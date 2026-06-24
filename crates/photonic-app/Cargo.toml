@@ -1,0 +1,44 @@
+[package]
+name = "photonic-app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "photonic"
+path = "src/main.rs"
+
+[dependencies]
+photonic-core = { path = "../photonic-core" }
+photonic-render = { path = "../photonic-render" }
+photonic-gui = { path = "../photonic-gui" }
+photonic-mcp = { path = "../photonic-mcp" }
+tokio = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+egui-phosphor = { workspace = true }
+wgpu = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+ico = "0.3"
+image = { workspace = true }
+# Cross-platform deps. These power modules compiled on every OS — mlua/uuid
+# (repl.rs, script.rs, cli.rs) and reqwest (mcp_proxy.rs, claude_client.rs) —
+# so they must NOT live under [target.'cfg(windows)'.dependencies].
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+uuid = { workspace = true }
+mlua = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell"] }
+
+[build-dependencies]
+winresource = "0.1"

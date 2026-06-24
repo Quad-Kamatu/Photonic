@@ -1,0 +1,578 @@
+//! Document export utilities (SVG, etc.).
+
+use crate::{
+    node::{NodeId, SceneNode, SceneNodeKind, TextAlign},
+    style::{Fill, FillKind, GradientKind, LineCap, LineJoin, Stroke, StrokeAlign},
+    transform::Transform,
+    Color, Document,
+};
+use std::collections::{HashMap, HashSet};
+
+// ─── Export options ───────────────────────────────────────────────────────────
+
+/// Options controlling SVG export output.
+#[derive(Debug, Clone)]
+pub struct SvgExportOptions {
+    /// Emit slugified node/layer names as `id` attributes (default: `true`).
+    pub semantic_ids: bool,
+    /// Decimal places for SVG dimension and viewBox values, clamped 1–6 (default: `4`).
+    pub precision: u8,
+}
+
+impl Default for SvgExportOptions {
+    fn default() -> Self {
+        Self {
+            semantic_ids: true,
+            precision: 4,
+        }
+    }
+}
+
+// ─── Full-document export ─────────────────────────────────────────────────────
+
+/// Export `doc` as an SVG string.
+///
+/// - Outputs `<!-- photonic-svg-v1 -->` as the first line for pipeline stability.
+/// - Layers are emitted as `<g id="layer-name">` elements in draw order.
+/// - When `opts.semantic_ids` is true, every node element receives an `id`
+///   derived from its name (slugified, deduplicated with a `-2`/`-3` suffix).
+/// - Gradients are collected into a `<defs>` block.
+/// - Transforms use SVG `matrix(a,b,c,d,e,f)` syntax (identity is omitted).
+pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
+    let mut defs = String::new();
+    let mut body = String::new();
+    let mut grad_counter: usize = 0;
+    let p = opts.precision.clamp(1, 6) as usize;
+
+    // Pre-build node ID map when semantic IDs are enabled.
+    let id_map: Option<HashMap<NodeId, String>> = if opts.semantic_ids {
+        let mut used: HashSet<String> = HashSet::new();
+        let mut map: HashMap<NodeId, String> = HashMap::new();
+        for layer_id in &doc.layer_order {
+            if let Some(layer) = doc.layers.get(layer_id) {
+                for node_id in &layer.node_ids {
+                    if let Some(node) = doc.nodes.get(node_id) {
+                        collect_node_ids(node, doc, &mut used, &mut map);
+                    }
+                }
+            }
+        }
+        Some(map)
+    } else {
+        None
+    };
+
+    // White artboard background
+    body.push_str(&format!(
+        "  <rect width=\"{w:.p$}\" height=\"{h:.p$}\" fill=\"white\"/>\n",
+        w = doc.width,
+        h = doc.height,
+        p = p,
+    ));
+
+    let mut used_layer_ids: HashSet<String> = HashSet::new();
+    for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible => l,
+            _ => continue,
+        };
+
+        let layer_id_str = if opts.semantic_ids {
+            unique_id(&slugify(&layer.name), &mut used_layer_ids)
+        } else {
+            format!("layer-{}", layer.id)
+        };
+
+        let mut attrs = format!(" id=\"{}\"", layer_id_str);
+        if (layer.opacity - 1.0).abs() > 0.001 {
+            attrs.push_str(&format!(" opacity=\"{:.4}\"", layer.opacity));
+        }
+        body.push_str(&format!("  <g{}>\n", attrs));
+
+        for node_id in &layer.node_ids {
+            if let Some(node) = doc.nodes.get(node_id) {
+                emit_node_inner(
+                    node,
+                    doc,
+                    &mut defs,
+                    &mut body,
+                    &mut grad_counter,
+                    4,
+                    None,
+                    id_map.as_ref(),
+                );
+            }
+        }
+
+        body.push_str("  </g>\n");
+    }
+
+    let defs_block = if defs.is_empty() {
+        String::new()
+    } else {
+        format!("  <defs>\n{}  </defs>\n", defs)
+    };
+
+    format!(
+        "<!-- photonic-svg-v1 -->\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+         width=\"{w:.p$}\" height=\"{h:.p$}\" viewBox=\"0 0 {w:.p$} {h:.p$}\">\n\
+         {defs}{body}</svg>",
+        w = doc.width,
+        h = doc.height,
+        p = p,
+        defs = defs_block,
+        body = body,
+    )
+}
+
+// ─── Selection export ─────────────────────────────────────────────────────────
+
+/// Export a subset of nodes as a self-contained SVG with a tight viewBox.
+///
+/// - `node_ids`: which nodes to include. Returns an empty SVG if none are found.
+/// - Node `name` is slugified and used as the `id` attribute on each element.
+/// - No artboard background rect is emitted.
+/// - viewBox is the union of all selected nodes' world-space bounding boxes;
+///   falls back to full document dimensions if no bounds can be computed.
+pub fn export_nodes_as_svg(doc: &Document, node_ids: &[NodeId]) -> String {
+    let mut defs = String::new();
+    let mut body = String::new();
+    let mut grad_counter: usize = 0;
+    let mut combined_bbox: Option<kurbo::Rect> = None;
+
+    // Collect nodes in document order (layer order → z-order within layer).
+    for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible => l,
+            _ => continue,
+        };
+        for node_id in &layer.node_ids {
+            if !node_ids.contains(node_id) {
+                continue;
+            }
+            if let Some(node) = doc.nodes.get(node_id) {
+                if !node.visible {
+                    continue;
+                }
+                if let Some(wb) = node_world_bbox(node, doc) {
+                    combined_bbox = Some(match combined_bbox {
+                        None => wb,
+                        Some(prev) => prev.union(wb),
+                    });
+                }
+                let slug = slugify(&node.name);
+                emit_node_inner(
+                    node,
+                    doc,
+                    &mut defs,
+                    &mut body,
+                    &mut grad_counter,
+                    2,
+                    Some(&slug),
+                    None,
+                );
+            }
+        }
+    }
+
+    let (vx, vy, vw, vh) = match combined_bbox {
+        Some(r) => (r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0),
+        None => (0.0, 0.0, doc.width as f64, doc.height as f64),
+    };
+
+    let defs_block = if defs.is_empty() {
+        String::new()
+    } else {
+        format!("  <defs>\n{}  </defs>\n", defs)
+    };
+
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+         width=\"{vw:.4}\" height=\"{vh:.4}\" viewBox=\"{vx:.4} {vy:.4} {vw:.4} {vh:.4}\">\n\
+         {defs_block}{body}</svg>",
+    )
+}
+
+/// Compute the world-space axis-aligned bounding box of a node by applying its
+/// affine transform to its local bounding box.  Groups are handled recursively.
+fn node_world_bbox(node: &SceneNode, doc: &Document) -> Option<kurbo::Rect> {
+    let local = match &node.kind {
+        SceneNodeKind::Path(p) => p.path_data.bounding_box()?,
+        SceneNodeKind::Group(g) => {
+            let mut combined: Option<kurbo::Rect> = None;
+            for cid in &g.children {
+                if let Some(child) = doc.nodes.get(cid) {
+                    if let Some(cb) = node_world_bbox(child, doc) {
+                        combined = Some(combined.map_or(cb, |prev| prev.union(cb)));
+                    }
+                }
+            }
+            combined?
+        }
+        SceneNodeKind::Text(_) => return None,
+    };
+    Some(node.transform.to_kurbo().transform_rect_bbox(local))
+}
+
+/// Return a deduplicated slug: appends `-2`, `-3`, … when `base` is already taken.
+fn unique_id(base: &str, used: &mut HashSet<String>) -> String {
+    if !used.contains(base) {
+        used.insert(base.to_string());
+        return base.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{}-{}", base, n);
+        if !used.contains(&candidate) {
+            used.insert(candidate.clone());
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Recursively populate `map` with slugified, deduplicated IDs for every node.
+fn collect_node_ids(
+    node: &SceneNode,
+    doc: &Document,
+    used: &mut HashSet<String>,
+    map: &mut HashMap<NodeId, String>,
+) {
+    let slug = slugify(&node.name);
+    let id = unique_id(&slug, used);
+    map.insert(node.id, id);
+    if let SceneNodeKind::Group(g) = &node.kind {
+        for child_id in &g.children {
+            if let Some(child) = doc.nodes.get(child_id) {
+                collect_node_ids(child, doc, used, map);
+            }
+        }
+    }
+}
+
+/// Convert a node name to a URL-safe `id` slug.
+fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = true; // start true to suppress leading dashes
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "node".to_string()
+    } else {
+        out
+    }
+}
+
+// ─── Node emitters ────────────────────────────────────────────────────────────
+
+fn emit_node_inner(
+    node: &SceneNode,
+    doc: &Document,
+    defs: &mut String,
+    body: &mut String,
+    grad_counter: &mut usize,
+    indent: usize,
+    // Explicit ID override (used by selection export).
+    id_override: Option<&str>,
+    // Map of NodeId → unique slug (used by full-document export).
+    id_map: Option<&HashMap<NodeId, String>>,
+) {
+    if !node.visible {
+        return;
+    }
+
+    let pad = " ".repeat(indent);
+    let id_attr = id_override
+        .map(|s| format!(" id=\"{}\"", s))
+        .or_else(|| {
+            id_map
+                .and_then(|m| m.get(&node.id))
+                .map(|s| format!(" id=\"{}\"", s))
+        })
+        .unwrap_or_default();
+    let transform = transform_attr(&node.transform);
+    let opacity = if (node.opacity - 1.0).abs() > 0.001 {
+        format!(" opacity=\"{:.4}\"", node.opacity)
+    } else {
+        String::new()
+    };
+
+    match &node.kind {
+        SceneNodeKind::Path(p) => {
+            let fill = fill_attrs(&p.fill, defs, grad_counter);
+            let stroke = stroke_attrs(&p.stroke);
+            body.push_str(&format!(
+                "{}<path{}{}{}{}{} d=\"{}\"/>\n",
+                pad,
+                id_attr,
+                transform,
+                opacity,
+                fill,
+                stroke,
+                p.path_data.as_svg(),
+            ));
+        }
+        SceneNodeKind::Group(g) => {
+            body.push_str(&format!("{}<g{}{}{}>\n", pad, id_attr, transform, opacity));
+            for child_id in &g.children {
+                if let Some(child) = doc.nodes.get(child_id) {
+                    emit_node_inner(
+                        child,
+                        doc,
+                        defs,
+                        body,
+                        grad_counter,
+                        indent + 2,
+                        None,
+                        id_map,
+                    );
+                }
+            }
+            body.push_str(&format!("{}</g>\n", pad));
+        }
+        SceneNodeKind::Text(t) => {
+            let fill = fill_attrs(&t.fill, defs, grad_counter);
+            let stroke = stroke_attrs(&t.stroke);
+            let anchor = match t.align {
+                TextAlign::Left => "start",
+                TextAlign::Center => "middle",
+                TextAlign::Right => "end",
+            };
+            let content = t
+                .content
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            body.push_str(&format!(
+                "{}<text{}{}{} font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" \
+                 text-anchor=\"{}\"{}{}>{}</text>\n",
+                pad,
+                id_attr,
+                transform,
+                opacity,
+                t.font_family,
+                t.font_size,
+                t.font_weight,
+                anchor,
+                fill,
+                stroke,
+                content,
+            ));
+        }
+    }
+}
+
+fn transform_attr(t: &Transform) -> String {
+    let [a, b, c, d, e, f] = t.matrix;
+    if (a - 1.0).abs() < 1e-9
+        && b.abs() < 1e-9
+        && c.abs() < 1e-9
+        && (d - 1.0).abs() < 1e-9
+        && e.abs() < 1e-9
+        && f.abs() < 1e-9
+    {
+        return String::new();
+    }
+    format!(" transform=\"matrix({a},{b},{c},{d},{e},{f})\"")
+}
+
+fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
+    if !fill.enabled {
+        return " fill=\"none\"".to_string();
+    }
+    match &fill.kind {
+        FillKind::None => " fill=\"none\"".to_string(),
+        FillKind::Solid(c) => solid_fill_attr(c, fill.opacity),
+        FillKind::FluidGradient(fg) => {
+            // Export as a radial gradient approximation: first point = center,
+            // remaining points as stops at increasing radii (best-effort SVG).
+            if fg.points.is_empty() {
+                return " fill=\"none\"".to_string();
+            }
+            if fg.points.len() == 1 {
+                return solid_fill_attr(&fg.points[0].color, fill.opacity);
+            }
+            let id = format!("grad-{}", *counter);
+            *counter += 1;
+            // Use centroid as gradient center
+            let cx: f64 = fg.points.iter().map(|p| p.x).sum::<f64>() / fg.points.len() as f64;
+            let cy: f64 = fg.points.iter().map(|p| p.y).sum::<f64>() / fg.points.len() as f64;
+            let max_r: f64 = fg
+                .points
+                .iter()
+                .map(|p| ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt())
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            // Use first point's color at center, average of outer points at edge
+            let first = &fg.points[0];
+            let last = &fg.points[fg.points.len() - 1];
+            let stops = format!(
+                "      <stop offset=\"0\" stop-color=\"{}\"/>\n\
+                       <stop offset=\"1\" stop-color=\"{}\"/>\n",
+                first.color.to_hex(),
+                last.color.to_hex()
+            );
+            defs.push_str(&format!(
+                "    <radialGradient id=\"{id}\" cx=\"{cx}\" cy=\"{cy}\" r=\"{max_r}\" \
+                 gradientUnits=\"userSpaceOnUse\">\n{stops}    </radialGradient>\n",
+            ));
+            if (fill.opacity - 1.0).abs() < 0.001 {
+                format!(" fill=\"url(#{id})\"")
+            } else {
+                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
+            }
+        }
+        FillKind::MeshGradient(mg) => {
+            // Export as a linear gradient approximation between first and last vertex colours.
+            if mg.vertices.is_empty() {
+                return " fill=\"none\"".to_string();
+            }
+            if mg.vertices.len() == 1 {
+                return solid_fill_attr(&mg.vertices[0].color, fill.opacity);
+            }
+            let id = format!("grad-{}", *counter);
+            *counter += 1;
+            let first = &mg.vertices[0];
+            let last = &mg.vertices[mg.vertices.len() - 1];
+            let stops = format!(
+                "      <stop offset=\"0\" stop-color=\"{}\"/>\n\
+                       <stop offset=\"1\" stop-color=\"{}\"/>\n",
+                first.color.to_hex(),
+                last.color.to_hex()
+            );
+            defs.push_str(&format!(
+                "    <linearGradient id=\"{id}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" \
+                 gradientUnits=\"userSpaceOnUse\">\n{stops}    </linearGradient>\n",
+                first.x, first.y, last.x, last.y,
+            ));
+            if (fill.opacity - 1.0).abs() < 0.001 {
+                format!(" fill=\"url(#{id})\"")
+            } else {
+                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
+            }
+        }
+        FillKind::Gradient(g) => {
+            let id = format!("grad-{}", *counter);
+            *counter += 1;
+
+            let stops: String = g
+                .stops
+                .iter()
+                .map(|s| {
+                    let hex = s.color.to_hex();
+                    if (s.color.a - 1.0).abs() < 0.001 {
+                        format!(
+                            "      <stop offset=\"{}\" stop-color=\"{}\"/>\n",
+                            s.offset, hex
+                        )
+                    } else {
+                        format!(
+                            "      <stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{:.4}\"/>\n",
+                            s.offset, hex, s.color.a
+                        )
+                    }
+                })
+                .collect();
+
+            match g.kind {
+                GradientKind::Linear => {
+                    let (x1, y1, x2, y2) = if g.coords.len() >= 4 {
+                        (g.coords[0], g.coords[1], g.coords[2], g.coords[3])
+                    } else {
+                        (0.0, 0.0, 1.0, 0.0)
+                    };
+                    defs.push_str(&format!(
+                        "    <linearGradient id=\"{id}\" x1=\"{x1}\" y1=\"{y1}\" \
+                         x2=\"{x2}\" y2=\"{y2}\" gradientUnits=\"userSpaceOnUse\">\n\
+                         {stops}\
+                         </linearGradient>\n",
+                    ));
+                }
+                GradientKind::Radial => {
+                    let (cx, cy, r) = if g.coords.len() >= 5 {
+                        (g.coords[0], g.coords[1], g.coords[4])
+                    } else {
+                        (0.5, 0.5, 0.5)
+                    };
+                    defs.push_str(&format!(
+                        "    <radialGradient id=\"{id}\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" \
+                         gradientUnits=\"userSpaceOnUse\">\n\
+                         {stops}\
+                         </radialGradient>\n",
+                    ));
+                }
+            }
+
+            if (fill.opacity - 1.0).abs() < 0.001 {
+                format!(" fill=\"url(#{id})\"")
+            } else {
+                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
+            }
+        }
+    }
+}
+
+fn solid_fill_attr(c: &Color, fill_opacity: f32) -> String {
+    let hex = c.to_hex();
+    let opacity = c.a * fill_opacity;
+    if (opacity - 1.0).abs() < 0.001 {
+        format!(" fill=\"{hex}\"")
+    } else {
+        format!(" fill=\"{hex}\" fill-opacity=\"{opacity:.4}\"")
+    }
+}
+
+fn stroke_attrs(stroke: &Stroke) -> String {
+    if !stroke.enabled || stroke.width <= 0.0 {
+        return " stroke=\"none\"".to_string();
+    }
+    let hex = stroke.color.to_hex();
+    let opacity = stroke.color.a * stroke.opacity;
+    let cap = match stroke.line_cap {
+        LineCap::Butt => "butt",
+        LineCap::Round => "round",
+        LineCap::Square => "square",
+    };
+    let join = match stroke.line_join {
+        LineJoin::Miter => "miter",
+        LineJoin::Round => "round",
+        LineJoin::Bevel => "bevel",
+    };
+
+    let align_attr = match stroke.align {
+        StrokeAlign::Center => "",
+        StrokeAlign::Inside => " stroke-alignment=\"inner\"",
+        StrokeAlign::Outside => " stroke-alignment=\"outer\"",
+    };
+    let mut s = format!(
+        " stroke=\"{hex}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\"{align_attr}",
+        stroke.width,
+    );
+    if join == "miter" && (stroke.miter_limit - 4.0).abs() > 0.001 {
+        s.push_str(&format!(" stroke-miterlimit=\"{}\"", stroke.miter_limit));
+    }
+    if (opacity - 1.0).abs() > 0.001 {
+        s.push_str(&format!(" stroke-opacity=\"{opacity:.4}\""));
+    }
+    if !stroke.dash_array.is_empty() {
+        let parts: Vec<String> = stroke.dash_array.iter().map(|d| d.to_string()).collect();
+        s.push_str(&format!(" stroke-dasharray=\"{}\"", parts.join(",")));
+        if stroke.dash_offset.abs() > 0.001 {
+            s.push_str(&format!(" stroke-dashoffset=\"{}\"", stroke.dash_offset));
+        }
+    }
+    s
+}

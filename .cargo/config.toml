@@ -1,0 +1,9 @@
+# Use Cargo's default per-workspace `target/` directory. Do NOT hardcode an
+# absolute, OS-specific target-dir here — a committed Windows path (e.g.
+# "C:/PhotonicBuild") breaks Linux/macOS builds (its ':' poisons
+# LD_LIBRARY_PATH). To redirect build output on a given machine, set the
+# CARGO_TARGET_DIR env var locally instead of committing it.
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:/msys64/mingw64/bin/gcc.exe"
+ar = "C:/msys64/mingw64/bin/ar.exe"

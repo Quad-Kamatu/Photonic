@@ -1,0 +1,22 @@
+[package]
+name = "photonic-render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+photonic-core = { path = "../photonic-core" }
+wgpu = { workspace = true }
+winit = { workspace = true }
+lyon = { workspace = true }
+glam = { workspace = true }
+glyphon = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true }
+tokio = { workspace = true }
+kurbo = { workspace = true }
+pollster = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ico = "0.3"

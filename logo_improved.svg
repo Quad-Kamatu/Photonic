@@ -1,0 +1,100 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="clip">
+      <rect width="512" height="512" rx="100" ry="100"/>
+    </clipPath>
+
+    <!-- Deep space background -->
+    <radialGradient id="bg" cx="50%" cy="50%" r="70%">
+      <stop offset="0%"   stop-color="#1A2248"/>
+      <stop offset="60%"  stop-color="#0E1530"/>
+      <stop offset="100%" stop-color="#060A18"/>
+    </radialGradient>
+
+    <!-- Main star: white-hot core → electric blue → deep blue tips -->
+    <radialGradient id="star_fill" cx="256" cy="256" r="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="12%"  stop-color="#D0ECFF"/>
+      <stop offset="35%"  stop-color="#5CB4F5"/>
+      <stop offset="70%"  stop-color="#1E5FA8"/>
+      <stop offset="100%" stop-color="#0C2A56"/>
+    </radialGradient>
+
+    <!-- Diagonal star: slightly softer gradient -->
+    <radialGradient id="diag_fill" cx="256" cy="256" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="18%"  stop-color="#B8DCFF"/>
+      <stop offset="55%"  stop-color="#3A8AD4"/>
+      <stop offset="100%" stop-color="#0E2A50"/>
+    </radialGradient>
+
+    <!-- Ambient nebula haze behind the star -->
+    <radialGradient id="nebula" cx="256" cy="256" r="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#3070B8" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#102040" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Glow bloom on the main star -->
+    <filter id="glow_star" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Soft layered center glow -->
+    <filter id="glow_center" x="-150%" y="-150%" width="400%" height="400%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="22" result="blur1"/>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="7"  result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#clip)">
+
+    <!-- ── Background ── -->
+    <rect width="512" height="512" fill="url(#bg)"/>
+
+    <!-- ── Nebula ambient haze ── -->
+    <circle cx="256" cy="256" r="160" fill="url(#nebula)"/>
+
+    <!-- ── Diffraction rings (light physics) ── -->
+    <circle cx="256" cy="256" r="90"  fill="none" stroke="#4A85C8" stroke-width="1.2" opacity="0.38"/>
+    <circle cx="256" cy="256" r="135" fill="none" stroke="#3A6AAA" stroke-width="0.7" opacity="0.20"/>
+
+    <!--
+      ── Diagonal secondary star (45° twinkle spikes) ──
+      Outer tips at 45°/135°/225°/315°, r=148.5 from center (256,256):
+        TL=(151,151)  TR=(361,151)  BR=(361,361)  BL=(151,361)
+      Inner waist at cardinal angles, r=8:
+        Top=(256,248)  Right=(264,256)  Bottom=(256,264)  Left=(248,256)
+    -->
+    <path d="M 151,151 L 256,248 L 361,151 L 264,256 L 361,361 L 256,264 L 151,361 L 248,256 Z"
+          fill="url(#diag_fill)" opacity="0.50"/>
+
+    <!--
+      ── Main 4-pointed star (cardinal spikes) ──
+      Outer tips at 0°/90°/180°/270°, r=204 from center:
+        Top=(256,52)  Right=(460,256)  Bottom=(256,460)  Left=(52,256)
+      Inner waist at 45° angles, r=20:
+        TR=(270,242)  BR=(270,270)  BL=(242,270)  TL=(242,242)
+    -->
+    <path d="M 256,52 L 270,242 L 460,256 L 270,270 L 256,460 L 242,270 L 52,256 L 242,242 Z"
+          fill="url(#star_fill)" filter="url(#glow_star)"/>
+
+    <!-- ── Center glow: large soft bloom ── -->
+    <circle cx="256" cy="256" r="50" fill="#80C4FF" opacity="0.18" filter="url(#glow_center)"/>
+
+    <!-- ── Center glow: tighter bright halo ── -->
+    <circle cx="256" cy="256" r="26" fill="#D8EFFF" filter="url(#glow_center)"/>
+
+    <!-- ── White-hot core ── -->
+    <circle cx="256" cy="256" r="10" fill="white"/>
+
+  </g>
+</svg>

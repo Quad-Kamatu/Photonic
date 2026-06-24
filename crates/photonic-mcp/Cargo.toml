@@ -1,0 +1,24 @@
+[package]
+name = "photonic-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+photonic-core = { path = "../photonic-core" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+mlua = { workspace = true }
+image = { workspace = true }
+base64 = "0.22"
+regex = "1"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+kurbo = { workspace = true }

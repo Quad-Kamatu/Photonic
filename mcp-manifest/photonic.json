@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "photonic": {
+      "command": "photonic",
+      "args": ["--headless", "--mcp-port", "7842"],
+      "env": {}
+    }
+  }
+}
