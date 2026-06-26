@@ -709,6 +709,25 @@ impl Default for PhotonicApp {
 }
 
 /// Load a document from disk, supporting `.photon` and `.svg` files.
+/// Run a blocking `rfd` file dialog OFF the winit/Wayland event-loop thread.
+///
+/// `rfd`'s portal-backed dialogs (`pick_file`/`save_file`) internally
+/// `pollster::block_on` an async XDG-desktop-portal call on the *calling*
+/// thread. When that caller is the egui draw closure — which runs inside
+/// winit's Wayland calloop event-loop callback — the portal's D-Bus events get
+/// delivered back into winit's calloop re-entrantly (`calloop: Received an
+/// event for non-existence source`) and the process aborts with SIGABRT
+/// (`org.freedesktop.DBus.Error.UnknownMethod: Object does not exist at
+/// .../request/...ashpd_...`). Spawning the dialog on a dedicated thread gives
+/// the portal its own context and avoids the re-entrancy. The UI thread blocks
+/// on `join()` while the dialog is open, which is the expected modal behaviour.
+fn run_file_dialog<F>(f: F) -> Option<std::path::PathBuf>
+where
+    F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
+{
+    std::thread::spawn(f).join().unwrap_or(None)
+}
+
 fn load_document(path: &Path) -> Result<Document, String> {
     let ext = path
         .extension()
@@ -802,12 +821,13 @@ impl PhotonicApp {
                         }
                     },
                     WelcomeAction::OpenBrowse => {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Photonic", &["photon"])
-                            .add_filter("SVG", &["svg"])
-                            .add_filter("All supported", &["photon", "svg"])
-                            .pick_file()
-                        {
+                        if let Some(path) = run_file_dialog(|| {
+                            rfd::FileDialog::new()
+                                .add_filter("Photonic", &["photon"])
+                                .add_filter("SVG", &["svg"])
+                                .add_filter("All supported", &["photon", "svg"])
+                                .pick_file()
+                        }) {
                             match load_document(&path) {
                                 Ok(loaded) => {
                                     self.welcome.add_recent(path.clone(), loaded.name.clone());
@@ -968,12 +988,13 @@ impl PhotonicApp {
                                         if ui.button("  Open…  ").clicked() {
                                             self.active_drawer = None;
                                             self.selected_drawer_option = None;
-                                            if let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("Photonic", &["photon"])
-                                                .add_filter("SVG", &["svg"])
-                                                .add_filter("All supported", &["photon", "svg"])
-                                                .pick_file()
-                                            {
+                                            if let Some(path) = run_file_dialog(|| {
+                                                rfd::FileDialog::new()
+                                                    .add_filter("Photonic", &["photon"])
+                                                    .add_filter("SVG", &["svg"])
+                                                    .add_filter("All supported", &["photon", "svg"])
+                                                    .pick_file()
+                                            }) {
                                                 match load_document(&path) {
                                                     Ok(loaded) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
@@ -1024,7 +1045,7 @@ impl PhotonicApp {
                                             if let Some(dir) = start_dir {
                                                 dialog = dialog.set_directory(dir);
                                             }
-                                            if let Some(path) = dialog.save_file() {
+                                            if let Some(path) = run_file_dialog(move || dialog.save_file()) {
                                                 let path = if path.extension().is_none() {
                                                     path.with_extension("photon")
                                                 } else { path };
@@ -4602,6 +4623,85 @@ impl PhotonicApp {
                     if !cmds.is_empty() {
                         history.execute(Command::Batch(cmds), doc);
                         doc_modified = true;
+                    }
+                }
+
+                PanelAction::RecolorPreview { ids, to } => {
+                    // Live preview — mutate the captured nodes directly, no history.
+                    use photonic_core::style::FillKind;
+                    let new_color = Color {
+                        r: to[0],
+                        g: to[1],
+                        b: to[2],
+                        a: to[3],
+                    };
+                    for id in &ids {
+                        if let Some(node) = doc.nodes.get_mut(id) {
+                            match &mut node.kind {
+                                SceneNodeKind::Path(p) => p.fill.kind = FillKind::Solid(new_color),
+                                SceneNodeKind::Text(t) => t.fill.kind = FillKind::Solid(new_color),
+                                _ => {}
+                            }
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::RecolorCommit { ids, from, to } => {
+                    // Commit as a single undoable step: old=`from`, new=`to`.
+                    use photonic_core::style::FillKind;
+                    let from_color = Color {
+                        r: from[0],
+                        g: from[1],
+                        b: from[2],
+                        a: from[3],
+                    };
+                    let to_color = Color {
+                        r: to[0],
+                        g: to[1],
+                        b: to[2],
+                        a: to[3],
+                    };
+                    if (from[0] - to[0]).abs() > 1e-6
+                        || (from[1] - to[1]).abs() > 1e-6
+                        || (from[2] - to[2]).abs() > 1e-6
+                        || (from[3] - to[3]).abs() > 1e-6
+                    {
+                        let mut cmds: Vec<Command> = Vec::new();
+                        for id in &ids {
+                            if let Some(node) = doc.nodes.get(id) {
+                                // Fabricate old (fill=from) and new (fill=to) from the
+                                // current node so undo restores the original color.
+                                let mut old_node = node.clone();
+                                let mut new_node = node.clone();
+                                match &mut old_node.kind {
+                                    SceneNodeKind::Path(p) => {
+                                        p.fill.kind = FillKind::Solid(from_color)
+                                    }
+                                    SceneNodeKind::Text(t) => {
+                                        t.fill.kind = FillKind::Solid(from_color)
+                                    }
+                                    _ => {}
+                                }
+                                match &mut new_node.kind {
+                                    SceneNodeKind::Path(p) => {
+                                        p.fill.kind = FillKind::Solid(to_color)
+                                    }
+                                    SceneNodeKind::Text(t) => {
+                                        t.fill.kind = FillKind::Solid(to_color)
+                                    }
+                                    _ => {}
+                                }
+                                cmds.push(Command::UpdateNode {
+                                    old: old_node,
+                                    new: new_node,
+                                });
+                            }
+                        }
+                        if !cmds.is_empty() {
+                            history.execute(Command::Batch(cmds), doc);
+                            doc_modified = true;
+                        }
                     }
                 }
 
@@ -12042,29 +12142,30 @@ impl PhotonicApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                // ── Background + bounds (not applicable to SVG) ───────────
+                // ── Background (all formats, incl. transparent SVG) + bounds ──
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    ui.radio_value(
+                        &mut dlg.background,
+                        ExportBackground::Transparent,
+                        "Transparent",
+                    );
+                    ui.radio_value(
+                        &mut dlg.background,
+                        ExportBackground::Artboard,
+                        "Artboard (white)",
+                    );
+                });
+                // Bounds/crop only applies to raster export; SVG uses the full artboard viewBox.
                 if dlg.format != ExportFormat::Svg {
-                    ui.horizontal(|ui| {
-                        ui.label("Background");
-                        ui.radio_value(
-                            &mut dlg.background,
-                            ExportBackground::Transparent,
-                            "Transparent",
-                        );
-                        ui.radio_value(
-                            &mut dlg.background,
-                            ExportBackground::Artboard,
-                            "Artboard (white)",
-                        );
-                    });
                     ui.horizontal(|ui| {
                         ui.label("Bounds       ");
                         ui.checkbox(&mut dlg.crop_to_content, "Crop to artwork");
                     });
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
                 }
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
 
                 // ── Format-specific settings ──────────────────────────────
                 match dlg.format {
@@ -12397,7 +12498,7 @@ impl PhotonicApp {
         if let Some(dir) = start_dir {
             file_dialog = file_dialog.set_directory(dir);
         }
-        let Some(path) = file_dialog.save_file() else {
+        let Some(path) = run_file_dialog(move || file_dialog.save_file()) else {
             return;
         };
         let path = if path.extension().is_none() {
@@ -12408,9 +12509,18 @@ impl PhotonicApp {
 
         let result = match format {
             ExportFormat::Svg => {
+                // Honor the Background selector: Transparent => no rect,
+                // Artboard => a white background rect.
+                let background = match opts.background {
+                    ExportBackground::Transparent => None,
+                    ExportBackground::Artboard => Some(Color::WHITE),
+                };
                 let svg = photonic_core::export::export_svg(
                     doc,
-                    &photonic_core::export::SvgExportOptions::default(),
+                    &photonic_core::export::SvgExportOptions {
+                        background,
+                        ..Default::default()
+                    },
                 );
                 std::fs::write(&path, svg).map_err(|e| e.to_string())
             }

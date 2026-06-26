@@ -103,92 +103,75 @@ fn build_context(root: &roxmltree::Node) -> SvgContext {
     let mut css_rules: HashMap<String, CssProps> = HashMap::new();
     let mut gradients: HashMap<String, ParsedGradient> = HashMap::new();
 
-    for child in root.children() {
-        if !child.is_element() {
+    // Scan the entire tree, not just direct children of <svg>. Illustrator and
+    // most other tools nest the <style> block and gradient defs inside <defs>,
+    // and <style> can appear at any depth. Walking descendants() makes
+    // CSS-class fills (`.cls-1 { fill: #... }`) and gradients resolve regardless
+    // of nesting — the previous code only matched <style>/<defs> that were
+    // direct children of the root <svg>, so class-based colors silently
+    // imported as the default black fill.
+    for node in root.descendants() {
+        if !node.is_element() {
             continue;
         }
-        match child.tag_name().name() {
+        match node.tag_name().name() {
             "style" => {
-                if let Some(text) = child.text() {
-                    parse_css_into(text, &mut css_rules);
+                let css = element_text(&node);
+                if !css.trim().is_empty() {
+                    parse_css_into(&css, &mut css_rules);
                 }
             }
-            "defs" => {
-                for def in child.descendants() {
-                    if !def.is_element() {
-                        continue;
-                    }
-                    match def.tag_name().name() {
-                        "linearGradient" => {
-                            if let Some(id) = def.attribute("id") {
-                                let units = parse_gradient_units(&def);
-                                let x1 = parse_percentage_or_number(
-                                    def.attribute("x1").unwrap_or("0%"),
-                                    units,
-                                );
-                                let y1 = parse_percentage_or_number(
-                                    def.attribute("y1").unwrap_or("0%"),
-                                    units,
-                                );
-                                let x2 = parse_percentage_or_number(
-                                    def.attribute("x2").unwrap_or("100%"),
-                                    units,
-                                );
-                                let y2 = parse_percentage_or_number(
-                                    def.attribute("y2").unwrap_or("0%"),
-                                    units,
-                                );
-                                let stops = parse_gradient_stops(&def);
-                                let href = def
-                                    .attribute("href")
-                                    .or_else(|| def.attribute("xlink:href"))
-                                    .filter(|h| h.starts_with('#'))
-                                    .map(|h| h[1..].to_string());
-                                gradients.insert(
-                                    id.to_string(),
-                                    ParsedGradient {
-                                        kind: ParsedGradKind::Linear { x1, y1, x2, y2 },
-                                        stops,
-                                        units,
-                                        href,
-                                    },
-                                );
-                            }
-                        }
-                        "radialGradient" => {
-                            if let Some(id) = def.attribute("id") {
-                                let units = parse_gradient_units(&def);
-                                let cx = parse_percentage_or_number(
-                                    def.attribute("cx").unwrap_or("50%"),
-                                    units,
-                                );
-                                let cy = parse_percentage_or_number(
-                                    def.attribute("cy").unwrap_or("50%"),
-                                    units,
-                                );
-                                let r = parse_percentage_or_number(
-                                    def.attribute("r").unwrap_or("50%"),
-                                    units,
-                                );
-                                let stops = parse_gradient_stops(&def);
-                                let href = def
-                                    .attribute("href")
-                                    .or_else(|| def.attribute("xlink:href"))
-                                    .filter(|h| h.starts_with('#'))
-                                    .map(|h| h[1..].to_string());
-                                gradients.insert(
-                                    id.to_string(),
-                                    ParsedGradient {
-                                        kind: ParsedGradKind::Radial { cx, cy, r },
-                                        stops,
-                                        units,
-                                        href,
-                                    },
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
+            "linearGradient" => {
+                if let Some(id) = node.attribute("id") {
+                    let units = parse_gradient_units(&node);
+                    let x1 =
+                        parse_percentage_or_number(node.attribute("x1").unwrap_or("0%"), units);
+                    let y1 =
+                        parse_percentage_or_number(node.attribute("y1").unwrap_or("0%"), units);
+                    let x2 =
+                        parse_percentage_or_number(node.attribute("x2").unwrap_or("100%"), units);
+                    let y2 =
+                        parse_percentage_or_number(node.attribute("y2").unwrap_or("0%"), units);
+                    let stops = parse_gradient_stops(&node);
+                    let href = node
+                        .attribute("href")
+                        .or_else(|| node.attribute("xlink:href"))
+                        .filter(|h| h.starts_with('#'))
+                        .map(|h| h[1..].to_string());
+                    gradients.insert(
+                        id.to_string(),
+                        ParsedGradient {
+                            kind: ParsedGradKind::Linear { x1, y1, x2, y2 },
+                            stops,
+                            units,
+                            href,
+                        },
+                    );
+                }
+            }
+            "radialGradient" => {
+                if let Some(id) = node.attribute("id") {
+                    let units = parse_gradient_units(&node);
+                    let cx =
+                        parse_percentage_or_number(node.attribute("cx").unwrap_or("50%"), units);
+                    let cy =
+                        parse_percentage_or_number(node.attribute("cy").unwrap_or("50%"), units);
+                    let r = parse_percentage_or_number(node.attribute("r").unwrap_or("50%"), units);
+                    let stops = parse_gradient_stops(&node);
+                    let href = node
+                        .attribute("href")
+                        .or_else(|| node.attribute("xlink:href"))
+                        .filter(|h| h.starts_with('#'))
+                        .map(|h| h[1..].to_string());
+                    gradients.insert(
+                        id.to_string(),
+                        ParsedGradient {
+                            kind: ParsedGradKind::Radial { cx, cy, r },
+                            stops,
+                            units,
+                            href,
+                        },
+                    );
                 }
             }
             _ => {}
@@ -219,6 +202,21 @@ fn build_context(root: &roxmltree::Node) -> SvgContext {
 }
 
 // ─── CSS parsing ──────────────────────────────────────────────────────────────
+
+/// Concatenate all text (including CDATA) found under an element. `<style>`
+/// content is usually a single text node, but it may be wrapped in CDATA or
+/// split into several segments — this gathers all of it.
+fn element_text(node: &roxmltree::Node) -> String {
+    let mut s = String::new();
+    for d in node.descendants() {
+        if d.is_text() {
+            if let Some(t) = d.text() {
+                s.push_str(t);
+            }
+        }
+    }
+    s
+}
 
 fn parse_css_into(css: &str, out: &mut HashMap<String, CssProps>) {
     // Strip block comments
@@ -1240,5 +1238,72 @@ pub(crate) fn parse_length(s: &str) -> f64 {
         s[..s.len() - 2].parse::<f64>().unwrap_or(0.0) * 16.0
     } else {
         s.parse().unwrap_or(0.0)
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FillKind;
+
+    /// Collect every solid fill color found among a document's nodes.
+    fn solid_fills(doc: &Document) -> Vec<Color> {
+        doc.nodes
+            .values()
+            .filter_map(|n| match &n.kind {
+                SceneNodeKind::Path(p) => match p.fill.kind {
+                    FillKind::Solid(c) => Some(c),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn approx(c: Color, hex: &str) -> bool {
+        let expected = Color::from_hex(hex).unwrap();
+        (c.r - expected.r).abs() < 1e-3
+            && (c.g - expected.g).abs() < 1e-3
+            && (c.b - expected.b).abs() < 1e-3
+    }
+
+    /// Regression test: Illustrator nests the `<style>` block (which defines
+    /// `.cls-N { fill: #... }`) inside `<defs>`. The importer must resolve those
+    /// class-based fills, not fall back to the default black fill.
+    #[test]
+    fn css_class_fill_nested_in_defs_is_resolved() {
+        let svg = r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <style>
+      .cls-1 { fill: #3d5ba5; }
+      .cls-2 { fill: #5d4096; }
+    </style>
+  </defs>
+  <g>
+    <path class="cls-1" d="M0,0 L10,0 L10,10 Z"/>
+    <polygon class="cls-2" points="20,20 30,20 30,30"/>
+  </g>
+</svg>"#;
+
+        let doc = import_svg(svg).expect("import should succeed");
+        let fills = solid_fills(&doc);
+        assert_eq!(fills.len(), 2, "expected two filled shapes");
+
+        // Neither shape should have fallen back to the default black fill.
+        assert!(
+            !fills.iter().any(|c| approx(*c, "000000")),
+            "a shape imported as black — CSS class fill was not resolved: {fills:?}"
+        );
+        assert!(
+            fills.iter().any(|c| approx(*c, "3d5ba5")),
+            "missing .cls-1 fill #3d5ba5: {fills:?}"
+        );
+        assert!(
+            fills.iter().any(|c| approx(*c, "5d4096")),
+            "missing .cls-2 fill #5d4096: {fills:?}"
+        );
     }
 }

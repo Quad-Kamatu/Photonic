@@ -218,6 +218,16 @@ pub enum PanelAction {
         node_ids: Vec<NodeId>,
         palette: Vec<[f32; 4]>,
     },
+    /// Live preview: set the solid fill of exactly these nodes to `to` WITHOUT
+    /// recording history. Used while dragging the document color-swatch picker.
+    RecolorPreview { ids: Vec<NodeId>, to: [f32; 4] },
+    /// Commit a document color-swatch recolor as one undoable step: the given
+    /// nodes change from `from` to `to` (undo restores `from`).
+    RecolorCommit {
+        ids: Vec<NodeId>,
+        from: [f32; 4],
+        to: [f32; 4],
+    },
     /// Align selected nodes relative to the document canvas (artboard) bounds.
     AlignToArtboard { operation: String },
     /// Remove all unlocked guides from the document.
@@ -1101,6 +1111,23 @@ pub fn draw_layers_panel(
 
 /// Draw the right properties panel.
 /// Returns an optional action if the user clicked a boolean operation button.
+/// In-progress edit state for the document color-swatch recolor picker.
+/// Stored in egui temp memory so the inline picker survives across frames
+/// without threading another `&mut` parameter through `draw_properties_panel`.
+#[derive(Clone)]
+struct RecolorSwatchEdit {
+    /// Nodes captured at click time whose fill matched the clicked swatch.
+    /// Preview and commit operate on exactly these, so picking a color that
+    /// collides with another group never recolors the wrong objects.
+    ids: Vec<NodeId>,
+    /// The original color clicked — undo target / revert color.
+    original: [f32; 4],
+    /// The color currently shown in the document (last preview applied).
+    applied: [f32; 4],
+    /// The live color being edited in the picker.
+    current: [f32; 4],
+}
+
 pub fn draw_properties_panel(
     ui: &mut Ui,
     doc: &Document,
@@ -3216,19 +3243,156 @@ pub fn draw_properties_panel(
         if !fill_colors.is_empty() {
             ui.add_space(4.0);
             ui.label(RichText::new("Fill colors in document:").small());
+
+            // Click a swatch to recolor every object using that exact color,
+            // with a live preview while picking. The in-progress picker state
+            // lives in egui temp memory.
+            let edit_id = ui.make_persistent_id("recolor_swatch_edit");
+            let mut edit = ui.data(|d| d.get_temp::<RecolorSwatchEdit>(edit_id));
+            let mut just_opened = false;
+
             ui.horizontal_wrapped(|ui| {
                 for c in &fill_colors {
+                    let rgba = [c.r, c.g, c.b, c.a];
                     let c32 = egui::Color32::from_rgb(
                         (c.r * 255.0).round() as u8,
                         (c.g * 255.0).round() as u8,
                         (c.b * 255.0).round() as u8,
                     );
                     let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
                     ui.painter().rect_filled(rect, 2.0, c32);
-                    resp.on_hover_text(c.to_hex());
+                    let is_editing = edit.as_ref().map_or(false, |e| e.original == rgba);
+                    if resp.hovered() || is_editing {
+                        ui.painter().rect_stroke(
+                            rect,
+                            2.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 86, 207)),
+                        );
+                    }
+                    // Only start a new edit when none is active — finish the
+                    // current one (Apply/Cancel/click-away) before switching.
+                    if resp.clicked() && edit.is_none() {
+                        let ids: Vec<NodeId> = doc
+                            .nodes
+                            .values()
+                            .filter(|n| {
+                                let solid = match &n.kind {
+                                    SceneNodeKind::Path(p) if p.fill.enabled => {
+                                        match &p.fill.kind {
+                                            FillKind::Solid(fc) => Some(fc),
+                                            _ => None,
+                                        }
+                                    }
+                                    SceneNodeKind::Text(t) if t.fill.enabled => {
+                                        match &t.fill.kind {
+                                            FillKind::Solid(fc) => Some(fc),
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                                solid.map_or(false, |fc| fc.to_hex() == c.to_hex())
+                            })
+                            .map(|n| n.id)
+                            .collect();
+                        edit = Some(RecolorSwatchEdit {
+                            ids,
+                            original: rgba,
+                            applied: rgba,
+                            current: rgba,
+                        });
+                        just_opened = true;
+                    }
+                    resp.on_hover_text(format!(
+                        "{} — click to recolor every object using this color",
+                        c.to_hex()
+                    ));
                 }
             });
+
+            // Inline picker shown while a swatch is being edited.
+            if let Some(e) = edit.clone() {
+                let mut current = e.current;
+                let mut apply = false;
+                let mut cancel = false;
+                let frame_resp = egui::Frame::popup(ui.style())
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Recolor all matching objects (live)")
+                                .small()
+                                .strong(),
+                        );
+                        let mut c32 = egui::Color32::from_rgb(
+                            (current[0] * 255.0).round() as u8,
+                            (current[1] * 255.0).round() as u8,
+                            (current[2] * 255.0).round() as u8,
+                        );
+                        if egui::color_picker::color_picker_color32(
+                            ui,
+                            &mut c32,
+                            egui::color_picker::Alpha::Opaque,
+                        ) {
+                            current = [
+                                c32.r() as f32 / 255.0,
+                                c32.g() as f32 / 255.0,
+                                c32.b() as f32 / 255.0,
+                                e.original[3],
+                            ];
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Apply").clicked() {
+                                apply = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    })
+                    .response;
+
+                // Clicking outside the picker (e.g. another swatch, empty space)
+                // keeps the change — same as Apply. Ignore the click that opened it.
+                let click_away = !just_opened && frame_resp.clicked_elsewhere();
+
+                if apply || click_away {
+                    action = Some(PanelAction::RecolorCommit {
+                        ids: e.ids.clone(),
+                        from: e.original,
+                        to: current,
+                    });
+                    edit = None;
+                } else if cancel {
+                    // Revert the live preview, no history entry.
+                    if e.applied != e.original {
+                        action = Some(PanelAction::RecolorPreview {
+                            ids: e.ids.clone(),
+                            to: e.original,
+                        });
+                    }
+                    edit = None;
+                } else {
+                    // Live preview: push the new color whenever it changed.
+                    if current != e.applied {
+                        action = Some(PanelAction::RecolorPreview {
+                            ids: e.ids.clone(),
+                            to: current,
+                        });
+                    }
+                    edit = Some(RecolorSwatchEdit {
+                        ids: e.ids,
+                        original: e.original,
+                        applied: current,
+                        current,
+                    });
+                }
+            }
+
+            // Persist or clear the picker state for next frame.
+            match edit {
+                Some(e) => ui.data_mut(|d| d.insert_temp(edit_id, e)),
+                None => ui.data_mut(|d| d.remove::<RecolorSwatchEdit>(edit_id)),
+            }
         }
         ui.add_space(4.0);
     }
