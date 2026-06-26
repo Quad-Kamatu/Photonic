@@ -9594,6 +9594,15 @@ impl PhotonicApp {
                                 }
                             };
 
+                            // Shift held → constrain to uniform scale (lock aspect ratio).
+                            // Pick the dominant axis (larger |delta|) so the drag feels natural.
+                            let (sx, sy) = if ui.input(|i| i.modifiers.shift) {
+                                let u = uniform_scale(sx, sy);
+                                (u, u)
+                            } else {
+                                (sx, sy)
+                            };
+
                             if !self.resize_multi_origins.is_empty() {
                                 // Multi-node resize: apply the same scale to every node
                                 use photonic_core::transform::Transform;
@@ -13312,4 +13321,40 @@ fn gui_create_truchet_tiling_demo(
     );
 
     *doc_modified = true;
+}
+
+/// Pick a single uniform scale factor from independent x/y axis scales.
+///
+/// Selects the axis with the larger absolute value so that the user's dominant
+/// drag direction drives the constrained resize. Called when Shift is held
+/// during a corner-handle resize to lock the aspect ratio.
+fn uniform_scale(sx: f64, sy: f64) -> f64 {
+    if sx.abs() >= sy.abs() {
+        sx
+    } else {
+        sy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uniform_scale;
+
+    #[test]
+    fn uniform_scale_picks_dominant_axis() {
+        // x dominant
+        assert_eq!(uniform_scale(2.0, 1.0), 2.0);
+        // y dominant
+        assert_eq!(uniform_scale(1.0, 3.0), 3.0);
+        // x dominant with negative sign preserved
+        assert_eq!(uniform_scale(-2.0, 1.0), -2.0);
+        // y dominant with negative sign preserved
+        assert_eq!(uniform_scale(1.0, -3.0), -3.0);
+        // equal magnitudes → x wins (tie-break)
+        assert_eq!(uniform_scale(1.5, 1.5), 1.5);
+        // both negative — larger |value| wins
+        assert_eq!(uniform_scale(-2.0, -1.0), -2.0);
+        // identity (1,1)
+        assert_eq!(uniform_scale(1.0, 1.0), 1.0);
+    }
 }
