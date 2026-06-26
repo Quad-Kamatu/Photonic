@@ -12650,15 +12650,61 @@ fn gui_apply_affine_to_path(path: &PathData, affine: kurbo::Affine) -> PathData 
 }
 
 /// Return the topmost node (reverse draw order) whose bounding box contains (cx, cy).
+/// Tests whether the canvas-space point `(cx, cy)` lands on a path node's
+/// actual geometry: inside its filled area (non-zero winding) or within a small
+/// tolerance of its outline (so thin / open / stroke-only paths stay clickable).
+///
+/// Returns `None` for non-path nodes so the caller can fall back to a plain
+/// bounding-box test (text, images and groups have no fillable outline here).
+fn path_geometry_hit(node: &SceneNode, cx: f64, cy: f64) -> Option<bool> {
+    use kurbo::{ParamCurveNearest, Shape};
+    let SceneNodeKind::Path(pn) = &node.kind else {
+        return None;
+    };
+    let bez = pn.path_data.to_bez_path();
+    if bez.elements().is_empty() {
+        return Some(false);
+    }
+    // Transform into canvas space so the click point and the tolerance share
+    // units (the click is already in canvas coordinates).
+    let canvas_bez = node.transform.to_kurbo() * bez;
+    let pt = kurbo::Point::new(cx, cy);
+
+    // Filled interior: only a *filled* shape should be selectable through its
+    // body — an unfilled outline is clickable only on its edge, matching the
+    // "click through transparent areas" behaviour requested in #3.
+    if pn.fill.enabled && canvas_bez.contains(pt) {
+        return Some(true);
+    }
+
+    // Outline proximity: clickable within half the stroke width plus a few
+    // canvas units of slack so hairline strokes and open paths stay grabbable.
+    let tol = (pn.stroke.width * 0.5) + 3.0;
+    let tol_sq = tol * tol;
+    let on_edge = canvas_bez
+        .segments()
+        .any(|seg| seg.nearest(pt, 0.1).distance_sq <= tol_sq);
+    Some(on_edge)
+}
+
 fn hit_test(doc: &Document, cx: f64, cy: f64, renderer: &mut PhotonicRenderer) -> Option<NodeId> {
     for node in doc.nodes_in_draw_order().into_iter().rev() {
         if node.locked {
             continue;
         }
-        if let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) {
-            if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-                return Some(node.id);
-            }
+        // Cheap reject: the click must at least fall inside the bounding box.
+        let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) else {
+            continue;
+        };
+        if cx < x0 || cx > x1 || cy < y0 || cy > y1 {
+            continue;
+        }
+        // Refine path nodes to their real geometry so clicks fall through the
+        // transparent parts of a non-rectangular shape onto whatever is below;
+        // other node kinds keep the bounding-box hit.
+        match path_geometry_hit(node, cx, cy) {
+            Some(true) | None => return Some(node.id),
+            Some(false) => continue,
         }
     }
     None
