@@ -1976,8 +1976,11 @@ pub(crate) async fn dispatch_tool_inner(
     }
 }
 
-/// Returns the MCP tool list manifest.
-fn tool_list() -> Value {
+/// Returns the MCP tool list manifest (the `tools/list` response payload).
+///
+/// Public so tooling (e.g. the `dump_tools` binary that regenerates
+/// `docs/mcp-api.md`) can read the canonical schema without standing up a server.
+pub fn tool_list() -> Value {
     json!([
         {
             "name": "create_shape",

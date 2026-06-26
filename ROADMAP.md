@@ -3,6 +3,12 @@
 Expanding the MCP tool surface to better enable Claude to create high-quality vector art.
 Derived from analysis of alpha output (squid logo) and identified capability gaps.
 
+> **Status (historical roadmap).** Most items below have shipped — the MCP
+> surface is now 280+ tools. For the **current, authoritative** tool list, see
+> the auto-generated [`docs/mcp-api.md`](docs/mcp-api.md) (regenerated from
+> `server::tool_list()`), not this document. This file is retained for design
+> rationale and history.
+
 ---
 
 ## Priority 1 — Structural Foundations

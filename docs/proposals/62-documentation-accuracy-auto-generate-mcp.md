@@ -1,6 +1,40 @@
-# Documentation accuracy: auto-generate MCP API reference; refresh architecture docs (#62) — Design Proposal
+# Documentation accuracy: auto-generate MCP API reference; refresh architecture docs (#62)
 
-> Status: design scaffold (not an implementation).
+> Status: **implemented.**
+
+## What this PR implements
+
+- **Auto-generated MCP reference.** `server::tool_list()` is now `pub`, and a new
+  `photonic-mcp` binary `dump_tools` prints the canonical tool schema as JSON
+  without standing up a server. `tools/gen-mcp-docs.py` turns that JSON into
+  `docs/mcp-api.md` — one section per tool with a parameter table (type,
+  required, description). Output is deterministic (tools and params sorted).
+- **Regenerated `docs/mcp-api.md`**: now covers all **283** tools (was ~100,
+  heavily drifted). Regenerate with:
+  ```sh
+  cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md
+  ```
+- **CI drift gate**: the lint job regenerates the file and runs
+  `git diff --exit-code docs/mcp-api.md`, so the reference can never silently
+  drift from the code again.
+- **`docs/architecture.md`**: handler-module table corrected to all nine modules
+  under `crates/photonic-mcp/src/handlers/` (was five), and pointed at the
+  generated reference.
+- **`ROADMAP.md`**: marked historical with a banner pointing to the generated
+  `docs/mcp-api.md` as the authoritative tool list (content retained for
+  rationale/history rather than deleted).
+
+Verified locally: `dump_tools` runs, the generator is deterministic (two runs
+byte-identical), the committed doc matches a fresh regeneration, the workflow
+YAML parses, and `photonic-mcp` builds.
+
+> Note: `tool_list()` contains two duplicate registrations
+> (`make_compound_path`, `release_compound_path`); the generator faithfully
+> reflects the source. De-duplicating the manifest is a small separate cleanup.
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 
