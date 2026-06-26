@@ -2731,14 +2731,20 @@ impl PhotonicApp {
                         let (ex_raw, ey_raw) =
                             view.screen_to_canvas(end_pos.x as f64, end_pos.y as f64);
                         let (mut ex, mut ey) = (self.snap(ex_raw), self.snap(ey_raw));
+                        let shift_held = ui.input(|i| i.modifiers.shift);
                         // Line tool: snap endpoint to nearest 45° angle when Snap45 is on or Shift held.
                         if self.active_tool == Tool::Line {
-                            let shift_held = ui.input(|i| i.modifiers.shift);
                             if self.line_snap_45 || shift_held {
                                 let (snapped_ex, snapped_ey) = snap_line_to_45(sx, sy, ex, ey);
                                 ex = snapped_ex;
                                 ey = snapped_ey;
                             }
+                        } else if shift_held {
+                            // Other shape tools: Shift constrains the bounding box to
+                            // 1:1 (square / circle / proportional).
+                            let (cex, cey) = constrain_to_square(sx, sy, ex, ey);
+                            ex = cex;
+                            ey = cey;
                         }
                         if (ex - sx).abs() > 2.0 || (ey - sy).abs() > 2.0 {
                             if let Some(path) = self.build_shape(sx, sy, ex, ey) {
@@ -2795,13 +2801,15 @@ impl PhotonicApp {
                     if let Some(cursor) = cursor {
                         let (ex_raw, ey_raw) =
                             view.screen_to_canvas(cursor.x as f64, cursor.y as f64);
+                        let shift_held = ui.input(|i| i.modifiers.shift);
                         let (ex, ey) = if self.active_tool == Tool::Line {
-                            let shift_held = ui.input(|i| i.modifiers.shift);
                             if self.line_snap_45 || shift_held {
                                 snap_line_to_45(sx, sy, ex_raw, ey_raw)
                             } else {
                                 (ex_raw, ey_raw)
                             }
+                        } else if shift_held {
+                            constrain_to_square(sx, sy, ex_raw, ey_raw)
                         } else {
                             (ex_raw, ey_raw)
                         };
@@ -12724,6 +12732,16 @@ fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
     // Round to nearest multiple of 45° (π/4 radians).
     let snapped = (angle / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
     (sx + len * snapped.cos(), sy + len * snapped.sin())
+}
+
+/// Constrain a drag rectangle to a 1:1 square while keeping `(sx, sy)` as the
+/// anchor corner. The larger of the two deltas wins, so the endpoint moves
+/// along the drag direction's diagonal (square / circle / proportional shape).
+fn constrain_to_square(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
+    let dx = ex - sx;
+    let dy = ey - sy;
+    let m = dx.abs().max(dy.abs());
+    (sx + m.copysign(dx), sy + m.copysign(dy))
 }
 
 /// Extract the solid fill RGBA from a node (used by the Magic Wand tool).
