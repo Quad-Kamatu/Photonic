@@ -280,6 +280,40 @@ impl WidthProfile {
     }
 }
 
+// ─── Property Constraints ────────────────────────────────────────────────────
+
+/// A live parametric binding: `target_node_id.target_property = expression`.
+///
+/// The expression is evaluated over other nodes' properties (see
+/// [`crate::ops::constraints`]) and re-applied after every document mutation, so
+/// the target stays derived from its inputs. Supported properties: `x`, `y`,
+/// `width`, `height`, `opacity`, `font_size` (referenceable); `x`, `y`,
+/// `opacity`, `font_size` are also settable as targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyConstraint {
+    pub id: Uuid,
+    pub target_node_id: NodeId,
+    /// One of: `x`, `y`, `opacity`, `font_size`.
+    pub target_property: String,
+    /// Arithmetic expression; may reference `nodes['<id-or-name>'].<prop>`.
+    pub expression: String,
+}
+
+impl PropertyConstraint {
+    pub fn new(
+        target_node_id: NodeId,
+        target_property: impl Into<String>,
+        expression: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            target_node_id,
+            target_property: target_property.into(),
+            expression: expression.into(),
+        }
+    }
+}
+
 // ─── Spot Colors ─────────────────────────────────────────────────────────────
 
 // ─── Actions (Macro Sequences) ───────────────────────────────────────────────
@@ -496,6 +530,10 @@ pub struct Document {
     /// Named variable-width stroke profiles.
     #[serde(default)]
     pub width_profiles: Vec<WidthProfile>,
+    /// Live property constraints — parametric bindings of a node property to an
+    /// expression over other nodes' properties. Re-evaluated after every mutation.
+    #[serde(default)]
+    pub constraints: Vec<PropertyConstraint>,
     /// Named design grammar rules — constraints the document must satisfy.
     #[serde(default)]
     pub grammar_rules: Vec<GrammarRule>,
@@ -643,6 +681,7 @@ impl Document {
             spot_colors: Vec::new(),
             graphic_styles: Vec::new(),
             width_profiles: Vec::new(),
+            constraints: Vec::new(),
             grammar_rules: Vec::new(),
             action_sets: Vec::new(),
             bleed_mm: 0.0,
@@ -815,6 +854,99 @@ impl Document {
         }
     }
 
+    /// Maximum symbol-nesting depth before resolution bails out (cycle guard).
+    const SYMBOL_MAX_DEPTH: u8 = 8;
+
+    /// Resolve a node's render geometry/style from its symbol master.
+    ///
+    /// Symbol instances are created as a frozen clone of the master's geometry
+    /// (see `place_symbol`), so edits to the master would otherwise never reach
+    /// existing instances. This returns a node whose `kind` is taken from the
+    /// *current* master — with the instance's own transform, opacity,
+    /// visibility and per-instance fill/stroke colour overrides preserved — so
+    /// master edits propagate live. Non-instances are returned borrowed and
+    /// unchanged (zero-cost on the render hot path).
+    ///
+    /// Nested symbols (a master that is itself an instance) are followed up to
+    /// [`Self::SYMBOL_MAX_DEPTH`]; cycles and dangling references fall back to
+    /// rendering the instance's frozen copy.
+    ///
+    /// Note: only single-node masters propagate today. A group master is
+    /// flattened to leaf nodes at placement time and those leaves carry no
+    /// `symbol_ref`, so group/nested-group propagation is tracked as follow-up.
+    pub fn resolve_render_node<'a>(
+        &'a self,
+        node: &'a SceneNode,
+    ) -> std::borrow::Cow<'a, SceneNode> {
+        use std::borrow::Cow;
+        let Some(sym_id) = node.symbol_ref else {
+            return Cow::Borrowed(node);
+        };
+
+        // Follow the symbol → master chain, guarding against cycles/depth.
+        let mut current_sym = Some(sym_id);
+        let mut master: Option<&SceneNode> = None;
+        let mut depth = 0u8;
+        while let Some(sid) = current_sym {
+            if depth > Self::SYMBOL_MAX_DEPTH {
+                // Nesting too deep (likely a cycle): render the frozen copy.
+                return Cow::Borrowed(node);
+            }
+            let Some(sym) = self.symbols.iter().find(|s| s.id == sid) else {
+                // Dangling symbol reference: render the frozen copy.
+                break;
+            };
+            let Some(m) = self.nodes.get(&sym.master_node_id) else {
+                break;
+            };
+            if m.id == node.id {
+                // Instance is its own master — would loop forever.
+                return Cow::Borrowed(node);
+            }
+            master = Some(m);
+            current_sym = m.symbol_ref;
+            depth += 1;
+        }
+
+        let Some(master) = master else {
+            return Cow::Borrowed(node);
+        };
+
+        // Master geometry/style with instance placement + overrides on top.
+        let mut resolved = node.clone();
+        resolved.kind = master.kind.clone();
+        Self::apply_symbol_overrides(&mut resolved);
+        Cow::Owned(resolved)
+    }
+
+    /// Apply a symbol instance's hex colour overrides onto its (master-derived)
+    /// `kind`. A fill override replaces a solid fill; a stroke override replaces
+    /// the stroke colour. No-op when overrides are absent or unparseable.
+    fn apply_symbol_overrides(node: &mut SceneNode) {
+        use crate::style::FillKind;
+        let fill = node
+            .symbol_fill_override
+            .as_deref()
+            .and_then(Color::from_hex);
+        let stroke = node
+            .symbol_stroke_override
+            .as_deref()
+            .and_then(Color::from_hex);
+        if fill.is_none() && stroke.is_none() {
+            return;
+        }
+        if let SceneNodeKind::Path(pn) = &mut node.kind {
+            if let Some(c) = fill {
+                pn.fill.kind = FillKind::Solid(c);
+                pn.fill.enabled = true;
+            }
+            if let Some(c) = stroke {
+                pn.stroke.color = c;
+                pn.stroke.enabled = true;
+            }
+        }
+    }
+
     /// Returns node count across all layers.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -892,17 +1024,39 @@ impl Document {
         serde_json::to_string_pretty(self)
     }
 
-    /// Deserialize from JSON string. Returns an error if the file's `format_version`
-    /// is newer than `CURRENT_FORMAT_VERSION` (i.e. saved by a future build).
+    /// Deserialize from a JSON string, migrating the raw document forward to
+    /// [`CURRENT_FORMAT_VERSION`] first.
+    ///
+    /// Older documents are upgraded through the [`crate::migration`] chain before
+    /// deserialization. A document saved by a *newer* build loads leniently
+    /// (unknown fields dropped) while within
+    /// [`crate::migration::COMPAT_WINDOW`]; beyond that window it is rejected.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        let doc: Self = serde_json::from_str(json)?;
-        if doc.format_version > CURRENT_FORMAT_VERSION {
-            return Err(serde::de::Error::custom(format!(
-                "unsupported format version {} (this build supports up to version {})",
-                doc.format_version, CURRENT_FORMAT_VERSION
-            )));
+        use crate::migration;
+
+        // Migrate at the JSON-tree level before struct deserialization so new
+        // fields can be filled and moved fields renamed without the in-memory
+        // types having to understand older layouts.
+        let mut value: serde_json::Value = serde_json::from_str(json)?;
+        let file_version = migration::detect_version(&value);
+
+        if file_version > CURRENT_FORMAT_VERSION {
+            if file_version - CURRENT_FORMAT_VERSION > migration::COMPAT_WINDOW {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported format version {} (this build supports up to {}, \
+                     compatibility window +{})",
+                    file_version,
+                    CURRENT_FORMAT_VERSION,
+                    migration::COMPAT_WINDOW
+                )));
+            }
+            // Within the window: fall through and load leniently.
+        } else {
+            migration::run_migrations(&mut value, CURRENT_FORMAT_VERSION)
+                .map_err(serde::de::Error::custom)?;
         }
-        Ok(doc)
+
+        serde_json::from_value(value)
     }
 }
 
@@ -1013,5 +1167,170 @@ mod tests {
             "blue channel should be 1.0"
         );
         assert!((sampled[0]).abs() < 1e-6, "red channel should be 0.0");
+    }
+}
+
+#[cfg(test)]
+mod format_version_tests {
+    use super::*;
+
+    #[test]
+    fn current_version_round_trips() {
+        let doc = Document::new("v1", 100.0, 100.0);
+        let json = doc.to_json().unwrap();
+        let loaded = Document::from_json(&json).unwrap();
+        assert_eq!(loaded.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(loaded.name, "v1");
+    }
+
+    #[test]
+    fn missing_version_defaults_and_loads() {
+        // A pre-versioning document: a real document with format_version removed.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Document::new("old", 10.0, 10.0).to_json().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("format_version");
+        assert!(value.get("format_version").is_none());
+        let loaded = Document::from_json(&value.to_string()).unwrap();
+        assert_eq!(loaded.name, "old");
+        assert_eq!(loaded.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn slightly_newer_version_loads_leniently() {
+        // One version ahead with an unknown field — within COMPAT_WINDOW.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Document::new("future", 10.0, 10.0).to_json().unwrap()).unwrap();
+        value["format_version"] =
+            serde_json::Value::from(CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW);
+        value["a_field_from_the_future"] = serde_json::Value::from("ignored");
+        let loaded = Document::from_json(&value.to_string()).unwrap();
+        assert_eq!(loaded.name, "future");
+    }
+
+    #[test]
+    fn far_future_version_is_rejected() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Document::new("toonew", 10.0, 10.0).to_json().unwrap()).unwrap();
+        value["format_version"] =
+            serde_json::Value::from(CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW + 1);
+        assert!(Document::from_json(&value.to_string()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod symbol_resolution_tests {
+    use super::*;
+    use crate::node::PathNode;
+    use crate::path::PathData;
+    use crate::style::{Fill, FillKind};
+
+    fn solid_fill(node: &SceneNode) -> Color {
+        match &node.kind {
+            SceneNodeKind::Path(pn) => match pn.fill.kind {
+                FillKind::Solid(c) => c,
+                _ => panic!("expected solid fill"),
+            },
+            _ => panic!("expected path node"),
+        }
+    }
+
+    /// Build a master path node (red fill) + register it as symbol "sym".
+    fn doc_with_symbol() -> (Document, NodeId, Uuid) {
+        let mut doc = Document::new("test", 100.0, 100.0);
+        let layer = doc.active_layer_id.unwrap();
+        let mut master = SceneNode::new(
+            "master",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        if let SceneNodeKind::Path(pn) = &mut master.kind {
+            pn.fill = Fill::solid(Color::RED);
+        }
+        let master_id = doc.add_node(master, None);
+        let sym = Symbol::new("sym", master_id);
+        let sym_id = sym.id;
+        doc.symbols.push(sym);
+        (doc, master_id, sym_id)
+    }
+
+    fn make_instance(doc: &Document, master_id: NodeId, sym_id: Uuid) -> SceneNode {
+        let mut inst = doc.nodes.get(&master_id).unwrap().clone();
+        inst.id = Uuid::new_v4();
+        inst.name = "instance".into();
+        inst.symbol_ref = Some(sym_id);
+        inst.transform = crate::transform::Transform::translate(50.0, 50.0);
+        // Freeze a stale green fill on the instance copy.
+        if let SceneNodeKind::Path(pn) = &mut inst.kind {
+            pn.fill = Fill::solid(Color::GREEN);
+        }
+        inst
+    }
+
+    #[test]
+    fn master_edits_propagate_to_instances() {
+        let (mut doc, master_id, sym_id) = doc_with_symbol();
+        let inst = make_instance(&doc, master_id, sym_id);
+        let inst_id = doc.add_node(inst, None);
+
+        // Edit the master fill to blue *after* the instance was placed.
+        if let Some(SceneNodeKind::Path(pn)) = doc.nodes.get_mut(&master_id).map(|n| &mut n.kind) {
+            pn.fill = Fill::solid(Color::BLUE);
+        }
+
+        let inst_ref = doc.nodes.get(&inst_id).unwrap();
+        let resolved = doc.resolve_render_node(inst_ref);
+        // Geometry/style now reflects the current master (blue), not the frozen green.
+        assert_eq!(solid_fill(&resolved), Color::BLUE);
+        // Instance placement is preserved.
+        assert_eq!(resolved.transform.apply(0.0, 0.0), (50.0, 50.0));
+    }
+
+    #[test]
+    fn fill_override_takes_precedence_over_master() {
+        let (doc, master_id, sym_id) = doc_with_symbol();
+        let mut inst = make_instance(&doc, master_id, sym_id);
+        inst.symbol_fill_override = Some("#00ffff".into()); // cyan
+        let resolved = doc.resolve_render_node(&inst);
+        let c = solid_fill(&resolved);
+        assert!((c.r - 0.0).abs() < 1e-3 && (c.g - 1.0).abs() < 1e-3 && (c.b - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn non_instance_is_borrowed_unchanged() {
+        let (doc, master_id, _sym_id) = doc_with_symbol();
+        let master = doc.nodes.get(&master_id).unwrap();
+        let resolved = doc.resolve_render_node(master);
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn self_referential_symbol_does_not_loop() {
+        // A symbol whose master is the instance itself must not infinite-loop.
+        let mut doc = Document::new("test", 100.0, 100.0);
+        let layer = doc.active_layer_id.unwrap();
+        let node = SceneNode::new(
+            "n",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 5.0, 5.0))),
+        );
+        let nid = doc.add_node(node, None);
+        let sym = Symbol::new("self", nid);
+        let sym_id = sym.id;
+        doc.symbols.push(sym);
+        // Point the node at the symbol whose master is the node itself.
+        doc.nodes.get_mut(&nid).unwrap().symbol_ref = Some(sym_id);
+        let n = doc.nodes.get(&nid).unwrap();
+        let resolved = doc.resolve_render_node(n);
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn dangling_symbol_ref_renders_frozen_copy() {
+        let (doc, master_id, _sym_id) = doc_with_symbol();
+        let mut inst = make_instance(&doc, master_id, Uuid::new_v4()); // unknown symbol id
+        inst.symbol_ref = Some(Uuid::new_v4());
+        let resolved = doc.resolve_render_node(&inst);
+        // Falls back to the instance's own (green) copy.
+        assert_eq!(solid_fill(&resolved), Color::GREEN);
     }
 }

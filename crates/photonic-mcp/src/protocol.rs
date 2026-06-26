@@ -3448,6 +3448,25 @@ pub struct DeleteWidthProfileArgs {
     pub name: String,
 }
 
+/// Arguments for `set_constraint` tool
+#[derive(Debug, Deserialize)]
+pub struct SetConstraintArgs {
+    /// Target node UUID or name whose property is driven by the expression.
+    pub node_id: String,
+    /// Target property: one of `x`, `y`, `opacity`, `font_size`.
+    pub property: String,
+    /// Arithmetic expression; may reference `nodes['<id-or-name>'].<prop>`
+    /// (e.g. `nodes['logo'].x + 20`).
+    pub expression: String,
+}
+
+/// Arguments for `remove_constraint` tool
+#[derive(Debug, Deserialize)]
+pub struct RemoveConstraintArgs {
+    /// UUID of the constraint to remove.
+    pub constraint_id: String,
+}
+
 // ─── Swatch Library Args ─────────────────────────────────────────────────────
 
 /// Arguments for `load_swatch_library` tool

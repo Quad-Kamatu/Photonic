@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -45,14 +45,13 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # Note: --locked is intentionally omitted because Cargo.lock is gitignored
-      # in this repo. Commit Cargo.lock (and re-add --locked) for reproducible,
-      # pinned dependency builds.
+      # Cargo.lock is committed, so --locked gives reproducible, pinned builds
+      # and fails CI if the lockfile is out of date with Cargo.toml.
       - name: Build (workspace)
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Test (workspace)
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   lint:
     name: Lint (fmt + clippy)
@@ -83,5 +82,25 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all --check
 
+      # clippy runs but warnings are not denied yet (~40 in the backlog after the
+      # machine-applicable fixes) — add `-D warnings` to enforce once those are
+      # cleared (see docs/proposals/55-…).
       - name: clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked
+
+      # The MCP API reference is generated from server::tool_list(); fail if it
+      # has drifted from the committed docs/mcp-api.md.
+      - name: Regenerate MCP API docs
+        run: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md
+
+      - name: Check MCP API docs are up to date
+        run: git diff --exit-code docs/mcp-api.md
+
+      # Supply-chain / license / advisory gate using the committed deny.toml.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo-deny
+        run: cargo deny check
