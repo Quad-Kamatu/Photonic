@@ -1,6 +1,41 @@
-# Symbol instances: propagate master edits + nested symbols (#29) — Design Proposal
+# Symbol instances: propagate master edits + nested symbols (#29)
 
-> Status: design scaffold (not an implementation).
+> Status: **implemented** for single-node symbol masters (the common case).
+> Group/nested-group masters and `<use>`-based SVG export are tracked as
+> follow-ups (see *Remaining work*).
+
+## What this PR implements
+
+- `Document::resolve_render_node(node) -> Cow<SceneNode>` (`document.rs`):
+  returns a node whose `kind` comes from the **current** master for a symbol
+  instance — with the instance's transform, opacity, visibility and per-instance
+  fill/stroke overrides preserved — so editing a master now propagates to all
+  instances live. Non-instances are returned borrowed (zero-cost). Follows
+  nested symbol chains up to a depth guard; cycles, self-references and dangling
+  symbol refs fall back to the instance's frozen copy.
+- Per-instance `symbol_fill_override` / `symbol_stroke_override` (hex colours)
+  are now actually applied during resolution — previously stored but never
+  rendered.
+- The live renderer (`renderer.rs`) and headless export (`headless.rs`) both
+  resolve each node through `resolve_render_node`, so on-canvas and PNG export
+  agree.
+- `break_link_to_symbol` (MCP) now bakes the resolved (current master) geometry
+  into the node before unlinking, so breaking the link preserves what is on
+  screen instead of reverting to the placement-time copy.
+- Unit tests in `document.rs` cover propagation, override precedence, the
+  borrowed fast-path, self-reference/cycle safety, and dangling-ref fallback.
+
+### Remaining work (follow-up)
+
+- Group masters: `place_symbol` flattens a group master to leaf nodes that carry
+  no `symbol_ref`, so group/nested-group instances don't yet propagate. Needs
+  owned-subtree resolution in `collect_draw_nodes`.
+- SVG export as `<defs>` + `<use href>` (currently exports resolved flat
+  geometry via the existing path emitter).
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 

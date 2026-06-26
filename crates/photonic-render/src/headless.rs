@@ -525,6 +525,10 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
     }
 
     for node in doc.nodes_in_draw_order() {
+        // Resolve symbol instances to the current master (+ overrides) so
+        // headless export matches the live renderer.
+        let resolved = doc.resolve_render_node(node);
+        let node = resolved.as_ref();
         let SceneNodeKind::Path(path_node) = &node.kind else {
             continue;
         };

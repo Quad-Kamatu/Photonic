@@ -2341,7 +2341,13 @@ pub async fn break_link_to_symbol(state: &AppState, args: BreakLinkToSymbolArgs)
     }
 
     let mut new_node = node.clone();
+    // Bake the current master geometry/style (+ overrides) into the instance so
+    // breaking the link preserves what's rendered rather than reverting to the
+    // frozen copy captured at placement time.
+    new_node.kind = doc.resolve_render_node(&node).kind.clone();
     new_node.symbol_ref = None;
+    new_node.symbol_fill_override = None;
+    new_node.symbol_stroke_override = None;
 
     let mut history = state.history.lock().await;
     history.execute(
