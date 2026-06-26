@@ -92,8 +92,21 @@ fn main() -> Result<()> {
     register_file_association();
 
     let document = if let Some(path) = &args.file {
-        let json = std::fs::read_to_string(path)?;
-        Document::from_json(&json)?
+        let content = std::fs::read_to_string(path)?;
+        // Detect format by extension: `.svg` is imported, everything else is
+        // treated as Photonic JSON (`.photon`). Previously every file argument
+        // was parsed as JSON, so opening an SVG via the CLI/file argument failed.
+        let is_svg = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        if is_svg {
+            photonic_core::import_svg(&content)
+                .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?
+        } else {
+            Document::from_json(&content)
+                .map_err(|e| anyhow::anyhow!("failed to open '{}': {e}", path.display()))?
+        }
     } else {
         Document::default_artboard()
     };

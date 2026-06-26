@@ -19,46 +19,15 @@ use crate::{
 
 // ─── Eyedropper ───────────────────────────────────────────────────────────────
 
-/// Raw pixel data captured from the screen when eyedropper mode starts.
-struct EyedropperCapture {
-    /// Screen origin in logical (OS) coords.
-    origin_x: i32,
-    origin_y: i32,
-    /// Physical pixels per logical pixel for this display.
-    scale: f32,
-    /// Dimensions of the captured image in physical pixels.
-    width: u32,
-    height: u32,
-    /// Row-major RGBA pixel data (physical resolution).
-    pixels: Vec<u8>,
-}
-
-impl EyedropperCapture {
-    /// Sample the pixel at a logical screen coordinate.
-    fn sample_logical(&self, lx: f32, ly: f32) -> Option<[u8; 4]> {
-        let px = ((lx - self.origin_x as f32) * self.scale) as i32;
-        let py = ((ly - self.origin_y as f32) * self.scale) as i32;
-        if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
-            return None;
-        }
-        let base = ((py as u32 * self.width + px as u32) * 4) as usize;
-        if base + 3 >= self.pixels.len() {
-            return None;
-        }
-        Some([
-            self.pixels[base],
-            self.pixels[base + 1],
-            self.pixels[base + 2],
-            self.pixels[base + 3],
-        ])
-    }
-}
-
-/// State for the screen eyedropper tool.
+/// State for the in-canvas eyedropper tool.
+///
+/// Color sampling is performed entirely within the document's own canvas by
+/// converting the egui cursor position to canvas coordinates and calling
+/// `photonic_core::sample_fill_at`.  No screen capture or external portal is
+/// used, so this works correctly on Wayland.
 #[derive(Default)]
 pub struct EyedropperState {
     pub target: Option<EyedropperTarget>,
-    capture: Option<EyedropperCapture>,
     /// Skip the very first `primary_clicked` after activation so the button's
     /// own release doesn't immediately trigger a sample.
     skip_click: bool,
@@ -69,34 +38,10 @@ impl EyedropperState {
         self.target.is_some()
     }
 
-    fn sample_at_screen_logical(&self, lx: f32, ly: f32) -> Option<[u8; 4]> {
-        self.capture.as_ref()?.sample_logical(lx, ly)
-    }
-
     fn cancel(&mut self) {
         self.target = None;
-        self.capture = None;
         self.skip_click = false;
     }
-}
-
-/// Capture the screen that contains the given logical window position.
-/// Returns `None` if the screen cannot be captured or is unavailable.
-fn capture_screen(window_logical_x: i32, window_logical_y: i32) -> Option<EyedropperCapture> {
-    use screenshots::Screen;
-    let screen = Screen::from_point(window_logical_x, window_logical_y).ok()?;
-    let img = screen.capture().ok()?;
-    let w = img.width();
-    let h = img.height();
-    let pixels = img.into_raw();
-    Some(EyedropperCapture {
-        origin_x: screen.display_info.x,
-        origin_y: screen.display_info.y,
-        scale: screen.display_info.scale_factor,
-        width: w,
-        height: h,
-        pixels,
-    })
 }
 
 // ─── Drawer kind ──────────────────────────────────────────────────────────────
@@ -322,6 +267,18 @@ pub struct PhotonicApp {
 
     /// Whether we are currently dragging a selected node to move it.
     moving: bool,
+    /// Snapshots of the selected nodes captured at the start of a move drag.
+    /// Used to record a single undoable UpdateNode batch on release. Empty
+    /// until the first move frame actually shifts the selection.
+    move_drag_origins: Vec<SceneNode>,
+    /// Original translations (id, tx, ty) of the selection captured at move
+    /// start, so the move can be applied absolutely and snapped to the grid.
+    move_snap_origins: Vec<(NodeId, f64, f64)>,
+    /// Selection bounding-box top-left at move start — the point snapped to the
+    /// grid as the selection is dragged.
+    move_snap_ref: Option<(f64, f64)>,
+    /// Canvas-space cursor position where the move drag began.
+    move_snap_press: Option<(f64, f64)>,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -334,6 +291,9 @@ pub struct PhotonicApp {
 
     /// Transforms of all selected nodes captured at the start of a multi-node resize.
     resize_multi_origins: Vec<(NodeId, [f64; 6])>,
+    /// Full snapshots of the nodes captured at the start of a resize drag, used
+    /// to record a single undoable UpdateNode batch on release.
+    resize_drag_origins: Vec<SceneNode>,
 
     /// Screen-space position where a marquee (drag-select) began; None when inactive.
     marquee_start: Option<egui::Pos2>,
@@ -619,11 +579,16 @@ impl Default for PhotonicApp {
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
+            move_drag_origins: Vec::new(),
+            move_snap_origins: Vec::new(),
+            move_snap_ref: None,
+            move_snap_press: None,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
             resize_origin_font_size: None,
             resize_multi_origins: Vec::new(),
+            resize_drag_origins: Vec::new(),
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),
@@ -924,13 +889,48 @@ impl PhotonicApp {
                     }
 
                     ui.separator();
-                    panels::draw_toolbar(ui, &doc.name, view.zoom);
+                    // Pass the file-status message into the toolbar so the zoom
+                    // readout and status text share one right-aligned cluster
+                    // instead of overlapping in the top-right corner.
+                    panels::draw_toolbar(ui, &doc.name, view.zoom, self.file_status.as_deref());
+                });
+            });
 
-                    // Show file status message on the right
-                    if let Some(status) = &self.file_status {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(status).weak().italics());
-                        });
+        // ── Drawer pull tabs ─────────────────────────────────────────────────
+        // Persistent thin strip below the toolbar — one small clickable tab per
+        // drawer. Tabs stay visible whether the drawer is open or closed so the
+        // user always has a direct affordance to expand or collapse each drawer.
+        let tab_strip_resp = egui::TopBottomPanel::top("drawer_pull_tabs")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(6.0, 2.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for &kind in &[DrawerKind::File, DrawerKind::Edit, DrawerKind::Tools] {
+                        let is_open = self.active_drawer == Some(kind);
+                        let name = match kind {
+                            DrawerKind::File => "File",
+                            DrawerKind::Edit => "Edit",
+                            DrawerKind::Tools => "Tools",
+                        };
+                        let arrow = if is_open { "▲" } else { "▼" };
+                        let label = format!("{arrow} {name}");
+                        if ui
+                            .selectable_label(is_open, RichText::new(label).small())
+                            .on_hover_text(if is_open {
+                                format!("Close {name} drawer")
+                            } else {
+                                format!("Open {name} drawer")
+                            })
+                            .clicked()
+                        {
+                            if is_open && kind == DrawerKind::Edit {
+                                self.prefs.save();
+                            }
+                            self.active_drawer = if is_open { None } else { Some(kind) };
+                            self.selected_drawer_option = None;
+                        }
                     }
                 });
             });
@@ -947,7 +947,8 @@ impl PhotonicApp {
         // ── Menu drawer (floating overlay) ────────────────────────────────────
         if let Some(drawer_kind) = self.active_drawer {
             let screen = ctx.screen_rect();
-            let toolbar_bottom = toolbar_resp.response.rect.bottom();
+            // Open the drawer below the pull-tab strip so the tabs remain visible.
+            let toolbar_bottom = tab_strip_resp.response.rect.bottom();
             let drawer_height = (screen.height() * 0.6).max(300.0);
             let content_height = drawer_height - 24.0; // subtract Frame::popup inner_margin (12 * 2)
             let drawer_width = screen.width();
@@ -1317,13 +1318,15 @@ impl PhotonicApp {
                 }); // Area inner
 
             // Close when the user clicks outside the drawer.
-            // Also exclude the toolbar so the toggle buttons can handle their own state.
+            // Also exclude the toolbar and pull-tab strip so their own buttons
+            // can handle toggle state without fighting this "click outside" path.
             if ctx.input(|i| i.pointer.any_click()) {
                 let clicked_inside = ctx
                     .input(|i| i.pointer.interact_pos())
                     .map(|pos| {
                         drawer_resp.response.rect.contains(pos)
                             || toolbar_resp.response.rect.contains(pos)
+                            || tab_strip_resp.response.rect.contains(pos)
                     })
                     .unwrap_or(false);
                 if !clicked_inside {
@@ -1495,9 +1498,12 @@ impl PhotonicApp {
                     .id_salt("layers_scroll")
                     .max_height(150.0)
                     .show(ui, |ui| {
-                        if let Some(action) =
-                            panels::draw_layers_panel(ui, doc, &mut self.selected_layer_ids)
-                        {
+                        if let Some(action) = panels::draw_layers_panel(
+                            ui,
+                            doc,
+                            &mut self.selected_layer_ids,
+                            self.selected_id,
+                        ) {
                             self.pending_panel_actions.push(action);
                         }
                     });
@@ -1990,10 +1996,13 @@ impl PhotonicApp {
                     view.pan_y += delta.y as f64;
                 }
 
-                // ── Canvas pan: alt + left drag (skip when Shape Builder uses alt) ──
+                // ── Canvas pan: alt + left drag ──────────────────────────────
+                // Skipped for Shape Builder (alt = subtract) and for shape-creator
+                // tools, where alt = draw-from-center (#10).
                 if response.dragged_by(egui::PointerButton::Primary)
                     && ui.input(|i| i.modifiers.alt)
                     && self.active_tool != Tool::ShapeBuilder
+                    && !self.active_tool.is_shape_creator()
                 {
                     let delta = response.drag_delta();
                     view.pan_x += delta.x as f64;
@@ -2712,9 +2721,6 @@ impl PhotonicApp {
                 if !self.active_tool.is_shape_creator() {
                     return;
                 }
-                if ui.input(|i| i.modifiers.alt) {
-                    return;
-                }
 
                 if response.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -2731,17 +2737,29 @@ impl PhotonicApp {
                         let (ex_raw, ey_raw) =
                             view.screen_to_canvas(end_pos.x as f64, end_pos.y as f64);
                         let (mut ex, mut ey) = (self.snap(ex_raw), self.snap(ey_raw));
+                        let shift_held = ui.input(|i| i.modifiers.shift);
                         // Line tool: snap endpoint to nearest 45° angle when Snap45 is on or Shift held.
                         if self.active_tool == Tool::Line {
-                            let shift_held = ui.input(|i| i.modifiers.shift);
                             if self.line_snap_45 || shift_held {
                                 let (snapped_ex, snapped_ey) = snap_line_to_45(sx, sy, ex, ey);
                                 ex = snapped_ex;
                                 ey = snapped_ey;
                             }
+                        } else if shift_held {
+                            // Other shape tools: Shift constrains the bounding box to
+                            // 1:1 (square / circle / proportional).
+                            let (cex, cey) = constrain_to_square(sx, sy, ex, ey);
+                            ex = cex;
+                            ey = cey;
                         }
+                        // Alt: treat the drag start as the shape's center (#10).
+                        let ((bsx, bsy), (bex, bey)) = if ui.input(|i| i.modifiers.alt) {
+                            shape_corners_from_center(sx, sy, ex, ey)
+                        } else {
+                            ((sx, sy), (ex, ey))
+                        };
                         if (ex - sx).abs() > 2.0 || (ey - sy).abs() > 2.0 {
-                            if let Some(path) = self.build_shape(sx, sy, ex, ey) {
+                            if let Some(path) = self.build_shape(bsx, bsy, bex, bey) {
                                 let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
                                     (
                                         self.prefs.default_stroke_color,
@@ -2795,17 +2813,25 @@ impl PhotonicApp {
                     if let Some(cursor) = cursor {
                         let (ex_raw, ey_raw) =
                             view.screen_to_canvas(cursor.x as f64, cursor.y as f64);
+                        let shift_held = ui.input(|i| i.modifiers.shift);
                         let (ex, ey) = if self.active_tool == Tool::Line {
-                            let shift_held = ui.input(|i| i.modifiers.shift);
                             if self.line_snap_45 || shift_held {
                                 snap_line_to_45(sx, sy, ex_raw, ey_raw)
                             } else {
                                 (ex_raw, ey_raw)
                             }
+                        } else if shift_held {
+                            constrain_to_square(sx, sy, ex_raw, ey_raw)
                         } else {
                             (ex_raw, ey_raw)
                         };
-                        if let Some(path) = self.build_shape(sx, sy, ex, ey) {
+                        // Alt: preview the shape centered on the drag start (#10).
+                        let ((bsx, bsy), (bex, bey)) = if ui.input(|i| i.modifiers.alt) {
+                            shape_corners_from_center(sx, sy, ex, ey)
+                        } else {
+                            ((sx, sy), (ex, ey))
+                        };
+                        if let Some(path) = self.build_shape(bsx, bsy, bex, bey) {
                             let pts = bez_to_screen_points(&path.to_bez_path(), view);
                             if pts.len() >= 2 {
                                 let [fr, fg, fb, _] = self.fill_color;
@@ -2833,6 +2859,13 @@ impl PhotonicApp {
         // to &self/&mut self methods (build_shape_with_tool, do_group_selected).
         'actions: for action in std::mem::take(&mut self.pending_panel_actions) {
             match action {
+                PanelAction::SelectNode { node_id } => {
+                    if doc.nodes.contains_key(&node_id) {
+                        self.selected_id = Some(node_id);
+                        doc.selection = Selection::single(node_id);
+                        doc_modified = true;
+                    }
+                }
                 PanelAction::ReorderNode { node_id, op } => {
                     if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
                         let layer_len = doc
@@ -4926,8 +4959,6 @@ impl PhotonicApp {
                 }
 
                 PanelAction::StartEyedropper(target) => {
-                    self.eyedropper.capture =
-                        capture_screen(self.window_logical_pos.0, self.window_logical_pos.1);
                     self.eyedropper.target = Some(target);
                     self.eyedropper.skip_click = true;
                 }
@@ -8907,13 +8938,23 @@ impl PhotonicApp {
                 self.eyedropper.cancel();
             } else {
                 if let Some(pos) = cursor {
-                    let sx = self.window_logical_pos.0 as f32 + pos.x;
-                    let sy = self.window_logical_pos.1 as f32 + pos.y;
+                    // Convert the egui cursor position (screen-space, relative to
+                    // the egui viewport) to canvas coordinates and sample the
+                    // topmost filled node in the document.  This is reliable on
+                    // all platforms including Wayland — no screen capture needed.
+                    let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                    let sampled = photonic_core::sample_fill_at(doc, cx, cy);
 
                     // Draw color preview badge near cursor
-                    let sampled = self.eyedropper.sample_at_screen_logical(sx, sy);
                     let preview_color = sampled
-                        .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+                        .map(|c| {
+                            egui::Color32::from_rgba_unmultiplied(
+                                (c[0] * 255.0) as u8,
+                                (c[1] * 255.0) as u8,
+                                (c[2] * 255.0) as u8,
+                                (c[3] * 255.0) as u8,
+                            )
+                        })
                         .unwrap_or(egui::Color32::TRANSPARENT);
 
                     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -8934,10 +8975,10 @@ impl PhotonicApp {
                     if clicked {
                         if let Some(rgba) = sampled {
                             let picked = photonic_core::Color {
-                                r: rgba[0] as f32 / 255.0,
-                                g: rgba[1] as f32 / 255.0,
-                                b: rgba[2] as f32 / 255.0,
-                                a: rgba[3] as f32 / 255.0,
+                                r: rgba[0],
+                                g: rgba[1],
+                                b: rgba[2],
+                                a: rgba[3],
                             };
                             self.apply_eyedropper_color(doc, history, picked, &mut doc_modified);
                         }
@@ -9465,6 +9506,20 @@ impl PhotonicApp {
                 if let Some(handle) = resize_hit {
                     self.resizing = Some(handle);
                     self.resize_origin_bounds = effective_bounds;
+                    // Snapshot the nodes being resized so the drag can be recorded
+                    // as a single undoable history step on release (#5).
+                    self.resize_drag_origins = if sel_ids.len() > 1 {
+                        sel_ids
+                            .iter()
+                            .filter_map(|id| doc.nodes.get(id).cloned())
+                            .collect()
+                    } else {
+                        self.selected_id
+                            .and_then(|id| doc.nodes.get(&id))
+                            .cloned()
+                            .into_iter()
+                            .collect()
+                    };
                     if sel_ids.len() > 1 {
                         // Multi-node resize: capture every selected node's transform
                         self.resize_multi_origins = sel_ids
@@ -9579,7 +9634,7 @@ impl PhotonicApp {
                         let orig_w = bx1 - bx0;
                         let orig_h = by1 - by0;
                         if orig_w.abs() > 1e-9 && orig_h.abs() > 1e-9 {
-                            let (anchor_x, anchor_y, sx, sy) = match handle {
+                            let (anchor_x, anchor_y, mut sx, mut sy) = match handle {
                                 ResizeHandle::TopLeft => {
                                     (bx1, by1, (bx1 - px) / orig_w, (by1 - py) / orig_h)
                                 }
@@ -9593,6 +9648,16 @@ impl PhotonicApp {
                                     (bx0, by0, (px - bx0) / orig_w, (py - by0) / orig_h)
                                 }
                             };
+
+                            // Shift constrains the resize to a uniform scale so the
+                            // selection keeps its aspect ratio (#4). The
+                            // larger-magnitude axis wins; signs (flips across the
+                            // anchor) are preserved.
+                            if ui.input(|i| i.modifiers.shift) {
+                                let s = sx.abs().max(sy.abs());
+                                sx = s.copysign(sx);
+                                sy = s.copysign(sy);
+                            }
 
                             if !self.resize_multi_origins.is_empty() {
                                 // Multi-node resize: apply the same scale to every node
@@ -9639,15 +9704,53 @@ impl PhotonicApp {
                     }
                 }
             } else if self.moving {
-                let delta = response.drag_delta();
-                let dx = delta.x as f64 / view.zoom;
-                let dy = delta.y as f64 / view.zoom;
                 let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
-                for id in ids_to_move {
-                    if let Some(node) = doc.nodes.get_mut(&id) {
-                        node.transform.matrix[4] += dx;
-                        node.transform.matrix[5] += dy;
-                        *doc_modified = true;
+                // Capture the starting translations, reference point and press
+                // position on the first move frame, so the move is applied
+                // absolutely (origin + total delta) and can be snapped to grid
+                // (#12). Also snapshot the full nodes so the whole drag becomes a
+                // single undoable history step on release (#11).
+                if self.move_snap_origins.is_empty() {
+                    self.move_drag_origins = ids_to_move
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).cloned())
+                        .collect();
+                    self.move_snap_origins = ids_to_move
+                        .iter()
+                        .filter_map(|id| {
+                            doc.nodes
+                                .get(id)
+                                .map(|n| (*id, n.transform.matrix[4], n.transform.matrix[5]))
+                        })
+                        .collect();
+                    self.move_snap_ref = selection_canvas_bounds(doc, &ids_to_move, renderer)
+                        .map(|(x0, y0, _, _)| (x0, y0));
+                    self.move_snap_press = ui
+                        .input(|i| i.pointer.press_origin())
+                        .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
+                }
+
+                if let (Some((px, py)), Some(cur)) =
+                    (self.move_snap_press, response.interact_pointer_pos())
+                {
+                    let (curx, cury) = view.screen_to_canvas(cur.x as f64, cur.y as f64);
+                    let raw_dx = curx - px;
+                    let raw_dy = cury - py;
+                    // Snap the reference point's target to the grid (no-op when
+                    // snap-to-grid is off), then move every node by that delta so
+                    // the selection keeps its internal layout.
+                    let (dx, dy) = match self.move_snap_ref {
+                        Some((rx, ry)) => {
+                            (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
+                        }
+                        None => (raw_dx, raw_dy),
+                    };
+                    for (id, ox, oy) in &self.move_snap_origins {
+                        if let Some(node) = doc.nodes.get_mut(id) {
+                            node.transform.matrix[4] = ox + dx;
+                            node.transform.matrix[5] = oy + dy;
+                            *doc_modified = true;
+                        }
                     }
                 }
             }
@@ -9655,11 +9758,64 @@ impl PhotonicApp {
 
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             self.moving = false;
+            // Record the completed move as a single undoable history step (#11).
+            // The doc already holds the moved state, so re-applying UpdateNode is
+            // a no-op; it just captures the inverse for undo/redo.
+            if !self.move_drag_origins.is_empty() {
+                let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
+                    .into_iter()
+                    .filter_map(|old| {
+                        doc.nodes.get(&old.id).and_then(|cur| {
+                            (cur.transform.matrix != old.transform.matrix).then(|| {
+                                Command::UpdateNode {
+                                    old,
+                                    new: cur.clone(),
+                                }
+                            })
+                        })
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
+            self.move_snap_origins.clear();
+            self.move_snap_ref = None;
+            self.move_snap_press = None;
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
             self.resize_origin_font_size = None;
             self.resize_multi_origins.clear();
+
+            // Record the completed resize as a single undoable history step (#5).
+            // The doc already holds the resized state, so re-applying UpdateNode
+            // is a no-op; it just captures the inverse for undo/redo.
+            if !self.resize_drag_origins.is_empty() {
+                let cmds: Vec<Command> = std::mem::take(&mut self.resize_drag_origins)
+                    .into_iter()
+                    .filter_map(|old| {
+                        doc.nodes.get(&old.id).and_then(|cur| {
+                            let text_changed = matches!(
+                                (&cur.kind, &old.kind),
+                                (SceneNodeKind::Text(a), SceneNodeKind::Text(b))
+                                    if a.font_size != b.font_size
+                            );
+                            (cur.transform.matrix != old.transform.matrix || text_changed).then(
+                                || Command::UpdateNode {
+                                    old,
+                                    new: cur.clone(),
+                                },
+                            )
+                        })
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
 
             // Complete marquee selection if one was in progress
             if let Some(start_pos) = self.marquee_start.take() {
@@ -12655,15 +12811,61 @@ fn gui_apply_affine_to_path(path: &PathData, affine: kurbo::Affine) -> PathData 
 }
 
 /// Return the topmost node (reverse draw order) whose bounding box contains (cx, cy).
+/// Tests whether the canvas-space point `(cx, cy)` lands on a path node's
+/// actual geometry: inside its filled area (non-zero winding) or within a small
+/// tolerance of its outline (so thin / open / stroke-only paths stay clickable).
+///
+/// Returns `None` for non-path nodes so the caller can fall back to a plain
+/// bounding-box test (text, images and groups have no fillable outline here).
+fn path_geometry_hit(node: &SceneNode, cx: f64, cy: f64) -> Option<bool> {
+    use kurbo::{ParamCurveNearest, Shape};
+    let SceneNodeKind::Path(pn) = &node.kind else {
+        return None;
+    };
+    let bez = pn.path_data.to_bez_path();
+    if bez.elements().is_empty() {
+        return Some(false);
+    }
+    // Transform into canvas space so the click point and the tolerance share
+    // units (the click is already in canvas coordinates).
+    let canvas_bez = node.transform.to_kurbo() * bez;
+    let pt = kurbo::Point::new(cx, cy);
+
+    // Filled interior: only a *filled* shape should be selectable through its
+    // body — an unfilled outline is clickable only on its edge, matching the
+    // "click through transparent areas" behaviour requested in #3.
+    if pn.fill.enabled && canvas_bez.contains(pt) {
+        return Some(true);
+    }
+
+    // Outline proximity: clickable within half the stroke width plus a few
+    // canvas units of slack so hairline strokes and open paths stay grabbable.
+    let tol = (pn.stroke.width * 0.5) + 3.0;
+    let tol_sq = tol * tol;
+    let on_edge = canvas_bez
+        .segments()
+        .any(|seg| seg.nearest(pt, 0.1).distance_sq <= tol_sq);
+    Some(on_edge)
+}
+
 fn hit_test(doc: &Document, cx: f64, cy: f64, renderer: &mut PhotonicRenderer) -> Option<NodeId> {
     for node in doc.nodes_in_draw_order().into_iter().rev() {
         if node.locked {
             continue;
         }
-        if let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) {
-            if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-                return Some(node.id);
-            }
+        // Cheap reject: the click must at least fall inside the bounding box.
+        let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) else {
+            continue;
+        };
+        if cx < x0 || cx > x1 || cy < y0 || cy > y1 {
+            continue;
+        }
+        // Refine path nodes to their real geometry so clicks fall through the
+        // transparent parts of a non-rectangular shape onto whatever is below;
+        // other node kinds keep the bounding-box hit.
+        match path_geometry_hit(node, cx, cy) {
+            Some(true) | None => return Some(node.id),
+            Some(false) => continue,
         }
     }
     None
@@ -12724,6 +12926,25 @@ fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
     // Round to nearest multiple of 45° (π/4 radians).
     let snapped = (angle / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
     (sx + len * snapped.cos(), sy + len * snapped.sin())
+}
+
+/// Treat `(sx, sy)` as the center of a shape and mirror the drag end through it,
+/// returning the two opposite corners `((ax, ay), (bx, by))`. Used when Alt is
+/// held while drawing so the shape grows symmetrically from the start point.
+fn shape_corners_from_center(sx: f64, sy: f64, ex: f64, ey: f64) -> ((f64, f64), (f64, f64)) {
+    let dx = ex - sx;
+    let dy = ey - sy;
+    ((sx - dx, sy - dy), (sx + dx, sy + dy))
+}
+
+/// Constrain a drag rectangle to a 1:1 square while keeping `(sx, sy)` as the
+/// anchor corner. The larger of the two deltas wins, so the endpoint moves
+/// along the drag direction's diagonal (square / circle / proportional shape).
+fn constrain_to_square(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
+    let dx = ex - sx;
+    let dy = ey - sy;
+    let m = dx.abs().max(dy.abs());
+    (sx + m.copysign(dx), sy + m.copysign(dy))
 }
 
 /// Extract the solid fill RGBA from a node (used by the Magic Wand tool).
