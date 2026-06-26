@@ -499,6 +499,7 @@ pub async fn export_svg(state: &AppState, args: ExportSvgArgs) -> ToolResult {
     let opts = photonic_core::export::SvgExportOptions {
         semantic_ids: args.semantic_ids.unwrap_or(true),
         precision: args.precision.unwrap_or(4).clamp(1, 6),
+        ..Default::default()
     };
     let svg = photonic_core::export::export_svg(&doc, &opts);
 

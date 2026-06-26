@@ -17,6 +17,10 @@ pub struct SvgExportOptions {
     pub semantic_ids: bool,
     /// Decimal places for SVG dimension and viewBox values, clamped 1–6 (default: `4`).
     pub precision: u8,
+    /// Background fill. `None` (the default) exports a transparent SVG — no
+    /// background rect is emitted. `Some(color)` emits a full-artboard rect of
+    /// that color (e.g. white) behind the artwork.
+    pub background: Option<Color>,
 }
 
 impl Default for SvgExportOptions {
@@ -24,6 +28,7 @@ impl Default for SvgExportOptions {
         Self {
             semantic_ids: true,
             precision: 4,
+            background: None,
         }
     }
 }
@@ -62,13 +67,16 @@ pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
         None
     };
 
-    // White artboard background
-    body.push_str(&format!(
-        "  <rect width=\"{w:.p$}\" height=\"{h:.p$}\" fill=\"white\"/>\n",
-        w = doc.width,
-        h = doc.height,
-        p = p,
-    ));
+    // Optional background rect. `None` => transparent SVG (no rect emitted).
+    if let Some(bg) = opts.background {
+        body.push_str(&format!(
+            "  <rect width=\"{w:.p$}\" height=\"{h:.p$}\" fill=\"{fill}\"/>\n",
+            w = doc.width,
+            h = doc.height,
+            p = p,
+            fill = bg.to_hex(),
+        ));
+    }
 
     let mut used_layer_ids: HashSet<String> = HashSet::new();
     for layer_id in &doc.layer_order {
@@ -575,4 +583,39 @@ fn stroke_attrs(stroke: &Stroke) -> String {
         }
     }
     s
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SVG export must be transparent by default — no opaque background rect
+    /// baked behind the artwork (regression for white-background exports).
+    #[test]
+    fn svg_export_is_transparent_by_default() {
+        let doc = Document::new("t", 100.0, 100.0);
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(
+            !svg.contains("<rect"),
+            "default SVG export should emit no background rect:\n{svg}"
+        );
+    }
+
+    /// When a background color is requested, a full-artboard rect is emitted.
+    #[test]
+    fn svg_export_emits_background_rect_when_requested() {
+        let doc = Document::new("t", 100.0, 100.0);
+        let opts = SvgExportOptions {
+            background: Some(Color::WHITE),
+            ..Default::default()
+        };
+        let svg = export_svg(&doc, &opts);
+        assert!(svg.contains("<rect"), "expected a background rect:\n{svg}");
+        assert!(
+            svg.to_lowercase().contains("#ffffff"),
+            "expected white background fill:\n{svg}"
+        );
+    }
 }
