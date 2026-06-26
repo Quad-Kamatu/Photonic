@@ -322,6 +322,10 @@ pub struct PhotonicApp {
 
     /// Whether we are currently dragging a selected node to move it.
     moving: bool,
+    /// Snapshots of the selected nodes captured at the start of a move drag.
+    /// Used to record a single undoable UpdateNode batch on release. Empty
+    /// until the first move frame actually shifts the selection.
+    move_drag_origins: Vec<SceneNode>,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -619,6 +623,7 @@ impl Default for PhotonicApp {
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
+            move_drag_origins: Vec::new(),
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -9643,6 +9648,14 @@ impl PhotonicApp {
                 let dx = delta.x as f64 / view.zoom;
                 let dy = delta.y as f64 / view.zoom;
                 let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
+                // Capture pre-move snapshots on the first frame that actually
+                // shifts the selection so the whole drag becomes one undo step.
+                if self.move_drag_origins.is_empty() {
+                    self.move_drag_origins = ids_to_move
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).cloned())
+                        .collect();
+                }
                 for id in ids_to_move {
                     if let Some(node) = doc.nodes.get_mut(&id) {
                         node.transform.matrix[4] += dx;
@@ -9655,6 +9668,28 @@ impl PhotonicApp {
 
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             self.moving = false;
+            // Record the completed move as a single undoable history step (#11).
+            // The doc already holds the moved state, so re-applying UpdateNode is
+            // a no-op; it just captures the inverse for undo/redo.
+            if !self.move_drag_origins.is_empty() {
+                let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
+                    .into_iter()
+                    .filter_map(|old| {
+                        doc.nodes.get(&old.id).and_then(|cur| {
+                            (cur.transform.matrix != old.transform.matrix).then(|| {
+                                Command::UpdateNode {
+                                    old,
+                                    new: cur.clone(),
+                                }
+                            })
+                        })
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
