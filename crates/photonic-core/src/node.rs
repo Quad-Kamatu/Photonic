@@ -204,6 +204,39 @@ impl SceneNode {
         self
     }
 
+    /// True if canvas-space point `(cx, cy)` is inside this node's filled geometry,
+    /// honoring its transform and fill rule. Maps the point into node-local space
+    /// via the inverse transform, then applies kurbo winding. Returns false for a
+    /// singular (degenerate) transform so the caller can fall back to bbox.
+    /// For non-Path kinds (Text/Group) always returns false.
+    pub fn contains_canvas_point(&self, cx: f64, cy: f64) -> bool {
+        use kurbo::Shape;
+
+        let path_node = match &self.kind {
+            SceneNodeKind::Path(p) => p,
+            _ => return false,
+        };
+
+        let bez = path_node.path_data.to_bez_path();
+        if bez.elements().is_empty() {
+            return false;
+        }
+
+        let aff = self.transform.to_kurbo();
+        if aff.determinant().abs() < 1e-12 {
+            return false;
+        }
+
+        let p = aff.inverse() * kurbo::Point::new(cx, cy);
+
+        let winding = bez.winding(p);
+        if path_node.is_compound {
+            winding % 2 != 0
+        } else {
+            winding != 0
+        }
+    }
+
     /// Returns the bounding box of this node in local coordinates (before transform).
     pub fn local_bounds(&self) -> Option<kurbo::Rect> {
         match &self.kind {
@@ -433,4 +466,130 @@ pub enum PrimitiveKind {
     Star,
     Line,
     Arc,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::layer::LayerId;
+    use crate::path::PathData;
+    use crate::style::{Fill, Stroke};
+    use crate::transform::Transform;
+
+    fn make_path_node_svg(svg: &str, transform: Transform, is_compound: bool) -> SceneNode {
+        let path_data = PathData::from_svg(svg).expect("valid SVG path");
+        let path_node = PathNode {
+            path_data,
+            fill: Fill::solid(Color::BLACK),
+            stroke: Stroke::none(),
+            is_compound,
+        };
+        let mut node = SceneNode::new("test", LayerId::default(), SceneNodeKind::Path(path_node));
+        node.transform = transform;
+        node
+    }
+
+    // ── 1. Simple rectangle — inside ─────────────────────────────────────────
+    #[test]
+    fn hit_rect_center_is_inside() {
+        let node = make_path_node_svg(
+            "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+            Transform::IDENTITY,
+            false,
+        );
+        assert!(node.contains_canvas_point(50.0, 50.0));
+    }
+
+    // ── 2. Simple rectangle — clearly outside ────────────────────────────────
+    #[test]
+    fn hit_rect_outside_bbox_is_false() {
+        let node = make_path_node_svg(
+            "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+            Transform::IDENTITY,
+            false,
+        );
+        assert!(!node.contains_canvas_point(150.0, 150.0));
+    }
+
+    // ── 3. Transform: translated node ────────────────────────────────────────
+    #[test]
+    fn hit_translated_node_canvas_point_maps_correctly() {
+        // Rect at local (0..100, 0..100), translated by (100, 100).
+        // Canvas (150,150) → local (50,50) → inside.
+        let node = make_path_node_svg(
+            "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+            Transform::translate(100.0, 100.0),
+            false,
+        );
+        assert!(
+            node.contains_canvas_point(150.0, 150.0),
+            "translated inside"
+        );
+        // Canvas (50,50) → local (-50,-50) → outside.
+        assert!(
+            !node.contains_canvas_point(50.0, 50.0),
+            "old location now outside"
+        );
+    }
+
+    // ── 4. Concavity — L-shape, solid arm ────────────────────────────────────
+    // L-shape covers left column (x=0..50, y=0..100) and top bar (x=0..100, y=0..50).
+    // Empty region: x=50..100, y=50..100.
+    #[test]
+    fn hit_l_shape_solid_arm_inside() {
+        let svg = "M 0 0 L 100 0 L 100 50 L 50 50 L 50 100 L 0 100 Z";
+        let node = make_path_node_svg(svg, Transform::IDENTITY, false);
+        // Point in the solid left-vertical arm
+        assert!(node.contains_canvas_point(25.0, 75.0));
+    }
+
+    // ── 5. Concavity — L-shape, empty concave void ───────────────────────────
+    #[test]
+    fn hit_l_shape_concave_void_is_false() {
+        let svg = "M 0 0 L 100 0 L 100 50 L 50 50 L 50 100 L 0 100 Z";
+        let node = make_path_node_svg(svg, Transform::IDENTITY, false);
+        // Point in bounding box but inside the concave void — must be false
+        assert!(!node.contains_canvas_point(75.0, 75.0));
+    }
+
+    // ── 6. Compound/even-odd donut — point in hole ───────────────────────────
+    // Outer rect 0..100, inner rect 25..75, both same winding direction.
+    // is_compound=true → even-odd → hole at (50,50).
+    #[test]
+    fn hit_donut_even_odd_hole_is_false() {
+        let svg = "M 0 0 L 100 0 L 100 100 L 0 100 Z M 25 25 L 75 25 L 75 75 L 25 75 Z";
+        let node = make_path_node_svg(svg, Transform::IDENTITY, true);
+        assert!(!node.contains_canvas_point(50.0, 50.0));
+    }
+
+    // ── 7. Compound/even-odd donut — point in ring ───────────────────────────
+    #[test]
+    fn hit_donut_even_odd_ring_is_true() {
+        let svg = "M 0 0 L 100 0 L 100 100 L 0 100 Z M 25 25 L 75 25 L 75 75 L 25 75 Z";
+        let node = make_path_node_svg(svg, Transform::IDENTITY, true);
+        assert!(node.contains_canvas_point(10.0, 10.0));
+    }
+
+    // ── 8. Singular transform — must not panic, returns false ─────────────────
+    #[test]
+    fn hit_singular_transform_returns_false() {
+        let node = make_path_node_svg(
+            "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+            Transform::scale(0.0, 0.0),
+            false,
+        );
+        assert!(!node.contains_canvas_point(50.0, 50.0));
+    }
+
+    // ── 9. Non-path node always returns false ────────────────────────────────
+    #[test]
+    fn hit_text_node_returns_false() {
+        let node = SceneNode::new(
+            "text",
+            LayerId::default(),
+            SceneNodeKind::Text(TextNode::new("hello")),
+        );
+        assert!(!node.contains_canvas_point(5.0, 5.0));
+    }
 }

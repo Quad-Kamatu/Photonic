@@ -12656,12 +12656,25 @@ fn gui_apply_affine_to_path(path: &PathData, affine: kurbo::Affine) -> PathData 
 
 /// Return the topmost node (reverse draw order) whose bounding box contains (cx, cy).
 fn hit_test(doc: &Document, cx: f64, cy: f64, renderer: &mut PhotonicRenderer) -> Option<NodeId> {
+    use photonic_core::style::FillKind;
     for node in doc.nodes_in_draw_order().into_iter().rev() {
         if node.locked {
             continue;
         }
         if let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) {
             if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
+                // For Path nodes with a fillable interior, refine the hit using
+                // exact shape geometry (kurbo winding). Falls back to bbox-only
+                // for Text nodes and for stroke-only / fill-disabled paths so
+                // those remain fully clickable across their bounding box.
+                let use_geometry = if let SceneNodeKind::Path(pn) = &node.kind {
+                    pn.fill.enabled && !matches!(pn.fill.kind, FillKind::None)
+                } else {
+                    false
+                };
+                if use_geometry && !node.contains_canvas_point(cx, cy) {
+                    continue; // transparent region — fall through to lower nodes
+                }
                 return Some(node.id);
             }
         }
