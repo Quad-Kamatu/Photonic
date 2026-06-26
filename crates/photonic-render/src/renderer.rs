@@ -4,7 +4,7 @@ use crate::{
         create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
         create_fill_pipeline, BlurParams, CameraUniform, Vertex,
     },
-    tessellator::{tessellate_fill, tessellate_stroke},
+    tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
 };
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -714,6 +714,9 @@ impl PhotonicRenderer {
             stroke_join: photonic_core::style::LineJoin,
             stroke_miter: f32,
             stroke_align: StrokeAlign,
+            /// Resolved variable-width profile samples (uniform-t along the path).
+            /// `None` → render with the uniform `stroke_width`.
+            stroke_widths: Option<Vec<f64>>,
             path_data: photonic_core::path::PathData,
             /// (r, g, b, a, opacity, size) + join — None when disabled.
             outer_glow: Option<([f32; 6], photonic_core::style::LineJoin)>,
@@ -793,6 +796,13 @@ impl PhotonicRenderer {
                             stroke_join: sc.line_join,
                             stroke_miter: sc.miter_limit as f32,
                             stroke_align: sc.align,
+                            stroke_widths: sc.width_profile_id.and_then(|id| {
+                                doc.width_profiles
+                                    .iter()
+                                    .find(|p| p.id == id)
+                                    .filter(|p| p.widths.len() >= 2)
+                                    .map(|p| p.widths.clone())
+                            }),
                             path_data: path_node.path_data.clone(),
                             is_compound: path_node.is_compound,
                             arrowhead_start: sc.arrowhead_start,
@@ -949,13 +959,23 @@ impl PhotonicRenderer {
                     return;
                 }
                 let [a, b, c, d, e, f] = node.matrix;
-                let mesh = tessellate_stroke(
-                    &node.path_data,
-                    width,
-                    node.stroke_cap,
-                    node.stroke_join,
-                    node.stroke_miter,
-                );
+                let mesh = match &node.stroke_widths {
+                    // Variable-width profile: scale samples by the same factor the
+                    // caller applies to the uniform width (stroke-align doubling),
+                    // then build a filled ribbon outline.
+                    Some(widths) if node.stroke_width > 0.0 => {
+                        let scale = (width / node.stroke_width) as f64;
+                        let scaled: Vec<f64> = widths.iter().map(|w| w * scale).collect();
+                        tessellate_stroke_variable(&node.path_data, &scaled)
+                    }
+                    _ => tessellate_stroke(
+                        &node.path_data,
+                        width,
+                        node.stroke_cap,
+                        node.stroke_join,
+                        node.stroke_miter,
+                    ),
+                };
                 if mesh.is_empty() {
                     return;
                 }

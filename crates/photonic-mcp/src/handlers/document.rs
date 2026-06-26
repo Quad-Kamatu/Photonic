@@ -2022,11 +2022,11 @@ pub async fn apply_width_profile(state: &AppState, args: ApplyWidthProfileArgs) 
     use photonic_core::node::SceneNodeKind;
 
     // Read profile (drop lock before re-acquiring)
-    let avg_width = {
+    let (profile_id, avg_width) = {
         let doc = state.document.lock().await;
         match doc.width_profiles.iter().find(|p| p.name == args.name) {
             None => return ToolResult::error(format!("No width profile named '{}'.", args.name)),
-            Some(p) => p.average_width(),
+            Some(p) => (p.id, p.average_width()),
         }
     };
 
@@ -2042,7 +2042,10 @@ pub async fn apply_width_profile(state: &AppState, args: ApplyWidthProfileArgs) 
                 if let SceneNodeKind::Path(ref pn) = node.kind {
                     let mut new_node = node.clone();
                     if let SceneNodeKind::Path(ref mut pn2) = new_node.kind {
+                        // Legacy uniform fallback + the profile link that drives
+                        // true variable-width rendering.
                         pn2.stroke.width = avg_width;
+                        pn2.stroke.width_profile_id = Some(profile_id);
                     }
                     let _ = pn; // suppress warning
                     commands.push(Command::UpdateNode {

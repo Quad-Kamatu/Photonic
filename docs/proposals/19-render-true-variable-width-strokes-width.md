@@ -1,6 +1,37 @@
-# Render True Variable-Width Strokes (#19) — Design Proposal
+# Render True Variable-Width Strokes (#19)
 
-> Status: design scaffold (not an implementation).
+> Status: **implemented** (on-canvas + headless rendering). SVG export retains
+> the average-width fallback — a true outlined-`<path>` export is tracked as a
+> follow-up (see *Remaining work* below).
+
+## What this PR implements
+
+- `Stroke::width_profile_id: Option<Uuid>` (`style.rs`) links a stroke to a
+  `WidthProfile` in `Document::width_profiles`. Additive + `#[serde(default)]`,
+  so existing `.photonic` documents load unchanged.
+- `tessellate_stroke_variable(path, widths)` (`tessellator.rs`) flattens the
+  path, offsets each vertex by the linearly-interpolated half-width along its
+  normal, and triangulates a filled ribbon — true varying width, not the average.
+- The renderer (`renderer.rs`) resolves the profile in the doc-lock read phase
+  (`NodeSnapshot::stroke_widths`) and dispatches to the variable tessellator in
+  `append_stroke`, scaling samples to match stroke-align width doubling. Uniform
+  strokes (no profile) take the original path unchanged.
+- `apply_width_profile` (MCP, `handlers/document.rs`) now sets `width_profile_id`
+  in addition to the legacy average `width`, so applying a profile renders with
+  real variable width immediately.
+- Unit tests in `tessellator.rs` cover linear sampling and ribbon geometry
+  (start span ≈ first sample, end span ≈ last sample).
+
+### Remaining work (follow-up)
+
+- SVG export of a variable-width stroke as an outlined `<path>` via
+  `outline_stroke` (SVG has no native variable-width stroke). Currently exports
+  `stroke-width` = average as a documented fallback.
+- Asymmetric per-side widths and cubic interpolation for calligraphic smoothness.
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 

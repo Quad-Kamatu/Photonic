@@ -1,5 +1,6 @@
 use crate::color::Color;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// A fill applied to a shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +140,11 @@ pub struct Stroke {
     /// Arrowhead drawn at the end of the path.
     #[serde(default)]
     pub arrowhead_end: ArrowheadStyle,
+    /// Optional variable-width profile (id into `Document::width_profiles`).
+    /// When `Some`, the renderer modulates the stroke width along the path
+    /// using the profile's samples instead of the uniform `width`.
+    #[serde(default)]
+    pub width_profile_id: Option<Uuid>,
 }
 
 impl Stroke {
@@ -157,6 +163,7 @@ impl Stroke {
             dash_corner_alignment: false,
             arrowhead_start: ArrowheadStyle::None,
             arrowhead_end: ArrowheadStyle::None,
+            width_profile_id: None,
         }
     }
 
@@ -175,6 +182,7 @@ impl Stroke {
             dash_corner_alignment: false,
             arrowhead_start: ArrowheadStyle::None,
             arrowhead_end: ArrowheadStyle::None,
+            width_profile_id: None,
         }
     }
 }
