@@ -1996,10 +1996,13 @@ impl PhotonicApp {
                     view.pan_y += delta.y as f64;
                 }
 
-                // ── Canvas pan: alt + left drag (skip when Shape Builder uses alt) ──
+                // ── Canvas pan: alt + left drag ──────────────────────────────
+                // Skipped for Shape Builder (alt = subtract) and for shape-creator
+                // tools, where alt = draw-from-center (#10).
                 if response.dragged_by(egui::PointerButton::Primary)
                     && ui.input(|i| i.modifiers.alt)
                     && self.active_tool != Tool::ShapeBuilder
+                    && !self.active_tool.is_shape_creator()
                 {
                     let delta = response.drag_delta();
                     view.pan_x += delta.x as f64;
@@ -2718,9 +2721,6 @@ impl PhotonicApp {
                 if !self.active_tool.is_shape_creator() {
                     return;
                 }
-                if ui.input(|i| i.modifiers.alt) {
-                    return;
-                }
 
                 if response.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -2746,8 +2746,14 @@ impl PhotonicApp {
                                 ey = snapped_ey;
                             }
                         }
+                        // Alt: treat the drag start as the shape's center (#10).
+                        let ((bsx, bsy), (bex, bey)) = if ui.input(|i| i.modifiers.alt) {
+                            shape_corners_from_center(sx, sy, ex, ey)
+                        } else {
+                            ((sx, sy), (ex, ey))
+                        };
                         if (ex - sx).abs() > 2.0 || (ey - sy).abs() > 2.0 {
-                            if let Some(path) = self.build_shape(sx, sy, ex, ey) {
+                            if let Some(path) = self.build_shape(bsx, bsy, bex, bey) {
                                 let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
                                     (
                                         self.prefs.default_stroke_color,
@@ -2811,7 +2817,13 @@ impl PhotonicApp {
                         } else {
                             (ex_raw, ey_raw)
                         };
-                        if let Some(path) = self.build_shape(sx, sy, ex, ey) {
+                        // Alt: preview the shape centered on the drag start (#10).
+                        let ((bsx, bsy), (bex, bey)) = if ui.input(|i| i.modifiers.alt) {
+                            shape_corners_from_center(sx, sy, ex, ey)
+                        } else {
+                            ((sx, sy), (ex, ey))
+                        };
+                        if let Some(path) = self.build_shape(bsx, bsy, bex, bey) {
                             let pts = bez_to_screen_points(&path.to_bez_path(), view);
                             if pts.len() >= 2 {
                                 let [fr, fg, fb, _] = self.fill_color;
@@ -12906,6 +12918,15 @@ fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
     // Round to nearest multiple of 45° (π/4 radians).
     let snapped = (angle / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
     (sx + len * snapped.cos(), sy + len * snapped.sin())
+}
+
+/// Treat `(sx, sy)` as the center of a shape and mirror the drag end through it,
+/// returning the two opposite corners `((ax, ay), (bx, by))`. Used when Alt is
+/// held while drawing so the shape grows symmetrically from the start point.
+fn shape_corners_from_center(sx: f64, sy: f64, ex: f64, ey: f64) -> ((f64, f64), (f64, f64)) {
+    let dx = ex - sx;
+    let dy = ey - sy;
+    ((sx - dx, sy - dy), (sx + dx, sy + dy))
 }
 
 /// Extract the solid fill RGBA from a node (used by the Magic Wand tool).
