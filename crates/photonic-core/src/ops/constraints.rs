@@ -27,17 +27,26 @@ pub enum ConstraintError {
     /// An expression failed to parse.
     Parse { constraint: NodeId, message: String },
     /// A target property is not settable (e.g. `width`/`height`).
-    UnsupportedTarget { constraint: NodeId, property: String },
+    UnsupportedTarget {
+        constraint: NodeId,
+        property: String,
+    },
 }
 
 impl std::fmt::Display for ConstraintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConstraintError::Cycle(ids) => write!(f, "constraint cycle among {ids:?}"),
-            ConstraintError::Parse { constraint, message } => {
+            ConstraintError::Parse {
+                constraint,
+                message,
+            } => {
                 write!(f, "constraint on {constraint}: parse error: {message}")
             }
-            ConstraintError::UnsupportedTarget { constraint, property } => write!(
+            ConstraintError::UnsupportedTarget {
+                constraint,
+                property,
+            } => write!(
                 f,
                 "constraint on {constraint}: property '{property}' is not a settable target"
             ),
@@ -207,7 +216,8 @@ fn eval_expression(doc: &Document, expr: &str) -> Result<f64, String> {
     let mut last = 0;
     for r in &refs {
         out.push_str(&expr[last..r.span.0]);
-        let node_id = resolve_key(doc, &r.key).ok_or_else(|| format!("unknown node '{}'", r.key))?;
+        let node_id =
+            resolve_key(doc, &r.key).ok_or_else(|| format!("unknown node '{}'", r.key))?;
         let val = get_property(doc, node_id, &r.prop)
             .ok_or_else(|| format!("unknown property '{}'", r.prop))?;
         out.push_str(&format!("({val})"));
@@ -300,9 +310,7 @@ impl<'a> Parser<'a> {
 
     fn number(&mut self) -> Result<f64, String> {
         let start = self.i;
-        while self.i < self.s.len()
-            && (self.s[self.i].is_ascii_digit() || self.s[self.i] == b'.')
-        {
+        while self.i < self.s.len() && (self.s[self.i].is_ascii_digit() || self.s[self.i] == b'.') {
             self.i += 1;
         }
         if self.i == start {
@@ -461,7 +469,10 @@ mod tests {
         let refs = scan_refs("nodes['a'].x * 2 + nodes[\"b\"].width");
         assert_eq!(refs.len(), 2);
         assert_eq!((refs[0].key.as_str(), refs[0].prop.as_str()), ("a", "x"));
-        assert_eq!((refs[1].key.as_str(), refs[1].prop.as_str()), ("b", "width"));
+        assert_eq!(
+            (refs[1].key.as_str(), refs[1].prop.as_str()),
+            ("b", "width")
+        );
     }
 
     #[test]

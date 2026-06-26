@@ -874,7 +874,10 @@ impl Document {
     /// Note: only single-node masters propagate today. A group master is
     /// flattened to leaf nodes at placement time and those leaves carry no
     /// `symbol_ref`, so group/nested-group propagation is tracked as follow-up.
-    pub fn resolve_render_node<'a>(&'a self, node: &'a SceneNode) -> std::borrow::Cow<'a, SceneNode> {
+    pub fn resolve_render_node<'a>(
+        &'a self,
+        node: &'a SceneNode,
+    ) -> std::borrow::Cow<'a, SceneNode> {
         use std::borrow::Cow;
         let Some(sym_id) = node.symbol_ref else {
             return Cow::Borrowed(node);
@@ -921,8 +924,14 @@ impl Document {
     /// the stroke colour. No-op when overrides are absent or unparseable.
     fn apply_symbol_overrides(node: &mut SceneNode) {
         use crate::style::FillKind;
-        let fill = node.symbol_fill_override.as_deref().and_then(Color::from_hex);
-        let stroke = node.symbol_stroke_override.as_deref().and_then(Color::from_hex);
+        let fill = node
+            .symbol_fill_override
+            .as_deref()
+            .and_then(Color::from_hex);
+        let stroke = node
+            .symbol_stroke_override
+            .as_deref()
+            .and_then(Color::from_hex);
         if fill.is_none() && stroke.is_none() {
             return;
         }
@@ -1202,9 +1211,8 @@ mod format_version_tests {
     fn far_future_version_is_rejected() {
         let mut value: serde_json::Value =
             serde_json::from_str(&Document::new("toonew", 10.0, 10.0).to_json().unwrap()).unwrap();
-        value["format_version"] = serde_json::Value::from(
-            CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW + 1,
-        );
+        value["format_version"] =
+            serde_json::Value::from(CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW + 1);
         assert!(Document::from_json(&value.to_string()).is_err());
     }
 }
@@ -1265,9 +1273,7 @@ mod symbol_resolution_tests {
         let inst_id = doc.add_node(inst, None);
 
         // Edit the master fill to blue *after* the instance was placed.
-        if let Some(SceneNodeKind::Path(pn)) =
-            doc.nodes.get_mut(&master_id).map(|n| &mut n.kind)
-        {
+        if let Some(SceneNodeKind::Path(pn)) = doc.nodes.get_mut(&master_id).map(|n| &mut n.kind) {
             pn.fill = Fill::solid(Color::BLUE);
         }
 

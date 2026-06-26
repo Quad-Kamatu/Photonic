@@ -2115,7 +2115,8 @@ pub async fn set_constraint(
         _ => return ToolResult::error(format!("Node '{}' not found.", args.node_id)),
     };
 
-    let constraint = PropertyConstraint::new(node_id, args.property.clone(), args.expression.clone());
+    let constraint =
+        PropertyConstraint::new(node_id, args.property.clone(), args.expression.clone());
     let constraint_id = constraint.id;
     doc.constraints.push(constraint);
 

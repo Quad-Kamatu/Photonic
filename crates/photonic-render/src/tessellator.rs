@@ -472,7 +472,9 @@ pub fn tessellate_stroke_variable(path: &PathData, widths: &[f64]) -> Mesh {
     let mut subpaths: Vec<(Vec<kurbo::Point>, bool)> = Vec::new();
     let mut cur: Vec<kurbo::Point> = Vec::new();
     let mut closed = false;
-    let flush = |cur: &mut Vec<kurbo::Point>, closed: &mut bool, out: &mut Vec<(Vec<kurbo::Point>, bool)>| {
+    let flush = |cur: &mut Vec<kurbo::Point>,
+                 closed: &mut bool,
+                 out: &mut Vec<(Vec<kurbo::Point>, bool)>| {
         if cur.len() >= 2 {
             out.push((std::mem::take(cur), *closed));
         } else {
