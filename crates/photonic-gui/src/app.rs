@@ -2731,14 +2731,19 @@ impl PhotonicApp {
                         let (ex_raw, ey_raw) =
                             view.screen_to_canvas(end_pos.x as f64, end_pos.y as f64);
                         let (mut ex, mut ey) = (self.snap(ex_raw), self.snap(ey_raw));
+                        let shift_held = ui.input(|i| i.modifiers.shift);
                         // Line tool: snap endpoint to nearest 45° angle when Snap45 is on or Shift held.
+                        // Other shape tools: constrain bounding box to a square when Shift held.
                         if self.active_tool == Tool::Line {
-                            let shift_held = ui.input(|i| i.modifiers.shift);
                             if self.line_snap_45 || shift_held {
                                 let (snapped_ex, snapped_ey) = snap_line_to_45(sx, sy, ex, ey);
                                 ex = snapped_ex;
                                 ey = snapped_ey;
                             }
+                        } else if shift_held {
+                            let (cx, cy) = constrain_square(sx, sy, ex, ey);
+                            ex = cx;
+                            ey = cy;
                         }
                         if (ex - sx).abs() > 2.0 || (ey - sy).abs() > 2.0 {
                             if let Some(path) = self.build_shape(sx, sy, ex, ey) {
@@ -2795,13 +2800,15 @@ impl PhotonicApp {
                     if let Some(cursor) = cursor {
                         let (ex_raw, ey_raw) =
                             view.screen_to_canvas(cursor.x as f64, cursor.y as f64);
+                        let shift_held = ui.input(|i| i.modifiers.shift);
                         let (ex, ey) = if self.active_tool == Tool::Line {
-                            let shift_held = ui.input(|i| i.modifiers.shift);
                             if self.line_snap_45 || shift_held {
                                 snap_line_to_45(sx, sy, ex_raw, ey_raw)
                             } else {
                                 (ex_raw, ey_raw)
                             }
+                        } else if shift_held {
+                            constrain_square(sx, sy, ex_raw, ey_raw)
                         } else {
                             (ex_raw, ey_raw)
                         };
@@ -12724,6 +12731,79 @@ fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
     // Round to nearest multiple of 45° (π/4 radians).
     let snapped = (angle / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
     (sx + len * snapped.cos(), sy + len * snapped.sin())
+}
+
+/// Constrain a drag endpoint so the bounding box is square (equal width and height).
+///
+/// Given a drag from `(sx, sy)` to `(ex, ey)`, clamps to the smaller of |dx| and |dy|
+/// while preserving the sign of each axis, so the result always lies in the same
+/// quadrant as the original endpoint.
+///
+/// Used by Rectangle / Ellipse / Polygon / Star / … when Shift is held.
+fn constrain_square(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
+    let dx = ex - sx;
+    let dy = ey - sy;
+    let side = dx.abs().min(dy.abs());
+    (sx + dx.signum() * side, sy + dy.signum() * side)
+}
+
+#[cfg(test)]
+mod constrain_square_tests {
+    use super::constrain_square;
+
+    #[test]
+    fn wider_than_tall_clamps_to_height() {
+        // dx=10, dy=6 → side=6
+        let (ex, ey) = constrain_square(0.0, 0.0, 10.0, 6.0);
+        assert!((ex - 6.0).abs() < 1e-9, "ex should be 6, got {ex}");
+        assert!((ey - 6.0).abs() < 1e-9, "ey should be 6, got {ey}");
+    }
+
+    #[test]
+    fn taller_than_wide_clamps_to_width() {
+        // dx=4, dy=9 → side=4
+        let (ex, ey) = constrain_square(0.0, 0.0, 4.0, 9.0);
+        assert!((ex - 4.0).abs() < 1e-9, "ex should be 4, got {ex}");
+        assert!((ey - 4.0).abs() < 1e-9, "ey should be 4, got {ey}");
+    }
+
+    #[test]
+    fn negative_direction_preserves_sign() {
+        // Drag up-left: dx=-7, dy=-3 → side=3, result=(-3,-3)
+        let (ex, ey) = constrain_square(0.0, 0.0, -7.0, -3.0);
+        assert!((ex - (-3.0)).abs() < 1e-9, "ex should be -3, got {ex}");
+        assert!((ey - (-3.0)).abs() < 1e-9, "ey should be -3, got {ey}");
+    }
+
+    #[test]
+    fn mixed_sign_drag_preserves_each_sign() {
+        // Drag right-up: dx=5, dy=-8 → side=5, result=(5,-5)
+        let (ex, ey) = constrain_square(0.0, 0.0, 5.0, -8.0);
+        assert!((ex - 5.0).abs() < 1e-9, "ex should be 5, got {ex}");
+        assert!((ey - (-5.0)).abs() < 1e-9, "ey should be -5, got {ey}");
+    }
+
+    #[test]
+    fn nonzero_start_point() {
+        // Start at (10, 20), drag to (17, 25) → dx=7, dy=5 → side=5
+        let (ex, ey) = constrain_square(10.0, 20.0, 17.0, 25.0);
+        assert!((ex - 15.0).abs() < 1e-9, "ex should be 15, got {ex}");
+        assert!((ey - 25.0).abs() < 1e-9, "ey should be 25, got {ey}");
+    }
+
+    #[test]
+    fn already_square_unchanged() {
+        let (ex, ey) = constrain_square(0.0, 0.0, 5.0, 5.0);
+        assert!((ex - 5.0).abs() < 1e-9);
+        assert!((ey - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_drag_returns_start() {
+        let (ex, ey) = constrain_square(3.0, 4.0, 3.0, 4.0);
+        assert!((ex - 3.0).abs() < 1e-9);
+        assert!((ey - 4.0).abs() < 1e-9);
+    }
 }
 
 /// Extract the solid fill RGBA from a node (used by the Magic Wand tool).
