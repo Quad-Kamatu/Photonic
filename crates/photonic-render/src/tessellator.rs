@@ -426,6 +426,129 @@ pub fn tessellate_stroke_bez(
     }
 }
 
+/// Linearly sample a width profile at parameter `t ∈ [0, 1]`.
+/// `widths` are samples at uniform t intervals (`widths[0]` at t=0,
+/// `widths[last]` at t=1). Values are interpolated linearly between samples.
+fn sample_width_profile(widths: &[f64], t: f64) -> f64 {
+    match widths.len() {
+        0 => 1.0,
+        1 => widths[0],
+        n => {
+            let t = t.clamp(0.0, 1.0);
+            let scaled = t * (n - 1) as f64;
+            let i = scaled.floor() as usize;
+            if i >= n - 1 {
+                widths[n - 1]
+            } else {
+                let frac = scaled - i as f64;
+                widths[i] * (1.0 - frac) + widths[i + 1] * frac
+            }
+        }
+    }
+}
+
+/// Tessellate a variable-width stroke into a filled outline ribbon.
+///
+/// `widths` are width samples at uniform `t` intervals along the path
+/// (t=0 at the start, t=1 at the end). The path is flattened, each vertex is
+/// offset by the interpolated half-width along its normal on both sides, and
+/// the resulting ribbon is triangulated directly. Unlike [`tessellate_stroke`]
+/// this honours a true variable width rather than a single average value.
+///
+/// Falls back to producing an empty mesh when fewer than two width samples are
+/// supplied; callers should use the uniform path in that case.
+pub fn tessellate_stroke_variable(path: &PathData, widths: &[f64]) -> Mesh {
+    if widths.len() < 2 {
+        return Mesh::default();
+    }
+
+    let bez = path.to_bez_path();
+    if bez.elements().is_empty() {
+        return Mesh::default();
+    }
+
+    // Flatten the (possibly curved, multi-subpath) outline into polylines.
+    let tolerance = 0.1;
+    let mut subpaths: Vec<(Vec<kurbo::Point>, bool)> = Vec::new();
+    let mut cur: Vec<kurbo::Point> = Vec::new();
+    let mut closed = false;
+    let flush = |cur: &mut Vec<kurbo::Point>, closed: &mut bool, out: &mut Vec<(Vec<kurbo::Point>, bool)>| {
+        if cur.len() >= 2 {
+            out.push((std::mem::take(cur), *closed));
+        } else {
+            cur.clear();
+        }
+        *closed = false;
+    };
+    kurbo::flatten(bez.elements().iter().copied(), tolerance, |el| match el {
+        kurbo::PathEl::MoveTo(p) => {
+            flush(&mut cur, &mut closed, &mut subpaths);
+            cur.push(p);
+        }
+        kurbo::PathEl::LineTo(p) => cur.push(p),
+        kurbo::PathEl::ClosePath => closed = true,
+        // `flatten` only emits MoveTo / LineTo / ClosePath.
+        _ => {}
+    });
+    flush(&mut cur, &mut closed, &mut subpaths);
+
+    let mut vertices: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for (mut pts, is_closed) in subpaths {
+        if is_closed && pts.first() != pts.last() {
+            pts.push(pts[0]);
+        }
+        let n = pts.len();
+        if n < 2 {
+            continue;
+        }
+
+        // Cumulative arc length → per-vertex t.
+        let mut clen = vec![0.0_f64; n];
+        for i in 1..n {
+            clen[i] = clen[i - 1] + (pts[i] - pts[i - 1]).hypot();
+        }
+        let total = clen[n - 1];
+        if total <= f64::EPSILON {
+            continue;
+        }
+
+        let base = vertices.len() as u32;
+        for i in 0..n {
+            // Averaged tangent at the vertex for smooth normals on interior points.
+            let tangent = if i == 0 {
+                pts[1] - pts[0]
+            } else if i == n - 1 {
+                pts[n - 1] - pts[n - 2]
+            } else {
+                (pts[i] - pts[i - 1]).normalize() + (pts[i + 1] - pts[i]).normalize()
+            };
+            let tan = if tangent.hypot() > f64::EPSILON {
+                tangent.normalize()
+            } else {
+                kurbo::Vec2::new(1.0, 0.0)
+            };
+            let normal = kurbo::Vec2::new(-tan.y, tan.x);
+            let half_w = sample_width_profile(widths, clen[i] / total) * 0.5;
+            let l = pts[i] + normal * half_w;
+            let r = pts[i] - normal * half_w;
+            vertices.push([l.x as f32, l.y as f32]);
+            vertices.push([r.x as f32, r.y as f32]);
+        }
+
+        for i in 0..n - 1 {
+            let l0 = base + (i * 2) as u32;
+            let r0 = base + (i * 2 + 1) as u32;
+            let l1 = base + ((i + 1) * 2) as u32;
+            let r1 = base + ((i + 1) * 2 + 1) as u32;
+            indices.extend_from_slice(&[l0, r0, r1, l0, r1, l1]);
+        }
+    }
+
+    Mesh { vertices, indices }
+}
+
 /// Convert a `kurbo::BezPath` into a `lyon::path::Path`.
 /// Handles open and closed contours, including multiple subpaths.
 fn bezpath_to_lyon(bez: &kurbo::BezPath) -> lyon::path::Path {
@@ -471,4 +594,62 @@ fn bezpath_to_lyon(bez: &kurbo::BezPath) -> lyon::path::Path {
     }
 
     builder.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_width_profile_interpolates_linearly() {
+        let widths = [2.0, 10.0];
+        assert_eq!(sample_width_profile(&widths, 0.0), 2.0);
+        assert_eq!(sample_width_profile(&widths, 1.0), 10.0);
+        assert_eq!(sample_width_profile(&widths, 0.5), 6.0);
+        // Out-of-range t is clamped.
+        assert_eq!(sample_width_profile(&widths, -1.0), 2.0);
+        assert_eq!(sample_width_profile(&widths, 2.0), 10.0);
+    }
+
+    #[test]
+    fn variable_stroke_widens_with_profile() {
+        // A horizontal line from (0,0) to (100,0); width ramps 2 → 20.
+        let path = PathData::line(0.0, 0.0, 100.0, 0.0);
+        let mesh = tessellate_stroke_variable(&path, &[2.0, 20.0]);
+        assert!(!mesh.is_empty(), "variable stroke should produce geometry");
+
+        // The ribbon spans the line's normal (the y axis). Vertical extent near
+        // the start must be ~2px and near the end ~20px.
+        let near_start: Vec<f32> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v[0] < 5.0)
+            .map(|v| v[1])
+            .collect();
+        let near_end: Vec<f32> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v[0] > 95.0)
+            .map(|v| v[1])
+            .collect();
+        let span = |ys: &[f32]| {
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for &y in ys {
+                lo = lo.min(y);
+                hi = hi.max(y);
+            }
+            hi - lo
+        };
+        let start_span = span(&near_start);
+        let end_span = span(&near_end);
+        assert!((start_span - 2.0).abs() < 0.5, "start span {start_span}");
+        assert!((end_span - 20.0).abs() < 0.5, "end span {end_span}");
+    }
+
+    #[test]
+    fn variable_stroke_needs_two_samples() {
+        let path = PathData::line(0.0, 0.0, 10.0, 0.0);
+        assert!(tessellate_stroke_variable(&path, &[5.0]).is_empty());
+        assert!(tessellate_stroke_variable(&path, &[]).is_empty());
+    }
 }
