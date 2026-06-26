@@ -815,6 +815,90 @@ impl Document {
         }
     }
 
+    /// Maximum symbol-nesting depth before resolution bails out (cycle guard).
+    const SYMBOL_MAX_DEPTH: u8 = 8;
+
+    /// Resolve a node's render geometry/style from its symbol master.
+    ///
+    /// Symbol instances are created as a frozen clone of the master's geometry
+    /// (see `place_symbol`), so edits to the master would otherwise never reach
+    /// existing instances. This returns a node whose `kind` is taken from the
+    /// *current* master — with the instance's own transform, opacity,
+    /// visibility and per-instance fill/stroke colour overrides preserved — so
+    /// master edits propagate live. Non-instances are returned borrowed and
+    /// unchanged (zero-cost on the render hot path).
+    ///
+    /// Nested symbols (a master that is itself an instance) are followed up to
+    /// [`Self::SYMBOL_MAX_DEPTH`]; cycles and dangling references fall back to
+    /// rendering the instance's frozen copy.
+    ///
+    /// Note: only single-node masters propagate today. A group master is
+    /// flattened to leaf nodes at placement time and those leaves carry no
+    /// `symbol_ref`, so group/nested-group propagation is tracked as follow-up.
+    pub fn resolve_render_node<'a>(&'a self, node: &'a SceneNode) -> std::borrow::Cow<'a, SceneNode> {
+        use std::borrow::Cow;
+        let Some(sym_id) = node.symbol_ref else {
+            return Cow::Borrowed(node);
+        };
+
+        // Follow the symbol → master chain, guarding against cycles/depth.
+        let mut current_sym = Some(sym_id);
+        let mut master: Option<&SceneNode> = None;
+        let mut depth = 0u8;
+        while let Some(sid) = current_sym {
+            if depth > Self::SYMBOL_MAX_DEPTH {
+                // Nesting too deep (likely a cycle): render the frozen copy.
+                return Cow::Borrowed(node);
+            }
+            let Some(sym) = self.symbols.iter().find(|s| s.id == sid) else {
+                // Dangling symbol reference: render the frozen copy.
+                break;
+            };
+            let Some(m) = self.nodes.get(&sym.master_node_id) else {
+                break;
+            };
+            if m.id == node.id {
+                // Instance is its own master — would loop forever.
+                return Cow::Borrowed(node);
+            }
+            master = Some(m);
+            current_sym = m.symbol_ref;
+            depth += 1;
+        }
+
+        let Some(master) = master else {
+            return Cow::Borrowed(node);
+        };
+
+        // Master geometry/style with instance placement + overrides on top.
+        let mut resolved = node.clone();
+        resolved.kind = master.kind.clone();
+        Self::apply_symbol_overrides(&mut resolved);
+        Cow::Owned(resolved)
+    }
+
+    /// Apply a symbol instance's hex colour overrides onto its (master-derived)
+    /// `kind`. A fill override replaces a solid fill; a stroke override replaces
+    /// the stroke colour. No-op when overrides are absent or unparseable.
+    fn apply_symbol_overrides(node: &mut SceneNode) {
+        use crate::style::FillKind;
+        let fill = node.symbol_fill_override.as_deref().and_then(Color::from_hex);
+        let stroke = node.symbol_stroke_override.as_deref().and_then(Color::from_hex);
+        if fill.is_none() && stroke.is_none() {
+            return;
+        }
+        if let SceneNodeKind::Path(pn) = &mut node.kind {
+            if let Some(c) = fill {
+                pn.fill.kind = FillKind::Solid(c);
+                pn.fill.enabled = true;
+            }
+            if let Some(c) = stroke {
+                pn.stroke.color = c;
+                pn.stroke.enabled = true;
+            }
+        }
+    }
+
     /// Returns node count across all layers.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -1083,5 +1167,125 @@ mod format_version_tests {
             CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW + 1,
         );
         assert!(Document::from_json(&value.to_string()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod symbol_resolution_tests {
+    use super::*;
+    use crate::node::PathNode;
+    use crate::path::PathData;
+    use crate::style::{Fill, FillKind};
+
+    fn solid_fill(node: &SceneNode) -> Color {
+        match &node.kind {
+            SceneNodeKind::Path(pn) => match pn.fill.kind {
+                FillKind::Solid(c) => c,
+                _ => panic!("expected solid fill"),
+            },
+            _ => panic!("expected path node"),
+        }
+    }
+
+    /// Build a master path node (red fill) + register it as symbol "sym".
+    fn doc_with_symbol() -> (Document, NodeId, Uuid) {
+        let mut doc = Document::new("test", 100.0, 100.0);
+        let layer = doc.active_layer_id.unwrap();
+        let mut master = SceneNode::new(
+            "master",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        if let SceneNodeKind::Path(pn) = &mut master.kind {
+            pn.fill = Fill::solid(Color::RED);
+        }
+        let master_id = doc.add_node(master, None);
+        let sym = Symbol::new("sym", master_id);
+        let sym_id = sym.id;
+        doc.symbols.push(sym);
+        (doc, master_id, sym_id)
+    }
+
+    fn make_instance(doc: &Document, master_id: NodeId, sym_id: Uuid) -> SceneNode {
+        let mut inst = doc.nodes.get(&master_id).unwrap().clone();
+        inst.id = Uuid::new_v4();
+        inst.name = "instance".into();
+        inst.symbol_ref = Some(sym_id);
+        inst.transform = crate::transform::Transform::translate(50.0, 50.0);
+        // Freeze a stale green fill on the instance copy.
+        if let SceneNodeKind::Path(pn) = &mut inst.kind {
+            pn.fill = Fill::solid(Color::GREEN);
+        }
+        inst
+    }
+
+    #[test]
+    fn master_edits_propagate_to_instances() {
+        let (mut doc, master_id, sym_id) = doc_with_symbol();
+        let inst = make_instance(&doc, master_id, sym_id);
+        let inst_id = doc.add_node(inst, None);
+
+        // Edit the master fill to blue *after* the instance was placed.
+        if let Some(SceneNodeKind::Path(pn)) =
+            doc.nodes.get_mut(&master_id).map(|n| &mut n.kind)
+        {
+            pn.fill = Fill::solid(Color::BLUE);
+        }
+
+        let inst_ref = doc.nodes.get(&inst_id).unwrap();
+        let resolved = doc.resolve_render_node(inst_ref);
+        // Geometry/style now reflects the current master (blue), not the frozen green.
+        assert_eq!(solid_fill(&resolved), Color::BLUE);
+        // Instance placement is preserved.
+        assert_eq!(resolved.transform.apply(0.0, 0.0), (50.0, 50.0));
+    }
+
+    #[test]
+    fn fill_override_takes_precedence_over_master() {
+        let (doc, master_id, sym_id) = doc_with_symbol();
+        let mut inst = make_instance(&doc, master_id, sym_id);
+        inst.symbol_fill_override = Some("#00ffff".into()); // cyan
+        let resolved = doc.resolve_render_node(&inst);
+        let c = solid_fill(&resolved);
+        assert!((c.r - 0.0).abs() < 1e-3 && (c.g - 1.0).abs() < 1e-3 && (c.b - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn non_instance_is_borrowed_unchanged() {
+        let (doc, master_id, _sym_id) = doc_with_symbol();
+        let master = doc.nodes.get(&master_id).unwrap();
+        let resolved = doc.resolve_render_node(master);
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn self_referential_symbol_does_not_loop() {
+        // A symbol whose master is the instance itself must not infinite-loop.
+        let mut doc = Document::new("test", 100.0, 100.0);
+        let layer = doc.active_layer_id.unwrap();
+        let node = SceneNode::new(
+            "n",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 5.0, 5.0))),
+        );
+        let nid = doc.add_node(node, None);
+        let sym = Symbol::new("self", nid);
+        let sym_id = sym.id;
+        doc.symbols.push(sym);
+        // Point the node at the symbol whose master is the node itself.
+        doc.nodes.get_mut(&nid).unwrap().symbol_ref = Some(sym_id);
+        let n = doc.nodes.get(&nid).unwrap();
+        let resolved = doc.resolve_render_node(n);
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn dangling_symbol_ref_renders_frozen_copy() {
+        let (doc, master_id, _sym_id) = doc_with_symbol();
+        let mut inst = make_instance(&doc, master_id, Uuid::new_v4()); // unknown symbol id
+        inst.symbol_ref = Some(Uuid::new_v4());
+        let resolved = doc.resolve_render_node(&inst);
+        // Falls back to the instance's own (green) copy.
+        assert_eq!(solid_fill(&resolved), Color::GREEN);
     }
 }

@@ -747,6 +747,10 @@ impl PhotonicRenderer {
             self.pending_texts.clear();
             let mut nodes: Vec<NodeSnapshot> = Vec::new();
             for node in doc.nodes_in_draw_order() {
+                // Symbol instances render from the *current* master so master
+                // edits and per-instance overrides take effect live.
+                let resolved = doc.resolve_render_node(node);
+                let node = resolved.as_ref();
                 match &node.kind {
                     SceneNodeKind::Text(text_node) => {
                         let (doc_x, doc_y) = node.transform.apply(0.0, 0.0);
