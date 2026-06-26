@@ -140,7 +140,12 @@ pub enum PanelAction {
     /// Rotate a node to an absolute angle (degrees). The rotation is applied around
     /// the node's world-space bounding-box center. Delta from the current angle is
     /// composed onto the existing transform.
-    RotateNode { node_id: NodeId, angle_deg: f64 },
+    /// Rotate the selection to `angle_deg`. `node_ids[0]` is the primary whose
+    /// current angle defines the delta; all are rotated about the shared center.
+    RotateNode {
+        node_ids: Vec<NodeId>,
+        angle_deg: f64,
+    },
     /// Split two overlapping path nodes at their intersection edges into distinct face nodes.
     /// Empty vec = use current selection (resolved in app.rs).
     PathfinderDivide { node_ids: Vec<NodeId> },
@@ -200,7 +205,7 @@ pub enum PanelAction {
     ReleaseCompoundPath { node_id: NodeId },
     /// Apply a shear (skew) transform to a node around its own centre.
     ShearNode {
-        node_id: NodeId,
+        node_ids: Vec<NodeId>,
         shear_x: f64,
         shear_y: f64,
     },
@@ -1370,8 +1375,12 @@ pub fn draw_properties_panel(
                             .suffix("°"),
                     );
                     if rot_resp.changed() {
+                        // Primary first so its current angle defines the delta;
+                        // the whole selection rotates about its shared center.
+                        let mut node_ids = vec![nid];
+                        node_ids.extend(selected_ids.iter().copied().filter(|&i| i != nid));
                         action = Some(PanelAction::RotateNode {
-                            node_id: nid,
+                            node_ids,
                             angle_deg,
                         });
                     }
@@ -1965,8 +1974,11 @@ pub fn draw_properties_panel(
                                 .clicked()
                             {
                                 if *shear_x != 0.0 || *shear_y != 0.0 {
+                                    let mut node_ids = vec![nid];
+                                    node_ids
+                                        .extend(selected_ids.iter().copied().filter(|&i| i != nid));
                                     action = Some(PanelAction::ShearNode {
-                                        node_id: nid,
+                                        node_ids,
                                         shear_x: *shear_x,
                                         shear_y: *shear_y,
                                     });
@@ -1994,8 +2006,10 @@ pub fn draw_properties_panel(
                         .on_hover_text("Flip horizontally")
                         .clicked()
                     {
+                        let mut node_ids = vec![nid];
+                        node_ids.extend(selected_ids.iter().copied().filter(|&i| i != nid));
                         action = Some(PanelAction::FlipNodes {
-                            node_ids: vec![nid],
+                            node_ids,
                             horizontal: true,
                         });
                     }
@@ -2004,8 +2018,10 @@ pub fn draw_properties_panel(
                         .on_hover_text("Flip vertically")
                         .clicked()
                     {
+                        let mut node_ids = vec![nid];
+                        node_ids.extend(selected_ids.iter().copied().filter(|&i| i != nid));
                         action = Some(PanelAction::FlipNodes {
-                            node_ids: vec![nid],
+                            node_ids,
                             horizontal: false,
                         });
                     }

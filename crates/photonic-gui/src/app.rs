@@ -3129,36 +3129,61 @@ impl PhotonicApp {
                     }
                 }
 
-                PanelAction::RotateNode { node_id, angle_deg } => {
-                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
-                        // Compute current angle from matrix and derive delta.
-                        let [a, b, _c, _d, _e, _f] = node.transform.matrix;
-                        let current_rad = b.atan2(a);
-                        let target_rad = angle_deg.to_radians();
-                        let delta_rad = target_rad - current_rad;
-                        // Rotate around the world-space center of the node's bounding box.
-                        let (cx, cy) = match node.local_bounds() {
-                            Some(local) => {
-                                let affine = node.transform.to_kurbo();
-                                let cx_local = (local.x0 + local.x1) / 2.0;
-                                let cy_local = (local.y0 + local.y1) / 2.0;
-                                let center = affine * Point::new(cx_local, cy_local);
-                                (center.x, center.y)
+                PanelAction::RotateNode {
+                    node_ids,
+                    angle_deg,
+                } => {
+                    // node_ids[0] is the primary: its current angle defines the delta.
+                    if let Some(&primary_id) = node_ids.first() {
+                        if let Some(primary) = doc.nodes.get(&primary_id).cloned() {
+                            let [a, b, _c, _d, _e, _f] = primary.transform.matrix;
+                            let current_rad = b.atan2(a);
+                            let delta_rad = angle_deg.to_radians() - current_rad;
+                            // Shared pivot: center of the selection's world bounds when
+                            // multiple are selected; the node's own center otherwise.
+                            let (cx, cy) = if node_ids.len() > 1 {
+                                selection_canvas_bounds(doc, &node_ids, renderer)
+                                    .map(|(x0, y0, x1, y1)| ((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+                                    .unwrap_or((
+                                        primary.transform.matrix[4],
+                                        primary.transform.matrix[5],
+                                    ))
+                            } else {
+                                match primary.local_bounds() {
+                                    Some(local) => {
+                                        let c = primary.transform.to_kurbo()
+                                            * Point::new(
+                                                (local.x0 + local.x1) / 2.0,
+                                                (local.y0 + local.y1) / 2.0,
+                                            );
+                                        (c.x, c.y)
+                                    }
+                                    None => {
+                                        (primary.transform.matrix[4], primary.transform.matrix[5])
+                                    }
+                                }
+                            };
+                            let rot_t = photonic_core::transform::Transform::rotate_around(
+                                delta_rad, cx, cy,
+                            );
+                            let mut cmds = Vec::new();
+                            for nid in &node_ids {
+                                if let Some(node) = doc.nodes.get(nid) {
+                                    let mut new_node = node.clone();
+                                    // Apply in WORLD space: node transform first, then
+                                    // the rotation about the shared pivot.
+                                    new_node.transform = rot_t.then(&node.transform);
+                                    cmds.push(Command::UpdateNode {
+                                        old: node.clone(),
+                                        new: new_node,
+                                    });
+                                }
                             }
-                            None => (node.transform.matrix[4], node.transform.matrix[5]),
-                        };
-                        let rot_t =
-                            photonic_core::transform::Transform::rotate_around(delta_rad, cx, cy);
-                        let mut new_node = node.clone();
-                        new_node.transform = node.transform.then(&rot_t);
-                        history.execute(
-                            Command::UpdateNode {
-                                old: node,
-                                new: new_node,
-                            },
-                            doc,
-                        );
-                        doc_modified = true;
+                            if !cmds.is_empty() {
+                                history.execute(Command::Batch(cmds), doc);
+                                doc_modified = true;
+                            }
+                        }
                     }
                 }
 
@@ -4110,27 +4135,56 @@ impl PhotonicApp {
                 }
 
                 PanelAction::ShearNode {
-                    node_id,
+                    node_ids,
                     shear_x,
                     shear_y,
                 } => {
-                    if let Some(old_node) = doc.nodes.get(&node_id).cloned() {
-                        let mut new_node = old_node.clone();
-                        // Shear around the node's world-space bounding-box centre.
-                        let (cx, cy) = new_node
-                            .local_bounds()
-                            .map(|b| (b.x0 + b.width() / 2.0, b.y0 + b.height() / 2.0))
+                    if node_ids.len() <= 1 {
+                        // Single node: shear about its own local center (unchanged).
+                        if let Some(old_node) =
+                            node_ids.first().and_then(|id| doc.nodes.get(id).cloned())
+                        {
+                            let mut new_node = old_node.clone();
+                            let (cx, cy) = new_node
+                                .local_bounds()
+                                .map(|b| (b.x0 + b.width() / 2.0, b.y0 + b.height() / 2.0))
+                                .unwrap_or((0.0, 0.0));
+                            use photonic_core::ops::transform_ops;
+                            transform_ops::shear(&mut new_node, shear_x, shear_y, cx, cy);
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: old_node,
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                        }
+                    } else {
+                        // Multi: shear every node about the shared world center.
+                        let (cx, cy) = selection_canvas_bounds(doc, &node_ids, renderer)
+                            .map(|(x0, y0, x1, y1)| ((x0 + x1) / 2.0, (y0 + y1) / 2.0))
                             .unwrap_or((0.0, 0.0));
-                        use photonic_core::ops::transform_ops;
-                        transform_ops::shear(&mut new_node, shear_x, shear_y, cx, cy);
-                        history.execute(
-                            Command::UpdateNode {
-                                old: old_node,
-                                new: new_node,
-                            },
-                            doc,
+                        let m = photonic_core::transform::Transform::shear_around(
+                            shear_x, shear_y, cx, cy,
                         );
-                        doc_modified = true;
+                        let mut cmds = Vec::new();
+                        for nid in &node_ids {
+                            if let Some(node) = doc.nodes.get(nid) {
+                                let mut new_node = node.clone();
+                                // Apply in WORLD space: node transform first, then the
+                                // mirror/shear about the shared pivot (correct after moves).
+                                new_node.transform = m.then(&node.transform);
+                                cmds.push(Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                });
+                            }
+                        }
+                        if !cmds.is_empty() {
+                            history.execute(Command::Batch(cmds), doc);
+                            doc_modified = true;
+                        }
                     }
                 }
 
@@ -5405,49 +5459,79 @@ impl PhotonicApp {
                     node_ids,
                     horizontal,
                 } => {
-                    let mut commands = Vec::new();
-                    for nid in &node_ids {
-                        if let Some(node) = doc.nodes.get(nid) {
-                            if let SceneNodeKind::Path(pn) = &node.kind {
-                                use kurbo::Shape;
-                                let bez = pn.path_data.to_bez_path();
-                                let bbox = bez.bounding_box();
-                                let cx = bbox.x0 + bbox.width() / 2.0;
-                                let cy = bbox.y0 + bbox.height() / 2.0;
-                                let flip = |p: kurbo::Point| -> kurbo::Point {
-                                    kurbo::Point::new(
-                                        if horizontal { 2.0 * cx - p.x } else { p.x },
-                                        if !horizontal { 2.0 * cy - p.y } else { p.y },
-                                    )
-                                };
-                                let mut new_bez = BezPath::new();
-                                for el in bez.elements() {
-                                    match *el {
-                                        PathEl::MoveTo(p) => new_bez.move_to(flip(p)),
-                                        PathEl::LineTo(p) => new_bez.line_to(flip(p)),
-                                        PathEl::CurveTo(c1, c2, p) => {
-                                            new_bez.curve_to(flip(c1), flip(c2), flip(p))
+                    if node_ids.len() <= 1 {
+                        // Single node: mirror the path geometry in place (unchanged).
+                        let mut commands = Vec::new();
+                        for nid in &node_ids {
+                            if let Some(node) = doc.nodes.get(nid) {
+                                if let SceneNodeKind::Path(pn) = &node.kind {
+                                    use kurbo::Shape;
+                                    let bez = pn.path_data.to_bez_path();
+                                    let bbox = bez.bounding_box();
+                                    let cx = bbox.x0 + bbox.width() / 2.0;
+                                    let cy = bbox.y0 + bbox.height() / 2.0;
+                                    let flip = |p: kurbo::Point| -> kurbo::Point {
+                                        kurbo::Point::new(
+                                            if horizontal { 2.0 * cx - p.x } else { p.x },
+                                            if !horizontal { 2.0 * cy - p.y } else { p.y },
+                                        )
+                                    };
+                                    let mut new_bez = BezPath::new();
+                                    for el in bez.elements() {
+                                        match *el {
+                                            PathEl::MoveTo(p) => new_bez.move_to(flip(p)),
+                                            PathEl::LineTo(p) => new_bez.line_to(flip(p)),
+                                            PathEl::CurveTo(c1, c2, p) => {
+                                                new_bez.curve_to(flip(c1), flip(c2), flip(p))
+                                            }
+                                            PathEl::QuadTo(c, p) => {
+                                                new_bez.quad_to(flip(c), flip(p))
+                                            }
+                                            PathEl::ClosePath => new_bez.close_path(),
                                         }
-                                        PathEl::QuadTo(c, p) => new_bez.quad_to(flip(c), flip(p)),
-                                        PathEl::ClosePath => new_bez.close_path(),
                                     }
+                                    let mut new_node = node.clone();
+                                    if let SceneNodeKind::Path(ref mut new_pn) = new_node.kind {
+                                        new_pn.path_data = PathData::from_bez_path(&new_bez);
+                                    }
+                                    commands.push(Command::UpdateNode {
+                                        old: node.clone(),
+                                        new: new_node,
+                                    });
                                 }
+                            }
+                        }
+                        if !commands.is_empty() {
+                            for cmd in commands {
+                                history.execute(cmd, doc);
+                            }
+                            doc_modified = true;
+                        }
+                    } else {
+                        // Multi: mirror the whole selection about its shared center
+                        // (any node kind), as one undoable step.
+                        let (cx, cy) = selection_canvas_bounds(doc, &node_ids, renderer)
+                            .map(|(x0, y0, x1, y1)| ((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+                            .unwrap_or((0.0, 0.0));
+                        let (sx, sy) = if horizontal { (-1.0, 1.0) } else { (1.0, -1.0) };
+                        let m = photonic_core::transform::Transform::scale_around(sx, sy, cx, cy);
+                        let mut cmds = Vec::new();
+                        for nid in &node_ids {
+                            if let Some(node) = doc.nodes.get(nid) {
                                 let mut new_node = node.clone();
-                                if let SceneNodeKind::Path(ref mut new_pn) = new_node.kind {
-                                    new_pn.path_data = PathData::from_bez_path(&new_bez);
-                                }
-                                commands.push(Command::UpdateNode {
+                                // Apply in WORLD space: node transform first, then the
+                                // mirror/shear about the shared pivot (correct after moves).
+                                new_node.transform = m.then(&node.transform);
+                                cmds.push(Command::UpdateNode {
                                     old: node.clone(),
                                     new: new_node,
                                 });
                             }
                         }
-                    }
-                    if !commands.is_empty() {
-                        for cmd in commands {
-                            history.execute(cmd, doc);
+                        if !cmds.is_empty() {
+                            history.execute(Command::Batch(cmds), doc);
+                            doc_modified = true;
                         }
-                        doc_modified = true;
                     }
                 }
 
@@ -9640,28 +9724,12 @@ impl PhotonicApp {
 
         // ── Selection overlay ────────────────────────────────────────────────
         let accent = Color32::from_rgb(110, 86, 207);
-        let thin_stroke = egui::Stroke::new(1.0, accent);
         let thick_stroke = egui::Stroke::new(1.5, accent);
         let sel_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
 
         if sel_ids.len() > 1 {
-            // Multi-select: thin outline per node + combined bbox with resize handles
-            for &id in &sel_ids {
-                if let Some(node) = doc.nodes.get(&id) {
-                    if let Some((cx0, cy0, cx1, cy1)) = text_aware_canvas_bounds(node, renderer) {
-                        let (sx0, sy0) = view.canvas_to_screen(cx0, cy0);
-                        let (sx1, sy1) = view.canvas_to_screen(cx1, cy1);
-                        ui.painter().rect_stroke(
-                            egui::Rect::from_min_max(
-                                egui::pos2(sx0 as f32, sy0 as f32),
-                                egui::pos2(sx1 as f32, sy1 as f32),
-                            ),
-                            0.0,
-                            thin_stroke,
-                        );
-                    }
-                }
-            }
+            // Multi-select: one unified bounding box with resize handles over the
+            // union of all selected nodes (no per-node boxes — they act as a unit).
             if let Some((cx0, cy0, cx1, cy1)) = selection_canvas_bounds(doc, &sel_ids, renderer) {
                 let (sx0, sy0) = view.canvas_to_screen(cx0, cy0);
                 let (sx1, sy1) = view.canvas_to_screen(cx1, cy1);
