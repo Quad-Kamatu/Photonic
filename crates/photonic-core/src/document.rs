@@ -906,10 +906,112 @@ impl Document {
     }
 }
 
+// ─── In-canvas color sampling ─────────────────────────────────────────────────
+
+/// Sample the topmost visible filled node at canvas-space coordinates `(x, y)`.
+///
+/// Walks layers and nodes from top to bottom (reverse of the rendering order
+/// stored in `layer_order` / `node_ids`). For each visible `PathNode` whose
+/// fill is enabled, performs a non-zero winding-rule hit test.  The first hit
+/// returns the sampled RGBA colour via `FillKind::sample_at`, which correctly
+/// handles solid, gradient, fluid-gradient, and mesh-gradient fills.
+///
+/// Returns `None` if no node covers the point or every node at that point has
+/// its fill disabled.
+pub fn sample_fill_at(doc: &Document, x: f64, y: f64) -> Option<[f32; 4]> {
+    use kurbo::Shape;
+    let pt = kurbo::Point::new(x, y);
+
+    for lid in doc.layer_order.iter().rev() {
+        let layer = match doc.layers.get(lid) {
+            Some(l) if l.visible => l,
+            _ => continue,
+        };
+        for nid in layer.node_ids.iter().rev() {
+            let node = match doc.nodes.get(nid) {
+                Some(n) if n.visible => n,
+                _ => continue,
+            };
+            if let SceneNodeKind::Path(pn) = &node.kind {
+                if !pn.fill.enabled {
+                    continue;
+                }
+                let bez = pn.path_data.to_bez_path();
+                if bez.winding(pt) != 0 {
+                    let opacity = pn.fill.opacity * node.opacity;
+                    return Some(pn.fill.kind.sample_at(x, y, opacity));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// A page (for multi-page documents — future use).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     pub id: Uuid,
     pub name: String,
     pub document: Document,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        node::{PathNode, SceneNode, SceneNodeKind},
+        path::PathData,
+        style::Fill,
+        Color,
+    };
+
+    /// Build a minimal document with one layer and the supplied path nodes
+    /// (given in bottom-to-top order).
+    fn doc_with_nodes(nodes: Vec<(PathData, Color)>) -> Document {
+        let mut doc = Document::new("test", 400.0, 400.0);
+        let layer_id = doc.layer_order[0];
+        for (path_data, color) in nodes {
+            let pn = PathNode::new(path_data).with_fill(Fill::solid(color));
+            let node = SceneNode::new("n", layer_id, SceneNodeKind::Path(pn));
+            let nid = node.id;
+            doc.nodes.insert(nid, node);
+            doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+        }
+        doc
+    }
+
+    #[test]
+    fn no_hit_returns_none() {
+        let path = PathData::rect(10.0, 10.0, 50.0, 50.0);
+        let doc = doc_with_nodes(vec![(path, Color::RED)]);
+        // Point outside the rectangle
+        assert!(sample_fill_at(&doc, 200.0, 200.0).is_none());
+    }
+
+    #[test]
+    fn single_node_hit() {
+        let path = PathData::rect(0.0, 0.0, 100.0, 100.0);
+        let doc = doc_with_nodes(vec![(path, Color::RED)]);
+        let sampled = sample_fill_at(&doc, 50.0, 50.0).expect("expected a hit");
+        assert!((sampled[0] - 1.0).abs() < 1e-6, "red channel");
+        assert!((sampled[1]).abs() < 1e-6, "green channel");
+        assert!((sampled[2]).abs() < 1e-6, "blue channel");
+        assert!((sampled[3] - 1.0).abs() < 1e-6, "alpha channel");
+    }
+
+    #[test]
+    fn overlapping_topmost_wins() {
+        // bottom = red square, top = blue square (both cover (50,50))
+        let bottom = PathData::rect(0.0, 0.0, 100.0, 100.0);
+        let top = PathData::rect(25.0, 25.0, 75.0, 75.0);
+        // doc_with_nodes adds nodes bottom-to-top; last entry = topmost
+        let doc = doc_with_nodes(vec![(bottom, Color::RED), (top, Color::BLUE)]);
+        let sampled = sample_fill_at(&doc, 50.0, 50.0).expect("expected a hit");
+        // Blue (top) should win
+        assert!(
+            (sampled[2] - 1.0).abs() < 1e-6,
+            "blue channel should be 1.0"
+        );
+        assert!((sampled[0]).abs() < 1e-6, "red channel should be 0.0");
+    }
 }

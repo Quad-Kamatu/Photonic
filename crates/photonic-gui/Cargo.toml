@@ -23,4 +23,3 @@ tracing = { workspace = true }
 rfd = "0.15"
 regex = "1"
 pollster = { workspace = true }
-screenshots = "0.8"
