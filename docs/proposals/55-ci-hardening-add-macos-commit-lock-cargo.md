@@ -1,6 +1,39 @@
-# CI Hardening: Add macOS, Commit + Lock Cargo.lock, Deny Clippy Warnings (#55) — Design Proposal
+# CI Hardening: Add macOS, Commit + Lock Cargo.lock, Deny Clippy Warnings (#55)
 
-> Status: design scaffold (not an implementation).
+> Status: **mostly implemented.** macOS runner, committed `Cargo.lock` + `--locked`,
+> and a passing `cargo-deny` gate are done. Enforcing `clippy -D warnings` is
+> deferred until the remaining backlog is cleared (see *Remaining work*).
+
+## What this PR implements
+
+- **macOS runner**: `macos-latest` added to the `build-test` matrix. The
+  `if: runner.os == 'Linux'` guard already skips the apt step on macOS.
+- **Reproducible builds**: removed `Cargo.lock` from `.gitignore`, committed the
+  lockfile, and added `--locked` to every `cargo build`/`test`/`clippy` in CI.
+- **Supply-chain gate**: `cargo-deny` is installed (via `taiki-e/install-action`)
+  and `cargo deny check` runs in the lint job. `deny.toml` was updated so the
+  check passes today:
+  - allow the Ubuntu Font License (`LicenseRef-UFL-1.0`) for
+    `epaint_default_fonts` only (egui's bundled fonts; no SPDX id);
+  - ignore two *unmaintained* transitive advisories (`fxhash`
+    RUSTSEC-2025-0057, `paste` RUSTSEC-2024-0436) — neither is a vulnerability
+    and neither has a maintained drop-in.
+
+Verified locally: `cargo check --workspace --locked` builds, `cargo deny check`
+reports `advisories ok, bans ok, licenses ok, sources ok`, and the workflow YAML
+parses.
+
+### Remaining work (follow-up)
+
+- Clear the clippy backlog and add `-D warnings` to the clippy step. A
+  `cargo clippy --fix` pass auto-resolves ~126 of ~166 warnings; ~40 need manual
+  attention (`too_many_arguments`, `dead_code`, a deprecated egui call, etc.).
+  Kept out of this PR to avoid bundling a large mechanical diff with the CI
+  config changes.
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 
