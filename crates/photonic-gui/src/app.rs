@@ -271,6 +271,14 @@ pub struct PhotonicApp {
     /// Used to record a single undoable UpdateNode batch on release. Empty
     /// until the first move frame actually shifts the selection.
     move_drag_origins: Vec<SceneNode>,
+    /// Original translations (id, tx, ty) of the selection captured at move
+    /// start, so the move can be applied absolutely and snapped to the grid.
+    move_snap_origins: Vec<(NodeId, f64, f64)>,
+    /// Selection bounding-box top-left at move start — the point snapped to the
+    /// grid as the selection is dragged.
+    move_snap_ref: Option<(f64, f64)>,
+    /// Canvas-space cursor position where the move drag began.
+    move_snap_press: Option<(f64, f64)>,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -572,6 +580,9 @@ impl Default for PhotonicApp {
             pen_points: Vec::new(),
             moving: false,
             move_drag_origins: Vec::new(),
+            move_snap_origins: Vec::new(),
+            move_snap_ref: None,
+            move_snap_press: None,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -9673,23 +9684,53 @@ impl PhotonicApp {
                     }
                 }
             } else if self.moving {
-                let delta = response.drag_delta();
-                let dx = delta.x as f64 / view.zoom;
-                let dy = delta.y as f64 / view.zoom;
                 let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
-                // Capture pre-move snapshots on the first frame that actually
-                // shifts the selection so the whole drag becomes one undo step.
-                if self.move_drag_origins.is_empty() {
+                // Capture the starting translations, reference point and press
+                // position on the first move frame, so the move is applied
+                // absolutely (origin + total delta) and can be snapped to grid
+                // (#12). Also snapshot the full nodes so the whole drag becomes a
+                // single undoable history step on release (#11).
+                if self.move_snap_origins.is_empty() {
                     self.move_drag_origins = ids_to_move
                         .iter()
                         .filter_map(|id| doc.nodes.get(id).cloned())
                         .collect();
+                    self.move_snap_origins = ids_to_move
+                        .iter()
+                        .filter_map(|id| {
+                            doc.nodes
+                                .get(id)
+                                .map(|n| (*id, n.transform.matrix[4], n.transform.matrix[5]))
+                        })
+                        .collect();
+                    self.move_snap_ref = selection_canvas_bounds(doc, &ids_to_move, renderer)
+                        .map(|(x0, y0, _, _)| (x0, y0));
+                    self.move_snap_press = ui
+                        .input(|i| i.pointer.press_origin())
+                        .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
                 }
-                for id in ids_to_move {
-                    if let Some(node) = doc.nodes.get_mut(&id) {
-                        node.transform.matrix[4] += dx;
-                        node.transform.matrix[5] += dy;
-                        *doc_modified = true;
+
+                if let (Some((px, py)), Some(cur)) =
+                    (self.move_snap_press, response.interact_pointer_pos())
+                {
+                    let (curx, cury) = view.screen_to_canvas(cur.x as f64, cur.y as f64);
+                    let raw_dx = curx - px;
+                    let raw_dy = cury - py;
+                    // Snap the reference point's target to the grid (no-op when
+                    // snap-to-grid is off), then move every node by that delta so
+                    // the selection keeps its internal layout.
+                    let (dx, dy) = match self.move_snap_ref {
+                        Some((rx, ry)) => {
+                            (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
+                        }
+                        None => (raw_dx, raw_dy),
+                    };
+                    for (id, ox, oy) in &self.move_snap_origins {
+                        if let Some(node) = doc.nodes.get_mut(id) {
+                            node.transform.matrix[4] = ox + dx;
+                            node.transform.matrix[5] = oy + dy;
+                            *doc_modified = true;
+                        }
                     }
                 }
             }
@@ -9719,6 +9760,9 @@ impl PhotonicApp {
                     *doc_modified = true;
                 }
             }
+            self.move_snap_origins.clear();
+            self.move_snap_ref = None;
+            self.move_snap_press = None;
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
