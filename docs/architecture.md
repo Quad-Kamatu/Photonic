@@ -228,13 +228,19 @@ struct AppState {
 
 | Module | Responsibility |
 |---|---|
-| `handlers/nodes.rs` | Create, update, delete, group, reorder, boolean ops |
-| `handlers/document.rs` | `get_document_state`, `get_node`, checkpoints |
-| `handlers/layers.rs` | `create_layer` |
-| `handlers/canvas.rs` | `screenshot` |
-| `handlers/transforms.rs` | `apply_transform` |
+| `handlers/nodes.rs` | Create, update, delete, group, reorder, boolean ops, paths, text, effects |
+| `handlers/document.rs` | Document state, checkpoints, symbols, swatches, styles, variables, width profiles |
+| `handlers/layers.rs` | Layer create/delete/reorder/merge, visibility, blend mode |
+| `handlers/canvas.rs` | Screenshot, fit/center, artboard margins, bleed, canvas resize |
+| `handlers/transforms.rs` | Apply transform, align, distribute, mirror/scatter/rotate copies |
+| `handlers/annotations.rs` | Non-printing annotations and dimensions |
+| `handlers/audit.rs` | Audit-log query and export |
+| `handlers/clipboard.rs` | Copy/paste nodes, clipboard history |
+| `handlers/color_guide.rs` | Color-harmony guide and palette suggestions |
 
-See [mcp-api.md](mcp-api.md) for the full tool reference.
+The full tool surface is **auto-generated** — see [mcp-api.md](mcp-api.md),
+regenerated from `server::tool_list()` via
+`cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py`.
 
 ---
 

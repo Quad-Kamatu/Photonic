@@ -85,3 +85,11 @@ jobs:
 
       - name: clippy
         run: cargo clippy --workspace --all-targets
+
+      # The MCP API reference is generated from server::tool_list(); fail if it
+      # has drifted from the committed docs/mcp-api.md.
+      - name: Regenerate MCP API docs
+        run: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md
+
+      - name: Check MCP API docs are up to date
+        run: git diff --exit-code docs/mcp-api.md
