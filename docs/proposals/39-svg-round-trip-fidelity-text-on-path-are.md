@@ -1,6 +1,33 @@
-# SVG Round-Trip Fidelity: Text-on-Path, Area Type, Effects, Blend Modes, Patterns (#39) — Design Proposal
+# SVG Round-Trip Fidelity: Text-on-Path, Area Type, Effects, Blend Modes, Patterns (#39)
 
-> Status: design scaffold (not an implementation).
+> Status: **blend-mode round-trip implemented.** The remaining fidelity items
+> (glow filters, text-on-path, area type, patterns) are still open — see
+> *Remaining work*. Tracked as the first landed slice of this PR.
+
+## What this PR implements
+
+- **Blend-mode export/import round-trip.** `BlendMode::to_css` / `from_css`
+  (`layer.rs`) map all 16 variants to/from their CSS `mix-blend-mode` keywords.
+  Export (`export.rs`) emits `style="mix-blend-mode:<kw>"` on any path/group/text
+  node whose `blend_mode` is non-Normal. Import (`import.rs`) parses
+  `mix-blend-mode` (from inline `style`) into `ComputedStyle::blend_mode` — reset
+  per element, not inherited — and applies it to the constructed node (previously
+  hardcoded to `Normal`, so blend modes were silently dropped on import).
+- Tests: the 16-variant CSS mapping is bijective, and a document with a
+  `Multiply` node survives export → re-import.
+
+### Remaining work (follow-up)
+
+- `<filter>`/`feGaussianBlur` export+import for `GlowEffect` (outer/inner glow).
+- `<textPath>` export+import for text-on-path; `<foreignObject>`/`<tspan>` area
+  type.
+- `<pattern>` export+import (blocked on `FillKind::Pattern`, issue #20).
+- Variable-width strokes as outlined paths (depends on #19, already landed) and
+  the `photonic:version` namespace marker.
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 
