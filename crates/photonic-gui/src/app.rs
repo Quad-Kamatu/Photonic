@@ -3170,7 +3170,9 @@ impl PhotonicApp {
                             for nid in &node_ids {
                                 if let Some(node) = doc.nodes.get(nid) {
                                     let mut new_node = node.clone();
-                                    new_node.transform = node.transform.then(&rot_t);
+                                    // Apply in WORLD space: node transform first, then
+                                    // the rotation about the shared pivot.
+                                    new_node.transform = rot_t.then(&node.transform);
                                     cmds.push(Command::UpdateNode {
                                         old: node.clone(),
                                         new: new_node,
@@ -4170,7 +4172,9 @@ impl PhotonicApp {
                         for nid in &node_ids {
                             if let Some(node) = doc.nodes.get(nid) {
                                 let mut new_node = node.clone();
-                                new_node.transform = node.transform.then(&m);
+                                // Apply in WORLD space: node transform first, then the
+                                // mirror/shear about the shared pivot (correct after moves).
+                                new_node.transform = m.then(&node.transform);
                                 cmds.push(Command::UpdateNode {
                                     old: node.clone(),
                                     new: new_node,
@@ -5515,7 +5519,9 @@ impl PhotonicApp {
                         for nid in &node_ids {
                             if let Some(node) = doc.nodes.get(nid) {
                                 let mut new_node = node.clone();
-                                new_node.transform = node.transform.then(&m);
+                                // Apply in WORLD space: node transform first, then the
+                                // mirror/shear about the shared pivot (correct after moves).
+                                new_node.transform = m.then(&node.transform);
                                 cmds.push(Command::UpdateNode {
                                     old: node.clone(),
                                     new: new_node,

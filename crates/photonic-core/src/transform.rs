@@ -117,3 +117,38 @@ impl Default for Transform {
         Self::IDENTITY
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the multi-select flip drift (#2 follow-up): a flip applied
+    /// to a *moved* node (non-identity transform) about a fixed world pivot must
+    /// be involutive — flipping back and forth keeps it in place. The transform
+    /// is applied in WORLD space via `m.then(&node)` (node first, then mirror).
+    #[test]
+    fn world_space_mirror_is_involutive_for_a_moved_node() {
+        let node = Transform::translate(100.0, 50.0); // a node that has been moved
+        let (cx, cy) = (130.0, 70.0); // arbitrary shared world pivot
+        let m = Transform::scale_around(-1.0, 1.0, cx, cy); // horizontal flip
+
+        let once = m.then(&node);
+        let twice = m.then(&once);
+
+        // Flipping twice about the same pivot returns to the original mapping.
+        for (x, y) in [(0.0, 0.0), (10.0, 5.0), (-3.0, 8.0)] {
+            let (ox, oy) = node.apply(x, y);
+            let (tx, ty) = twice.apply(x, y);
+            assert!(
+                (ox - tx).abs() < 1e-9 && (oy - ty).abs() < 1e-9,
+                "flip-twice not involutive: ({ox},{oy}) != ({tx},{ty})"
+            );
+        }
+
+        // A single flip mirrors world-x about cx and leaves y unchanged.
+        let (wx, wy) = node.apply(0.0, 0.0);
+        let (fx, fy) = once.apply(0.0, 0.0);
+        assert!((fx - (2.0 * cx - wx)).abs() < 1e-9);
+        assert!((fy - wy).abs() < 1e-9);
+    }
+}
