@@ -736,7 +736,10 @@ pub enum ZOrderOp {
 }
 
 /// Draw the horizontal toolbar (logo, doc name, zoom — no tool buttons).
-pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64) {
+///
+/// `file_status` is an optional message shown to the left of the zoom readout
+/// in the same right-aligned region so the two never overlap.
+pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64, file_status: Option<&str>) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{} Photonic", ph::HEXAGON))
@@ -749,6 +752,10 @@ pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(format!("{:.0}%", zoom * 100.0));
             ui.label("Zoom:");
+            if let Some(status) = file_status {
+                ui.separator();
+                ui.label(egui::RichText::new(status).weak().italics());
+            }
         });
     });
 }

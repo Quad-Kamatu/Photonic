@@ -924,14 +924,7 @@ impl PhotonicApp {
                     }
 
                     ui.separator();
-                    panels::draw_toolbar(ui, &doc.name, view.zoom);
-
-                    // Show file status message on the right
-                    if let Some(status) = &self.file_status {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(status).weak().italics());
-                        });
-                    }
+                    panels::draw_toolbar(ui, &doc.name, view.zoom, self.file_status.as_deref());
                 });
             });
 
