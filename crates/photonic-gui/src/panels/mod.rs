@@ -1330,155 +1330,168 @@ pub fn draw_properties_panel(
     if let Some(node) = selected_node {
         ui.label(RichText::new("Selected").strong());
         ui.label(format!("Name:    {}", node.name));
-        ui.label(format!("Opacity: {:.0}%", node.opacity * 100.0));
+        egui::CollapsingHeader::new("Transform")
+            .default_open(true)
+            .id_salt("transform_section")
+            .open(forced_open)
+            .show(ui, |ui| {
+                ui.label(format!("Opacity: {:.0}%", node.opacity * 100.0));
 
-        let [_a, _b, _c, _d, tx, ty] = node.transform.matrix;
-        if let Some(nid) = selected_id {
-            let mut px = tx;
-            let mut py = ty;
-            egui::Grid::new("node_pos_grid")
-                .num_columns(4)
-                .spacing([4.0, 2.0])
-                .show(ui, |ui| {
-                    ui.label("X:");
-                    let x_resp = ui.add(egui::DragValue::new(&mut px).speed(1.0).fixed_decimals(1));
-                    ui.label("Y:");
-                    let y_resp = ui.add(egui::DragValue::new(&mut py).speed(1.0).fixed_decimals(1));
-                    ui.end_row();
-                    if x_resp.changed() || y_resp.changed() {
-                        action = Some(PanelAction::SetNodePosition {
-                            node_id: nid,
-                            x: px,
-                            y: py,
+                let [_a, _b, _c, _d, tx, ty] = node.transform.matrix;
+                if let Some(nid) = selected_id {
+                    let mut px = tx;
+                    let mut py = ty;
+                    egui::Grid::new("node_pos_grid")
+                        .num_columns(4)
+                        .spacing([4.0, 2.0])
+                        .show(ui, |ui| {
+                            ui.label("X:");
+                            let x_resp =
+                                ui.add(egui::DragValue::new(&mut px).speed(1.0).fixed_decimals(1));
+                            ui.label("Y:");
+                            let y_resp =
+                                ui.add(egui::DragValue::new(&mut py).speed(1.0).fixed_decimals(1));
+                            ui.end_row();
+                            if x_resp.changed() || y_resp.changed() {
+                                action = Some(PanelAction::SetNodePosition {
+                                    node_id: nid,
+                                    x: px,
+                                    y: py,
+                                });
+                            }
                         });
-                    }
-                });
-        } else {
-            ui.label(format!("X: {:.1}   Y: {:.1}", tx, ty));
-        }
+                } else {
+                    ui.label(format!("X: {:.1}   Y: {:.1}", tx, ty));
+                }
 
-        // Rotation input — available for any node type when one node is selected.
-        if let Some(nid) = selected_id {
-            let [a, b, _c, _d, _tx, _ty] = node.transform.matrix;
-            // Extract current rotation angle in degrees from the matrix column vectors.
-            let current_deg = b.atan2(a).to_degrees();
-            let mut angle_deg = current_deg;
-            egui::Grid::new("node_rot_grid")
-                .num_columns(2)
-                .spacing([4.0, 2.0])
-                .show(ui, |ui| {
-                    ui.label("R°:");
-                    let rot_resp = ui.add(
-                        egui::DragValue::new(&mut angle_deg)
-                            .speed(0.5)
-                            .fixed_decimals(1)
-                            .suffix("°"),
-                    );
-                    if rot_resp.changed() {
-                        // Primary first so its current angle defines the delta;
-                        // the whole selection rotates about its shared center.
-                        let mut node_ids = vec![nid];
-                        node_ids.extend(selected_ids.iter().copied().filter(|&i| i != nid));
-                        action = Some(PanelAction::RotateNode {
-                            node_ids,
-                            angle_deg,
+                // Rotation input — available for any node type when one node is selected.
+                if let Some(nid) = selected_id {
+                    let [a, b, _c, _d, _tx, _ty] = node.transform.matrix;
+                    // Extract current rotation angle in degrees from the matrix column vectors.
+                    let current_deg = b.atan2(a).to_degrees();
+                    let mut angle_deg = current_deg;
+                    egui::Grid::new("node_rot_grid")
+                        .num_columns(2)
+                        .spacing([4.0, 2.0])
+                        .show(ui, |ui| {
+                            ui.label("R°:");
+                            let rot_resp = ui.add(
+                                egui::DragValue::new(&mut angle_deg)
+                                    .speed(0.5)
+                                    .fixed_decimals(1)
+                                    .suffix("°"),
+                            );
+                            if rot_resp.changed() {
+                                // Primary first so its current angle defines the delta;
+                                // the whole selection rotates about its shared center.
+                                let mut node_ids = vec![nid];
+                                node_ids.extend(selected_ids.iter().copied().filter(|&i| i != nid));
+                                action = Some(PanelAction::RotateNode {
+                                    node_ids,
+                                    angle_deg,
+                                });
+                            }
                         });
-                    }
-                });
-        }
+                }
 
-        if let (Some(nid), photonic_core::SceneNodeKind::Path(pn)) = (selected_id, &node.kind) {
-            if let Some(local_r) = pn.path_data.bounding_box() {
-                // Compute world-space W/H by transforming the four local corners.
-                let affine = node.transform.to_kurbo();
-                let cx = [local_r.x0, local_r.x1, local_r.x1, local_r.x0];
-                let cy = [local_r.y0, local_r.y0, local_r.y1, local_r.y1];
-                let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
-                let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
-                for i in 0..4 {
-                    let p = affine * kurbo::Point::new(cx[i], cy[i]);
-                    if p.x < min_x {
-                        min_x = p.x;
-                    }
-                    if p.x > max_x {
-                        max_x = p.x;
-                    }
-                    if p.y < min_y {
-                        min_y = p.y;
-                    }
-                    if p.y > max_y {
-                        max_y = p.y;
+                if let (Some(nid), photonic_core::SceneNodeKind::Path(pn)) =
+                    (selected_id, &node.kind)
+                {
+                    if let Some(local_r) = pn.path_data.bounding_box() {
+                        // Compute world-space W/H by transforming the four local corners.
+                        let affine = node.transform.to_kurbo();
+                        let cx = [local_r.x0, local_r.x1, local_r.x1, local_r.x0];
+                        let cy = [local_r.y0, local_r.y0, local_r.y1, local_r.y1];
+                        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+                        let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+                        for i in 0..4 {
+                            let p = affine * kurbo::Point::new(cx[i], cy[i]);
+                            if p.x < min_x {
+                                min_x = p.x;
+                            }
+                            if p.x > max_x {
+                                max_x = p.x;
+                            }
+                            if p.y < min_y {
+                                min_y = p.y;
+                            }
+                            if p.y > max_y {
+                                max_y = p.y;
+                            }
+                        }
+                        let mut world_w = (max_x - min_x).max(0.1);
+                        let mut world_h = (max_y - min_y).max(0.1);
+                        egui::Grid::new("node_size_grid")
+                            .num_columns(4)
+                            .spacing([4.0, 2.0])
+                            .show(ui, |ui| {
+                                ui.label("W:");
+                                let w_resp = ui.add(
+                                    egui::DragValue::new(&mut world_w)
+                                        .speed(1.0)
+                                        .fixed_decimals(1),
+                                );
+                                ui.label("H:");
+                                let h_resp = ui.add(
+                                    egui::DragValue::new(&mut world_h)
+                                        .speed(1.0)
+                                        .fixed_decimals(1),
+                                );
+                                ui.end_row();
+                                if (w_resp.changed() || h_resp.changed())
+                                    && world_w > 0.1
+                                    && world_h > 0.1
+                                {
+                                    action = Some(PanelAction::SetNodeSize {
+                                        node_id: nid,
+                                        width: world_w,
+                                        height: world_h,
+                                    });
+                                }
+                            });
                     }
                 }
-                let mut world_w = (max_x - min_x).max(0.1);
-                let mut world_h = (max_y - min_y).max(0.1);
-                egui::Grid::new("node_size_grid")
-                    .num_columns(4)
-                    .spacing([4.0, 2.0])
-                    .show(ui, |ui| {
-                        ui.label("W:");
-                        let w_resp = ui.add(
-                            egui::DragValue::new(&mut world_w)
-                                .speed(1.0)
-                                .fixed_decimals(1),
-                        );
-                        ui.label("H:");
-                        let h_resp = ui.add(
-                            egui::DragValue::new(&mut world_h)
-                                .speed(1.0)
-                                .fixed_decimals(1),
-                        );
-                        ui.end_row();
-                        if (w_resp.changed() || h_resp.changed()) && world_w > 0.1 && world_h > 0.1
+
+                // ── Visibility / Lock toggles ─────────────────────────────────────
+                if let Some(nid) = selected_id {
+                    ui.horizontal(|ui| {
+                        let eye_icon = if node.visible { ph::EYE } else { ph::EYE_SLASH };
+                        let eye_tip = if node.visible {
+                            "Hide this node"
+                        } else {
+                            "Show this node"
+                        };
+                        if ui
+                            .button(eye_icon.to_string())
+                            .on_hover_text(eye_tip)
+                            .clicked()
                         {
-                            action = Some(PanelAction::SetNodeSize {
+                            action = Some(PanelAction::SetVisible {
                                 node_id: nid,
-                                width: world_w,
-                                height: world_h,
+                                visible: !node.visible,
+                            });
+                        }
+
+                        let lock_icon = if node.locked { ph::LOCK } else { ph::LOCK_OPEN };
+                        let lock_tip = if node.locked {
+                            "Unlock this node"
+                        } else {
+                            "Lock this node (prevents canvas selection)"
+                        };
+                        if ui
+                            .button(lock_icon.to_string())
+                            .on_hover_text(lock_tip)
+                            .clicked()
+                        {
+                            action = Some(PanelAction::SetLocked {
+                                node_id: nid,
+                                locked: !node.locked,
                             });
                         }
                     });
-            }
-        }
-
-        // ── Visibility / Lock toggles ─────────────────────────────────────
-        if let Some(nid) = selected_id {
-            ui.horizontal(|ui| {
-                let eye_icon = if node.visible { ph::EYE } else { ph::EYE_SLASH };
-                let eye_tip = if node.visible {
-                    "Hide this node"
-                } else {
-                    "Show this node"
-                };
-                if ui
-                    .button(eye_icon.to_string())
-                    .on_hover_text(eye_tip)
-                    .clicked()
-                {
-                    action = Some(PanelAction::SetVisible {
-                        node_id: nid,
-                        visible: !node.visible,
-                    });
-                }
-
-                let lock_icon = if node.locked { ph::LOCK } else { ph::LOCK_OPEN };
-                let lock_tip = if node.locked {
-                    "Unlock this node"
-                } else {
-                    "Lock this node (prevents canvas selection)"
-                };
-                if ui
-                    .button(lock_icon.to_string())
-                    .on_hover_text(lock_tip)
-                    .clicked()
-                {
-                    action = Some(PanelAction::SetLocked {
-                        node_id: nid,
-                        locked: !node.locked,
-                    });
                 }
             });
-        }
+        ui.add_space(2.0);
 
         // ── Path node accordions (alphabetical) ───────────────────────────
         if let (Some(nid), SceneNodeKind::Path(pn)) = (selected_id, &node.kind) {
@@ -1562,6 +1575,28 @@ pub fn draw_properties_panel(
                                     }
                                 }
                             });
+                        }
+                    });
+            }
+
+            // Stroke
+            if matches("Stroke") {
+                egui::CollapsingHeader::new("Stroke")
+                    .default_open(true)
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        let mut d = false;
+                        if let Some(new_stroke) = draw_stroke_editor(ui, &pn.stroke, &mut d) {
+                            action = Some(PanelAction::UpdateNodeStroke {
+                                node_id: nid,
+                                stroke: new_stroke,
+                            });
+                        }
+                        if d {
+                            action =
+                                Some(PanelAction::StartEyedropper(EyedropperTarget::NodeStroke {
+                                    node_id: nid,
+                                }));
                         }
                     });
             }
@@ -1673,71 +1708,102 @@ pub fn draw_properties_panel(
                     });
             }
 
-            // Inner Glow
-            if matches("Inner Glow") {
-                egui::CollapsingHeader::new("Inner Glow")
+            // ── Effects ───────────────────────────────────────────────────────
+            if matches("Effects")
+                || matches("Inner Glow")
+                || matches("Outer Glow")
+                || matches("Gaussian Glow")
+            {
+                egui::CollapsingHeader::new("Effects")
                     .default_open(false)
+                    .id_salt("effects_section")
                     .open(forced_open)
                     .show(ui, |ui| {
-                        let mut d = false;
-                        if let Some(new_ig) = draw_glow_editor(ui, &node.inner_glow, &mut d) {
-                            action = Some(PanelAction::UpdateNodeInnerGlow {
-                                node_id: nid,
-                                glow: new_ig,
-                            });
+                        // Inner Glow
+                        if matches("Inner Glow") || matches("Effects") {
+                            egui::CollapsingHeader::new("Inner Glow")
+                                .default_open(false)
+                                .open(forced_open)
+                                .show(ui, |ui| {
+                                    let mut d = false;
+                                    if let Some(new_ig) =
+                                        draw_glow_editor(ui, &node.inner_glow, &mut d)
+                                    {
+                                        action = Some(PanelAction::UpdateNodeInnerGlow {
+                                            node_id: nid,
+                                            glow: new_ig,
+                                        });
+                                    }
+                                    if d {
+                                        action = Some(PanelAction::StartEyedropper(
+                                            EyedropperTarget::NodeInnerGlow { node_id: nid },
+                                        ));
+                                    }
+                                });
                         }
-                        if d {
-                            action = Some(PanelAction::StartEyedropper(
-                                EyedropperTarget::NodeInnerGlow { node_id: nid },
-                            ));
+                        // Outer Glow
+                        if matches("Outer Glow") || matches("Effects") {
+                            egui::CollapsingHeader::new("Outer Glow")
+                                .default_open(false)
+                                .open(forced_open)
+                                .show(ui, |ui| {
+                                    let mut d = false;
+                                    if let Some(new_og) =
+                                        draw_glow_editor(ui, &node.outer_glow, &mut d)
+                                    {
+                                        action = Some(PanelAction::UpdateNodeOuterGlow {
+                                            node_id: nid,
+                                            glow: new_og,
+                                        });
+                                    }
+                                    if d {
+                                        action = Some(PanelAction::StartEyedropper(
+                                            EyedropperTarget::NodeOuterGlow { node_id: nid },
+                                        ));
+                                    }
+                                });
+                        }
+                        // Gaussian Glow
+                        if matches("Gaussian Glow") || matches("Effects") {
+                            egui::CollapsingHeader::new("Gaussian Glow")
+                                .default_open(false)
+                                .open(forced_open)
+                                .show(ui, |ui| {
+                                    let mut d = false;
+                                    if let Some(new_gg) =
+                                        draw_gaussian_glow_editor(ui, &node.gaussian_glow, &mut d)
+                                    {
+                                        action = Some(PanelAction::UpdateNodeGaussianGlow {
+                                            node_id: nid,
+                                            glow: new_gg,
+                                        });
+                                    }
+                                    if d {
+                                        action = Some(PanelAction::StartEyedropper(
+                                            EyedropperTarget::NodeGaussianGlow { node_id: nid },
+                                        ));
+                                    }
+                                });
                         }
                     });
+                ui.add_space(2.0);
             }
 
-            // Outer Glow
-            if matches("Outer Glow") {
-                egui::CollapsingHeader::new("Outer Glow")
+            // ── Path / Geometry ───────────────────────────────────────────────
+            if matches("Path / Geometry")
+                || matches("Path Operations")
+                || matches("Shear")
+                || matches("Flip")
+                || matches("Radial Copies")
+                || matches("Pin Guides")
+                || matches("Select Similar")
+                || matches("Snap to Pixel")
+            {
+                egui::CollapsingHeader::new("Path / Geometry")
                     .default_open(false)
+                    .id_salt("path_geometry_section")
                     .open(forced_open)
                     .show(ui, |ui| {
-                        let mut d = false;
-                        if let Some(new_og) = draw_glow_editor(ui, &node.outer_glow, &mut d) {
-                            action = Some(PanelAction::UpdateNodeOuterGlow {
-                                node_id: nid,
-                                glow: new_og,
-                            });
-                        }
-                        if d {
-                            action = Some(PanelAction::StartEyedropper(
-                                EyedropperTarget::NodeOuterGlow { node_id: nid },
-                            ));
-                        }
-                    });
-            }
-
-            // Gaussian Glow
-            if matches("Gaussian Glow") {
-                egui::CollapsingHeader::new("Gaussian Glow")
-                    .default_open(false)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        let mut d = false;
-                        if let Some(new_gg) =
-                            draw_gaussian_glow_editor(ui, &node.gaussian_glow, &mut d)
-                        {
-                            action = Some(PanelAction::UpdateNodeGaussianGlow {
-                                node_id: nid,
-                                glow: new_gg,
-                            });
-                        }
-                        if d {
-                            action = Some(PanelAction::StartEyedropper(
-                                EyedropperTarget::NodeGaussianGlow { node_id: nid },
-                            ));
-                        }
-                    });
-            }
-
             // Path Operations
             if matches("Path Operations") {
                 egui::CollapsingHeader::new("Path Operations")
@@ -2121,27 +2187,8 @@ pub fn draw_properties_panel(
                         }
                     });
             }
-
-            // Stroke
-            if matches("Stroke") {
-                egui::CollapsingHeader::new("Stroke")
-                    .default_open(true)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        let mut d = false;
-                        if let Some(new_stroke) = draw_stroke_editor(ui, &pn.stroke, &mut d) {
-                            action = Some(PanelAction::UpdateNodeStroke {
-                                node_id: nid,
-                                stroke: new_stroke,
-                            });
-                        }
-                        if d {
-                            action =
-                                Some(PanelAction::StartEyedropper(EyedropperTarget::NodeStroke {
-                                    node_id: nid,
-                                }));
-                        }
                     });
+                ui.add_space(2.0);
             }
         }
 
@@ -2386,6 +2433,18 @@ pub fn draw_properties_panel(
                         }
                     }
                 });
+            ui.add_space(2.0);
+        }
+
+        // ── Typography & Text ─────────────────────────────────────────────
+        if let SceneNodeKind::Text(_) = &node.kind {
+            ui.add_space(2.0);
+            ui.separator();
+            ui.label(
+                RichText::new("Typography")
+                    .small()
+                    .color(Color32::from_rgb(80, 80, 110)),
+            );
             ui.add_space(2.0);
         }
 
@@ -3413,6 +3472,27 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+    // ── Combine ──────────────────────────────────────────────────────────────
+    if selection_count >= 2
+        && (matches("Boolean Operations")
+            || matches("Blend")
+            || matches("Pathfinder")
+            || matches("Compound Path")
+            || matches("Clipping Mask")
+            || matches("Blend Colors")
+            || matches("Distribute on Path")
+            || matches("Combine"))
+    {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.label(
+            RichText::new("Combine & Paths")
+                .small()
+                .color(Color32::from_rgb(80, 80, 110)),
+        );
+        ui.add_space(2.0);
+    }
+
     // ── Boolean operations (visible when exactly 2 path nodes are selected) ──
     if selection_count == 2 && matches("Boolean Operations") {
         egui::CollapsingHeader::new("Boolean Operations")
@@ -3881,6 +3961,25 @@ pub fn draw_properties_panel(
                 });
             });
         ui.add_space(4.0);
+    }
+
+    // ── Arrange & Align ──────────────────────────────────────────────────────
+    if selection_count >= 2
+        && (matches("Alignment")
+            || matches("Distribute No Overlap")
+            || matches("Align to Artboard")
+            || matches("Layer Operations")
+            || matches("Arrange")
+            || matches("Align"))
+    {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.label(
+            RichText::new("Arrange & Align")
+                .small()
+                .color(Color32::from_rgb(80, 80, 110)),
+        );
+        ui.add_space(2.0);
     }
 
     // ── Alignment (visible when 2+ nodes selected) ───────────────────────────
@@ -4440,6 +4539,26 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+    // ── Libraries & Export ───────────────────────────────────────────────────
+    if matches("Color Swatches")
+        || matches("Spot Colors")
+        || matches("Gradient Swatches")
+        || matches("Graphic Styles")
+        || matches("Width Profiles")
+        || matches("Export Profiles")
+        || matches("Libraries")
+        || matches("Export")
+    {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.label(
+            RichText::new("Libraries & Export")
+                .small()
+                .color(Color32::from_rgb(80, 80, 110)),
+        );
+        ui.add_space(2.0);
+    }
+
     // ── Color Swatches ────────────────────────────────────────────────────────
     if matches("Color Swatches") {
         egui::CollapsingHeader::new("Color Swatches")
@@ -4801,6 +4920,23 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+    // ── Analysis ─────────────────────────────────────────────────────────────
+    if matches("Distances")
+        || matches("Dimension Annotations")
+        || matches("Composition Analysis")
+        || matches("Document Grammar")
+        || matches("Analysis")
+    {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.label(
+            RichText::new("Analysis")
+                .small()
+                .color(Color32::from_rgb(80, 80, 110)),
+        );
+        ui.add_space(2.0);
+    }
+
     // ── Distances ─────────────────────────────────────────────────────────────
     if selection_count >= 2 && matches("Distances") {
         egui::CollapsingHeader::new("Distances")
@@ -5049,6 +5185,29 @@ pub fn draw_properties_panel(
                 }
             });
         ui.add_space(4.0);
+    }
+
+    // ── Document & Workflow ───────────────────────────────────────────────────
+    if matches("Actions")
+        || matches("History")
+        || matches("Event Triggers")
+        || matches("Workspaces")
+        || matches("Branches")
+        || matches("Variables")
+        || matches("Variable Binding")
+        || matches("Symbol Override")
+        || matches("Symbols")
+        || matches("Document")
+        || matches("Workflow")
+    {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.label(
+            RichText::new("Document & Workflow")
+                .small()
+                .color(Color32::from_rgb(80, 80, 110)),
+        );
+        ui.add_space(2.0);
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
