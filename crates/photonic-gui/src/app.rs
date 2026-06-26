@@ -1478,9 +1478,12 @@ impl PhotonicApp {
                     .id_salt("layers_scroll")
                     .max_height(150.0)
                     .show(ui, |ui| {
-                        if let Some(action) =
-                            panels::draw_layers_panel(ui, doc, &mut self.selected_layer_ids)
-                        {
+                        if let Some(action) = panels::draw_layers_panel(
+                            ui,
+                            doc,
+                            &mut self.selected_layer_ids,
+                            self.selected_id,
+                        ) {
                             self.pending_panel_actions.push(action);
                         }
                     });
@@ -2816,6 +2819,13 @@ impl PhotonicApp {
         // to &self/&mut self methods (build_shape_with_tool, do_group_selected).
         'actions: for action in std::mem::take(&mut self.pending_panel_actions) {
             match action {
+                PanelAction::SelectNode { node_id } => {
+                    if doc.nodes.contains_key(&node_id) {
+                        self.selected_id = Some(node_id);
+                        doc.selection = Selection::single(node_id);
+                        doc_modified = true;
+                    }
+                }
                 PanelAction::ReorderNode { node_id, op } => {
                     if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
                         let layer_len = doc
