@@ -2712,10 +2712,6 @@ impl PhotonicApp {
                 if !self.active_tool.is_shape_creator() {
                     return;
                 }
-                if ui.input(|i| i.modifiers.alt) {
-                    return;
-                }
-
                 if response.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
@@ -2740,6 +2736,9 @@ impl PhotonicApp {
                                 ey = snapped_ey;
                             }
                         }
+                        // Alt held: treat drag-start as center, grow shape symmetrically.
+                        let alt_held = ui.input(|i| i.modifiers.alt);
+                        let (sx, sy, ex, ey) = alt_center_drag(sx, sy, ex, ey, alt_held);
                         if (ex - sx).abs() > 2.0 || (ey - sy).abs() > 2.0 {
                             if let Some(path) = self.build_shape(sx, sy, ex, ey) {
                                 let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
@@ -2805,6 +2804,9 @@ impl PhotonicApp {
                         } else {
                             (ex_raw, ey_raw)
                         };
+                        // Alt held: treat drag-start as center, grow shape symmetrically.
+                        let alt_held = ui.input(|i| i.modifiers.alt);
+                        let (sx, sy, ex, ey) = alt_center_drag(sx, sy, ex, ey, alt_held);
                         if let Some(path) = self.build_shape(sx, sy, ex, ey) {
                             let pts = bez_to_screen_points(&path.to_bez_path(), view);
                             if pts.len() >= 2 {
@@ -12713,6 +12715,20 @@ fn gui_color_dist(a: photonic_core::color::Color, b: photonic_core::color::Color
 
 /// Snap the line endpoint `(ex, ey)` from start `(sx, sy)` to the nearest 45° angle.
 /// The distance from start to the snapped end is preserved.
+/// When `alt` is held the drag-start point is the **center** of the shape.
+/// Returns `(sx2, sy2, ex2, ey2)` such that `(sx, sy)` is the midpoint and the
+/// shape spans `(sx − dx, sy − dy) → (sx + dx, sy + dy)`.
+/// Without Alt the coordinates are returned unchanged.
+fn alt_center_drag(sx: f64, sy: f64, ex: f64, ey: f64, alt: bool) -> (f64, f64, f64, f64) {
+    if alt {
+        let dx = ex - sx;
+        let dy = ey - sy;
+        (sx - dx, sy - dy, sx + dx, sy + dy)
+    } else {
+        (sx, sy, ex, ey)
+    }
+}
+
 fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
     let dx = ex - sx;
     let dy = ey - sy;
@@ -13312,4 +13328,44 @@ fn gui_create_truchet_tiling_demo(
     );
 
     *doc_modified = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::alt_center_drag;
+
+    #[test]
+    fn alt_center_drag_no_alt_passthrough() {
+        // Without Alt the coordinates are unchanged.
+        let (sx2, sy2, ex2, ey2) = alt_center_drag(10.0, 20.0, 110.0, 70.0, false);
+        assert_eq!((sx2, sy2, ex2, ey2), (10.0, 20.0, 110.0, 70.0));
+    }
+
+    #[test]
+    fn alt_center_drag_symmetric_positive_delta() {
+        // Alt held: start is center (100, 150), current pointer is (200, 250).
+        // dx=100, dy=100 → shape spans (0, 50) → (200, 250).
+        let (sx2, sy2, ex2, ey2) = alt_center_drag(100.0, 150.0, 200.0, 250.0, true);
+        assert_eq!((sx2, sy2, ex2, ey2), (0.0, 50.0, 200.0, 250.0));
+    }
+
+    #[test]
+    fn alt_center_drag_symmetric_negative_delta() {
+        // Alt held: pointer dragged left/up from the start center.
+        // start=(100,100), end=(60,40) → dx=-40, dy=-60 → spans (140,160)→(60,40).
+        let (sx2, sy2, ex2, ey2) = alt_center_drag(100.0, 100.0, 60.0, 40.0, true);
+        assert_eq!((sx2, sy2, ex2, ey2), (140.0, 160.0, 60.0, 40.0));
+    }
+
+    #[test]
+    fn alt_center_drag_center_is_midpoint() {
+        // The midpoint of the returned rect should equal the original start point.
+        let sx = 50.0_f64;
+        let sy = 80.0_f64;
+        let ex = 90.0_f64;
+        let ey = 30.0_f64;
+        let (sx2, sy2, ex2, ey2) = alt_center_drag(sx, sy, ex, ey, true);
+        assert!((((sx2 + ex2) / 2.0) - sx).abs() < 1e-10);
+        assert!((((sy2 + ey2) / 2.0) - sy).abs() < 1e-10);
+    }
 }
