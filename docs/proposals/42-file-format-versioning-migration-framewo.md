@@ -1,6 +1,41 @@
-# File-Format Versioning, Migration Framework, and Package/Collect (#42) — Design Proposal
+# File-Format Versioning, Migration Framework, and Package/Collect (#42)
 
-> Status: design scaffold (not an implementation).
+> Status: **migration framework implemented.** Package/Collect is deferred — it
+> depends on linked-asset (ImageNode) support that does not exist yet (see
+> *Remaining work*).
+
+## What this PR implements
+
+- `crates/photonic-core/src/migration.rs`: the `FormatMigration` trait, an
+  ordered `migrations()` chain (empty at v1), `detect_version`, and
+  `run_migrations`/`run_migrations_with` that upgrade a raw `serde_json::Value`
+  from its stored version up to the target, bumping `format_version` per step.
+- `Document::from_json` now migrates at the JSON-tree level **before** struct
+  deserialization, instead of deserializing first and rejecting. Older documents
+  are upgraded through the chain; a document from a newer build loads leniently
+  (unknown fields dropped) within `migration::COMPAT_WINDOW` versions ahead and
+  is refused beyond it. v1 documents and documents predating the
+  `format_version` field load unchanged.
+- `docs/format-versions.md`: the versioning policy + changelog.
+- Unit tests cover chain ordering/version bumping, early stop, failure
+  reporting, the v1 no-op, round-trip, missing-version default, lenient
+  newer-version load, and far-future rejection.
+
+### How to add the next migration
+
+1. Bump `CURRENT_FORMAT_VERSION` in `document.rs`.
+2. Implement `FormatMigration` (N → N+1) and append it to `migration::migrations()`.
+3. Add a changelog entry to `docs/format-versions.md` and a golden-file test.
+
+### Remaining work (follow-up)
+
+- **Package / Collect**: gather linked assets/fonts into a folder and relink to
+  relative paths. Blocked on linked-asset support (`ImageNode::path`, issue #27),
+  so it is intentionally not implemented here.
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 

@@ -892,17 +892,39 @@ impl Document {
         serde_json::to_string_pretty(self)
     }
 
-    /// Deserialize from JSON string. Returns an error if the file's `format_version`
-    /// is newer than `CURRENT_FORMAT_VERSION` (i.e. saved by a future build).
+    /// Deserialize from a JSON string, migrating the raw document forward to
+    /// [`CURRENT_FORMAT_VERSION`] first.
+    ///
+    /// Older documents are upgraded through the [`crate::migration`] chain before
+    /// deserialization. A document saved by a *newer* build loads leniently
+    /// (unknown fields dropped) while within
+    /// [`crate::migration::COMPAT_WINDOW`]; beyond that window it is rejected.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        let doc: Self = serde_json::from_str(json)?;
-        if doc.format_version > CURRENT_FORMAT_VERSION {
-            return Err(serde::de::Error::custom(format!(
-                "unsupported format version {} (this build supports up to version {})",
-                doc.format_version, CURRENT_FORMAT_VERSION
-            )));
+        use crate::migration;
+
+        // Migrate at the JSON-tree level before struct deserialization so new
+        // fields can be filled and moved fields renamed without the in-memory
+        // types having to understand older layouts.
+        let mut value: serde_json::Value = serde_json::from_str(json)?;
+        let file_version = migration::detect_version(&value);
+
+        if file_version > CURRENT_FORMAT_VERSION {
+            if file_version - CURRENT_FORMAT_VERSION > migration::COMPAT_WINDOW {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported format version {} (this build supports up to {}, \
+                     compatibility window +{})",
+                    file_version,
+                    CURRENT_FORMAT_VERSION,
+                    migration::COMPAT_WINDOW
+                )));
+            }
+            // Within the window: fall through and load leniently.
+        } else {
+            migration::run_migrations(&mut value, CURRENT_FORMAT_VERSION)
+                .map_err(serde::de::Error::custom)?;
         }
-        Ok(doc)
+
+        serde_json::from_value(value)
     }
 }
 
@@ -912,4 +934,52 @@ pub struct Page {
     pub id: Uuid,
     pub name: String,
     pub document: Document,
+}
+
+#[cfg(test)]
+mod format_version_tests {
+    use super::*;
+
+    #[test]
+    fn current_version_round_trips() {
+        let doc = Document::new("v1", 100.0, 100.0);
+        let json = doc.to_json().unwrap();
+        let loaded = Document::from_json(&json).unwrap();
+        assert_eq!(loaded.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(loaded.name, "v1");
+    }
+
+    #[test]
+    fn missing_version_defaults_and_loads() {
+        // A pre-versioning document: a real document with format_version removed.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Document::new("old", 10.0, 10.0).to_json().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("format_version");
+        assert!(value.get("format_version").is_none());
+        let loaded = Document::from_json(&value.to_string()).unwrap();
+        assert_eq!(loaded.name, "old");
+        assert_eq!(loaded.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn slightly_newer_version_loads_leniently() {
+        // One version ahead with an unknown field — within COMPAT_WINDOW.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Document::new("future", 10.0, 10.0).to_json().unwrap()).unwrap();
+        value["format_version"] =
+            serde_json::Value::from(CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW);
+        value["a_field_from_the_future"] = serde_json::Value::from("ignored");
+        let loaded = Document::from_json(&value.to_string()).unwrap();
+        assert_eq!(loaded.name, "future");
+    }
+
+    #[test]
+    fn far_future_version_is_rejected() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&Document::new("toonew", 10.0, 10.0).to_json().unwrap()).unwrap();
+        value["format_version"] = serde_json::Value::from(
+            CURRENT_FORMAT_VERSION + crate::migration::COMPAT_WINDOW + 1,
+        );
+        assert!(Document::from_json(&value.to_string()).is_err());
+    }
 }

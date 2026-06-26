@@ -6,6 +6,7 @@ pub mod export;
 pub mod history;
 pub mod import;
 pub mod layer;
+pub mod migration;
 pub mod node;
 pub mod ops;
 pub mod path;
