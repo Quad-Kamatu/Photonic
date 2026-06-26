@@ -279,6 +279,9 @@ pub struct PhotonicApp {
 
     /// Transforms of all selected nodes captured at the start of a multi-node resize.
     resize_multi_origins: Vec<(NodeId, [f64; 6])>,
+    /// Full snapshots of the nodes captured at the start of a resize drag, used
+    /// to record a single undoable UpdateNode batch on release.
+    resize_drag_origins: Vec<SceneNode>,
 
     /// Screen-space position where a marquee (drag-select) began; None when inactive.
     marquee_start: Option<egui::Pos2>,
@@ -569,6 +572,7 @@ impl Default for PhotonicApp {
             resize_origin_transform: None,
             resize_origin_font_size: None,
             resize_multi_origins: Vec::new(),
+            resize_drag_origins: Vec::new(),
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),
@@ -9466,6 +9470,20 @@ impl PhotonicApp {
                 if let Some(handle) = resize_hit {
                     self.resizing = Some(handle);
                     self.resize_origin_bounds = effective_bounds;
+                    // Snapshot the nodes being resized so the drag can be recorded
+                    // as a single undoable history step on release (#5).
+                    self.resize_drag_origins = if sel_ids.len() > 1 {
+                        sel_ids
+                            .iter()
+                            .filter_map(|id| doc.nodes.get(id).cloned())
+                            .collect()
+                    } else {
+                        self.selected_id
+                            .and_then(|id| doc.nodes.get(&id))
+                            .cloned()
+                            .into_iter()
+                            .collect()
+                    };
                     if sel_ids.len() > 1 {
                         // Multi-node resize: capture every selected node's transform
                         self.resize_multi_origins = sel_ids
@@ -9671,6 +9689,34 @@ impl PhotonicApp {
             self.resize_origin_transform = None;
             self.resize_origin_font_size = None;
             self.resize_multi_origins.clear();
+
+            // Record the completed resize as a single undoable history step (#5).
+            // The doc already holds the resized state, so re-applying UpdateNode
+            // is a no-op; it just captures the inverse for undo/redo.
+            if !self.resize_drag_origins.is_empty() {
+                let cmds: Vec<Command> = std::mem::take(&mut self.resize_drag_origins)
+                    .into_iter()
+                    .filter_map(|old| {
+                        doc.nodes.get(&old.id).and_then(|cur| {
+                            let text_changed = matches!(
+                                (&cur.kind, &old.kind),
+                                (SceneNodeKind::Text(a), SceneNodeKind::Text(b))
+                                    if a.font_size != b.font_size
+                            );
+                            (cur.transform.matrix != old.transform.matrix || text_changed).then(
+                                || Command::UpdateNode {
+                                    old,
+                                    new: cur.clone(),
+                                },
+                            )
+                        })
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
 
             // Complete marquee selection if one was in progress
             if let Some(start_pos) = self.marquee_start.take() {
