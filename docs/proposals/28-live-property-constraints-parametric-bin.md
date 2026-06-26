@@ -1,6 +1,41 @@
-# Live property constraints (parametric binding between nodes) (#28) — Design Proposal
+# Live property constraints (parametric binding between nodes) (#28)
 
-> Status: design scaffold (not an implementation).
+> Status: **engine + MCP tools implemented.** The Properties-panel lock UI is
+> deferred (GUI-only), and `width`/`height` as constraint *targets* are
+> intentionally reference-only for now (see *Remaining work*).
+
+## What this PR implements
+
+- **Model**: `PropertyConstraint { id, target_node_id, target_property, expression }`
+  + `Document::constraints` (`document.rs`, `#[serde(default)]` — round-trips).
+- **Engine** (`ops/constraints.rs`): a self-contained expression layer — a
+  scanner for `nodes['<id-or-name>'].<prop>` references and a recursive-descent
+  arithmetic evaluator (`+ - * /`, parens, unary minus, no external crate).
+  `evaluate_constraints` builds the dependency graph, topologically sorts it
+  (Kahn), detects cycles (`ConstraintError::Cycle`), and applies each result to
+  its target. Referenceable properties: `x`, `y`, `width`, `height`, `opacity`,
+  `font_size`. Settable targets: `x`, `y`, `opacity`, `font_size`.
+- **Reactive hook** (`history.rs`): constraints are re-evaluated after every
+  `execute`/`undo`/`redo`, so the document never shows stale derived values.
+  Errors are swallowed at the render path (last valid values kept); the MCP
+  layer surfaces them explicitly.
+- **MCP tools**: `set_constraint` (validates target + rolls back on cycle),
+  `list_constraints` (with current evaluated values), `remove_constraint`.
+- **Tests** (`ops/constraints.rs`): arithmetic evaluator, reference scanner,
+  single + chained propagation (out-of-order, exercising the topo sort), cycle
+  detection, and unsupported-target rejection.
+
+### Remaining work (follow-up)
+
+- Properties-panel lock indicator + inline expression editor (GUI).
+- `width`/`height` as settable targets — needs non-uniform geometry scaling with
+  a defined anchor; deliberately reference-only here (matches the proposal's own
+  "probably not" open question). The acceptance example is demonstrated with
+  position (`x`) instead.
+
+---
+
+> Original design scaffold follows.
 
 ## Summary
 

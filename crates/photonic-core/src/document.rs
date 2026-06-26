@@ -280,6 +280,40 @@ impl WidthProfile {
     }
 }
 
+// ─── Property Constraints ────────────────────────────────────────────────────
+
+/// A live parametric binding: `target_node_id.target_property = expression`.
+///
+/// The expression is evaluated over other nodes' properties (see
+/// [`crate::ops::constraints`]) and re-applied after every document mutation, so
+/// the target stays derived from its inputs. Supported properties: `x`, `y`,
+/// `width`, `height`, `opacity`, `font_size` (referenceable); `x`, `y`,
+/// `opacity`, `font_size` are also settable as targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyConstraint {
+    pub id: Uuid,
+    pub target_node_id: NodeId,
+    /// One of: `x`, `y`, `opacity`, `font_size`.
+    pub target_property: String,
+    /// Arithmetic expression; may reference `nodes['<id-or-name>'].<prop>`.
+    pub expression: String,
+}
+
+impl PropertyConstraint {
+    pub fn new(
+        target_node_id: NodeId,
+        target_property: impl Into<String>,
+        expression: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            target_node_id,
+            target_property: target_property.into(),
+            expression: expression.into(),
+        }
+    }
+}
+
 // ─── Spot Colors ─────────────────────────────────────────────────────────────
 
 // ─── Actions (Macro Sequences) ───────────────────────────────────────────────
@@ -496,6 +530,10 @@ pub struct Document {
     /// Named variable-width stroke profiles.
     #[serde(default)]
     pub width_profiles: Vec<WidthProfile>,
+    /// Live property constraints — parametric bindings of a node property to an
+    /// expression over other nodes' properties. Re-evaluated after every mutation.
+    #[serde(default)]
+    pub constraints: Vec<PropertyConstraint>,
     /// Named design grammar rules — constraints the document must satisfy.
     #[serde(default)]
     pub grammar_rules: Vec<GrammarRule>,
@@ -643,6 +681,7 @@ impl Document {
             spot_colors: Vec::new(),
             graphic_styles: Vec::new(),
             width_profiles: Vec::new(),
+            constraints: Vec::new(),
             grammar_rules: Vec::new(),
             action_sets: Vec::new(),
             bleed_mm: 0.0,

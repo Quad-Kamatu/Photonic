@@ -2084,6 +2084,101 @@ pub async fn delete_width_profile(state: &AppState, args: DeleteWidthProfileArgs
     }
 }
 
+// ─── Property Constraints ──────────────────────────────────────────────────────
+
+/// Create a live property constraint binding a node property to an expression.
+pub async fn set_constraint(
+    state: &AppState,
+    args: crate::protocol::SetConstraintArgs,
+) -> ToolResult {
+    tracing::debug!("tool: set_constraint");
+    use photonic_core::document::PropertyConstraint;
+    use photonic_core::ops::constraints::evaluate_constraints;
+
+    const SETTABLE: [&str; 4] = ["x", "y", "opacity", "font_size"];
+    if !SETTABLE.contains(&args.property.as_str()) {
+        return ToolResult::error(format!(
+            "Property '{}' is not a settable constraint target (use one of {SETTABLE:?}).",
+            args.property
+        ));
+    }
+
+    let mut doc = state.document.lock().await;
+    let node_id = uuid::Uuid::parse_str(&args.node_id)
+        .ok()
+        .or_else(|| doc.find_node_by_name(&args.node_id).map(|n| n.id));
+    let node_id = match node_id {
+        Some(id) if doc.nodes.contains_key(&id) => id,
+        _ => return ToolResult::error(format!("Node '{}' not found.", args.node_id)),
+    };
+
+    let constraint = PropertyConstraint::new(node_id, args.property.clone(), args.expression.clone());
+    let constraint_id = constraint.id;
+    doc.constraints.push(constraint);
+
+    // Validate by evaluating; roll back on failure (e.g. a cycle).
+    if let Err(e) = evaluate_constraints(&mut doc) {
+        doc.constraints.retain(|c| c.id != constraint_id);
+        let _ = evaluate_constraints(&mut doc);
+        return ToolResult::error(format!("Constraint rejected: {e}"));
+    }
+
+    let current = photonic_core::ops::constraints::get_property(&doc, node_id, &args.property);
+    ToolResult::text(format!(
+        "Constraint set: {}.{} = {}{}.",
+        args.node_id,
+        args.property,
+        args.expression,
+        current
+            .map(|v| format!(" (now {v:.3})"))
+            .unwrap_or_default()
+    ))
+    .with_data(serde_json::json!({ "constraint_id": constraint_id.to_string() }))
+}
+
+/// List all property constraints with their current evaluated values.
+pub async fn list_constraints(state: &AppState) -> ToolResult {
+    tracing::debug!("tool: list_constraints");
+    let doc = state.document.lock().await;
+    let items: Vec<serde_json::Value> = doc
+        .constraints
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id.to_string(),
+                "node_id": c.target_node_id.to_string(),
+                "property": c.target_property,
+                "expression": c.expression,
+                "current_value": photonic_core::ops::constraints::get_property(
+                    &doc, c.target_node_id, &c.target_property
+                ),
+            })
+        })
+        .collect();
+    ToolResult::text(format!("{} constraint(s).", items.len()))
+        .with_data(serde_json::json!({ "constraints": items }))
+}
+
+/// Remove a property constraint by id.
+pub async fn remove_constraint(
+    state: &AppState,
+    args: crate::protocol::RemoveConstraintArgs,
+) -> ToolResult {
+    tracing::debug!("tool: remove_constraint");
+    let id = match uuid::Uuid::parse_str(&args.constraint_id) {
+        Ok(id) => id,
+        Err(_) => return ToolResult::error("Invalid constraint id."),
+    };
+    let mut doc = state.document.lock().await;
+    let before = doc.constraints.len();
+    doc.constraints.retain(|c| c.id != id);
+    if doc.constraints.len() < before {
+        ToolResult::text(format!("Removed constraint {id}."))
+    } else {
+        ToolResult::error(format!("No constraint with id {id}."))
+    }
+}
+
 // ─── Document Variables ───────────────────────────────────────────────────────
 
 /// Define (or update) a named document variable.

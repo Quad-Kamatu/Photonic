@@ -1482,6 +1482,23 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::document::delete_width_profile(state, a).await,
             ))
         }
+        "set_constraint" => {
+            let a: crate::protocol::SetConstraintArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::set_constraint(state, a).await,
+            ))
+        }
+        "list_constraints" => Ok(ToolOutput::readonly(
+            handlers::document::list_constraints(state).await,
+        )),
+        "remove_constraint" => {
+            let a: crate::protocol::RemoveConstraintArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::remove_constraint(state, a).await,
+            ))
+        }
         "define_symbol" => {
             let a: DefineSymbolArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(
@@ -5198,6 +5215,35 @@ fn tool_list() -> Value {
                     "name": { "type": "string", "description": "Name of the profile to delete." }
                 },
                 "required": ["name"]
+            }
+        },
+        {
+            "name": "set_constraint",
+            "description": "Create a live property constraint binding a node property to an arithmetic expression over other nodes' properties (e.g. 'nodes[\\'logo\\'].x + 20'). Re-evaluated after every edit. Target property must be one of x, y, opacity, font_size. Cycles are rejected.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string", "description": "Target node UUID or name." },
+                    "property": { "type": "string", "enum": ["x", "y", "opacity", "font_size"], "description": "Target property to drive." },
+                    "expression": { "type": "string", "description": "Arithmetic expression; may reference nodes['<id-or-name>'].<prop>." }
+                },
+                "required": ["node_id", "property", "expression"]
+            }
+        },
+        {
+            "name": "list_constraints",
+            "description": "List all live property constraints with their current evaluated values.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "remove_constraint",
+            "description": "Remove a property constraint by its id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "constraint_id": { "type": "string", "description": "UUID of the constraint to remove." }
+                },
+                "required": ["constraint_id"]
             }
         },
         {

@@ -1028,6 +1028,7 @@ impl CommandHistory {
     pub fn execute(&mut self, cmd: Command, doc: &mut Document) {
         let desc = cmd.description();
         cmd.apply(doc);
+        reevaluate_constraints(doc);
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
         // Trim to max depth
@@ -1067,6 +1068,7 @@ impl CommandHistory {
         if let Some(cmd) = self.undo_stack.pop() {
             if let Some(inv) = cmd.inverse(doc) {
                 inv.apply(doc);
+                reevaluate_constraints(doc);
                 self.redo_stack.push(cmd);
                 return true;
             } else {
@@ -1081,6 +1083,7 @@ impl CommandHistory {
     pub fn redo(&mut self, doc: &mut Document) -> bool {
         if let Some(cmd) = self.redo_stack.pop() {
             cmd.apply(doc);
+            reevaluate_constraints(doc);
             self.undo_stack.push(cmd);
             true
         } else {
@@ -1265,5 +1268,15 @@ fn collect_node_olds(cmd: &Command, node_id: NodeId, out: &mut Vec<SceneNode>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Re-evaluate live property constraints after a mutation. Errors (cycles,
+/// parse failures, unsupported targets) are intentionally swallowed here so the
+/// document stays usable and constrained properties keep their last valid
+/// values; the MCP layer surfaces errors explicitly when a constraint is created.
+fn reevaluate_constraints(doc: &mut Document) {
+    if !doc.constraints.is_empty() {
+        let _ = crate::ops::constraints::evaluate_constraints(doc);
     }
 }
