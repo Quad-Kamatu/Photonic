@@ -46,6 +46,8 @@ pub enum EyedropperTarget {
 pub enum PanelAction {
     /// Reorder a node in z-order.
     ReorderNode { node_id: NodeId, op: ZOrderOp },
+    /// Select a single node (e.g. clicked in the Layers tree).
+    SelectNode { node_id: NodeId },
     /// Run a boolean operation on the two currently selected nodes.
     BooleanOp(BooleanOp),
     /// Restore the document to a named checkpoint.
@@ -892,10 +894,99 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
 }
 
 /// Draw the left layers panel. Returns an optional action triggered by context menus.
+/// Recursively render one node row in the Layers tree. Groups get a disclosure
+/// header that expands to their children at any depth; every row is selectable
+/// (emits `SelectNode`) and carries the z-order / collect context menu.
+fn draw_layer_node_row(
+    ui: &mut Ui,
+    doc: &Document,
+    node_id: NodeId,
+    selected_id: Option<NodeId>,
+    action: &mut Option<PanelAction>,
+) {
+    let Some(node) = doc.nodes.get(&node_id) else {
+        return;
+    };
+    let is_selected = selected_id == Some(node_id);
+
+    let response = match &node.kind {
+        SceneNodeKind::Group(g) => {
+            let label = RichText::new(node.name.clone()).color(if is_selected {
+                Color32::from_rgb(184, 164, 255)
+            } else {
+                Color32::from_rgb(144, 119, 224)
+            });
+            let header = egui::CollapsingHeader::new(label)
+                .id_salt(node_id)
+                .default_open(true)
+                .show(ui, |ui| {
+                    let children: Vec<NodeId> = g.children.iter().rev().copied().collect();
+                    if children.is_empty() {
+                        ui.label(RichText::new("(empty group)").weak());
+                    }
+                    for child_id in children {
+                        draw_layer_node_row(ui, doc, child_id, selected_id, action);
+                    }
+                });
+            let hr = header.header_response;
+            if hr.clicked() {
+                *action = Some(PanelAction::SelectNode { node_id });
+            }
+            hr
+        }
+        _ => {
+            let resp = ui.selectable_label(is_selected, format!("• {}", node.name));
+            if resp.clicked() {
+                *action = Some(PanelAction::SelectNode { node_id });
+            }
+            resp
+        }
+    };
+
+    response.context_menu(|ui| {
+        if ui.button("Bring to Front").clicked() {
+            *action = Some(PanelAction::ReorderNode {
+                node_id,
+                op: ZOrderOp::BringToFront,
+            });
+            ui.close_menu();
+        }
+        if ui.button("Bring Forward").clicked() {
+            *action = Some(PanelAction::ReorderNode {
+                node_id,
+                op: ZOrderOp::BringForward,
+            });
+            ui.close_menu();
+        }
+        if ui.button("Send Backward").clicked() {
+            *action = Some(PanelAction::ReorderNode {
+                node_id,
+                op: ZOrderOp::SendBackward,
+            });
+            ui.close_menu();
+        }
+        if ui.button("Send to Back").clicked() {
+            *action = Some(PanelAction::ReorderNode {
+                node_id,
+                op: ZOrderOp::SendToBack,
+            });
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("Collect in New Layer").clicked() {
+            *action = Some(PanelAction::CollectInNewLayer {
+                node_ids: vec![node_id],
+            });
+            ui.close_menu();
+        }
+    });
+}
+
 pub fn draw_layers_panel(
     ui: &mut Ui,
     doc: &Document,
     selected_layer_ids: &mut Vec<LayerId>,
+    selected_id: Option<NodeId>,
 ) -> Option<PanelAction> {
     let mut action: Option<PanelAction> = None;
 
@@ -1005,71 +1096,12 @@ pub fn draw_layers_panel(
                 .id_salt(lid)
                 .default_open(true)
                 .show(ui, |ui| {
-                    let node_ids: Vec<_> = layer.node_ids.iter().rev().collect();
+                    let node_ids: Vec<NodeId> = layer.node_ids.iter().rev().copied().collect();
                     if node_ids.is_empty() {
                         ui.label(RichText::new("  (empty)").weak());
                     }
                     for node_id in node_ids {
-                        if let Some(node) = doc.nodes.get(node_id) {
-                            let nid = *node_id;
-                            let response = match &node.kind {
-                                SceneNodeKind::Group(g) => {
-                                    let header = egui::CollapsingHeader::new(
-                                        RichText::new(format!("  ▸ {}", node.name))
-                                            .color(Color32::from_rgb(144, 119, 224)),
-                                    )
-                                    .id_salt(nid)
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        for child_id in g.children.iter().rev() {
-                                            if let Some(child) = doc.nodes.get(child_id) {
-                                                ui.label(format!("    • {}", child.name));
-                                            }
-                                        }
-                                    });
-                                    header.header_response
-                                }
-                                _ => ui.label(format!("  • {}", node.name)),
-                            };
-
-                            response.context_menu(|ui| {
-                                if ui.button("Bring to Front").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::BringToFront,
-                                    });
-                                    ui.close_menu();
-                                }
-                                if ui.button("Bring Forward").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::BringForward,
-                                    });
-                                    ui.close_menu();
-                                }
-                                if ui.button("Send Backward").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::SendBackward,
-                                    });
-                                    ui.close_menu();
-                                }
-                                if ui.button("Send to Back").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::SendToBack,
-                                    });
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                if ui.button("Collect in New Layer").clicked() {
-                                    action = Some(PanelAction::CollectInNewLayer {
-                                        node_ids: vec![nid],
-                                    });
-                                    ui.close_menu();
-                                }
-                            });
-                        }
+                        draw_layer_node_row(ui, doc, node_id, selected_id, &mut action);
                     }
                 });
         });
