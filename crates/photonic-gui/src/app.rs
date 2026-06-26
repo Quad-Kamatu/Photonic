@@ -7,6 +7,7 @@ use photonic_core::{
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -417,6 +418,11 @@ pub struct PhotonicApp {
     /// None = normal editing mode.
     pub isolated_group: Option<NodeId>,
 
+    // ── Layers panel group expansion ─────────────────────────────────────────
+    /// Set of group node IDs that are currently expanded in the Layers panel.
+    /// Groups absent from this set are shown collapsed (children hidden).
+    pub expanded_groups: HashSet<NodeId>,
+
     // ── Pencil tool state ────────────────────────────────────────────────────
     /// Canvas-space points collected during an active pencil drag.
     pencil_points: Vec<(f64, f64)>,
@@ -699,6 +705,7 @@ impl Default for PhotonicApp {
             outline_mode: false,
             guides_visible: true,
             isolated_group: None,
+            expanded_groups: HashSet::new(),
             pencil_points: Vec::new(),
             lasso_points: Vec::new(),
             magic_wand_attribute: SelectSameAttr::FillColor,
@@ -1495,9 +1502,12 @@ impl PhotonicApp {
                     .id_salt("layers_scroll")
                     .max_height(150.0)
                     .show(ui, |ui| {
-                        if let Some(action) =
-                            panels::draw_layers_panel(ui, doc, &mut self.selected_layer_ids)
-                        {
+                        if let Some(action) = panels::draw_layers_panel(
+                            ui,
+                            doc,
+                            &mut self.selected_layer_ids,
+                            &mut self.expanded_groups,
+                        ) {
                             self.pending_panel_actions.push(action);
                         }
                     });

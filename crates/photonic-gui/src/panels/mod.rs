@@ -11,6 +11,7 @@ use photonic_core::{
     CheckpointInfo, Color, Document, Fill, GaussianGlow, GlowEffect, PrimitiveKind, SceneNode,
     SceneNodeKind,
 };
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::radial_wheel::WheelAction;
@@ -735,6 +736,33 @@ pub enum ZOrderOp {
     BringForward,
 }
 
+/// Flattens a node list (in bottom-to-top storage order) into `(NodeId, depth)`
+/// display rows for the layers panel, recursively expanding groups whose IDs
+/// appear in `expanded_groups`. Children of a collapsed group are omitted.
+///
+/// This pure function is the canonical ordering used by `draw_node_row`; it is
+/// exposed here so the behaviour can be unit-tested without any egui context.
+pub fn collect_node_rows(
+    node_ids: &[NodeId],
+    nodes: &HashMap<NodeId, SceneNode>,
+    expanded_groups: &HashSet<NodeId>,
+    depth: u32,
+    out: &mut Vec<(NodeId, u32)>,
+) {
+    // Storage order is bottom-to-top; reverse to get top-to-bottom display order.
+    for node_id in node_ids.iter().rev() {
+        out.push((*node_id, depth));
+        if let Some(node) = nodes.get(node_id) {
+            if let SceneNodeKind::Group(g) = &node.kind {
+                if expanded_groups.contains(node_id) {
+                    // g.children is also bottom-to-top storage order.
+                    collect_node_rows(&g.children, nodes, expanded_groups, depth + 1, out);
+                }
+            }
+        }
+    }
+}
+
 /// Draw the horizontal toolbar (logo, doc name, zoom — no tool buttons).
 pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64) {
     ui.horizontal(|ui| {
@@ -891,11 +919,158 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
     chosen
 }
 
+/// Renders a single node row inside the layers panel and, if the node is a
+/// group that has been expanded, its children indented beneath it.
+///
+/// Returns any `PanelAction` produced by the row (visibility toggle, context
+/// menu item). Only the first action produced per frame is returned.
+fn draw_node_row(
+    ui: &mut Ui,
+    nid: NodeId,
+    node: &SceneNode,
+    doc: &Document,
+    depth: u32,
+    expanded_groups: &mut HashSet<NodeId>,
+) -> Option<PanelAction> {
+    let is_group = matches!(&node.kind, SceneNodeKind::Group(_));
+    // Snapshot the expanded state before any potential toggle this frame.
+    let was_expanded = is_group && expanded_groups.contains(&nid);
+
+    // Build the horizontal row and collect per-widget booleans so that we do
+    // not need to capture mutable references inside the egui closure.
+    let horiz = ui.horizontal(|ui| {
+        // Depth-based leading indent for nested children.
+        if depth > 0 {
+            ui.add_space(depth as f32 * 14.0);
+        }
+
+        // Expand/collapse chevron for groups; alignment spacer for leaf nodes.
+        let toggle_clicked = if is_group {
+            let icon = if was_expanded { "▼" } else { "▶" };
+            ui.small_button(icon)
+                .on_hover_text(if was_expanded {
+                    "Collapse group"
+                } else {
+                    "Expand group"
+                })
+                .clicked()
+        } else {
+            ui.add_space(18.0);
+            false
+        };
+
+        // Compact visibility eye icon.
+        let eye = if node.visible { ph::EYE } else { ph::EYE_SLASH };
+        let eye_tip = if node.visible {
+            "Hide node"
+        } else {
+            "Show node"
+        };
+        let eye_clicked = ui.small_button(eye).on_hover_text(eye_tip).clicked();
+
+        // Name label: purple for groups, dimmed when hidden.
+        let name_rt = if is_group {
+            RichText::new(node.name.as_str()).color(Color32::from_rgb(144, 119, 224))
+        } else if !node.visible {
+            RichText::new(node.name.as_str()).weak()
+        } else {
+            RichText::new(node.name.as_str())
+        };
+        ui.label(name_rt);
+
+        (toggle_clicked, eye_clicked)
+    });
+
+    let (toggle_clicked, eye_clicked) = horiz.inner;
+    let row_response = horiz.response;
+
+    // Apply the expand/collapse toggle immediately so children appear on the
+    // same frame as the click.
+    if toggle_clicked {
+        if was_expanded {
+            expanded_groups.remove(&nid);
+        } else {
+            expanded_groups.insert(nid);
+        }
+    }
+
+    let mut action: Option<PanelAction> = None;
+
+    if eye_clicked {
+        action = Some(PanelAction::SetVisible {
+            node_id: nid,
+            visible: !node.visible,
+        });
+    }
+
+    // Right-click context menu on the row (same options as before).
+    row_response.context_menu(|ui| {
+        if ui.button("Bring to Front").clicked() {
+            action = Some(PanelAction::ReorderNode {
+                node_id: nid,
+                op: ZOrderOp::BringToFront,
+            });
+            ui.close_menu();
+        }
+        if ui.button("Bring Forward").clicked() {
+            action = Some(PanelAction::ReorderNode {
+                node_id: nid,
+                op: ZOrderOp::BringForward,
+            });
+            ui.close_menu();
+        }
+        if ui.button("Send Backward").clicked() {
+            action = Some(PanelAction::ReorderNode {
+                node_id: nid,
+                op: ZOrderOp::SendBackward,
+            });
+            ui.close_menu();
+        }
+        if ui.button("Send to Back").clicked() {
+            action = Some(PanelAction::ReorderNode {
+                node_id: nid,
+                op: ZOrderOp::SendToBack,
+            });
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("Collect in New Layer").clicked() {
+            action = Some(PanelAction::CollectInNewLayer {
+                node_ids: vec![nid],
+            });
+            ui.close_menu();
+        }
+    });
+
+    // Recursively render children when the group is (now) expanded.
+    if let SceneNodeKind::Group(g) = &node.kind {
+        if expanded_groups.contains(&nid) {
+            // Collect child IDs first to avoid holding a borrow on `g.children`
+            // across the recursive `draw_node_row` calls.
+            let children: Vec<NodeId> = g.children.iter().rev().copied().collect();
+            for child_id in children {
+                if let Some(child_node) = doc.nodes.get(&child_id) {
+                    if let Some(child_action) =
+                        draw_node_row(ui, child_id, child_node, doc, depth + 1, expanded_groups)
+                    {
+                        if action.is_none() {
+                            action = Some(child_action);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    action
+}
+
 /// Draw the left layers panel. Returns an optional action triggered by context menus.
 pub fn draw_layers_panel(
     ui: &mut Ui,
     doc: &Document,
     selected_layer_ids: &mut Vec<LayerId>,
+    expanded_groups: &mut HashSet<NodeId>,
 ) -> Option<PanelAction> {
     let mut action: Option<PanelAction> = None;
 
@@ -1012,63 +1187,13 @@ pub fn draw_layers_panel(
                     for node_id in node_ids {
                         if let Some(node) = doc.nodes.get(node_id) {
                             let nid = *node_id;
-                            let response = match &node.kind {
-                                SceneNodeKind::Group(g) => {
-                                    let header = egui::CollapsingHeader::new(
-                                        RichText::new(format!("  ▸ {}", node.name))
-                                            .color(Color32::from_rgb(144, 119, 224)),
-                                    )
-                                    .id_salt(nid)
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        for child_id in g.children.iter().rev() {
-                                            if let Some(child) = doc.nodes.get(child_id) {
-                                                ui.label(format!("    • {}", child.name));
-                                            }
-                                        }
-                                    });
-                                    header.header_response
+                            if let Some(node_action) =
+                                draw_node_row(ui, nid, node, doc, 0, expanded_groups)
+                            {
+                                if action.is_none() {
+                                    action = Some(node_action);
                                 }
-                                _ => ui.label(format!("  • {}", node.name)),
-                            };
-
-                            response.context_menu(|ui| {
-                                if ui.button("Bring to Front").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::BringToFront,
-                                    });
-                                    ui.close_menu();
-                                }
-                                if ui.button("Bring Forward").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::BringForward,
-                                    });
-                                    ui.close_menu();
-                                }
-                                if ui.button("Send Backward").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::SendBackward,
-                                    });
-                                    ui.close_menu();
-                                }
-                                if ui.button("Send to Back").clicked() {
-                                    action = Some(PanelAction::ReorderNode {
-                                        node_id: nid,
-                                        op: ZOrderOp::SendToBack,
-                                    });
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                if ui.button("Collect in New Layer").clicked() {
-                                    action = Some(PanelAction::CollectInNewLayer {
-                                        node_ids: vec![nid],
-                                    });
-                                    ui.close_menu();
-                                }
-                            });
+                            }
                         }
                     }
                 });
@@ -6794,4 +6919,163 @@ pub fn draw_audit_panel(
                         });
                 });
         });
+}
+
+// ─── Unit tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::collect_node_rows;
+    use photonic_core::{
+        layer::LayerId,
+        node::{GroupNode, NodeId, PathNode, SceneNode, SceneNodeKind},
+        PathData,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    /// Helper: create a minimal `SceneNode` wrapping a `PathNode`.
+    fn make_path(layer_id: LayerId) -> SceneNode {
+        SceneNode::new(
+            "path",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::default())),
+        )
+    }
+
+    /// Helper: create a `SceneNode` wrapping a `GroupNode` with given children.
+    fn make_group(layer_id: LayerId, children: Vec<NodeId>) -> SceneNode {
+        let mut g = GroupNode::new();
+        g.children = children;
+        SceneNode::new("group", layer_id, SceneNodeKind::Group(g))
+    }
+
+    #[test]
+    fn empty_layer_produces_no_rows() {
+        let nodes: HashMap<NodeId, SceneNode> = HashMap::new();
+        let expanded: HashSet<NodeId> = HashSet::new();
+        let mut out = Vec::new();
+        collect_node_rows(&[], &nodes, &expanded, 0, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn flat_nodes_displayed_top_to_bottom() {
+        // layer.node_ids stores bottom-to-top: [bottom, top]
+        let layer_id = uuid::Uuid::new_v4();
+        let a = make_path(layer_id); // will be bottom
+        let b = make_path(layer_id); // will be top
+        let id_a = a.id;
+        let id_b = b.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(id_a, a);
+        nodes.insert(id_b, b);
+
+        let expanded: HashSet<NodeId> = HashSet::new();
+        let mut out = Vec::new();
+        // Stored bottom-to-top: [id_a (bottom), id_b (top)]
+        collect_node_rows(&[id_a, id_b], &nodes, &expanded, 0, &mut out);
+
+        // Display order should be top first: id_b then id_a, both at depth 0.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (id_b, 0));
+        assert_eq!(out[1], (id_a, 0));
+    }
+
+    #[test]
+    fn collapsed_group_hides_children() {
+        let layer_id = uuid::Uuid::new_v4();
+        let child = make_path(layer_id);
+        let child_id = child.id;
+        let group = make_group(layer_id, vec![child_id]);
+        let group_id = group.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(child_id, child);
+        nodes.insert(group_id, group);
+
+        // Group is NOT in expanded_groups → children should be hidden.
+        let expanded: HashSet<NodeId> = HashSet::new();
+        let mut out = Vec::new();
+        collect_node_rows(&[group_id], &nodes, &expanded, 0, &mut out);
+
+        assert_eq!(out.len(), 1, "collapsed group shows only the group row");
+        assert_eq!(out[0], (group_id, 0));
+    }
+
+    #[test]
+    fn expanded_group_shows_children_at_depth_1() {
+        let layer_id = uuid::Uuid::new_v4();
+        let child = make_path(layer_id);
+        let child_id = child.id;
+        let group = make_group(layer_id, vec![child_id]);
+        let group_id = group.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(child_id, child);
+        nodes.insert(group_id, group);
+
+        let mut expanded = HashSet::new();
+        expanded.insert(group_id);
+
+        let mut out = Vec::new();
+        collect_node_rows(&[group_id], &nodes, &expanded, 0, &mut out);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (group_id, 0), "group row at depth 0");
+        assert_eq!(out[1], (child_id, 1), "child row at depth 1");
+    }
+
+    #[test]
+    fn nested_groups_both_expanded() {
+        // Outer group → inner group → leaf
+        let layer_id = uuid::Uuid::new_v4();
+        let leaf = make_path(layer_id);
+        let leaf_id = leaf.id;
+        let inner = make_group(layer_id, vec![leaf_id]);
+        let inner_id = inner.id;
+        let outer = make_group(layer_id, vec![inner_id]);
+        let outer_id = outer.id;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(leaf_id, leaf);
+        nodes.insert(inner_id, inner);
+        nodes.insert(outer_id, outer);
+
+        let mut expanded = HashSet::new();
+        expanded.insert(outer_id);
+        expanded.insert(inner_id);
+
+        let mut out = Vec::new();
+        collect_node_rows(&[outer_id], &nodes, &expanded, 0, &mut out);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], (outer_id, 0));
+        assert_eq!(out[1], (inner_id, 1));
+        assert_eq!(out[2], (leaf_id, 2));
+    }
+
+    #[test]
+    fn nested_groups_outer_only_expanded() {
+        // Outer expanded, inner collapsed → leaf not shown.
+        let layer_id = uuid::Uuid::new_v4();
+        let leaf = make_path(layer_id);
+        let leaf_id = leaf.id;
+        let inner = make_group(layer_id, vec![leaf_id]);
+        let inner_id = inner.id;
+        let outer = make_group(layer_id, vec![inner_id]);
+        let outer_id = outer.id;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(leaf_id, leaf);
+        nodes.insert(inner_id, inner);
+        nodes.insert(outer_id, outer);
+
+        let mut expanded = HashSet::new();
+        expanded.insert(outer_id); // inner NOT expanded
+
+        let mut out = Vec::new();
+        collect_node_rows(&[outer_id], &nodes, &expanded, 0, &mut out);
+
+        assert_eq!(out.len(), 2, "outer + inner group row, but no leaf");
+        assert_eq!(out[0], (outer_id, 0));
+        assert_eq!(out[1], (inner_id, 1));
+    }
 }
