@@ -10,7 +10,7 @@ mod tests {
     use super::*;
     use crate::{
         layer::Layer,
-        node::{PathNode, SceneNodeKind},
+        node::{PathNode, SceneNodeKind, TextNode},
         path::PathData,
     };
 
@@ -391,6 +391,170 @@ mod tests {
         assert!(!doc.nodes.contains_key(&node_a_id));
         assert!(!doc.nodes.contains_key(&node_b_id));
         assert_eq!(history.undo_depth(), 0);
+    }
+
+    // ── commit_node_changes (shared move/resize drag-end commit) ──────────────
+
+    #[test]
+    fn commit_node_changes_records_one_undoable_step_for_multiple_nodes() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+
+        let node_a = make_node(&doc);
+        let node_b = make_node(&doc);
+        let (id_a, id_b) = (node_a.id, node_b.id);
+        history.execute(
+            Command::Batch(vec![
+                Command::AddNode {
+                    node: node_a.clone(),
+                    layer_id: None,
+                },
+                Command::AddNode {
+                    node: node_b.clone(),
+                    layer_id: None,
+                },
+            ]),
+            &mut doc,
+        );
+        let depth_before = history.undo_depth();
+
+        // Snapshot originals, then simulate a live drag mutating both transforms directly.
+        let originals = vec![doc.nodes[&id_a].clone(), doc.nodes[&id_b].clone()];
+        doc.nodes.get_mut(&id_a).unwrap().transform.matrix[4] += 25.0;
+        doc.nodes.get_mut(&id_b).unwrap().transform.matrix[5] += 40.0;
+
+        let committed = history.commit_node_changes(&mut doc, originals);
+
+        assert!(committed, "expected a history entry to be committed");
+        assert_eq!(
+            history.undo_depth(),
+            depth_before + 1,
+            "must be ONE undo step"
+        );
+
+        // Undo restores BOTH nodes' transforms in a single step.
+        history.undo(&mut doc);
+        assert_eq!(
+            doc.nodes[&id_a].transform.matrix[4],
+            node_a.transform.matrix[4]
+        );
+        assert_eq!(
+            doc.nodes[&id_b].transform.matrix[5],
+            node_b.transform.matrix[5]
+        );
+
+        // Redo re-applies the move.
+        history.redo(&mut doc);
+        assert_eq!(
+            doc.nodes[&id_a].transform.matrix[4],
+            node_a.transform.matrix[4] + 25.0
+        );
+        assert_eq!(
+            doc.nodes[&id_b].transform.matrix[5],
+            node_b.transform.matrix[5] + 40.0
+        );
+    }
+
+    #[test]
+    fn commit_node_changes_skips_when_nothing_changed() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        let depth_before = history.undo_depth();
+
+        // Snapshot and commit without mutating — a click-without-drag.
+        let originals = vec![doc.nodes[&id].clone()];
+        let committed = history.commit_node_changes(&mut doc, originals);
+
+        assert!(!committed, "no change must not record history");
+        assert_eq!(history.undo_depth(), depth_before, "no spurious undo entry");
+    }
+
+    #[test]
+    fn commit_node_changes_commits_only_changed_nodes() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let moved = make_node(&doc);
+        let still = make_node(&doc);
+        let (moved_id, still_id) = (moved.id, still.id);
+        history.execute(
+            Command::Batch(vec![
+                Command::AddNode {
+                    node: moved.clone(),
+                    layer_id: None,
+                },
+                Command::AddNode {
+                    node: still.clone(),
+                    layer_id: None,
+                },
+            ]),
+            &mut doc,
+        );
+
+        let originals = vec![doc.nodes[&moved_id].clone(), doc.nodes[&still_id].clone()];
+        doc.nodes.get_mut(&moved_id).unwrap().transform.matrix[4] += 10.0;
+        // `still` is untouched.
+
+        let committed = history.commit_node_changes(&mut doc, originals);
+        assert!(committed);
+
+        // Undo only affects the node that actually moved.
+        history.undo(&mut doc);
+        assert_eq!(
+            doc.nodes[&moved_id].transform.matrix[4],
+            moved.transform.matrix[4]
+        );
+        assert_eq!(
+            doc.nodes[&still_id].transform.matrix[4],
+            still.transform.matrix[4]
+        );
+    }
+
+    #[test]
+    fn commit_node_changes_records_text_resize_when_only_font_size_changed() {
+        // A BottomRight text resize can change font_size while leaving the
+        // transform matrix identical — that change must still be recorded.
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let layer_id = doc.active_layer_id.unwrap();
+        let node = SceneNode::new("label", layer_id, SceneNodeKind::Text(TextNode::new("hi")));
+        let id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        let depth_before = history.undo_depth();
+
+        let originals = vec![doc.nodes[&id].clone()];
+        if let SceneNodeKind::Text(t) = &mut doc.nodes.get_mut(&id).unwrap().kind {
+            t.font_size *= 2.0; // transform untouched
+        }
+
+        let committed = history.commit_node_changes(&mut doc, originals);
+        assert!(committed, "a font-size-only text resize must be recorded");
+        assert_eq!(history.undo_depth(), depth_before + 1);
+
+        let grown = match &doc.nodes[&id].kind {
+            SceneNodeKind::Text(t) => t.font_size,
+            _ => unreachable!(),
+        };
+        history.undo(&mut doc);
+        let restored = match &doc.nodes[&id].kind {
+            SceneNodeKind::Text(t) => t.font_size,
+            _ => unreachable!(),
+        };
+        assert!(restored < grown, "undo must restore the original font size");
     }
 
     // ── max_depth ─────────────────────────────────────────────────────────────
@@ -1008,6 +1172,22 @@ impl Default for CommandHistory {
     }
 }
 
+/// Whether a node was meaningfully changed by a move/resize drag, used to skip
+/// no-op commits (e.g. a click on a handle without an actual drag). Compares the
+/// affine transform and — for text — the font size, since a text resize can
+/// change `font_size` while leaving the transform matrix identical.
+fn node_drag_changed(old: &SceneNode, new: &SceneNode) -> bool {
+    if old.transform != new.transform {
+        return true;
+    }
+    if let (crate::node::SceneNodeKind::Text(o), crate::node::SceneNodeKind::Text(n)) =
+        (&old.kind, &new.kind)
+    {
+        return o.font_size != n.font_size;
+    }
+    false
+}
+
 impl CommandHistory {
     pub fn new(max_depth: usize) -> Self {
         Self {
@@ -1035,6 +1215,45 @@ impl CommandHistory {
             self.undo_stack.remove(0);
         }
         self.gui_debounce.schedule(desc);
+    }
+
+    /// Commit a transform/property change applied live during a drag (move or
+    /// resize) as a single undoable history step.
+    ///
+    /// `originals` holds each affected node as it was *before* the drag began;
+    /// the live drag has already mutated `doc` in place. For every original whose
+    /// node still exists and whose `transform` now differs, an `UpdateNode` is
+    /// recorded; all of them are committed as one `Command::Batch` so a single
+    /// undo reverts the whole drag. Nodes that did not change (e.g. a
+    /// click-without-drag) are skipped, so no spurious history entry is created.
+    ///
+    /// Returns `true` if anything was committed.
+    pub fn commit_node_changes(&mut self, doc: &mut Document, originals: Vec<SceneNode>) -> bool {
+        let cmds: Vec<Command> = originals
+            .into_iter()
+            .filter_map(|old| {
+                let new = doc.nodes.get(&old.id)?;
+                if !node_drag_changed(&old, new) {
+                    return None; // unchanged — e.g. a click without a drag
+                }
+                Some(Command::UpdateNode {
+                    new: new.clone(),
+                    old,
+                })
+            })
+            .collect();
+
+        match cmds.len() {
+            0 => false,
+            1 => {
+                self.execute(cmds.into_iter().next().unwrap(), doc);
+                true
+            }
+            _ => {
+                self.execute(Command::Batch(cmds), doc);
+                true
+            }
+        }
     }
 
     /// Call once per frame from the render loop.  If a user action was recorded

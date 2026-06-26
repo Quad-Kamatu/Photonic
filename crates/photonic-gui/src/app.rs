@@ -335,6 +335,10 @@ pub struct PhotonicApp {
     /// Transforms of all selected nodes captured at the start of a multi-node resize.
     resize_multi_origins: Vec<(NodeId, [f64; 6])>,
 
+    /// Full snapshots of the selected nodes captured at the start of a move drag,
+    /// used to record a single undoable history step on drag release.
+    move_origins: Vec<(NodeId, SceneNode)>,
+
     /// Screen-space position where a marquee (drag-select) began; None when inactive.
     marquee_start: Option<egui::Pos2>,
 
@@ -624,6 +628,7 @@ impl Default for PhotonicApp {
             resize_origin_transform: None,
             resize_origin_font_size: None,
             resize_multi_origins: Vec::new(),
+            move_origins: Vec::new(),
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),
@@ -9643,6 +9648,14 @@ impl PhotonicApp {
                 let dx = delta.x as f64 / view.zoom;
                 let dy = delta.y as f64 / view.zoom;
                 let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
+                // Snapshot pre-move state on the first drag frame so the whole
+                // move can be committed as one undoable step on release.
+                if self.move_origins.is_empty() {
+                    self.move_origins = ids_to_move
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).map(|n| (*id, n.clone())))
+                        .collect();
+                }
                 for id in ids_to_move {
                     if let Some(node) = doc.nodes.get_mut(&id) {
                         node.transform.matrix[4] += dx;
@@ -9654,12 +9667,41 @@ impl PhotonicApp {
         }
 
         if response.drag_stopped_by(egui::PointerButton::Primary) {
+            // ── Commit the drag as a single undoable history step ──────────────
+            // A move and a resize are mutually exclusive within one drag, so at
+            // most one of these produces a command. Unchanged nodes are skipped,
+            // so a click-without-drag records nothing.
+            if !self.move_origins.is_empty() {
+                let originals: Vec<SceneNode> = std::mem::take(&mut self.move_origins)
+                    .into_iter()
+                    .map(|(_, node)| node)
+                    .collect();
+                history.commit_node_changes(doc, originals);
+                *doc_modified = true;
+            } else {
+                // Resize commit — reconstruct each node's pre-resize state from
+                // the matrix (and font size) snapshots captured at drag start.
+                let resize_originals = resize_drag_originals(
+                    doc,
+                    self.selected_id,
+                    self.resize_origin_transform,
+                    self.resize_origin_font_size,
+                    &self.resize_multi_origins,
+                );
+                if !resize_originals.is_empty()
+                    && history.commit_node_changes(doc, resize_originals)
+                {
+                    *doc_modified = true;
+                }
+            }
+
             self.moving = false;
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
             self.resize_origin_font_size = None;
             self.resize_multi_origins.clear();
+            self.move_origins.clear();
 
             // Complete marquee selection if one was in progress
             if let Some(start_pos) = self.marquee_start.take() {
@@ -10944,6 +10986,330 @@ impl PhotonicApp {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Reconstruct pre-resize node snapshots for committing one undo step on drag release.
+///
+/// Clones each affected node from `doc` and overwrites its `transform.matrix` with the
+/// matrix captured at drag-start.  For a single [`SceneNodeKind::Text`] node it also
+/// restores `font_size`.  Returns an empty `Vec` when no snapshot is available (i.e. no
+/// resize was in progress).
+///
+/// This is a pure function (no egui dependency) extracted from the `drag_stopped_by`
+/// commit block in `handle_select_tool` so that it can be unit-tested without a running
+/// egui context.
+fn resize_drag_originals(
+    doc: &Document,
+    selected_id: Option<NodeId>,
+    resize_origin_transform: Option<[f64; 6]>,
+    resize_origin_font_size: Option<f64>,
+    resize_multi_origins: &[(NodeId, [f64; 6])],
+) -> Vec<SceneNode> {
+    if !resize_multi_origins.is_empty() {
+        resize_multi_origins
+            .iter()
+            .filter_map(|(id, orig_matrix)| {
+                let mut old = doc.nodes.get(id)?.clone();
+                old.transform.matrix = *orig_matrix;
+                Some(old)
+            })
+            .collect()
+    } else if let (Some(orig_matrix), Some(sel_id)) = (resize_origin_transform, selected_id) {
+        doc.nodes
+            .get(&sel_id)
+            .map(|cur| {
+                let mut old = cur.clone();
+                old.transform.matrix = orig_matrix;
+                if let (SceneNodeKind::Text(t), Some(fs)) = (&mut old.kind, resize_origin_font_size)
+                {
+                    t.font_size = fs;
+                }
+                old
+            })
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod drag_commit_tests {
+    use super::resize_drag_originals;
+    use photonic_core::{
+        history::{Command, CommandHistory},
+        node::{NodeId, PathNode, TextNode},
+        Document, PathData, SceneNode, SceneNodeKind,
+    };
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn make_doc() -> Document {
+        Document::new("test", 200.0, 200.0)
+    }
+
+    fn make_path_node(doc: &Document) -> SceneNode {
+        let layer_id = doc.active_layer_id.unwrap();
+        SceneNode::new(
+            "rect",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 50.0, 50.0))),
+        )
+    }
+
+    fn make_text_node(doc: &Document) -> SceneNode {
+        let layer_id = doc.active_layer_id.unwrap();
+        SceneNode::new(
+            "label",
+            layer_id,
+            SceneNodeKind::Text(TextNode::new("hello")),
+        )
+    }
+
+    // ── single Path resize ────────────────────────────────────────────────────
+
+    #[test]
+    fn single_path_resize_restores_original_matrix() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_path_node(&doc);
+        let id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        // Capture the pre-resize matrix snapshot.
+        let orig_matrix = doc.nodes[&id].transform.matrix;
+
+        // Simulate a live resize — mutate the node's transform in place.
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[0] *= 2.0;
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[3] *= 2.0;
+
+        // reconstruct originals via the pure helper
+        let originals = resize_drag_originals(
+            &doc,
+            Some(id),
+            Some(orig_matrix),
+            None, // not a Text node
+            &[],  // single-node path: multi_origins is empty
+        );
+
+        assert_eq!(originals.len(), 1, "must produce exactly one snapshot");
+        assert_eq!(
+            originals[0].transform.matrix, orig_matrix,
+            "reconstructed snapshot must carry the pre-resize matrix"
+        );
+        // The id must match the live node
+        assert_eq!(originals[0].id, id);
+    }
+
+    // ── single Text resize ────────────────────────────────────────────────────
+
+    #[test]
+    fn single_text_resize_restores_matrix_and_font_size() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_text_node(&doc);
+        let id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        let orig_matrix = doc.nodes[&id].transform.matrix;
+        let orig_font_size = match &doc.nodes[&id].kind {
+            SceneNodeKind::Text(t) => t.font_size,
+            _ => unreachable!(),
+        };
+
+        // Simulate a live text resize — both matrix and font_size change.
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[0] *= 1.5;
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[3] *= 1.5;
+        if let SceneNodeKind::Text(t) = &mut doc.nodes.get_mut(&id).unwrap().kind {
+            t.font_size *= 1.5;
+        }
+
+        let originals =
+            resize_drag_originals(&doc, Some(id), Some(orig_matrix), Some(orig_font_size), &[]);
+
+        assert_eq!(originals.len(), 1);
+        assert_eq!(
+            originals[0].transform.matrix, orig_matrix,
+            "matrix must be restored"
+        );
+        let restored_fs = match &originals[0].kind {
+            SceneNodeKind::Text(t) => t.font_size,
+            _ => panic!("expected Text node"),
+        };
+        assert!(
+            (restored_fs - orig_font_size).abs() < 1e-10,
+            "font_size must be restored to {orig_font_size} but got {restored_fs}"
+        );
+    }
+
+    // ── multi-node resize ─────────────────────────────────────────────────────
+
+    #[test]
+    fn multi_node_resize_reconstructs_all_origins() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node_a = make_path_node(&doc);
+        let node_b = make_path_node(&doc);
+        let (id_a, id_b) = (node_a.id, node_b.id);
+        history.execute(
+            Command::Batch(vec![
+                Command::AddNode {
+                    node: node_a,
+                    layer_id: None,
+                },
+                Command::AddNode {
+                    node: node_b,
+                    layer_id: None,
+                },
+            ]),
+            &mut doc,
+        );
+
+        let orig_a = doc.nodes[&id_a].transform.matrix;
+        let orig_b = doc.nodes[&id_b].transform.matrix;
+
+        // Simulate live multi-resize
+        doc.nodes.get_mut(&id_a).unwrap().transform.matrix[4] += 30.0;
+        doc.nodes.get_mut(&id_b).unwrap().transform.matrix[5] += 20.0;
+
+        let multi_origins: Vec<(NodeId, [f64; 6])> = vec![(id_a, orig_a), (id_b, orig_b)];
+        let originals = resize_drag_originals(&doc, None, None, None, &multi_origins);
+
+        assert_eq!(originals.len(), 2, "both nodes must be reconstructed");
+        let snap_a = originals
+            .iter()
+            .find(|n| n.id == id_a)
+            .expect("node_a missing");
+        let snap_b = originals
+            .iter()
+            .find(|n| n.id == id_b)
+            .expect("node_b missing");
+        assert_eq!(snap_a.transform.matrix, orig_a);
+        assert_eq!(snap_b.transform.matrix, orig_b);
+    }
+
+    // ── end-to-end: originals → commit_node_changes → undo restores ───────────
+
+    #[test]
+    fn end_to_end_path_resize_committed_and_undone() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_path_node(&doc);
+        let id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        let depth_before = history.undo_depth();
+
+        let orig_matrix = doc.nodes[&id].transform.matrix;
+
+        // Simulate a resize drag — mutate transform directly in doc (as the live tool does).
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[0] *= 3.0;
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[3] *= 3.0;
+        let after_matrix = doc.nodes[&id].transform.matrix;
+
+        // Call the extracted helper to get pre-resize snapshots.
+        let originals = resize_drag_originals(&doc, Some(id), Some(orig_matrix), None, &[]);
+        assert_eq!(originals.len(), 1);
+
+        // Commit via history (this is what drag_stopped_by calls).
+        let committed = history.commit_node_changes(&mut doc, originals);
+        assert!(committed, "resize must produce one history entry");
+        assert_eq!(
+            history.undo_depth(),
+            depth_before + 1,
+            "undo_depth must increase by exactly 1"
+        );
+
+        // Verify the live state reflects the resize.
+        assert_eq!(doc.nodes[&id].transform.matrix, after_matrix);
+
+        // Undo must restore the pre-resize matrix.
+        history.undo(&mut doc);
+        assert_eq!(
+            doc.nodes[&id].transform.matrix, orig_matrix,
+            "undo must restore the original transform"
+        );
+    }
+
+    #[test]
+    fn end_to_end_text_resize_committed_and_undone() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_text_node(&doc);
+        let id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        let depth_before = history.undo_depth();
+
+        let orig_matrix = doc.nodes[&id].transform.matrix;
+        let orig_fs = match &doc.nodes[&id].kind {
+            SceneNodeKind::Text(t) => t.font_size,
+            _ => unreachable!(),
+        };
+
+        // Simulate a text resize.
+        doc.nodes.get_mut(&id).unwrap().transform.matrix[0] *= 2.0;
+        if let SceneNodeKind::Text(t) = &mut doc.nodes.get_mut(&id).unwrap().kind {
+            t.font_size *= 2.0;
+        }
+
+        let originals =
+            resize_drag_originals(&doc, Some(id), Some(orig_matrix), Some(orig_fs), &[]);
+        assert_eq!(originals.len(), 1);
+
+        let committed = history.commit_node_changes(&mut doc, originals);
+        assert!(committed);
+        assert_eq!(history.undo_depth(), depth_before + 1);
+
+        history.undo(&mut doc);
+        assert_eq!(
+            doc.nodes[&id].transform.matrix, orig_matrix,
+            "undo must restore matrix"
+        );
+        let restored_fs = match &doc.nodes[&id].kind {
+            SceneNodeKind::Text(t) => t.font_size,
+            _ => unreachable!(),
+        };
+        assert!(
+            (restored_fs - orig_fs).abs() < 1e-10,
+            "undo must restore font_size to {orig_fs} but got {restored_fs}"
+        );
+    }
+
+    // ── no-op: empty snapshots when no resize was in progress ────────────────
+
+    #[test]
+    fn no_resize_in_progress_returns_empty() {
+        let doc = make_doc();
+        // No selected_id, no transform, no multi_origins → must return empty Vec.
+        let originals = resize_drag_originals(&doc, None, None, None, &[]);
+        assert!(
+            originals.is_empty(),
+            "must return empty Vec when no resize was in progress"
+        );
+    }
+}
 
 /// Returns `true` when viewport keyboard shortcuts should be processed.
 ///
