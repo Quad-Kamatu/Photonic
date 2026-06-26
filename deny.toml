@@ -31,6 +31,13 @@ crate = "display-info"
 expression = "Apache-2.0"
 license-files = [{ path = "LICENSE", hash = 0xdb1c553a }]
 
+# egui's bundled default fonts include the Ubuntu font, licensed under the
+# Ubuntu Font License (UFL-1.0). It has no SPDX identifier, so allow it
+# explicitly for this crate only. The font is permissively redistributable.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["LicenseRef-UFL-1.0"]
+
 [bans]
 # Warn on multiple versions of the same crate (size/audit hygiene, not blocking).
 multiple-versions = "warn"
@@ -39,6 +46,12 @@ multiple-versions = "warn"
 # Use the default RustSec advisory database; fail on known vulnerabilities.
 version = 2
 yanked = "deny"
+# Acknowledged unmaintained *transitive* dependencies (no vulnerability, no
+# maintained drop-in). Revisit when upstreams migrate off them.
+ignore = [
+    "RUSTSEC-2025-0057", # fxhash — unmaintained (pulled in transitively)
+    "RUSTSEC-2024-0436", # paste — unmaintained (pulled in transitively)
+]
 
 [sources]
 unknown-registry = "deny"
