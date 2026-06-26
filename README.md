@@ -88,3 +88,18 @@ photonic/
 | Boolean path ops | geo |
 | Serialization | serde_json |
 | Scripting | mlua (Lua 5.4) |
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set
+up, the coding conventions, and the pull-request workflow. Please also read our
+[Code of Conduct](CODE_OF_CONDUCT.md). To report a security issue, see
+[SECURITY.md](SECURITY.md).
+
+## License
+
+Photonic is licensed under the [MIT License](LICENSE).
+
+It bundles third-party open-source components under their own permissive
+licenses; their notices are reproduced in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
