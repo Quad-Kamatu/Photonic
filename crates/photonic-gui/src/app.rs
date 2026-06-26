@@ -9579,7 +9579,7 @@ impl PhotonicApp {
                         let orig_w = bx1 - bx0;
                         let orig_h = by1 - by0;
                         if orig_w.abs() > 1e-9 && orig_h.abs() > 1e-9 {
-                            let (anchor_x, anchor_y, sx, sy) = match handle {
+                            let (anchor_x, anchor_y, mut sx, mut sy) = match handle {
                                 ResizeHandle::TopLeft => {
                                     (bx1, by1, (bx1 - px) / orig_w, (by1 - py) / orig_h)
                                 }
@@ -9593,6 +9593,16 @@ impl PhotonicApp {
                                     (bx0, by0, (px - bx0) / orig_w, (py - by0) / orig_h)
                                 }
                             };
+
+                            // Shift constrains the resize to a uniform scale so the
+                            // selection keeps its aspect ratio (#4). The
+                            // larger-magnitude axis wins; signs (flips across the
+                            // anchor) are preserved.
+                            if ui.input(|i| i.modifiers.shift) {
+                                let s = sx.abs().max(sy.abs());
+                                sx = s.copysign(sx);
+                                sy = s.copysign(sy);
+                            }
 
                             if !self.resize_multi_origins.is_empty() {
                                 // Multi-node resize: apply the same scale to every node
