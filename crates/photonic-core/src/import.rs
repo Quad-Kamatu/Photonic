@@ -369,6 +369,8 @@ struct ComputedStyle {
     font_size: f64,
     font_weight: u16,
     text_anchor: TextAlign,
+    /// CSS `mix-blend-mode`. Not inherited — reset per element in `resolve_style`.
+    blend_mode: BlendMode,
 }
 
 impl Default for ComputedStyle {
@@ -391,6 +393,7 @@ impl Default for ComputedStyle {
             font_size: 16.0,
             font_weight: 400,
             text_anchor: TextAlign::Left,
+            blend_mode: BlendMode::Normal,
         }
     }
 }
@@ -455,7 +458,7 @@ fn import_element(
                     opacity: style.opacity,
                     visible: true,
                     locked: false,
-                    blend_mode: BlendMode::Normal,
+                    blend_mode: style.blend_mode,
                     tags: vec![],
                     prompt_history: vec![],
                     outer_glow: Default::default(),
@@ -497,7 +500,7 @@ fn import_element(
                     opacity: style.opacity,
                     visible: true,
                     locked: false,
-                    blend_mode: BlendMode::Normal,
+                    blend_mode: style.blend_mode,
                     tags: vec![],
                     prompt_history: vec![],
                     outer_glow: Default::default(),
@@ -562,7 +565,7 @@ fn import_element(
                     opacity: style.opacity,
                     visible: true,
                     locked: false,
-                    blend_mode: BlendMode::Normal,
+                    blend_mode: style.blend_mode,
                     tags: vec![],
                     prompt_history: vec![],
                     outer_glow: Default::default(),
@@ -591,8 +594,10 @@ fn resolve_style(
     ctx: &SvgContext,
 ) -> ComputedStyle {
     let mut s = parent.clone();
-    // Each node has its own opacity unless it declares one
+    // Each node has its own opacity and blend mode unless it declares one
+    // (neither is inherited from the parent group).
     s.opacity = 1.0;
+    s.blend_mode = BlendMode::Normal;
 
     // Build a merged property map from (lowest to highest priority):
     // 1. Matching element-type rules (e.g. `path { ... }`)
@@ -679,6 +684,11 @@ fn is_presentation_attr(name: &str) -> bool {
 }
 
 fn apply_props(props: &HashMap<&str, String>, s: &mut ComputedStyle) {
+    if let Some(v) = props.get("mix-blend-mode") {
+        if let Some(mode) = BlendMode::from_css(v) {
+            s.blend_mode = mode;
+        }
+    }
     if let Some(v) = props.get("display") {
         if v.trim() == "none" {
             s.display = false;

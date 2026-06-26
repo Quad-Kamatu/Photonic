@@ -1,6 +1,7 @@
 //! Document export utilities (SVG, etc.).
 
 use crate::{
+    layer::BlendMode,
     node::{NodeId, SceneNode, SceneNodeKind, TextAlign},
     style::{Fill, FillKind, GradientKind, LineCap, LineJoin, Stroke, StrokeAlign},
     transform::Transform,
@@ -317,24 +318,34 @@ fn emit_node_inner(
     } else {
         String::new()
     };
+    // Non-Normal blend modes round-trip via the CSS `mix-blend-mode` property.
+    let blend = if node.blend_mode != BlendMode::Normal {
+        format!(" style=\"mix-blend-mode:{}\"", node.blend_mode.to_css())
+    } else {
+        String::new()
+    };
 
     match &node.kind {
         SceneNodeKind::Path(p) => {
             let fill = fill_attrs(&p.fill, defs, grad_counter);
             let stroke = stroke_attrs(&p.stroke);
             body.push_str(&format!(
-                "{}<path{}{}{}{}{} d=\"{}\"/>\n",
+                "{}<path{}{}{}{}{}{} d=\"{}\"/>\n",
                 pad,
                 id_attr,
                 transform,
                 opacity,
+                blend,
                 fill,
                 stroke,
                 p.path_data.as_svg(),
             ));
         }
         SceneNodeKind::Group(g) => {
-            body.push_str(&format!("{}<g{}{}{}>\n", pad, id_attr, transform, opacity));
+            body.push_str(&format!(
+                "{}<g{}{}{}{}>\n",
+                pad, id_attr, transform, opacity, blend
+            ));
             for child_id in &g.children {
                 if let Some(child) = doc.nodes.get(child_id) {
                     emit_node_inner(
@@ -365,12 +376,13 @@ fn emit_node_inner(
                 .replace('<', "&lt;")
                 .replace('>', "&gt;");
             body.push_str(&format!(
-                "{}<text{}{}{} font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" \
+                "{}<text{}{}{}{} font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" \
                  text-anchor=\"{}\"{}{}>{}</text>\n",
                 pad,
                 id_attr,
                 transform,
                 opacity,
+                blend,
                 t.font_family,
                 t.font_size,
                 t.font_weight,
@@ -616,6 +628,46 @@ mod tests {
         assert!(
             svg.to_lowercase().contains("#ffffff"),
             "expected white background fill:\n{svg}"
+        );
+    }
+
+    #[test]
+    fn blend_mode_css_names_round_trip() {
+        use crate::layer::BlendMode::*;
+        for mode in [
+            Normal, Multiply, Screen, Overlay, Darken, Lighten, ColorDodge, ColorBurn, HardLight,
+            SoftLight, Difference, Exclusion, Hue, Saturation, Color, Luminosity,
+        ] {
+            assert_eq!(BlendMode::from_css(mode.to_css()), Some(mode));
+        }
+        assert_eq!(BlendMode::from_css("not-a-mode"), None);
+    }
+
+    #[test]
+    fn blend_mode_survives_svg_round_trip() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        node.blend_mode = BlendMode::Multiply;
+        doc.add_node(node, None);
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(
+            svg.contains("mix-blend-mode:multiply"),
+            "export should emit the CSS blend mode:\n{svg}"
+        );
+
+        let reimported = crate::import::import_svg(&svg).expect("re-import");
+        let modes: Vec<_> = reimported.nodes.values().map(|n| n.blend_mode).collect();
+        assert!(
+            modes.contains(&BlendMode::Multiply),
+            "blend mode lost on re-import; modes = {modes:?}"
         );
     }
 }
