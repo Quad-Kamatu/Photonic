@@ -729,17 +729,7 @@ where
 }
 
 fn load_document(path: &Path) -> Result<Document, String> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if ext == "svg" {
-        photonic_core::import_svg(&content).map_err(|e| e.to_string())
-    } else {
-        Document::from_json(&content).map_err(|e| e.to_string())
-    }
+    photonic_core::load_document_from_path(path).map_err(|e| e.to_string())
 }
 
 impl PhotonicApp {

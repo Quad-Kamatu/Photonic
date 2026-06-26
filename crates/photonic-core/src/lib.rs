@@ -23,7 +23,7 @@ pub use document::{
     Guide, GuideOrientation, Page, ParagraphStyle, SpotColor, Symbol, WidthProfile, Workspace,
 };
 pub use history::{CheckpointInfo, Command, CommandHistory};
-pub use import::{import_svg, ImportError};
+pub use import::{import_svg, load_document_from_path, ImportError};
 pub use layer::{BlendMode, Layer, LayerId};
 pub use node::{
     AssetExportSpec, FontStyle, GaussianGlow, GlowEffect, NodeId, PrimitiveKind, SceneNode,

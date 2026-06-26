@@ -20,7 +20,28 @@ pub enum ImportError {
     NotSvg,
 }
 
-// ─── Public entry point ───────────────────────────────────────────────────────
+// ─── Public entry points ──────────────────────────────────────────────────────
+
+/// Load a [`Document`] from a file path, routing by extension.
+///
+/// - `.svg` / `.SVG` (case-insensitive) → [`import_svg`]
+/// - All other extensions (`.photon`, `.photonic`, …) → JSON via
+///   [`Document::from_json`]
+///
+/// Returns an error on I/O failure, a bad SVG document, or a JSON parse error.
+pub fn load_document_from_path(path: &std::path::Path) -> anyhow::Result<Document> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let content = std::fs::read_to_string(path)?;
+    if ext == "svg" {
+        Ok(import_svg(&content)?)
+    } else {
+        Ok(Document::from_json(&content)?)
+    }
+}
 
 /// Parse an SVG string and return a Photonic [`Document`].
 pub fn import_svg(svg_text: &str) -> Result<Document, ImportError> {
@@ -1305,5 +1326,65 @@ mod tests {
             fills.iter().any(|c| approx(*c, "5d4096")),
             "missing .cls-2 fill #5d4096: {fills:?}"
         );
+    }
+
+    // ── load_document_from_path tests ─────────────────────────────────────────
+
+    const TINY_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <rect x="10" y="10" width="80" height="80" fill="blue"/>
+</svg>"#;
+
+    /// A `.svg` file is routed through the SVG importer and produces a Document
+    /// with at least one node.
+    #[test]
+    fn load_document_from_path_svg_extension_imports_svg() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("photonic_test_load_ext.svg");
+        std::fs::write(&path, TINY_SVG).expect("write temp svg");
+        let doc = load_document_from_path(&path).expect("svg load should succeed");
+        assert!(
+            !doc.nodes.is_empty(),
+            "SVG import should produce at least one node"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `.SVG` file (uppercase extension) is also routed through the SVG importer.
+    #[test]
+    fn load_document_from_path_svg_uppercase_extension() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("photonic_test_load_upper.SVG");
+        std::fs::write(&path, TINY_SVG).expect("write temp svg");
+        let doc = load_document_from_path(&path).expect("uppercase SVG load should succeed");
+        assert!(
+            !doc.nodes.is_empty(),
+            "uppercase .SVG import should produce nodes"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `.photon` file is routed through JSON deserialization and round-trips
+    /// the document name correctly.
+    #[test]
+    fn load_document_from_path_photon_extension_uses_json() {
+        let doc = Document::default_artboard();
+        let json = doc.to_json().expect("serialize should succeed");
+        let dir = std::env::temp_dir();
+        let path = dir.join("photonic_test_load_ext.photon");
+        std::fs::write(&path, &json).expect("write temp photon");
+        let loaded = load_document_from_path(&path).expect("photon load should succeed");
+        assert_eq!(loaded.name, doc.name, "round-tripped name should match");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A bad SVG file returns an error instead of panicking.
+    #[test]
+    fn load_document_from_path_bad_svg_returns_error() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("photonic_test_load_bad.svg");
+        std::fs::write(&path, b"this is not svg at all").expect("write bad svg");
+        let result = load_document_from_path(&path);
+        assert!(result.is_err(), "bad SVG content should return an error");
+        let _ = std::fs::remove_file(&path);
     }
 }

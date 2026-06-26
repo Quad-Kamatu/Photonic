@@ -92,8 +92,8 @@ fn main() -> Result<()> {
     register_file_association();
 
     let document = if let Some(path) = &args.file {
-        let json = std::fs::read_to_string(path)?;
-        Document::from_json(&json)?
+        photonic_core::load_document_from_path(path)
+            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", path.display(), e))?
     } else {
         Document::default_artboard()
     };
