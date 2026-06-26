@@ -19,46 +19,15 @@ use crate::{
 
 // ─── Eyedropper ───────────────────────────────────────────────────────────────
 
-/// Raw pixel data captured from the screen when eyedropper mode starts.
-struct EyedropperCapture {
-    /// Screen origin in logical (OS) coords.
-    origin_x: i32,
-    origin_y: i32,
-    /// Physical pixels per logical pixel for this display.
-    scale: f32,
-    /// Dimensions of the captured image in physical pixels.
-    width: u32,
-    height: u32,
-    /// Row-major RGBA pixel data (physical resolution).
-    pixels: Vec<u8>,
-}
-
-impl EyedropperCapture {
-    /// Sample the pixel at a logical screen coordinate.
-    fn sample_logical(&self, lx: f32, ly: f32) -> Option<[u8; 4]> {
-        let px = ((lx - self.origin_x as f32) * self.scale) as i32;
-        let py = ((ly - self.origin_y as f32) * self.scale) as i32;
-        if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
-            return None;
-        }
-        let base = ((py as u32 * self.width + px as u32) * 4) as usize;
-        if base + 3 >= self.pixels.len() {
-            return None;
-        }
-        Some([
-            self.pixels[base],
-            self.pixels[base + 1],
-            self.pixels[base + 2],
-            self.pixels[base + 3],
-        ])
-    }
-}
-
-/// State for the screen eyedropper tool.
+/// State for the in-canvas eyedropper tool.
+///
+/// Color sampling is performed entirely within the document's own canvas by
+/// converting the egui cursor position to canvas coordinates and calling
+/// `photonic_core::sample_fill_at`.  No screen capture or external portal is
+/// used, so this works correctly on Wayland.
 #[derive(Default)]
 pub struct EyedropperState {
     pub target: Option<EyedropperTarget>,
-    capture: Option<EyedropperCapture>,
     /// Skip the very first `primary_clicked` after activation so the button's
     /// own release doesn't immediately trigger a sample.
     skip_click: bool,
@@ -69,34 +38,10 @@ impl EyedropperState {
         self.target.is_some()
     }
 
-    fn sample_at_screen_logical(&self, lx: f32, ly: f32) -> Option<[u8; 4]> {
-        self.capture.as_ref()?.sample_logical(lx, ly)
-    }
-
     fn cancel(&mut self) {
         self.target = None;
-        self.capture = None;
         self.skip_click = false;
     }
-}
-
-/// Capture the screen that contains the given logical window position.
-/// Returns `None` if the screen cannot be captured or is unavailable.
-fn capture_screen(window_logical_x: i32, window_logical_y: i32) -> Option<EyedropperCapture> {
-    use screenshots::Screen;
-    let screen = Screen::from_point(window_logical_x, window_logical_y).ok()?;
-    let img = screen.capture().ok()?;
-    let w = img.width();
-    let h = img.height();
-    let pixels = img.into_raw();
-    Some(EyedropperCapture {
-        origin_x: screen.display_info.x,
-        origin_y: screen.display_info.y,
-        scale: screen.display_info.scale_factor,
-        width: w,
-        height: h,
-        pixels,
-    })
 }
 
 // ─── Drawer kind ──────────────────────────────────────────────────────────────
@@ -4926,8 +4871,6 @@ impl PhotonicApp {
                 }
 
                 PanelAction::StartEyedropper(target) => {
-                    self.eyedropper.capture =
-                        capture_screen(self.window_logical_pos.0, self.window_logical_pos.1);
                     self.eyedropper.target = Some(target);
                     self.eyedropper.skip_click = true;
                 }
@@ -8907,13 +8850,23 @@ impl PhotonicApp {
                 self.eyedropper.cancel();
             } else {
                 if let Some(pos) = cursor {
-                    let sx = self.window_logical_pos.0 as f32 + pos.x;
-                    let sy = self.window_logical_pos.1 as f32 + pos.y;
+                    // Convert the egui cursor position (screen-space, relative to
+                    // the egui viewport) to canvas coordinates and sample the
+                    // topmost filled node in the document.  This is reliable on
+                    // all platforms including Wayland — no screen capture needed.
+                    let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                    let sampled = photonic_core::sample_fill_at(doc, cx, cy);
 
                     // Draw color preview badge near cursor
-                    let sampled = self.eyedropper.sample_at_screen_logical(sx, sy);
                     let preview_color = sampled
-                        .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+                        .map(|c| {
+                            egui::Color32::from_rgba_unmultiplied(
+                                (c[0] * 255.0) as u8,
+                                (c[1] * 255.0) as u8,
+                                (c[2] * 255.0) as u8,
+                                (c[3] * 255.0) as u8,
+                            )
+                        })
                         .unwrap_or(egui::Color32::TRANSPARENT);
 
                     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -8934,10 +8887,10 @@ impl PhotonicApp {
                     if clicked {
                         if let Some(rgba) = sampled {
                             let picked = photonic_core::Color {
-                                r: rgba[0] as f32 / 255.0,
-                                g: rgba[1] as f32 / 255.0,
-                                b: rgba[2] as f32 / 255.0,
-                                a: rgba[3] as f32 / 255.0,
+                                r: rgba[0],
+                                g: rgba[1],
+                                b: rgba[2],
+                                a: rgba[3],
                             };
                             self.apply_eyedropper_color(doc, history, picked, &mut doc_modified);
                         }
