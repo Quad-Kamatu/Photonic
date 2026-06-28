@@ -140,6 +140,7 @@ impl ExportDialog {
             crop_to_content: self.crop_to_content,
             ico_sizes,
             jpeg_quality: self.jpeg_quality,
+            region: None,
         }
     }
 }
@@ -286,6 +287,9 @@ pub struct PhotonicApp {
     move_snap_ref: Option<(f64, f64)>,
     /// Canvas-space cursor position where the move drag began.
     move_snap_press: Option<(f64, f64)>,
+    /// True when the current move drag is duplicating the selection (Alt-drag):
+    /// copies were spawned at drag start and the originals stay put.
+    dup_drag: bool,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -607,6 +611,7 @@ impl Default for PhotonicApp {
             move_snap_origins: Vec::new(),
             move_snap_ref: None,
             move_snap_press: None,
+            dup_drag: false,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -721,6 +726,16 @@ where
     F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
 {
     std::thread::spawn(f).join().unwrap_or(None)
+}
+
+/// Center and fit the view on the document's first artboard (falls back to the
+/// document bounds). Used when opening a project so it lands framed on board 1.
+fn fit_first_artboard(view: &mut CanvasView, doc: &Document) {
+    if let Some(ab) = doc.artboards.first() {
+        view.fit_to_rect(ab.x, ab.y, ab.width.max(1.0), ab.height.max(1.0));
+    } else {
+        view.fit_to_rect(0.0, 0.0, doc.width.max(1.0), doc.height.max(1.0));
+    }
 }
 
 fn load_document(path: &Path) -> Result<Document, String> {
@@ -1047,6 +1062,8 @@ impl PhotonicApp {
                         Ok(loaded) => {
                             self.welcome.add_recent(path.clone(), loaded.name.clone());
                             *doc = loaded;
+                            fit_first_artboard(view, doc);
+                            self.smooth.log_zoom_target = view.zoom.ln();
                             self.current_file = Some(path);
                             self.selected_id = None;
                             self.show_welcome = false;
@@ -1056,6 +1073,13 @@ impl PhotonicApp {
                             self.file_status = Some(format!("Open failed: {e}"));
                         }
                     },
+                    WelcomeAction::AddDiskRoot => {
+                        if let Some(dir) =
+                            run_file_dialog(|| rfd::FileDialog::new().pick_folder())
+                        {
+                            self.welcome.add_disk_root(dir);
+                        }
+                    }
                     WelcomeAction::OpenBrowse => {
                         if let Some(path) = run_file_dialog(|| {
                             rfd::FileDialog::new()
@@ -1068,6 +1092,8 @@ impl PhotonicApp {
                                 Ok(loaded) => {
                                     self.welcome.add_recent(path.clone(), loaded.name.clone());
                                     *doc = loaded;
+                                    fit_first_artboard(view, doc);
+                                    self.smooth.log_zoom_target = view.zoom.ln();
                                     self.current_file = Some(path);
                                     self.selected_id = None;
                                     self.show_welcome = false;
@@ -1277,6 +1303,8 @@ impl PhotonicApp {
                                                     Ok(loaded) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
                                                         *doc = loaded;
+                                                        fit_first_artboard(view, doc);
+                                                        self.smooth.log_zoom_target = view.zoom.ln();
                                                         self.selected_id = None;
                                                         doc_modified = true;
                                                         self.file_status = Some(format!("Opened {}", path.file_name().unwrap_or_default().to_string_lossy()));
@@ -1692,6 +1720,10 @@ impl PhotonicApp {
         egui::SidePanel::left("properties")
             .default_width(220.0)
             .min_width(160.0)
+            // Cap the width so content (e.g. the search field sizing off
+            // available_width during egui's sizing pass) can't balloon the
+            // panel to fill the screen.
+            .max_width(360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
@@ -2185,6 +2217,121 @@ impl PhotonicApp {
                             egui::FontId::proportional(11.0),
                             dim_color,
                         );
+                    }
+                }
+
+                // ── Artboards: labels, active highlight, select, add/remove ───
+                {
+                    let accent = egui::Color32::from_rgb(110, 86, 207);
+                    // Snapshot (id, name, rect) so we can mutate `doc` afterward.
+                    let boards: Vec<(photonic_core::ArtboardId, String, f64, f64, f64, f64)> = doc
+                        .artboards
+                        .iter()
+                        .map(|a| (a.id, a.name.clone(), a.x, a.y, a.width, a.height))
+                        .collect();
+                    let active_id = doc.active_artboard;
+                    let mut select: Option<photonic_core::ArtboardId> = None;
+
+                    // Labels + active border only matter with multiple boards;
+                    // a lone artboard keeps the classic clean canvas.
+                    if boards.len() > 1 {
+                        let painter = ui.painter_at(rect);
+                        for (i, (id, name, x, y, w, h)) in boards.iter().enumerate() {
+                            let (sx0, sy0) = view.canvas_to_screen(*x, *y);
+                            let (sx1, sy1) = view.canvas_to_screen(*x + *w, *y + *h);
+                            let is_active =
+                                active_id == Some(*id) || (active_id.is_none() && i == 0);
+                            let col = if is_active {
+                                accent
+                            } else {
+                                egui::Color32::from_gray(140)
+                            };
+                            let label_pos = egui::pos2(sx0 as f32, sy0 as f32 - 18.0);
+                            let galley = painter.layout_no_wrap(
+                                name.clone(),
+                                egui::FontId::proportional(12.0),
+                                col,
+                            );
+                            let lrect = egui::Rect::from_min_size(label_pos, galley.size());
+                            let resp = ui.interact(
+                                lrect.expand(3.0),
+                                ui.id().with(("ab_label", i)),
+                                egui::Sense::click(),
+                            );
+                            if resp.hovered() {
+                                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
+                                select = Some(*id);
+                            }
+                            painter.galley(label_pos, galley, col);
+                            if is_active {
+                                painter.rect_stroke(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(sx0 as f32, sy0 as f32),
+                                        egui::pos2(sx1 as f32, sy1 as f32),
+                                    ),
+                                    0.0,
+                                    egui::Stroke::new(1.5, accent),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(id) = select {
+                        doc.active_artboard = Some(id);
+                        doc_modified = true;
+                    }
+
+                    // Compact add/remove toolbar pinned to the viewport corner.
+                    let mut do_add = false;
+                    let mut do_remove = false;
+                    egui::Area::new(ui.id().with("artboard_tools"))
+                        .fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 42.0))
+                        .show(ctx, |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("Artboards: {}", boards.len()))
+                                            .size(11.5),
+                                    );
+                                    if ui.add(egui::Button::new("＋").small()).clicked() {
+                                        do_add = true;
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            boards.len() > 1,
+                                            egui::Button::new("－").small(),
+                                        )
+                                        .clicked()
+                                    {
+                                        do_remove = true;
+                                    }
+                                });
+                            });
+                        });
+                    if do_add {
+                        let (_, by0, bx1, _) = doc.artboards_bounds();
+                        let (aw, ah) = doc
+                            .active_artboard()
+                            .map(|a| (a.width, a.height))
+                            .unwrap_or((doc.width, doc.height));
+                        let gap = (aw * 0.06).max(40.0);
+                        let n = doc.artboards.len() + 1;
+                        let ab = photonic_core::Artboard::new(
+                            format!("Artboard {n}"),
+                            bx1 + gap,
+                            by0,
+                            aw,
+                            ah,
+                        );
+                        doc.add_artboard(ab);
+                        doc_modified = true;
+                    }
+                    if do_remove {
+                        if let Some(id) = doc.active_artboard {
+                            doc.remove_artboard(id);
+                            doc_modified = true;
+                        }
                     }
                 }
 
@@ -9863,7 +10010,10 @@ impl PhotonicApp {
                         None => self.selected_id.is_some(),
                     };
 
-                    if on_selected && !shift {
+                    // Dragging within the selection bounds moves it — including
+                    // with Shift (axis-lock) or Alt (duplicate). Shift only falls
+                    // through to marquee/extend-select when NOT on the selection.
+                    if on_selected {
                         self.moving = true;
                     } else {
                         // Try selecting a new node at the click point
@@ -9976,8 +10126,10 @@ impl PhotonicApp {
                                 let origins = self.resize_multi_origins.clone();
                                 for (id, orig_xf) in origins {
                                     if let Some(node) = doc.nodes.get_mut(&id) {
+                                        // Scale is in canvas space, so it composes
+                                        // AFTER the node's own transform.
                                         node.transform =
-                                            Transform { matrix: orig_xf }.then(&t_scale);
+                                            t_scale.then(&Transform { matrix: orig_xf });
                                     }
                                 }
                                 *doc_modified = true;
@@ -10005,7 +10157,10 @@ impl PhotonicApp {
                                         let t_orig = Transform { matrix: orig_xf };
                                         let t_scale =
                                             Transform::scale_around(sx, sy, anchor_x, anchor_y);
-                                        node.transform = t_orig.then(&t_scale);
+                                        // Canvas-space scale composes AFTER the
+                                        // node's own transform (else a moved node
+                                        // jumps instead of scaling in place).
+                                        node.transform = t_scale.then(&t_orig);
                                     }
                                     *doc_modified = true;
                                 }
@@ -10014,13 +10169,35 @@ impl PhotonicApp {
                     }
                 }
             } else if self.moving {
-                let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
                 // Capture the starting translations, reference point and press
                 // position on the first move frame, so the move is applied
                 // absolutely (origin + total delta) and can be snapped to grid
                 // (#12). Also snapshot the full nodes so the whole drag becomes a
                 // single undoable history step on release (#11).
                 if self.move_snap_origins.is_empty() {
+                    // Alt held at move start: duplicate the selection and drag the
+                    // copies, leaving the originals in place.
+                    if ui.input(|i| i.modifiers.alt) {
+                        let src_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
+                        let mut new_ids: Vec<NodeId> = Vec::new();
+                        for id in &src_ids {
+                            if let Some(mut n) = doc.nodes.get(id).cloned() {
+                                n.id = uuid::Uuid::new_v4();
+                                let layer = n.layer_id;
+                                let nid = n.id;
+                                doc.add_node(n, Some(layer));
+                                new_ids.push(nid);
+                            }
+                        }
+                        if !new_ids.is_empty() {
+                            doc.selection = Selection::from_ids(new_ids.iter().copied());
+                            self.selected_id = new_ids.first().copied();
+                            self.dup_drag = true;
+                            *doc_modified = true;
+                        }
+                    }
+
+                    let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
                     self.move_drag_origins = ids_to_move
                         .iter()
                         .filter_map(|id| doc.nodes.get(id).cloned())
@@ -10046,14 +10223,18 @@ impl PhotonicApp {
                     let (curx, cury) = view.screen_to_canvas(cur.x as f64, cur.y as f64);
                     let raw_dx = curx - px;
                     let raw_dy = cury - py;
-                    // Snap the reference point's target to the grid (no-op when
-                    // snap-to-grid is off), then move every node by that delta so
-                    // the selection keeps its internal layout.
-                    let (dx, dy) = match self.move_snap_ref {
-                        Some((rx, ry)) => {
-                            (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
+                    // Shift: lock the move to the nearest of 8 directions (takes
+                    // precedence over grid snap). Otherwise snap the reference
+                    // point's target to the grid (no-op when snap is off).
+                    let (dx, dy) = if ui.input(|i| i.modifiers.shift) {
+                        axis_lock_8(raw_dx, raw_dy)
+                    } else {
+                        match self.move_snap_ref {
+                            Some((rx, ry)) => {
+                                (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
+                            }
+                            None => (raw_dx, raw_dy),
                         }
-                        None => (raw_dx, raw_dy),
                     };
                     for (id, ox, oy) in &self.move_snap_origins {
                         if let Some(node) = doc.nodes.get_mut(id) {
@@ -10072,24 +10253,50 @@ impl PhotonicApp {
             // The doc already holds the moved state, so re-applying UpdateNode is
             // a no-op; it just captures the inverse for undo/redo.
             if !self.move_drag_origins.is_empty() {
-                let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
-                    .into_iter()
-                    .filter_map(|old| {
-                        doc.nodes.get(&old.id).and_then(|cur| {
-                            (cur.transform.matrix != old.transform.matrix).then(|| {
-                                Command::UpdateNode {
-                                    old,
-                                    new: cur.clone(),
-                                }
+                if self.dup_drag {
+                    // Alt-duplicate: the copies are already live in the doc. Remove
+                    // them and re-add through history so the whole duplication is a
+                    // single undoable step (undo deletes the copies).
+                    let ids: Vec<NodeId> =
+                        self.move_drag_origins.iter().map(|n| n.id).collect();
+                    self.move_drag_origins.clear();
+                    let finals: Vec<SceneNode> =
+                        ids.iter().filter_map(|id| doc.nodes.get(id).cloned()).collect();
+                    for id in &ids {
+                        doc.remove_node(id);
+                    }
+                    let cmds: Vec<Command> = finals
+                        .into_iter()
+                        .map(|node| {
+                            let layer_id = Some(node.layer_id);
+                            Command::AddNode { node, layer_id }
+                        })
+                        .collect();
+                    if !cmds.is_empty() {
+                        history.execute(Command::Batch(cmds), doc);
+                        *doc_modified = true;
+                    }
+                } else {
+                    let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
+                        .into_iter()
+                        .filter_map(|old| {
+                            doc.nodes.get(&old.id).and_then(|cur| {
+                                (cur.transform.matrix != old.transform.matrix).then(|| {
+                                    Command::UpdateNode {
+                                        old,
+                                        new: cur.clone(),
+                                    }
+                                })
                             })
                         })
-                    })
-                    .collect();
-                if !cmds.is_empty() {
-                    history.execute(Command::Batch(cmds), doc);
-                    *doc_modified = true;
+                        .collect();
+                    if !cmds.is_empty() {
+                        history.execute(Command::Batch(cmds), doc);
+                        *doc_modified = true;
+                    }
                 }
             }
+            self.dup_drag = false;
             self.move_snap_origins.clear();
             self.move_snap_ref = None;
             self.move_snap_press = None;
@@ -13041,6 +13248,62 @@ impl PhotonicApp {
             path
         };
 
+        // ── Multi-artboard raster export: one file per artboard ──────────────
+        // Each board exports at its own pixel size into `<stem>_<name>.<ext>`.
+        // SVG/ICO keep whole-document behaviour.
+        if matches!(
+            format,
+            ExportFormat::Png
+                | ExportFormat::Jpeg
+                | ExportFormat::WebP
+                | ExportFormat::Gif
+                | ExportFormat::Tiff
+        ) && doc.artboards.len() > 1
+        {
+            let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+            let parent = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| doc.name.clone());
+            let mut err: Option<String> = None;
+            let mut count = 0usize;
+            for ab in &doc.artboards {
+                let mut o = opts.clone();
+                o.region = Some((ab.x, ab.y, ab.width, ab.height));
+                let aw = ab.width.round().max(1.0) as u32;
+                let ah = ab.height.round().max(1.0) as u32;
+                let bytes = match format {
+                    ExportFormat::Png => renderer.render_png_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Jpeg => renderer.render_jpeg_with_opts(doc, aw, ah, &o),
+                    ExportFormat::WebP => renderer.render_webp_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Gif => renderer.render_gif_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Tiff => renderer.render_tiff_with_opts(doc, aw, ah, &o),
+                    _ => unreachable!(),
+                };
+                let safe: String = ab
+                    .name
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let p = parent.join(format!("{stem}_{safe}.{ext}"));
+                if let Err(e) = std::fs::write(&p, bytes) {
+                    err = Some(e.to_string());
+                    break;
+                }
+                count += 1;
+            }
+            self.export_dialog = None;
+            self.file_status = Some(match err {
+                None => format!("Exported {count} artboards → {stem}_*.{ext}"),
+                Some(e) => format!("Export failed: {e}"),
+            });
+            return;
+        }
+
         let result = match format {
             ExportFormat::Svg => {
                 // Honor the Background selector: Transparent => no rect,
@@ -13236,6 +13499,19 @@ fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
     // Round to nearest multiple of 45° (π/4 radians).
     let snapped = (angle / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
     (sx + len * snapped.cos(), sy + len * snapped.sin())
+}
+
+/// Lock a movement delta `(dx, dy)` to the nearest of 8 directions
+/// (N/S/E/W + the four diagonals), preserving magnitude. Used for
+/// Shift-constrained moves of selected objects.
+fn axis_lock_8(dx: f64, dy: f64) -> (f64, f64) {
+    let len = dx.hypot(dy);
+    if len < 1e-9 {
+        return (0.0, 0.0);
+    }
+    let step = std::f64::consts::FRAC_PI_4; // 45°
+    let snapped = (dy.atan2(dx) / step).round() * step;
+    (len * snapped.cos(), len * snapped.sin())
 }
 
 /// Treat `(sx, sy)` as the center of a shape and mirror the drag end through it,

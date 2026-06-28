@@ -1,4 +1,6 @@
 pub mod app;
+pub mod disk_search;
+pub mod lightfall;
 pub mod panels;
 pub mod preferences;
 pub mod quit;

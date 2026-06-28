@@ -43,6 +43,11 @@ pub struct ExportOptions {
     pub ico_sizes: Vec<u32>,
     /// JPEG quality (1–100). Only used by `render_jpeg_*` methods.
     pub jpeg_quality: u8,
+    /// Optional crop region in document coordinates `(x, y, w, h)`. When set, the
+    /// render fits to this rectangle (and draws the artboard background over it)
+    /// instead of the full document — used for per-artboard export. Takes
+    /// precedence over `crop_to_content`.
+    pub region: Option<(f64, f64, f64, f64)>,
 }
 
 impl Default for ExportOptions {
@@ -52,6 +57,7 @@ impl Default for ExportOptions {
             crop_to_content: false,
             ico_sizes: vec![16, 32, 48, 256],
             jpeg_quality: 90,
+            region: None,
         }
     }
 }
@@ -148,9 +154,12 @@ impl HeadlessRenderer {
         let include_artboard_bg = opts.background == ExportBackground::Artboard;
         let (verts, idxs) = build_geometry(document, include_artboard_bg);
 
-        // Camera: fit artboard or content bounding box to the output size.
+        // Camera: an explicit region (per-artboard export) wins; otherwise fit
+        // the content bounding box or the full document to the output size.
         let mut view = CanvasView::new(w, h);
-        if opts.crop_to_content {
+        if let Some((rx, ry, rw, rh)) = opts.region {
+            view.fit_to_rect(rx, ry, rw, rh);
+        } else if opts.crop_to_content {
             if let Some((cx, cy, cw, ch)) = content_bounds(&verts, include_artboard_bg, document) {
                 view.fit_to_rect(cx, cy, cw, ch);
             } else {
@@ -199,8 +208,10 @@ impl HeadlessRenderer {
             }
             // White artboard rectangle (matches the GPU path's artboard quad).
             if include_artboard_bg {
-                let (ax0, ay0) = view.canvas_to_screen(0.0, 0.0);
-                let (ax1, ay1) = view.canvas_to_screen(document.width, document.height);
+                let (rx, ry, rw, rh) =
+                    opts.region.unwrap_or((0.0, 0.0, document.width, document.height));
+                let (ax0, ay0) = view.canvas_to_screen(rx, ry);
+                let (ax1, ay1) = view.canvas_to_screen(rx + rw, ry + rh);
                 let x0 = (ax0.min(ax1).floor() as i64).max(0);
                 let y0 = (ay0.min(ay1).floor() as i64).max(0);
                 let x1 = (ax0.max(ax1).ceil() as i64).min(w as i64);

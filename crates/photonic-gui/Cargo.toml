@@ -14,6 +14,7 @@ egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
+bytemuck = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

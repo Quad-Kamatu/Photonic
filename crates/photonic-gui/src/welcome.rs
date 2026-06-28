@@ -40,76 +40,243 @@ const TEXT_PRIMARY: Color32 = Color32::from_rgb(232, 232, 242);
 const TEXT_MUTED: Color32 = Color32::from_rgb(122, 122, 154);
 
 // Canvas size presets, grouped by use-case: (group, &[(label, width, height)]).
-// Dimensions are in pixels (print sizes at 96 DPI). Each tile draws its true
-// aspect ratio, so wide/tall/square presets are visually distinguishable.
+// Dimensions are in pixels (paper sizes at 96 DPI, photo/poster noted per group).
+// Each tile draws its true aspect ratio, so wide/tall/square presets are
+// visually distinguishable. Filterable via the size search bar.
 const PRESET_GROUPS: &[(&str, &[(&str, f64, f64)])] = &[
     (
-        "Print",
+        "Paper · A series (96dpi)",
         &[
-            ("A3", 1587.0, 2245.0),
-            ("A4", 1123.0, 794.0),
-            ("A5", 794.0, 559.0),
-            ("Letter", 1056.0, 816.0),
+            ("A6", 397.0, 559.0),
+            ("A5", 559.0, 794.0),
+            ("A4", 794.0, 1123.0),
+            ("A4 Landscape", 1123.0, 794.0),
+            ("A3", 1123.0, 1587.0),
+            ("A2", 1587.0, 2245.0),
+            ("A1", 2245.0, 3179.0),
+            ("A0", 3179.0, 4494.0),
+        ],
+    ),
+    (
+        "Paper · US (96dpi)",
+        &[
+            ("Letter", 816.0, 1056.0),
+            ("Letter Landscape", 1056.0, 816.0),
             ("Legal", 816.0, 1344.0),
             ("Tabloid", 1056.0, 1632.0),
-            ("Postcard", 576.0, 384.0),
-            ("Card", 336.0, 192.0),
+            ("Ledger", 1632.0, 1056.0),
+            ("Executive", 696.0, 1008.0),
+            ("Statement", 528.0, 816.0),
+            ("B5", 665.0, 944.0),
+            ("B4", 944.0, 1334.0),
         ],
     ),
     (
-        "Screen",
+        "Stationery",
         &[
+            ("Business Card", 1050.0, 600.0),
+            ("Postcard 4×6", 1200.0, 1800.0),
+            ("Postcard 5×7", 1500.0, 2100.0),
+            ("DL Flyer", 1039.0, 2079.0),
+            ("Envelope #10", 2850.0, 1237.0),
+            ("Letterhead", 2550.0, 3300.0),
+            ("Greeting Card", 1500.0, 2100.0),
+            ("Door Hanger", 1050.0, 2700.0),
+            ("Ticket", 1650.0, 600.0),
+            ("Bookmark", 600.0, 1800.0),
+        ],
+    ),
+    (
+        "Photo print (300dpi)",
+        &[
+            ("2×3", 600.0, 900.0),
+            ("3.5×5", 1050.0, 1500.0),
+            ("4×6", 1200.0, 1800.0),
+            ("5×7", 1500.0, 2100.0),
+            ("6×8", 1800.0, 2400.0),
+            ("8×10", 2400.0, 3000.0),
+            ("8.5×11", 2550.0, 3300.0),
+            ("11×14", 3300.0, 4200.0),
+            ("12×12", 3600.0, 3600.0),
+            ("16×20", 4800.0, 6000.0),
+            ("20×30", 6000.0, 9000.0),
+            ("24×36", 7200.0, 10800.0),
+        ],
+    ),
+    (
+        "Poster & large (150dpi)",
+        &[
+            ("11×17", 1650.0, 2550.0),
+            ("Tabloid Poster", 1800.0, 2700.0),
+            ("18×24", 2700.0, 3600.0),
+            ("24×36", 3600.0, 5400.0),
+            ("Movie 27×40", 4050.0, 6000.0),
+            ("A2 Poster", 2480.0, 3508.0),
+            ("A1 Poster", 3508.0, 4961.0),
+            ("Banner 2×6ft", 3600.0, 10800.0),
+            ("Roll-up", 3838.0, 9921.0),
+        ],
+    ),
+    (
+        "Screen & video",
+        &[
+            ("480p", 854.0, 480.0),
             ("720p", 1280.0, 720.0),
             ("1080p", 1920.0, 1080.0),
-            ("1440p", 2560.0, 1440.0),
-            ("4K", 3840.0, 2160.0),
+            ("1440p QHD", 2560.0, 1440.0),
+            ("4K UHD", 3840.0, 2160.0),
+            ("5K", 5120.0, 2880.0),
+            ("8K", 7680.0, 4320.0),
+            ("DCI 4K", 4096.0, 2160.0),
+            ("Vertical 1080", 1080.0, 1920.0),
             ("Ultrawide", 3440.0, 1440.0),
-            ("Web", 1366.0, 768.0),
+            ("Super Ultrawide", 5120.0, 1440.0),
+            ("WXGA", 1366.0, 768.0),
+            ("WUXGA", 1920.0, 1200.0),
+            ("Cinemascope", 1920.0, 816.0),
         ],
     ),
     (
-        "Social",
+        "Web",
         &[
-            ("IG Post", 1080.0, 1080.0),
-            ("IG Story", 1080.0, 1920.0),
-            ("IG Portrait", 1080.0, 1350.0),
-            ("TikTok", 1080.0, 1920.0),
-            ("X Post", 1600.0, 900.0),
-            ("YT Thumb", 1280.0, 720.0),
-            ("Pinterest", 1000.0, 1500.0),
-        ],
-    ),
-    (
-        "Banners",
-        &[
-            ("YouTube", 2560.0, 1440.0),
+            ("Desktop 1280", 1280.0, 800.0),
+            ("Desktop 1440", 1440.0, 900.0),
+            ("Desktop 1920", 1920.0, 1080.0),
+            ("Hero", 1600.0, 900.0),
             ("OG Image", 1200.0, 630.0),
-            ("FB Cover", 820.0, 312.0),
-            ("FB Event", 1920.0, 1005.0),
-            ("X Header", 1500.0, 500.0),
-            ("LinkedIn", 1584.0, 396.0),
-            ("LinkedIn Co", 1128.0, 191.0),
-            ("Twitch", 1200.0, 480.0),
-            ("Twitch Panel", 320.0, 100.0),
+            ("Blog Header", 1200.0, 630.0),
+            ("Email", 600.0, 1200.0),
+            ("Email Header", 600.0, 200.0),
+            ("Card", 400.0, 500.0),
+            ("Logo Space", 800.0, 400.0),
         ],
     ),
     (
-        "Square",
+        "Instagram",
         &[
-            ("Favicon", 64.0, 64.0),
-            ("256", 256.0, 256.0),
-            ("512", 512.0, 512.0),
-            ("1024", 1024.0, 1024.0),
-            ("2048", 2048.0, 2048.0),
+            ("Post", 1080.0, 1080.0),
+            ("Portrait", 1080.0, 1350.0),
+            ("Landscape", 1080.0, 566.0),
+            ("Story / Reel", 1080.0, 1920.0),
+            ("Profile", 320.0, 320.0),
+            ("Carousel", 1080.0, 1080.0),
+        ],
+    ),
+    (
+        "Facebook",
+        &[
+            ("Post", 1200.0, 630.0),
+            ("Square Post", 1200.0, 1200.0),
+            ("Cover", 820.0, 312.0),
+            ("Story", 1080.0, 1920.0),
+            ("Event", 1920.0, 1005.0),
+            ("Profile", 320.0, 320.0),
+            ("Ad", 1200.0, 628.0),
+        ],
+    ),
+    (
+        "X / Twitter",
+        &[
+            ("Post", 1600.0, 900.0),
+            ("Square Post", 1080.0, 1080.0),
+            ("Header", 1500.0, 500.0),
+            ("Profile", 400.0, 400.0),
+        ],
+    ),
+    (
+        "LinkedIn",
+        &[
+            ("Post", 1200.0, 1200.0),
+            ("Link Post", 1200.0, 627.0),
+            ("Personal Banner", 1584.0, 396.0),
+            ("Company Banner", 1128.0, 191.0),
+            ("Profile", 400.0, 400.0),
+        ],
+    ),
+    (
+        "YouTube",
+        &[
+            ("Thumbnail", 1280.0, 720.0),
+            ("Banner", 2560.0, 1440.0),
+            ("Short", 1080.0, 1920.0),
+            ("Profile", 800.0, 800.0),
+        ],
+    ),
+    (
+        "TikTok & more",
+        &[
+            ("TikTok Video", 1080.0, 1920.0),
+            ("TikTok Profile", 200.0, 200.0),
+            ("Snapchat", 1080.0, 1920.0),
+            ("Pinterest Pin", 1000.0, 1500.0),
+            ("Pinterest Square", 1000.0, 1000.0),
+            ("Pinterest Long", 1000.0, 2100.0),
+            ("Tumblr", 1280.0, 1920.0),
+            ("Reddit Banner", 1920.0, 384.0),
+            ("WhatsApp", 1080.0, 1920.0),
+            ("Discord Banner", 960.0, 540.0),
+        ],
+    ),
+    (
+        "Twitch",
+        &[
+            ("Banner", 1200.0, 480.0),
+            ("Offline", 1920.0, 1080.0),
+            ("Panel", 320.0, 100.0),
+            ("Overlay", 1920.0, 1080.0),
+            ("Profile", 800.0, 800.0),
+        ],
+    ),
+    (
+        "Display ads",
+        &[
+            ("Leaderboard", 728.0, 90.0),
+            ("Banner", 468.0, 60.0),
+            ("Skyscraper", 120.0, 600.0),
+            ("Wide Skyscraper", 160.0, 600.0),
+            ("Med Rectangle", 300.0, 250.0),
+            ("Large Rectangle", 336.0, 280.0),
+            ("Half Page", 300.0, 600.0),
+            ("Billboard", 970.0, 250.0),
+            ("Mobile Banner", 320.0, 50.0),
+            ("Large Mobile", 320.0, 100.0),
         ],
     ),
     (
         "Device",
         &[
-            ("iPhone", 1170.0, 2532.0),
+            ("iPhone 15 Pro", 1179.0, 2556.0),
+            ("iPhone SE", 750.0, 1334.0),
+            ("iPad Pro 12.9", 2048.0, 2732.0),
             ("iPad", 1640.0, 2360.0),
             ("Android", 1080.0, 2340.0),
-            ("Watch", 396.0, 484.0),
+            ("Pixel", 1080.0, 2400.0),
+            ("Galaxy", 1440.0, 3088.0),
+            ("Apple Watch", 368.0, 448.0),
+        ],
+    ),
+    (
+        "App icons",
+        &[
+            ("iOS Icon", 1024.0, 1024.0),
+            ("Android Icon", 512.0, 512.0),
+            ("Touch Icon", 180.0, 180.0),
+            ("Adaptive", 432.0, 432.0),
+            ("Favicon 64", 64.0, 64.0),
+            ("Favicon 32", 32.0, 32.0),
+            ("Favicon 16", 16.0, 16.0),
+        ],
+    ),
+    (
+        "Square",
+        &[
+            ("64", 64.0, 64.0),
+            ("128", 128.0, 128.0),
+            ("256", 256.0, 256.0),
+            ("512", 512.0, 512.0),
+            ("1024", 1024.0, 1024.0),
+            ("2048", 2048.0, 2048.0),
+            ("4096", 4096.0, 4096.0),
         ],
     ),
 ];
@@ -139,6 +306,15 @@ pub enum WelcomeAction {
     },
     OpenFile(PathBuf),
     OpenBrowse,
+    /// Prompt for a folder to add as a disk-search root.
+    AddDiskRoot,
+}
+
+/// Which tab is showing inside the Open panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenTab {
+    Recent,
+    Disk,
 }
 
 /// Unit the dimension fields are expressed in. Pixels are canonical; mm/in are
@@ -194,7 +370,14 @@ pub struct WelcomeState {
     slug_mm: f64,
     margin: f64,
     num_artboards: usize,
-    advanced_open: bool,
+    size_search: String,
+    // ── Open panel ──
+    open_tab: OpenTab,
+    disk_roots: Vec<PathBuf>,
+    disk_filter: String,
+    disk: crate::disk_search::DiskScanner,
+    /// Whether the disk tab has kicked off its first scan this session.
+    disk_scanned: bool,
 }
 
 impl WelcomeState {
@@ -213,7 +396,22 @@ impl WelcomeState {
             slug_mm: 0.0,
             margin: 0.0,
             num_artboards: 1,
-            advanced_open: false,
+            size_search: String::new(),
+            open_tab: OpenTab::Recent,
+            disk_roots: load_disk_roots(),
+            disk_filter: String::new(),
+            disk: crate::disk_search::DiskScanner::new(),
+            disk_scanned: false,
+        }
+    }
+
+    /// Add a folder as a disk-search root (deduped), persist, and rescan.
+    pub fn add_disk_root(&mut self, path: PathBuf) {
+        if !self.disk_roots.contains(&path) {
+            self.disk_roots.push(path);
+            save_disk_roots(&self.disk_roots);
+            self.disk.rescan(self.disk_roots.clone(), false);
+            self.disk_scanned = true;
         }
     }
 
@@ -227,15 +425,19 @@ impl WelcomeState {
 
     /// Draw the welcome screen, returning an action if the user made a choice.
     pub fn draw(&mut self, ctx: &egui::Context) -> Option<WelcomeAction> {
+        // The welcome screen is always dark, regardless of the app's light/dark
+        // preference — otherwise egui widgets (fields, buttons) would render light
+        // over the dark background.
+        ctx.set_visuals(crate::theme::build_dark_theme());
         let t = ctx.input(|i| i.time);
         let appeared = *self.appeared_at.get_or_insert(t);
         let elapsed = (t - appeared) as f32;
-        // Drive the one-shot entrance reveal to completion.
-        if elapsed < 1.4 {
-            ctx.request_repaint();
-        }
+        // Repaint every frame so the animated Lightfall background advances.
+        ctx.request_repaint();
         // Upload any thumbnails that finished rendering since last frame.
         self.thumbs.pump(ctx);
+        // Drain any disk-search results found since last frame.
+        self.disk.pump();
 
         let mut action: Option<WelcomeAction> = None;
         let mut next_view: Option<WelcomeView> = None;
@@ -264,14 +466,13 @@ impl WelcomeState {
             .frame(egui::Frame::none().fill(BG_BASE))
             .show(ctx, |ui| {
                 let full = ui.max_rect();
-                // Ambient accent glow rising from behind the wordmark.
-                paint_radial_glow(
-                    ui.painter(),
-                    Pos2::new(full.center().x, full.top() + full.height() * 0.30),
-                    full.width().max(full.height()) * 0.62,
-                    ACCENT,
-                    22,
-                );
+                // Animated Lightfall shader background (real fullscreen GPU pass
+                // behind the UI). Falls back to BG_BASE if not installed.
+                crate::lightfall::paint(ui, full, t as f32);
+                // Dark gradient over the whole background, plus an extra radial
+                // scrim in the centre so text + boxes read clearly.
+                paint_bg_gradient(ui.painter(), full);
+                paint_center_scrim(ui.painter(), full);
 
                 match self.view {
                     WelcomeView::Hub => {
@@ -316,7 +517,8 @@ impl WelcomeState {
             let p = ui.painter();
             let cx = ui.max_rect().center().x;
             let y = ui.cursor().top();
-            p.text(
+            text_shadow(
+                p,
                 Pos2::new(cx, y + lift(r_word)),
                 Align2::CENTER_TOP,
                 "PHOTONIC",
@@ -329,7 +531,8 @@ impl WelcomeState {
             let p = ui.painter();
             let cx = ui.max_rect().center().x;
             let y = ui.cursor().top();
-            p.text(
+            text_shadow(
+                p,
                 Pos2::new(cx, y + lift(r_sub)),
                 Align2::CENTER_TOP,
                 "a modern graphics studio",
@@ -408,264 +611,364 @@ impl WelcomeState {
         let anim = ctx.animate_bool_with_time(egui::Id::new("welcome_anim_new"), true, 0.18);
         panel_chrome(ui, ctx, "New canvas", next_view);
 
-        let panel_w = 600.0_f32.min(ui.available_width() - 48.0);
-        ui.add_space(8.0);
+        // Fill most of the screen: a centered name on top, two large separate
+        // containers side by side, and a centered Create button below.
+        let panel_w = (ui.available_width() - 56.0).clamp(620.0, 1280.0);
+        ui.add_space(6.0);
         ui.vertical_centered(|ui| {
             ui.set_max_width(panel_w);
             ui.scope(|ui| {
                 ui.set_opacity(anim);
-                let off = lift(anim);
-                ui.add_space(off);
+                ui.add_space(lift(anim));
 
-                let card = egui::Frame::none()
-                    .fill(BG_PANEL)
-                    .rounding(Rounding::same(10.0))
-                    .stroke(Stroke::new(1.0, BORDER))
-                    .inner_margin(Margin::same(22.0));
-                card.show(ui, |ui| {
-                    // Name.
-                    ui.label(RichText::new("NAME").color(TEXT_MUTED).size(10.5));
-                    ui.add_space(4.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.doc_name)
-                            .desired_width(f32::INFINITY)
-                            .font(egui::TextStyle::Body),
-                    );
-                    ui.add_space(18.0);
-
-                    // Aspect-ratio preset tiles, grouped by use-case, in a
-                    // bounded scroll area. Selecting a tile sets W/H; typing in
-                    // the always-visible dimension fields deselects all tiles.
-                    ui.label(RichText::new("CANVAS SIZE").color(TEXT_MUTED).size(10.5));
-                    ui.add_space(8.0);
-                    let mut pick: Option<(f64, f64)> = None;
-                    egui::ScrollArea::vertical()
-                        .id_source("canvas_size_scroll")
-                        .max_height(286.0)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for (gi, (group, items)) in PRESET_GROUPS.iter().enumerate() {
-                                if gi > 0 {
-                                    ui.add_space(10.0);
-                                }
-                                ui.label(
-                                    RichText::new(*group)
-                                        .color(TEXT_MUTED)
-                                        .size(10.0)
-                                        .strong(),
-                                );
-                                ui.add_space(6.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing = Vec2::new(9.0, 9.0);
-                                    for (label, pw, ph_) in *items {
-                                        let selected = (self.width - pw).abs() < 0.5
-                                            && (self.height - ph_).abs() < 0.5;
-                                        if aspect_tile(ui, ctx, label, *pw, *ph_, selected) {
-                                            pick = Some((*pw, *ph_));
-                                        }
-                                    }
+                // ── Name (centered, on top, in its own distinct container) ───
+                let name_w = (panel_w * 0.46).min(560.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(name_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        egui::Frame::none()
+                            .fill(BG_PANEL)
+                            .rounding(Rounding::same(10.0))
+                            .stroke(Stroke::new(1.0, BORDER))
+                            .shadow(box_shadow())
+                            .inner_margin(Margin::symmetric(18.0, 12.0))
+                            .show(ui, |ui| {
+                                ui.set_width(name_w - 36.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        RichText::new("DOCUMENT NAME")
+                                            .color(ACCENT_BRIGHT)
+                                            .size(10.5)
+                                            .strong(),
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.doc_name)
+                                            .desired_width(f32::INFINITY)
+                                            .horizontal_align(egui::Align::Center)
+                                            .font(FontId::proportional(15.0)),
+                                    );
                                 });
+                            });
+                    },
+                );
+                ui.add_space(16.0);
+
+                // ── Two separate containers side by side ─────────────────────
+                let gap = 18.0;
+                let usable = panel_w - 4.0;
+                let left_w = (usable - gap) * 0.62;
+                let right_w = (usable - gap) * 0.38;
+                let container_h = (ui.available_height() - 84.0).clamp(300.0, 640.0);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_w, container_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            container_frame().show(ui, |ui| {
+                                ui.set_width(left_w - 36.0);
+                                ui.set_min_height(container_h - 36.0);
+                                self.draw_size_column(ui, ctx);
+                            });
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(right_w, container_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            container_frame().show(ui, |ui| {
+                                ui.set_width(right_w - 36.0);
+                                ui.set_min_height(container_h - 36.0);
+                                self.draw_options_column(ui);
+                            });
+                        },
+                    );
+                });
+
+                // ── Create button (centered, at bottom) ──────────────────────
+                ui.add_space(16.0);
+                let mut sub = format!("{} × {} px", self.width as i64, self.height as i64);
+                if self.num_artboards > 1 {
+                    sub.push_str(&format!("  ·  {} artboards", self.num_artboards));
+                }
+                if self.bleed_mm > 0.0 {
+                    sub.push_str(&format!("  ·  bleed {}mm", trim_num(self.bleed_mm)));
+                }
+                let label = format!("{}  Create  ·  {}", ph::SPARKLE, sub);
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let mut create = false;
+                ui.allocate_ui_with_layout(
+                    Vec2::new((panel_w * 0.5).min(520.0), 46.0),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        let btn = egui::Button::new(
+                            RichText::new(label).size(13.5).color(Color32::WHITE).strong(),
+                        )
+                        .fill(ACCENT)
+                        .stroke(Stroke::new(1.0, ACCENT_BRIGHT))
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(ui.available_width(), 44.0));
+                        if ui.add(btn).clicked() {
+                            create = true;
+                        }
+                    },
+                );
+                if create || enter {
+                    let name = self.doc_name.trim();
+                    let name = if name.is_empty() { "Untitled" } else { name };
+                    *action = Some(WelcomeAction::CreateNew {
+                        name: name.to_string(),
+                        width: self.width,
+                        height: self.height,
+                        bleed_mm: self.bleed_mm,
+                        slug_mm: self.slug_mm,
+                        margin: self.margin,
+                        artboards: self.num_artboards,
+                    });
+                }
+            });
+        });
+    }
+
+    /// Left container: a searchable size catalog (scrolling) above a visually
+    /// distinct custom-size section.
+    fn draw_size_column(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // ── Search bar ───────────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.size_search)
+                    .hint_text("Search sizes — name, platform, or dimensions…")
+                    .desired_width(f32::INFINITY),
+            );
+            if !self.size_search.is_empty()
+                && ui.small_button("✕").on_hover_text("Clear").clicked()
+            {
+                self.size_search.clear();
+            }
+        });
+        ui.add_space(8.0);
+
+        let q = self.size_search.trim().to_lowercase();
+        let mut pick: Option<(f64, f64)> = None;
+        // Reserve room for the custom-size box so the scroll fills the space
+        // above it and the box stays pinned to the container bottom.
+        const CUSTOM_H: f32 = 74.0;
+        let scroll_h = (ui.available_height() - CUSTOM_H - 12.0).max(150.0);
+        egui::ScrollArea::vertical()
+            .id_source("canvas_size_scroll")
+            .max_height(scroll_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut any = false;
+                for group_entry in PRESET_GROUPS {
+                    let group = group_entry.0;
+                    let items = group_entry.1;
+                    let filtered: Vec<(&str, f64, f64)> = items
+                        .iter()
+                        .copied()
+                        .filter(|(label, pw, ph_)| {
+                            if q.is_empty() {
+                                return true;
                             }
-                        });
-                    if let Some((w, h)) = pick {
-                        self.width = w;
-                        self.height = h;
+                            let hay = format!(
+                                "{} {} {} {} {}x{}",
+                                label, group, *pw as i64, *ph_ as i64, *pw as i64, *ph_ as i64
+                            )
+                            .to_lowercase();
+                            hay.contains(&q)
+                        })
+                        .collect();
+                    if filtered.is_empty() {
+                        continue;
                     }
-                    ui.add_space(14.0);
-
-                    // Dimension fields, expressed in the chosen unit (px canonical).
-                    // Editing them deselects all presets.
-                    let ppu = self.unit.px_per_unit(self.dpi);
-                    let decimals = if self.unit == SizeUnit::Px { 0 } else { 2 };
-                    let speed = if self.unit == SizeUnit::Px { 1.0 } else { 0.1 };
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("W").color(TEXT_MUTED).size(12.0));
-                        let mut w = self.width / ppu;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut w)
-                                    .speed(speed)
-                                    .range(0.01..=100_000.0)
-                                    .max_decimals(decimals),
-                            )
-                            .changed()
-                        {
-                            self.width = (w * ppu).clamp(1.0, 16384.0);
-                        }
-                        ui.add_space(12.0);
-                        ui.label(RichText::new("H").color(TEXT_MUTED).size(12.0));
-                        let mut h = self.height / ppu;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut h)
-                                    .speed(speed)
-                                    .range(0.01..=100_000.0)
-                                    .max_decimals(decimals),
-                            )
-                            .changed()
-                        {
-                            self.height = (h * ppu).clamp(1.0, 16384.0);
-                        }
-
-                        // Unit selector segmented control.
-                        ui.add_space(16.0);
-                        for u in [SizeUnit::Px, SizeUnit::Mm, SizeUnit::In] {
-                            if mini_toggle(ui, u.label(), self.unit == u) {
-                                self.unit = u;
+                    if any {
+                        ui.add_space(10.0);
+                    }
+                    any = true;
+                    ui.label(RichText::new(group).color(TEXT_MUTED).size(10.0).strong());
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(9.0, 9.0);
+                        for (label, pw, ph_) in filtered {
+                            let selected = (self.width - pw).abs() < 0.5
+                                && (self.height - ph_).abs() < 0.5;
+                            if aspect_tile(ui, ctx, label, pw, ph_, selected) {
+                                pick = Some((pw, ph_));
                             }
                         }
                     });
-                    ui.add_space(12.0);
+                }
+                if !any {
+                    ui.add_space(20.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("No sizes match your search.")
+                                .color(TEXT_MUTED)
+                                .italics()
+                                .size(12.0),
+                        );
+                    });
+                }
+            });
+        if let Some((w, h)) = pick {
+            self.width = w;
+            self.height = h;
+        }
+        // Push the custom-size box to the bottom of the container.
+        let gap = (ui.available_height() - CUSTOM_H).max(8.0);
+        ui.add_space(gap);
 
-                    // ── Advanced (DPI, bleed, slug, safe-area margin) ─────────
-                    let caret = if self.advanced_open {
-                        ph::CARET_DOWN
-                    } else {
-                        ph::CARET_RIGHT
-                    };
-                    let adv = ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("{caret}  Advanced"))
-                                .size(11.5)
-                                .color(TEXT_MUTED),
-                        )
-                        .sense(Sense::click()),
+        // ── Custom size — a visually distinct section (its own framed box) ────
+        let ppu = self.unit.px_per_unit(self.dpi);
+        let decimals = if self.unit == SizeUnit::Px { 0 } else { 2 };
+        let speed = if self.unit == SizeUnit::Px { 1.0 } else { 0.1 };
+        egui::Frame::none()
+            .fill(BG_ELEVATED)
+            .rounding(Rounding::same(7.0))
+            .stroke(Stroke::new(1.0, BORDER))
+            .shadow(box_shadow())
+            .inner_margin(Margin::symmetric(12.0, 10.0))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(format!("{}  CUSTOM SIZE", ph::FRAME_CORNERS))
+                            .color(ACCENT_BRIGHT)
+                            .size(10.5)
+                            .strong(),
                     );
-                    if adv.hovered() {
-                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                });
+                ui.add_space(8.0);
+                centered_row(ui, "custom_dims", |ui| {
+                    ui.label(RichText::new("W").color(TEXT_MUTED).size(12.0));
+                    let mut w = self.width / ppu;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut w)
+                                .speed(speed)
+                                .range(0.01..=100_000.0)
+                                .max_decimals(decimals),
+                        )
+                        .changed()
+                    {
+                        self.width = (w * ppu).clamp(1.0, 16384.0);
                     }
-                    if adv.clicked() {
-                        self.advanced_open = !self.advanced_open;
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("H").color(TEXT_MUTED).size(12.0));
+                    let mut h = self.height / ppu;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut h)
+                                .speed(speed)
+                                .range(0.01..=100_000.0)
+                                .max_decimals(decimals),
+                        )
+                        .changed()
+                    {
+                        self.height = (h * ppu).clamp(1.0, 16384.0);
                     }
-
-                    if self.advanced_open {
-                        ui.add_space(8.0);
-                        let inner = egui::Frame::none()
-                            .fill(BG_BASE)
-                            .rounding(Rounding::same(6.0))
-                            .stroke(Stroke::new(1.0, BORDER))
-                            .inner_margin(Margin::same(14.0));
-                        inner.show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 10.0;
-
-                            // Resolution (DPI/PPI) — drives mm/in ⇄ px conversion.
-                            adv_row(ui, "Resolution", "Pixels per inch (print quality).", |ui| {
-                                ui.add(
-                                    egui::DragValue::new(&mut self.dpi)
-                                        .speed(1.0)
-                                        .range(1.0..=2400.0)
-                                        .max_decimals(0)
-                                        .suffix(" DPI"),
-                                );
-                                ui.add_space(8.0);
-                                for d in [72.0, 96.0, 150.0, 300.0, 600.0] {
-                                    if mini_toggle(ui, &format!("{}", d as i64), (self.dpi - d).abs() < 0.5) {
-                                        self.dpi = d;
-                                    }
-                                }
-                            });
-
-                            // Bleed (print) — stored as Document::bleed_mm.
-                            adv_row(ui, "Bleed", "Extra print area on all sides.", |ui| {
-                                ui.add(
-                                    egui::DragValue::new(&mut self.bleed_mm)
-                                        .speed(0.1)
-                                        .range(0.0..=50.0)
-                                        .max_decimals(2)
-                                        .suffix(" mm"),
-                                );
-                                ui.add_space(8.0);
-                                if mini_toggle(ui, "3mm EU", (self.bleed_mm - 3.0).abs() < 0.05) {
-                                    self.bleed_mm = 3.0;
-                                }
-                                if mini_toggle(ui, "1/8\" US", (self.bleed_mm - 3.175).abs() < 0.05) {
-                                    self.bleed_mm = 3.175;
-                                }
-                            });
-
-                            // Slug (print) — stored as Document::slug_mm.
-                            adv_row(ui, "Slug", "Margin outside the bleed for marks.", |ui| {
-                                ui.add(
-                                    egui::DragValue::new(&mut self.slug_mm)
-                                        .speed(0.1)
-                                        .range(0.0..=50.0)
-                                        .max_decimals(2)
-                                        .suffix(" mm"),
-                                );
-                            });
-
-                            // Safe-area margin — stored on all four Document margins.
-                            adv_row(ui, "Safe margin", "Inset guide on all four sides.", |ui| {
-                                ui.add(
-                                    egui::DragValue::new(&mut self.margin)
-                                        .speed(1.0)
-                                        .range(0.0..=4096.0)
-                                        .max_decimals(0)
-                                        .suffix(" px"),
-                                );
-                            });
-
-                            // Artboards — N copies laid out in a grid in one doc.
-                            adv_row(
-                                ui,
-                                "Artboards",
-                                "Create several same-size artboards in a grid.",
-                                |ui| {
-                                    let mut n = self.num_artboards as i64;
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut n)
-                                                .speed(0.1)
-                                                .range(1..=64)
-                                                .max_decimals(0),
-                                        )
-                                        .changed()
-                                    {
-                                        self.num_artboards = n.clamp(1, 64) as usize;
-                                    }
-                                    ui.add_space(8.0);
-                                    for c in [1_usize, 2, 4, 6] {
-                                        if mini_toggle(ui, &format!("{c}"), self.num_artboards == c) {
-                                            self.num_artboards = c;
-                                        }
-                                    }
-                                },
-                            );
-                        });
-                    }
-                    ui.add_space(16.0);
-
-                    // Create button — carries the chosen size + print options.
-                    let mut sub = format!("{} × {} px", self.width as i64, self.height as i64);
-                    if self.num_artboards > 1 {
-                        sub.push_str(&format!("  ·  {} artboards", self.num_artboards));
-                    }
-                    if self.bleed_mm > 0.0 {
-                        sub.push_str(&format!("  ·  bleed {}mm", trim_num(self.bleed_mm)));
-                    }
-                    let label = format!("{}  Create  ·  {}", ph::SPARKLE, sub);
-                    let btn = egui::Button::new(
-                        RichText::new(label).size(13.0).color(Color32::WHITE).strong(),
-                    )
-                    .fill(ACCENT)
-                    .stroke(Stroke::new(1.0, ACCENT_BRIGHT))
-                    .rounding(Rounding::same(6.0))
-                    .min_size(Vec2::new(ui.available_width(), 40.0));
-                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.add(btn).clicked() || enter {
-                        let name = self.doc_name.trim();
-                        let name = if name.is_empty() { "Untitled" } else { name };
-                        *action = Some(WelcomeAction::CreateNew {
-                            name: name.to_string(),
-                            width: self.width,
-                            height: self.height,
-                            bleed_mm: self.bleed_mm,
-                            slug_mm: self.slug_mm,
-                            margin: self.margin,
-                            artboards: self.num_artboards,
-                        });
+                    ui.add_space(12.0);
+                    for u in [SizeUnit::Px, SizeUnit::Mm, SizeUnit::In] {
+                        if mini_toggle(ui, u.label(), self.unit == u) {
+                            self.unit = u;
+                        }
                     }
                 });
+            });
+    }
+
+    /// Right container: print & output options (DPI, bleed, slug, margin, artboards),
+    /// all centered.
+    fn draw_options_column(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("PRINT & OUTPUT")
+                    .color(ACCENT_BRIGHT)
+                    .size(10.5)
+                    .strong(),
+            );
+            ui.add_space(12.0);
+
+            // Resolution (DPI/PPI) — drives mm/in ⇄ px conversion.
+            field_label_centered(ui, "Resolution", "Pixels per inch — drives mm/in ⇄ px.");
+            centered_row(ui, "resolution", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut self.dpi)
+                        .speed(1.0)
+                        .range(1.0..=2400.0)
+                        .max_decimals(0)
+                        .suffix(" DPI"),
+                );
+                for d in [72.0, 96.0, 150.0, 300.0, 600.0] {
+                    if mini_toggle(ui, &format!("{}", d as i64), (self.dpi - d).abs() < 0.5) {
+                        self.dpi = d;
+                    }
+                }
+            });
+            ui.add_space(14.0);
+
+            // Bleed (print) — stored as Document::bleed_mm.
+            field_label_centered(ui, "Bleed", "Extra print area on all sides.");
+            centered_row(ui, "bleed", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut self.bleed_mm)
+                        .speed(0.1)
+                        .range(0.0..=50.0)
+                        .max_decimals(2)
+                        .suffix(" mm"),
+                );
+                if mini_toggle(ui, "3mm EU", (self.bleed_mm - 3.0).abs() < 0.05) {
+                    self.bleed_mm = 3.0;
+                }
+                if mini_toggle(ui, "1/8\" US", (self.bleed_mm - 3.175).abs() < 0.05) {
+                    self.bleed_mm = 3.175;
+                }
+            });
+            ui.add_space(14.0);
+
+            // Slug (print) — stored as Document::slug_mm.
+            field_label_centered(ui, "Slug", "Margin outside the bleed for marks.");
+            ui.add(
+                egui::DragValue::new(&mut self.slug_mm)
+                    .speed(0.1)
+                    .range(0.0..=50.0)
+                    .max_decimals(2)
+                    .suffix(" mm"),
+            );
+            ui.add_space(14.0);
+
+            // Safe-area margin — stored on all four Document margins.
+            field_label_centered(ui, "Safe margin", "Inset guide on all four sides.");
+            ui.add(
+                egui::DragValue::new(&mut self.margin)
+                    .speed(1.0)
+                    .range(0.0..=4096.0)
+                    .max_decimals(0)
+                    .suffix(" px"),
+            );
+            ui.add_space(14.0);
+
+            // Artboards — N same-size boards laid out in a grid.
+            field_label_centered(ui, "Artboards", "Several same-size boards in a grid.");
+            centered_row(ui, "artboards", |ui| {
+                let mut n = self.num_artboards as i64;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut n)
+                            .speed(0.1)
+                            .range(1..=64)
+                            .max_decimals(0),
+                    )
+                    .changed()
+                {
+                    self.num_artboards = n.clamp(1, 64) as usize;
+                }
+                for c in [1_usize, 2, 4, 6] {
+                    if mini_toggle(ui, &format!("{c}"), self.num_artboards == c) {
+                        self.num_artboards = c;
+                    }
+                }
             });
         });
     }
@@ -682,7 +985,7 @@ impl WelcomeState {
         let anim = ctx.animate_bool_with_time(egui::Id::new("welcome_anim_open"), true, 0.18);
         panel_chrome(ui, ctx, "Open", next_view);
 
-        let panel_w = 600.0_f32.min(ui.available_width() - 48.0);
+        let panel_w = 720.0_f32.min(ui.available_width() - 48.0);
         ui.add_space(8.0);
         ui.vertical_centered(|ui| {
             ui.set_max_width(panel_w);
@@ -690,60 +993,265 @@ impl WelcomeState {
                 ui.set_opacity(anim);
                 ui.add_space(lift(anim));
 
-                let card_w = 178.0;
-                let card_h = 168.0;
-                let gap = 16.0;
-                let per_row = ((panel_w + gap) / (card_w + gap)).floor().max(1.0) as usize;
+                // ── Tab strip: Recent · On disk ──────────────────────────────
+                centered_row(ui, "open_tabs", |ui| {
+                    if open_tab_btn(
+                        ui,
+                        ph::CLOCK_COUNTER_CLOCKWISE,
+                        "Recent",
+                        self.open_tab == OpenTab::Recent,
+                    ) {
+                        self.open_tab = OpenTab::Recent;
+                    }
+                    if open_tab_btn(ui, ph::FOLDER_OPEN, "On disk", self.open_tab == OpenTab::Disk) {
+                        self.open_tab = OpenTab::Disk;
+                    }
+                });
+                ui.add_space(12.0);
 
-                egui::ScrollArea::vertical()
-                    .max_height(ui.available_height() - 12.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
-                        // Build a flat list: the browse tile first, then recents.
-                        let count = self.recent.len() + 1;
-                        let mut idx = 0;
-                        while idx < count {
-                            ui.horizontal(|ui| {
-                                for _ in 0..per_row {
-                                    if idx >= count {
-                                        break;
-                                    }
-                                    if idx == 0 {
-                                        if browse_card(ui, ctx, Vec2::new(card_w, card_h)) {
-                                            *action = Some(WelcomeAction::OpenBrowse);
-                                        }
-                                    } else {
-                                        let path = self.recent[idx - 1].path.clone();
-                                        let thumb = self.thumbs.get(ctx, &path);
-                                        let entry = &self.recent[idx - 1];
-                                        if recent_card(
-                                            ui,
-                                            ctx,
-                                            idx,
-                                            Vec2::new(card_w, card_h),
-                                            entry,
-                                            Some(&thumb),
-                                        ) {
-                                            *action = Some(WelcomeAction::OpenFile(path.clone()));
-                                        }
-                                    }
-                                    idx += 1;
-                                }
-                            });
-                        }
-                        if self.recent.is_empty() {
-                            ui.add_space(14.0);
-                            ui.label(
-                                RichText::new("No recent documents yet — open one to see it here.")
-                                    .color(TEXT_MUTED)
-                                    .size(12.0)
-                                    .italics(),
-                            );
-                        }
-                    });
+                match self.open_tab {
+                    OpenTab::Recent => self.draw_recent_grid(ui, ctx, action, panel_w),
+                    OpenTab::Disk => self.draw_disk_view(ui, ctx, action, panel_w),
+                }
             });
         });
+    }
+
+    /// Recent tab: the browse tile + recent-document preview cards.
+    fn draw_recent_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        action: &mut Option<WelcomeAction>,
+        panel_w: f32,
+    ) {
+        let (card_w, card_h, gap) = (178.0, 168.0, 16.0);
+        let per_row = ((panel_w + gap) / (card_w + gap)).floor().max(1.0) as usize;
+        egui::ScrollArea::vertical()
+            .id_source("recent_scroll")
+            .max_height(ui.available_height() - 12.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
+                ui.add_space(6.0);
+                let count = self.recent.len() + 1;
+                let mut idx = 0;
+                while idx < count {
+                    ui.horizontal(|ui| {
+                        for _ in 0..per_row {
+                            if idx >= count {
+                                break;
+                            }
+                            if idx == 0 {
+                                if browse_card(ui, ctx, Vec2::new(card_w, card_h)) {
+                                    *action = Some(WelcomeAction::OpenBrowse);
+                                }
+                            } else {
+                                let path = self.recent[idx - 1].path.clone();
+                                let thumb = self.thumbs.get(ctx, &path);
+                                let entry = &self.recent[idx - 1];
+                                if recent_card(
+                                    ui,
+                                    ctx,
+                                    idx,
+                                    Vec2::new(card_w, card_h),
+                                    entry,
+                                    Some(&thumb),
+                                ) {
+                                    *action = Some(WelcomeAction::OpenFile(path.clone()));
+                                }
+                            }
+                            idx += 1;
+                        }
+                    });
+                }
+                if self.recent.is_empty() {
+                    ui.add_space(14.0);
+                    ui.label(
+                        RichText::new("No recent documents yet — open one to see it here.")
+                            .color(TEXT_MUTED)
+                            .size(12.0)
+                            .italics(),
+                    );
+                }
+            });
+    }
+
+    /// On-disk tab: managed search roots + a live grid of `.photon` files found.
+    fn draw_disk_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        action: &mut Option<WelcomeAction>,
+        panel_w: f32,
+    ) {
+        // Kick off the first scan when the tab is first opened.
+        if !self.disk_scanned {
+            self.disk_scanned = true;
+            if !self.disk_roots.is_empty() {
+                self.disk.rescan(self.disk_roots.clone(), false);
+            }
+        }
+
+        // ── Search roots: chips + add folder ─────────────────────────────────
+        let mut remove: Option<usize> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+            for (i, root) in self.disk_roots.iter().enumerate() {
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.to_string_lossy().into_owned());
+                egui::Frame::none()
+                    .fill(BG_ELEVATED)
+                    .rounding(Rounding::same(5.0))
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{}  {}", ph::FOLDER_OPEN, name))
+                                    .size(11.5)
+                                    .color(TEXT_PRIMARY),
+                            )
+                            .on_hover_text(root.to_string_lossy().into_owned());
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("✕").size(11.0).color(TEXT_MUTED),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("{}  Add folder", ph::PLUS))
+                            .size(11.5)
+                            .color(ACCENT_BRIGHT),
+                    )
+                    .fill(BG_ELEVATED)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .rounding(Rounding::same(5.0))
+                    .min_size(Vec2::new(0.0, 26.0)),
+                )
+                .clicked()
+            {
+                *action = Some(WelcomeAction::AddDiskRoot);
+            }
+        });
+        if let Some(i) = remove {
+            self.disk_roots.remove(i);
+            save_disk_roots(&self.disk_roots);
+            self.disk.rescan(self.disk_roots.clone(), false);
+        }
+        ui.add_space(10.0);
+
+        if self.disk_roots.is_empty() {
+            ui.add_space(28.0);
+            ui.label(
+                RichText::new("Add a folder or drive to search it for .photon files.")
+                    .color(TEXT_MUTED)
+                    .size(13.0),
+            );
+            return;
+        }
+
+        // ── Filter + status + rescan ─────────────────────────────────────────
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.disk_filter)
+                    .hint_text("Filter by name…")
+                    .desired_width(220.0),
+            );
+            ui.add_space(10.0);
+            let status = if self.disk.scanning {
+                format!("Scanning…  {} found", self.disk.files.len())
+            } else {
+                format!("{} .photon files", self.disk.files.len())
+            };
+            ui.label(RichText::new(status).size(11.5).color(TEXT_MUTED));
+            ui.add_space(10.0);
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Rescan").size(11.5).color(TEXT_PRIMARY))
+                        .fill(BG_ELEVATED)
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .rounding(Rounding::same(5.0)),
+                )
+                .on_hover_text("Deep rescan (fresh walk, ignores the OS index)")
+                .clicked()
+            {
+                self.disk.rescan(self.disk_roots.clone(), true);
+            }
+        });
+        ui.add_space(10.0);
+
+        // ── Results grid (clone to avoid borrowing the scanner while drawing) ─
+        let q = self.disk_filter.trim().to_lowercase();
+        let files: Vec<(PathBuf, String)> = self
+            .disk
+            .files
+            .iter()
+            .filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q))
+            .map(|f| (f.path.clone(), f.name.clone()))
+            .collect();
+        let scanning = self.disk.scanning;
+
+        let (card_w, card_h, gap) = (178.0, 168.0, 16.0);
+        let per_row = ((panel_w + gap) / (card_w + gap)).floor().max(1.0) as usize;
+        egui::ScrollArea::vertical()
+            .id_source("disk_scroll")
+            .max_height(ui.available_height() - 12.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
+                ui.add_space(6.0);
+                if files.is_empty() {
+                    ui.add_space(14.0);
+                    let msg = if scanning {
+                        "Scanning…"
+                    } else {
+                        "No .photon files found in these folders."
+                    };
+                    ui.label(RichText::new(msg).color(TEXT_MUTED).size(12.0).italics());
+                    return;
+                }
+                let mut i = 0;
+                while i < files.len() {
+                    ui.horizontal(|ui| {
+                        for _ in 0..per_row {
+                            if i >= files.len() {
+                                break;
+                            }
+                            let path = files[i].0.clone();
+                            let name = files[i].1.clone();
+                            let thumb = self.thumbs.get(ctx, &path);
+                            let entry = RecentEntry {
+                                path: path.clone(),
+                                name,
+                            };
+                            if recent_card(
+                                ui,
+                                ctx,
+                                100_000 + i,
+                                Vec2::new(card_w, card_h),
+                                &entry,
+                                Some(&thumb),
+                            ) {
+                                *action = Some(WelcomeAction::OpenFile(path.clone()));
+                            }
+                            i += 1;
+                        }
+                    });
+                }
+            });
     }
 }
 
@@ -815,21 +1323,129 @@ fn mini_toggle(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
     ui.add(btn).clicked()
 }
 
-/// One labeled row in the advanced panel: a fixed-width title (with a hover
-/// hint) followed by its controls.
-fn adv_row(ui: &mut egui::Ui, title: &str, hint: &str, content: impl FnOnce(&mut egui::Ui)) {
+/// Lay a row of widgets out horizontally, truly centered. egui does not honor
+/// `main_align: Center` for incrementally-placed rows, so we measure the content
+/// width (via `min_rect`, cached in egui memory — stable because the welcome
+/// repaints every frame) and center it with a leading spacer.
+fn centered_row(ui: &mut egui::Ui, salt: &str, content: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.id().with(("centered_row", salt));
+    let measured: f32 = ui.ctx().memory(|m| m.data.get_temp::<f32>(id)).unwrap_or(0.0);
+    let lead = ((ui.available_width() - measured) * 0.5).max(0.0);
+    let mut content_w = measured;
     ui.horizontal(|ui| {
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(116.0, 22.0), Sense::hover());
-        ui.painter().text(
-            Pos2::new(rect.left(), rect.center().y),
-            Align2::LEFT_CENTER,
-            title,
-            FontId::proportional(12.0),
-            TEXT_PRIMARY,
-        );
-        resp.on_hover_text(hint);
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        if lead > 0.5 {
+            ui.add_space(lead);
+        }
+        let before = ui.min_rect().right();
         content(ui);
+        content_w = (ui.min_rect().right() - before).max(0.0);
     });
+    ui.ctx().memory_mut(|m| m.data.insert_temp(id, content_w));
+}
+
+/// A tab button for the Open panel's tab strip.
+fn open_tab_btn(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> bool {
+    let btn = egui::Button::new(
+        RichText::new(format!("{}  {}", icon, label))
+            .size(13.0)
+            .color(if selected { Color32::WHITE } else { TEXT_MUTED }),
+    )
+    .fill(if selected { ACCENT } else { BG_ELEVATED })
+    .stroke(Stroke::new(1.0, if selected { ACCENT_BRIGHT } else { BORDER }))
+    .rounding(Rounding::same(6.0))
+    .min_size(Vec2::new(132.0, 32.0));
+    ui.add(btn).clicked()
+}
+
+/// A bordered panel container used for the New Canvas side-by-side columns.
+fn container_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(BG_PANEL)
+        .rounding(Rounding::same(10.0))
+        .stroke(Stroke::new(1.0, BORDER))
+        .shadow(box_shadow())
+        .inner_margin(Margin::same(18.0))
+}
+
+/// A soft drop shadow for cards/boxes, lifting them off the animated background.
+fn box_shadow() -> egui::epaint::Shadow {
+    egui::epaint::Shadow {
+        offset: Vec2::new(0.0, 6.0),
+        blur: 22.0,
+        spread: 0.0,
+        color: Color32::from_black_alpha(130),
+    }
+}
+
+/// Paint a soft drop shadow behind a manually-drawn card `rect`.
+fn shadow_behind(p: &egui::Painter, rect: Rect, radius: f32) {
+    p.add(box_shadow().as_shape(rect, Rounding::same(radius)));
+}
+
+/// Draw text with a soft dark shadow for legibility over the background.
+fn text_shadow(
+    p: &egui::Painter,
+    pos: Pos2,
+    anchor: Align2,
+    text: impl Into<String>,
+    font: FontId,
+    color: Color32,
+) {
+    let s = text.into();
+    p.text(
+        pos + Vec2::new(0.0, 2.0),
+        anchor,
+        &s,
+        font.clone(),
+        Color32::from_black_alpha(170),
+    );
+    p.text(pos, anchor, s, font, color);
+}
+
+/// A full-screen vertical dark gradient over the whole background, subduing the
+/// animated shader (lighter at the top, darker toward the bottom).
+fn paint_bg_gradient(p: &egui::Painter, rect: Rect) {
+    let top = Color32::from_black_alpha(95);
+    let bot = Color32::from_black_alpha(155);
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bot);
+    mesh.colored_vertex(rect.left_bottom(), bot);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    p.add(mesh);
+}
+
+/// Darken the centre of the welcome screen so content reads clearly over the
+/// animated Lightfall background — a broad radial scrim, opaque-ish in the
+/// middle and fading to transparent toward the edges.
+fn paint_center_scrim(p: &egui::Painter, rect: Rect) {
+    let center = rect.center();
+    let radius = rect.size().max_elem() * 0.62;
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(center, Color32::from_black_alpha(160));
+    let edge = Color32::from_black_alpha(0);
+    let n = 48;
+    for i in 0..=n {
+        let ang = (i as f32 / n as f32) * std::f32::consts::TAU;
+        mesh.colored_vertex(center + Vec2::new(ang.cos(), ang.sin()) * radius, edge);
+        if i > 0 {
+            mesh.add_triangle(0, i, i + 1);
+        }
+    }
+    p.add(mesh);
+}
+
+/// A stacked field label (title on its own line, with a hover hint) sitting
+/// above its control. In a centered layout the label centers itself.
+fn field_label_centered(ui: &mut egui::Ui, title: &str, hint: &str) {
+    ui.add(egui::Label::new(
+        RichText::new(title).size(11.5).color(TEXT_PRIMARY),
+    ))
+    .on_hover_text(hint);
+    ui.add_space(4.0);
 }
 
 /// Format a number without trailing zeros (e.g. 3.0 → "3", 3.175 → "3.18").
@@ -869,6 +1485,9 @@ fn hero_card(
 
     let fill = lerp_color(BG_PANEL, BG_ELEVATED, hov);
     let stroke = lerp_color(BORDER, ACCENT, hov);
+    if reveal > 0.5 {
+        shadow_behind(p, draw, 12.0);
+    }
     p.rect(
         draw,
         Rounding::same(12.0),
@@ -914,7 +1533,7 @@ fn aspect_tile(
     ph_: f64,
     selected: bool,
 ) -> bool {
-    let size = Vec2::new(88.0, 84.0);
+    let size = Vec2::new(94.0, 98.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let hov = ctx.animate_bool_with_time(
         egui::Id::new(("aspect", label, pw as i64, ph_ as i64)),
@@ -938,29 +1557,37 @@ fn aspect_tile(
     };
     p.rect(rect, Rounding::same(6.0), fill, Stroke::new(1.0, stroke));
 
-    // Proportional rectangle representing the aspect ratio, sat in the top
-    // third of the tile so the label + dimensions have clear room below it.
-    let max_box = Vec2::new(40.0, 26.0);
+    // Proportional rectangle representing the aspect ratio, near the top so the
+    // (possibly wrapped) label + dimensions have clear room below it.
+    let max_box = Vec2::new(40.0, 24.0);
     let ar = (pw / ph_) as f32;
     let (rw, rh) = if ar >= max_box.x / max_box.y {
         (max_box.x, max_box.x / ar)
     } else {
         (max_box.y * ar, max_box.y)
     };
-    let center = Pos2::new(rect.center().x, rect.top() + 22.0);
+    let center = Pos2::new(rect.center().x, rect.top() + 20.0);
     let prect = Rect::from_center_size(center, Vec2::new(rw, rh));
     let pr_fill = if selected { ACCENT_BRIGHT } else { TEXT_MUTED };
     p.rect(prect, Rounding::same(2.0), pr_fill, Stroke::NONE);
 
-    p.text(
-        Pos2::new(rect.center().x, rect.top() + 45.0),
-        Align2::CENTER_TOP,
-        label,
-        FontId::proportional(12.5),
+    // Label — a left-aligned wrapped galley, drawn centered as a block, so long
+    // names (e.g. "Letter Landscape") break onto a second line and stay inside
+    // the tile instead of poking out the sides.
+    let label_y = rect.top() + 37.0;
+    let galley = p.layout(
+        label.to_string(),
+        FontId::proportional(10.0),
+        TEXT_PRIMARY,
+        size.x - 12.0,
+    );
+    p.galley(
+        Pos2::new(rect.center().x - galley.size().x / 2.0, label_y),
+        galley.clone(),
         TEXT_PRIMARY,
     );
     p.text(
-        Pos2::new(rect.center().x, rect.top() + 62.0),
+        Pos2::new(rect.center().x, label_y + galley.size().y + 3.0),
         Align2::CENTER_TOP,
         format!("{}×{}", pw as i64, ph_ as i64),
         FontId::proportional(8.5),
@@ -982,6 +1609,7 @@ fn browse_card(ui: &mut egui::Ui, ctx: &egui::Context, size: Vec2) -> bool {
     let draw = rect.translate(Vec2::new(0.0, -3.0 * hov));
     let stroke = lerp_color(BORDER, ACCENT, hov);
     // Ghost card — subtle fill, dashed-feel via lighter stroke.
+    shadow_behind(p, draw, 10.0);
     p.rect(
         draw,
         Rounding::same(10.0),
@@ -1022,6 +1650,7 @@ fn recent_card(
     let p = ui.painter();
 
     // Card body.
+    shadow_behind(p, draw, 10.0);
     p.rect(
         draw,
         Rounding::same(10.0),
@@ -1165,23 +1794,6 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
-/// Soft radial glow as a triangle fan: opaque-ish centre → transparent edge.
-fn paint_radial_glow(p: &egui::Painter, center: Pos2, radius: f32, color: Color32, center_alpha: u8) {
-    let mut mesh = Mesh::default();
-    let c = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), center_alpha);
-    let edge = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 0);
-    mesh.colored_vertex(center, c);
-    let n = 48;
-    for i in 0..=n {
-        let ang = (i as f32 / n as f32) * std::f32::consts::TAU;
-        mesh.colored_vertex(center + Vec2::new(ang.cos(), ang.sin()) * radius, edge);
-        if i > 0 {
-            mesh.add_triangle(0, i, i + 1);
-        }
-    }
-    p.add(mesh);
-}
-
 fn elide(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -1321,6 +1933,29 @@ fn config_dir() -> Option<PathBuf> {
 
 fn recent_docs_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("recent_docs.json"))
+}
+
+fn disk_roots_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("disk_roots.json"))
+}
+
+fn load_disk_roots() -> Vec<PathBuf> {
+    disk_roots_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_disk_roots(roots: &[PathBuf]) {
+    let Some(path) = disk_roots_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(roots) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 fn load_recent() -> Vec<RecentEntry> {
