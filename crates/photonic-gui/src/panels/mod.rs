@@ -773,7 +773,7 @@ pub fn draw_toolbar(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Quit menu — explicit, discoverable shutdown (the window's close
             // button works too; this also offers killing every instance).
-            ui.menu_button("Quit ▾", |ui| {
+            ui.menu_button(format!("Quit {}", ph::CARET_DOWN), |ui| {
                 if ui.button("Quit Photonic").clicked() {
                     ui.close_menu();
                     crate::quit::quit_self();

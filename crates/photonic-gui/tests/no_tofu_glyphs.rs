@@ -22,6 +22,10 @@ const FORBIDDEN: &[(char, &str)] = &[
     ('\u{FF0D}', "U+FF0D FULLWIDTH HYPHEN-MINUS — use egui_phosphor::regular::MINUS"),
     ('\u{2139}', "U+2139 INFORMATION SOURCE — use egui_phosphor::regular::INFO"),
     ('\u{26A0}', "U+26A0 WARNING SIGN — use egui_phosphor::regular::WARNING"),
+    ('\u{25B2}', "U+25B2 BLACK UP-POINTING TRIANGLE — use egui_phosphor::regular::CARET_UP"),
+    ('\u{25BC}', "U+25BC BLACK DOWN-POINTING TRIANGLE — use egui_phosphor::regular::CARET_DOWN"),
+    ('\u{25BE}', "U+25BE SMALL DOWN TRIANGLE — use egui_phosphor::regular::CARET_DOWN"),
+    ('\u{25B4}', "U+25B4 SMALL UP TRIANGLE — use egui_phosphor::regular::CARET_UP"),
 ];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {

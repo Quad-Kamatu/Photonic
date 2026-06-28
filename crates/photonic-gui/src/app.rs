@@ -228,6 +228,18 @@ struct RasterTexCache {
     hash: u64,
 }
 
+/// In-progress artboard move: the board id, the cursor→origin grab offset, the
+/// board's original position, and the artwork that travels with it (node id +
+/// original translation) so dragging the board moves its contents too.
+struct ArtboardDrag {
+    id: photonic_core::ArtboardId,
+    grab_dx: f64,
+    grab_dy: f64,
+    orig_x: f64,
+    orig_y: f64,
+    nodes: Vec<(photonic_core::node::NodeId, f64, f64)>,
+}
+
 pub struct PhotonicApp {
     pub active_tool: Tool,
     pub fill_color: [f32; 4],
@@ -290,8 +302,8 @@ pub struct PhotonicApp {
     /// True when the current move drag is duplicating the selection (Alt-drag):
     /// copies were spawned at drag start and the originals stay put.
     dup_drag: bool,
-    /// Dragging an artboard: (id, cursor→origin offset in canvas units).
-    artboard_drag: Option<(photonic_core::ArtboardId, f64, f64)>,
+    /// Dragging an artboard (moves the board + its artwork).
+    artboard_drag: Option<ArtboardDrag>,
     /// Resizing an artboard: (id, corner 0=TL/1=TR/2=BL/3=BR, orig x, y, w, h).
     artboard_resize: Option<(photonic_core::ArtboardId, u8, f64, f64, f64, f64)>,
     /// Inline-renaming an artboard: (id, edit buffer).
@@ -299,6 +311,8 @@ pub struct PhotonicApp {
     /// Set on new/open to fit all artboards to the viewport on the next frame
     /// (once the actual viewport rect is known).
     fit_pending: bool,
+    /// Global search (command palette) query string.
+    global_search: String,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -625,6 +639,7 @@ impl Default for PhotonicApp {
             artboard_resize: None,
             artboard_rename: None,
             fit_pending: false,
+            global_search: String::new(),
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -745,6 +760,57 @@ where
 /// inside the on-screen viewport `rect`, so the artwork lands properly scaled in
 /// the actual visible canvas area (not the full window). Sets zoom + pan
 /// directly in the same point-space the overlays and GPU camera share.
+/// One result row in the global-search popup: icon + title + dim description,
+/// full-width and clickable. `dim` styles semantic/related results more subtly.
+fn search_result_row(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    description: &str,
+    dim: bool,
+) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let title_color = if dim {
+        egui::Color32::from_gray(185)
+    } else {
+        egui::Color32::from_gray(235)
+    };
+    let desc = if description.chars().count() > 52 {
+        format!("{}…", description.chars().take(51).collect::<String>())
+    } else {
+        description.to_string()
+    };
+    let p = ui.painter();
+    p.text(
+        egui::pos2(rect.left() + 11.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(15.0),
+        title_color,
+    );
+    p.text(
+        egui::pos2(rect.left() + 34.0, rect.top() + 7.0),
+        egui::Align2::LEFT_TOP,
+        title,
+        egui::FontId::proportional(13.0),
+        title_color,
+    );
+    p.text(
+        egui::pos2(rect.left() + 34.0, rect.top() + 21.0),
+        egui::Align2::LEFT_TOP,
+        desc,
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_gray(130),
+    );
+    resp.clicked()
+}
+
 fn fit_artboard_to_rect(view: &mut CanvasView, rect: egui::Rect, bounds: (f64, f64, f64, f64)) {
     let (bx0, by0, bx1, by1) = bounds;
     let bw = (bx1 - bx0).max(1.0);
@@ -1186,6 +1252,10 @@ impl PhotonicApp {
                         self.audit.panel_open = !self.audit.panel_open;
                     }
 
+                    // Global search (command palette) — tools + actions.
+                    ui.separator();
+                    self.global_search_ui(ui, doc, history);
+
                     // Diff overlay clear button (only visible when a diff is active)
                     if self.diff.overlay_active {
                         ui.separator();
@@ -1234,7 +1304,7 @@ impl PhotonicApp {
                             DrawerKind::Edit => "Edit",
                             DrawerKind::Tools => "Tools",
                         };
-                        let arrow = if is_open { "▲" } else { "▼" };
+                        let arrow = if is_open { ph::CARET_UP } else { ph::CARET_DOWN };
                         let label = format!("{arrow} {name}");
                         if ui
                             .selectable_label(is_open, RichText::new(label).small())
@@ -2272,39 +2342,103 @@ impl PhotonicApp {
                                 egui::Color32::from_gray(140)
                             };
 
-                            // Label (double-click rename, drag to move, click select).
+                            // Label: a drag handle (left of the name, shown on
+                            // hover) moves the board + its artwork; the name
+                            // selects / double-click renames (text cursor).
                             let renaming_this =
                                 matches!(&self.artboard_rename, Some((rid, _)) if rid == id);
-                            let label_pos = egui::pos2(sx0 as f32, sy0 as f32 - 19.0);
                             if !renaming_this {
                                 let galley = painter.layout_no_wrap(
                                     name.clone(),
                                     egui::FontId::proportional(12.0),
                                     col,
                                 );
-                                let lrect =
-                                    egui::Rect::from_min_size(label_pos, galley.size()).expand(3.0);
-                                let resp = ui.interact(
-                                    lrect,
-                                    ui.id().with(("ab_label", i)),
-                                    egui::Sense::click_and_drag(),
+                                let handle_w = 16.0_f32;
+                                let name_pos =
+                                    egui::pos2(sx0 as f32 + handle_w, sy0 as f32 - 19.0);
+                                let name_rect = egui::Rect::from_min_size(name_pos, galley.size());
+                                let handle_rect = egui::Rect::from_min_size(
+                                    egui::pos2(sx0 as f32, sy0 as f32 - 20.0),
+                                    egui::vec2(handle_w, 16.0),
                                 );
-                                if resp.hovered() {
-                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                let area = handle_rect.union(name_rect).expand(3.0);
+                                let hovered_area = ui
+                                    .input(|i| i.pointer.hover_pos())
+                                    .map_or(false, |p| area.contains(p));
+
+                                // Name → select / rename, with a text-edit cursor.
+                                let nresp = ui.interact(
+                                    name_rect.expand(2.0),
+                                    ui.id().with(("ab_name", i)),
+                                    egui::Sense::click(),
+                                );
+                                if nresp.hovered() {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Text);
                                 }
-                                if resp.double_clicked() {
+                                if nresp.double_clicked() {
                                     start_rename = Some((*id, name.clone()));
-                                } else if resp.drag_started() {
-                                    if let Some(p) = resp.interact_pointer_pos() {
-                                        let (cx, cy) =
-                                            view.screen_to_canvas(p.x as f64, p.y as f64);
-                                        self.artboard_drag = Some((*id, cx - *x, cy - *y));
-                                        select = Some(*id);
-                                    }
-                                } else if resp.clicked() {
+                                } else if nresp.clicked() {
                                     select = Some(*id);
                                 }
-                                painter.galley(label_pos, galley, col);
+
+                                // Drag handle → move the board and its artwork.
+                                let hresp = ui.interact(
+                                    handle_rect,
+                                    ui.id().with(("ab_drag", i)),
+                                    egui::Sense::click_and_drag(),
+                                );
+                                if hresp.hovered() {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                }
+                                if hresp.drag_started() {
+                                    if let Some(p) = hresp.interact_pointer_pos() {
+                                        let (cx, cy) =
+                                            view.screen_to_canvas(p.x as f64, p.y as f64);
+                                        // Capture artwork whose centre lies on this board.
+                                        let mut nodes = Vec::new();
+                                        for node in doc.nodes.values() {
+                                            if let Some((nx0, ny0, nx1, ny1)) =
+                                                text_aware_canvas_bounds(node, renderer)
+                                            {
+                                                let ncx = (nx0 + nx1) * 0.5;
+                                                let ncy = (ny0 + ny1) * 0.5;
+                                                if ncx >= *x
+                                                    && ncx <= *x + *w
+                                                    && ncy >= *y
+                                                    && ncy <= *y + *h
+                                                {
+                                                    nodes.push((
+                                                        node.id,
+                                                        node.transform.matrix[4],
+                                                        node.transform.matrix[5],
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        self.artboard_drag = Some(ArtboardDrag {
+                                            id: *id,
+                                            grab_dx: cx - *x,
+                                            grab_dy: cy - *y,
+                                            orig_x: *x,
+                                            orig_y: *y,
+                                            nodes,
+                                        });
+                                        select = Some(*id);
+                                    }
+                                }
+
+                                painter.galley(name_pos, galley, col);
+                                let dragging_this =
+                                    matches!(&self.artboard_drag, Some(d) if d.id == *id);
+                                if hovered_area || is_active || dragging_this {
+                                    painter.text(
+                                        handle_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        ph::DOTS_SIX_VERTICAL,
+                                        egui::FontId::proportional(14.0),
+                                        col,
+                                    );
+                                }
                             }
 
                             // Active board: border + corner resize handles.
@@ -2358,21 +2492,34 @@ impl PhotonicApp {
                     // ── Apply an in-progress drag / resize ──────────────────────
                     let pointer = ui.input(|i| i.pointer.interact_pos());
                     let down = ui.input(|i| i.pointer.primary_down());
-                    if let Some((id, ox, oy)) = self.artboard_drag {
+                    let mut end_artboard_drag = false;
+                    if let Some(d) = self.artboard_drag.as_ref() {
                         if down {
                             if let Some(p) = pointer {
                                 let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
-                                if let Some(ab) =
-                                    doc.artboards.iter_mut().find(|a| a.id == id)
-                                {
-                                    ab.x = self.snap(cx - ox);
-                                    ab.y = self.snap(cy - oy);
-                                    doc_modified = true;
+                                let nx = self.snap(cx - d.grab_dx);
+                                let ny = self.snap(cy - d.grab_dy);
+                                let dx = nx - d.orig_x;
+                                let dy = ny - d.orig_y;
+                                if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == d.id) {
+                                    ab.x = nx;
+                                    ab.y = ny;
                                 }
+                                // Move the artwork that sits on the board with it.
+                                for (nid, otx, oty) in &d.nodes {
+                                    if let Some(node) = doc.nodes.get_mut(nid) {
+                                        node.transform.matrix[4] = otx + dx;
+                                        node.transform.matrix[5] = oty + dy;
+                                    }
+                                }
+                                doc_modified = true;
                             }
                         } else {
-                            self.artboard_drag = None;
+                            end_artboard_drag = true;
                         }
+                    }
+                    if end_artboard_drag {
+                        self.artboard_drag = None;
                     }
                     if let Some((id, hidx, ox, oy, ow, oh)) = self.artboard_resize {
                         if down {
@@ -2429,7 +2576,7 @@ impl PhotonicApp {
                             let (sx0, sy0) = view.canvas_to_screen(bx, by);
                             let mut close: Option<bool> = None; // Some(true)=commit
                             egui::Area::new(ui.id().with(("ab_rename", rid)))
-                                .fixed_pos(egui::pos2(sx0 as f32, sy0 as f32 - 24.0))
+                                .fixed_pos(egui::pos2(sx0 as f32 + 16.0, sy0 as f32 - 24.0))
                                 .order(egui::Order::Foreground)
                                 .show(ctx, |ui| {
                                     egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -9809,6 +9956,118 @@ impl PhotonicApp {
 
     // ── Select tool handler ───────────────────────────────────────────────────
 
+    /// Apply a global-search result (set a tool or run a command).
+    fn apply_search(
+        &mut self,
+        action: crate::global_search::SearchAction,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        use crate::global_search::SearchAction as A;
+        match action {
+            A::Tool(t) => self.active_tool = t,
+            A::ToggleGrid => self.prefs.show_grid = !self.prefs.show_grid,
+            A::ToggleGuides => self.guides_visible = !self.guides_visible,
+            A::ToggleAudit => self.audit.panel_open = !self.audit.panel_open,
+            A::FileMenu => self.active_drawer = Some(DrawerKind::File),
+            A::EditMenu => self.active_drawer = Some(DrawerKind::Edit),
+            A::ToolsMenu => self.active_drawer = Some(DrawerKind::Tools),
+            A::Undo => {
+                history.undo(doc);
+            }
+            A::Redo => {
+                history.redo(doc);
+            }
+            A::FitView => self.fit_pending = true,
+            A::OutlineMode => self.outline_mode = !self.outline_mode,
+        }
+    }
+
+    /// Draw the global search box and (when there's a query) a results popup
+    /// listing direct matches first, then semantic ("Related") matches.
+    fn global_search_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.global_search)
+                .hint_text(format!("{}  Search tools & actions", ph::MAGNIFYING_GLASS))
+                .desired_width(230.0),
+        );
+        let q = self.global_search.trim().to_lowercase();
+        if q.is_empty() {
+            return;
+        }
+
+        let items = crate::global_search::items();
+        let mut direct: Vec<&crate::global_search::SearchItem> = items
+            .iter()
+            .filter(|it| it.title.to_lowercase().contains(&q))
+            .collect();
+        direct.sort_by_key(|it| (!it.title.to_lowercase().starts_with(&q), it.title.len()));
+        let semantic: Vec<&crate::global_search::SearchItem> = items
+            .iter()
+            .filter(|it| {
+                let tl = it.title.to_lowercase();
+                if tl.contains(&q) {
+                    return false;
+                }
+                // Semantic-ish: every query token appears somewhere in the
+                // title + description + keywords, or the title fuzzy-matches.
+                let hay =
+                    format!("{} {} {}", tl, it.description.to_lowercase(), it.keywords.join(" "));
+                q.split_whitespace().all(|t| hay.contains(t))
+                    || crate::global_search::fuzzy_subseq(&q, &tl)
+            })
+            .collect();
+
+        let mut chosen: Option<crate::global_search::SearchAction> = None;
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+        egui::Area::new(ui.id().with("global_search_popup"))
+            .fixed_pos(resp.rect.left_bottom() + egui::vec2(0.0, 4.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.set_max_width(340.0);
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        if direct.is_empty() && semantic.is_empty() {
+                            ui.label(RichText::new("No matches").weak());
+                        }
+                        for it in &direct {
+                            if search_result_row(ui, it.icon, &it.title, &it.description, false) {
+                                chosen = Some(it.action);
+                            }
+                        }
+                        if !semantic.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Related").small().weak());
+                            ui.add_space(2.0);
+                            for it in &semantic {
+                                if search_result_row(ui, it.icon, &it.title, &it.description, true) {
+                                    chosen = Some(it.action);
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+
+        if chosen.is_none() && enter {
+            chosen = direct.first().or_else(|| semantic.first()).map(|it| it.action);
+        }
+        if let Some(a) = chosen {
+            self.apply_search(a, doc, history);
+            self.global_search.clear();
+        } else if escape {
+            self.global_search.clear();
+        }
+    }
+
     fn handle_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -11378,11 +11637,7 @@ impl PhotonicApp {
                 if ui.small_button(ph::X).clicked() {
                     self.lua_console.visible = false;
                 }
-                let expand_icon = if self.lua_console.expanded {
-                    "▼"
-                } else {
-                    "▲"
-                };
+                let expand_icon = if self.lua_console.expanded { ph::CARET_DOWN } else { ph::CARET_UP };
                 if ui
                     .small_button(expand_icon)
                     .on_hover_text(if self.lua_console.expanded {
