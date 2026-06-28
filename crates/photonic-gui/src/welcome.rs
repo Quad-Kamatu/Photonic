@@ -743,7 +743,7 @@ impl WelcomeState {
                     .desired_width(f32::INFINITY),
             );
             if !self.size_search.is_empty()
-                && ui.small_button("✕").on_hover_text("Clear").clicked()
+                && ui.small_button(ph::X).on_hover_text("Clear").clicked()
             {
                 self.size_search.clear();
             }
@@ -1118,7 +1118,7 @@ impl WelcomeState {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("✕").size(11.0).color(TEXT_MUTED),
+                                        RichText::new(ph::X).size(11.0).color(TEXT_MUTED),
                                     )
                                     .frame(false),
                                 )

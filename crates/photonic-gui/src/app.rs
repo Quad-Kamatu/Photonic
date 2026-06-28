@@ -290,6 +290,15 @@ pub struct PhotonicApp {
     /// True when the current move drag is duplicating the selection (Alt-drag):
     /// copies were spawned at drag start and the originals stay put.
     dup_drag: bool,
+    /// Dragging an artboard: (id, cursor→origin offset in canvas units).
+    artboard_drag: Option<(photonic_core::ArtboardId, f64, f64)>,
+    /// Resizing an artboard: (id, corner 0=TL/1=TR/2=BL/3=BR, orig x, y, w, h).
+    artboard_resize: Option<(photonic_core::ArtboardId, u8, f64, f64, f64, f64)>,
+    /// Inline-renaming an artboard: (id, edit buffer).
+    artboard_rename: Option<(photonic_core::ArtboardId, String)>,
+    /// Set on new/open to fit all artboards to the viewport on the next frame
+    /// (once the actual viewport rect is known).
+    fit_pending: bool,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -612,6 +621,10 @@ impl Default for PhotonicApp {
             move_snap_ref: None,
             move_snap_press: None,
             dup_drag: false,
+            artboard_drag: None,
+            artboard_resize: None,
+            artboard_rename: None,
+            fit_pending: false,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -728,14 +741,22 @@ where
     std::thread::spawn(f).join().unwrap_or(None)
 }
 
-/// Center and fit the view on the document's first artboard (falls back to the
-/// document bounds). Used when opening a project so it lands framed on board 1.
-fn fit_first_artboard(view: &mut CanvasView, doc: &Document) {
-    if let Some(ab) = doc.artboards.first() {
-        view.fit_to_rect(ab.x, ab.y, ab.width.max(1.0), ab.height.max(1.0));
-    } else {
-        view.fit_to_rect(0.0, 0.0, doc.width.max(1.0), doc.height.max(1.0));
-    }
+/// Fit and center the artboard bounding box `(bx0,by0,bx1,by1)` (canvas units)
+/// inside the on-screen viewport `rect`, so the artwork lands properly scaled in
+/// the actual visible canvas area (not the full window). Sets zoom + pan
+/// directly in the same point-space the overlays and GPU camera share.
+fn fit_artboard_to_rect(view: &mut CanvasView, rect: egui::Rect, bounds: (f64, f64, f64, f64)) {
+    let (bx0, by0, bx1, by1) = bounds;
+    let bw = (bx1 - bx0).max(1.0);
+    let bh = (by1 - by0).max(1.0);
+    let zoom_x = rect.width() as f64 / bw;
+    let zoom_y = rect.height() as f64 / bh;
+    let zoom = (zoom_x.min(zoom_y) * 0.92).clamp(0.01, 64.0);
+    view.zoom = zoom;
+    let cx = (bx0 + bx1) * 0.5;
+    let cy = (by0 + by1) * 0.5;
+    view.pan_x = rect.center().x as f64 - cx * zoom;
+    view.pan_y = rect.center().y as f64 - cy * zoom;
 }
 
 fn load_document(path: &Path) -> Result<Document, String> {
@@ -1048,11 +1069,9 @@ impl PhotonicApp {
                             new_doc.artboards = boards;
                         }
                         *doc = new_doc;
-                        // Frame all artboards so multi-artboard documents are
-                        // fully visible immediately, not just the first board.
-                        let (bx0, by0, bx1, by1) = doc.artboards_bounds();
-                        view.fit_to_rect(bx0, by0, (bx1 - bx0).max(1.0), (by1 - by0).max(1.0));
-                        self.smooth.log_zoom_target = view.zoom.ln();
+                        // Fit all artboards to the viewport on the next frame
+                        // (once the real viewport rect is known).
+                        self.fit_pending = true;
                         self.current_file = None;
                         self.selected_id = None;
                         self.show_welcome = false;
@@ -1062,8 +1081,7 @@ impl PhotonicApp {
                         Ok(loaded) => {
                             self.welcome.add_recent(path.clone(), loaded.name.clone());
                             *doc = loaded;
-                            fit_first_artboard(view, doc);
-                            self.smooth.log_zoom_target = view.zoom.ln();
+                            self.fit_pending = true;
                             self.current_file = Some(path);
                             self.selected_id = None;
                             self.show_welcome = false;
@@ -1092,8 +1110,7 @@ impl PhotonicApp {
                                 Ok(loaded) => {
                                     self.welcome.add_recent(path.clone(), loaded.name.clone());
                                     *doc = loaded;
-                                    fit_first_artboard(view, doc);
-                                    self.smooth.log_zoom_target = view.zoom.ln();
+                                    self.fit_pending = true;
                                     self.current_file = Some(path);
                                     self.selected_id = None;
                                     self.show_welcome = false;
@@ -1174,7 +1191,7 @@ impl PhotonicApp {
                         ui.separator();
                         if ui
                             .button(
-                                RichText::new("✕ Clear Diff")
+                                RichText::new(format!("{} Clear Diff", ph::X))
                                     .small()
                                     .color(Color32::from_rgb(239, 68, 68)),
                             )
@@ -1303,8 +1320,7 @@ impl PhotonicApp {
                                                     Ok(loaded) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
                                                         *doc = loaded;
-                                                        fit_first_artboard(view, doc);
-                                                        self.smooth.log_zoom_target = view.zoom.ln();
+                                                        self.fit_pending = true;
                                                         self.selected_id = None;
                                                         doc_modified = true;
                                                         self.file_status = Some(format!("Opened {}", path.file_name().unwrap_or_default().to_string_lossy()));
@@ -1674,9 +1690,9 @@ impl PhotonicApp {
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if mcp_running {
-                            ui.label(RichText::new("MCP :7842 ✓").color(Color32::from_rgb(52, 211, 153)));
+                            ui.label(RichText::new(format!("MCP :7842 {}", ph::CHECK)).color(Color32::from_rgb(52, 211, 153)));
                         } else {
-                            ui.label(RichText::new("MCP offline ✗").color(Color32::from_rgb(248, 113, 113)))
+                            ui.label(RichText::new(format!("MCP offline {}", ph::X)).color(Color32::from_rgb(248, 113, 113)))
                                 .on_hover_text("MCP server failed to bind — another Photonic instance may be running on port 7842");
                         }
                         ui.separator();
@@ -1864,6 +1880,15 @@ impl PhotonicApp {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+
+                // ── Deferred fit-to-viewport on new/open ─────────────────────
+                // Runs now that the real viewport `rect` is known, so artwork
+                // lands properly scaled in the visible canvas (not the window).
+                if self.fit_pending {
+                    self.fit_pending = false;
+                    fit_artboard_to_rect(view, rect, doc.artboards_bounds());
+                    self.smooth.log_zoom_target = view.zoom.ln();
+                }
 
                 // ── Interactive raster brush / eraser ────────────────────────
                 if matches!(self.active_tool, Tool::RasterBrush | Tool::RasterEraser) {
@@ -2220,7 +2245,7 @@ impl PhotonicApp {
                     }
                 }
 
-                // ── Artboards: labels, active highlight, select, add/remove ───
+                // ── Artboards: labels, select, drag, resize, rename, add/remove ─
                 {
                     let accent = egui::Color32::from_rgb(110, 86, 207);
                     // Snapshot (id, name, rect) so we can mutate `doc` afterward.
@@ -2229,42 +2254,60 @@ impl PhotonicApp {
                         .iter()
                         .map(|a| (a.id, a.name.clone(), a.x, a.y, a.width, a.height))
                         .collect();
-                    let active_id = doc.active_artboard;
+                    let active_id = doc.active_artboard.or_else(|| boards.first().map(|b| b.0));
                     let mut select: Option<photonic_core::ArtboardId> = None;
+                    let mut start_rename: Option<(photonic_core::ArtboardId, String)> = None;
 
-                    // Labels + active border only matter with multiple boards;
+                    // Labels + handles only matter with multiple boards;
                     // a lone artboard keeps the classic clean canvas.
                     if boards.len() > 1 {
                         let painter = ui.painter_at(rect);
                         for (i, (id, name, x, y, w, h)) in boards.iter().enumerate() {
                             let (sx0, sy0) = view.canvas_to_screen(*x, *y);
                             let (sx1, sy1) = view.canvas_to_screen(*x + *w, *y + *h);
-                            let is_active =
-                                active_id == Some(*id) || (active_id.is_none() && i == 0);
+                            let is_active = active_id == Some(*id);
                             let col = if is_active {
                                 accent
                             } else {
                                 egui::Color32::from_gray(140)
                             };
-                            let label_pos = egui::pos2(sx0 as f32, sy0 as f32 - 18.0);
-                            let galley = painter.layout_no_wrap(
-                                name.clone(),
-                                egui::FontId::proportional(12.0),
-                                col,
-                            );
-                            let lrect = egui::Rect::from_min_size(label_pos, galley.size());
-                            let resp = ui.interact(
-                                lrect.expand(3.0),
-                                ui.id().with(("ab_label", i)),
-                                egui::Sense::click(),
-                            );
-                            if resp.hovered() {
-                                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+
+                            // Label (double-click rename, drag to move, click select).
+                            let renaming_this =
+                                matches!(&self.artboard_rename, Some((rid, _)) if rid == id);
+                            let label_pos = egui::pos2(sx0 as f32, sy0 as f32 - 19.0);
+                            if !renaming_this {
+                                let galley = painter.layout_no_wrap(
+                                    name.clone(),
+                                    egui::FontId::proportional(12.0),
+                                    col,
+                                );
+                                let lrect =
+                                    egui::Rect::from_min_size(label_pos, galley.size()).expand(3.0);
+                                let resp = ui.interact(
+                                    lrect,
+                                    ui.id().with(("ab_label", i)),
+                                    egui::Sense::click_and_drag(),
+                                );
+                                if resp.hovered() {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                }
+                                if resp.double_clicked() {
+                                    start_rename = Some((*id, name.clone()));
+                                } else if resp.drag_started() {
+                                    if let Some(p) = resp.interact_pointer_pos() {
+                                        let (cx, cy) =
+                                            view.screen_to_canvas(p.x as f64, p.y as f64);
+                                        self.artboard_drag = Some((*id, cx - *x, cy - *y));
+                                        select = Some(*id);
+                                    }
+                                } else if resp.clicked() {
+                                    select = Some(*id);
+                                }
+                                painter.galley(label_pos, galley, col);
                             }
-                            if resp.clicked() {
-                                select = Some(*id);
-                            }
-                            painter.galley(label_pos, galley, col);
+
+                            // Active board: border + corner resize handles.
                             if is_active {
                                 painter.rect_stroke(
                                     egui::Rect::from_min_max(
@@ -2274,12 +2317,157 @@ impl PhotonicApp {
                                     0.0,
                                     egui::Stroke::new(1.5, accent),
                                 );
+                                let corners = [
+                                    (sx0, sy0, 0u8),
+                                    (sx1, sy0, 1u8),
+                                    (sx0, sy1, 2u8),
+                                    (sx1, sy1, 3u8),
+                                ];
+                                for (hx, hy, hidx) in corners {
+                                    let hc = egui::pos2(hx as f32, hy as f32);
+                                    let hrect = egui::Rect::from_center_size(
+                                        hc,
+                                        egui::vec2(11.0, 11.0),
+                                    );
+                                    let hresp = ui.interact(
+                                        hrect,
+                                        ui.id().with(("ab_handle", i, hidx)),
+                                        egui::Sense::click_and_drag(),
+                                    );
+                                    if hresp.hovered() {
+                                        ctx.set_cursor_icon(if hidx == 0 || hidx == 3 {
+                                            egui::CursorIcon::ResizeNwSe
+                                        } else {
+                                            egui::CursorIcon::ResizeNeSw
+                                        });
+                                    }
+                                    if hresp.drag_started() {
+                                        self.artboard_resize = Some((*id, hidx, *x, *y, *w, *h));
+                                    }
+                                    painter.rect_filled(hrect.shrink(2.5), 1.0, accent);
+                                    painter.rect_stroke(
+                                        hrect.shrink(2.5),
+                                        1.0,
+                                        egui::Stroke::new(1.0, egui::Color32::WHITE),
+                                    );
+                                }
                             }
                         }
                     }
+
+                    // ── Apply an in-progress drag / resize ──────────────────────
+                    let pointer = ui.input(|i| i.pointer.interact_pos());
+                    let down = ui.input(|i| i.pointer.primary_down());
+                    if let Some((id, ox, oy)) = self.artboard_drag {
+                        if down {
+                            if let Some(p) = pointer {
+                                let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
+                                if let Some(ab) =
+                                    doc.artboards.iter_mut().find(|a| a.id == id)
+                                {
+                                    ab.x = self.snap(cx - ox);
+                                    ab.y = self.snap(cy - oy);
+                                    doc_modified = true;
+                                }
+                            }
+                        } else {
+                            self.artboard_drag = None;
+                        }
+                    }
+                    if let Some((id, hidx, ox, oy, ow, oh)) = self.artboard_resize {
+                        if down {
+                            if let Some(p) = pointer {
+                                let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
+                                let (mut x0, mut y0, mut x1, mut y1) =
+                                    (ox, oy, ox + ow, oy + oh);
+                                match hidx {
+                                    0 => {
+                                        x0 = self.snap(cx);
+                                        y0 = self.snap(cy);
+                                    }
+                                    1 => {
+                                        x1 = self.snap(cx);
+                                        y0 = self.snap(cy);
+                                    }
+                                    2 => {
+                                        x0 = self.snap(cx);
+                                        y1 = self.snap(cy);
+                                    }
+                                    _ => {
+                                        x1 = self.snap(cx);
+                                        y1 = self.snap(cy);
+                                    }
+                                }
+                                if let Some(ab) =
+                                    doc.artboards.iter_mut().find(|a| a.id == id)
+                                {
+                                    ab.x = x0.min(x1);
+                                    ab.y = y0.min(y1);
+                                    ab.width = (x1 - x0).abs().max(16.0);
+                                    ab.height = (y1 - y0).abs().max(16.0);
+                                    doc_modified = true;
+                                }
+                            }
+                        } else {
+                            self.artboard_resize = None;
+                        }
+                    }
+
                     if let Some(id) = select {
                         doc.active_artboard = Some(id);
                         doc_modified = true;
+                    }
+                    if let Some(r) = start_rename {
+                        self.artboard_rename = Some(r);
+                    }
+
+                    // ── Inline rename popup ─────────────────────────────────────
+                    if let Some((rid, _)) = self.artboard_rename.clone() {
+                        if let Some((bx, by)) =
+                            boards.iter().find(|b| b.0 == rid).map(|b| (b.2, b.3))
+                        {
+                            let (sx0, sy0) = view.canvas_to_screen(bx, by);
+                            let mut close: Option<bool> = None; // Some(true)=commit
+                            egui::Area::new(ui.id().with(("ab_rename", rid)))
+                                .fixed_pos(egui::pos2(sx0 as f32, sy0 as f32 - 24.0))
+                                .order(egui::Order::Foreground)
+                                .show(ctx, |ui| {
+                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                        if let Some((_, buf)) = self.artboard_rename.as_mut() {
+                                            let r = ui.add(
+                                                egui::TextEdit::singleline(buf)
+                                                    .desired_width(140.0),
+                                            );
+                                            r.request_focus();
+                                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                                close = Some(true);
+                                            }
+                                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                                close = Some(false);
+                                            }
+                                        }
+                                    });
+                                });
+                            match close {
+                                Some(true) => {
+                                    if let Some((id, buf)) = self.artboard_rename.take() {
+                                        let name = buf.trim().to_string();
+                                        if !name.is_empty() {
+                                            if let Some(ab) =
+                                                doc.artboards.iter_mut().find(|a| a.id == id)
+                                            {
+                                                ab.name = name;
+                                                doc_modified = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(false) => self.artboard_rename = None,
+                                None => {}
+                            }
+                        } else {
+                            self.artboard_rename = None;
+                        }
                     }
 
                     // Compact add/remove toolbar pinned to the viewport corner.
@@ -2294,13 +2482,13 @@ impl PhotonicApp {
                                         egui::RichText::new(format!("Artboards: {}", boards.len()))
                                             .size(11.5),
                                     );
-                                    if ui.add(egui::Button::new("＋").small()).clicked() {
+                                    if ui.add(egui::Button::new(ph::PLUS).small()).clicked() {
                                         do_add = true;
                                     }
                                     if ui
                                         .add_enabled(
                                             boards.len() > 1,
-                                            egui::Button::new("－").small(),
+                                            egui::Button::new(ph::MINUS).small(),
                                         )
                                         .clicked()
                                     {
@@ -2333,6 +2521,15 @@ impl PhotonicApp {
                             doc_modified = true;
                         }
                     }
+                }
+
+                // While manipulating an artboard, don't let the regular tools
+                // also act on the same drag.
+                if self.artboard_drag.is_some()
+                    || self.artboard_resize.is_some()
+                    || self.artboard_rename.is_some()
+                {
+                    return;
                 }
 
                 // ── Right-click radial wheel ──────────────────────────────────
@@ -7379,35 +7576,35 @@ impl PhotonicApp {
                         if h_imb > 40 {
                             let side = if left > right { "left" } else { "right" };
                             findings.push(format!(
-                                "⚠ Balance: {}% more objects on the {} ({} left, {} right).",
-                                h_imb, side, left, right
+                                "{} Balance: {}% more objects on the {} ({} left, {} right).",
+                                ph::WARNING, h_imb, side, left, right
                             ));
                         }
                         if v_imb > 40 {
                             let side = if top > bottom { "top" } else { "bottom" };
                             findings.push(format!(
-                                "ℹ Balance: {}% more objects near the {} ({} top, {} bottom).",
-                                v_imb, side, top, bottom
+                                "{} Balance: {}% more objects near the {} ({} top, {} bottom).",
+                                ph::INFO, v_imb, side, top, bottom
                             ));
                         }
                         if h_imb <= 20 && v_imb <= 20 {
-                            findings.push(
-                                "✓ Balance: objects distributed evenly across quadrants."
-                                    .to_string(),
-                            );
+                            findings.push(format!(
+                                "{} Balance: objects distributed evenly across quadrants.",
+                                ph::CHECK
+                            ));
                         }
                         let total_area: f64 = infos.iter().map(|n| n.bw * n.bh).sum();
                         let canvas_area = (canvas_w * canvas_h).max(1.0);
                         let density = (total_area / canvas_area * 100.0).min(200.0);
                         if density < 5.0 {
                             findings.push(format!(
-                                "ℹ Density: very sparse ({:.1}% canvas coverage).",
-                                density
+                                "{} Density: very sparse ({:.1}% canvas coverage).",
+                                ph::INFO, density
                             ));
                         } else if density > 120.0 {
                             findings.push(format!(
-                                "⚠ Density: may be overcrowded ({:.1}% combined coverage).",
-                                density
+                                "{} Density: may be overcrowded ({:.1}% combined coverage).",
+                                ph::WARNING, density
                             ));
                         }
                         let mut overlap_count = 0usize;
@@ -7429,8 +7626,8 @@ impl PhotonicApp {
                         }
                         if overlap_count > 0 {
                             findings.push(format!(
-                                "ℹ Overlaps: {} overlapping object pair(s) detected.",
-                                overlap_count
+                                "{} Overlaps: {} overlapping object pair(s) detected.",
+                                ph::INFO, overlap_count
                             ));
                         }
                         let solid: Vec<_> = infos.iter().filter(|n| n.solid).collect();
@@ -7445,7 +7642,7 @@ impl PhotonicApp {
                             })
                             .collect();
                         if unique_colors.len() > 12 {
-                            findings.push(format!("ℹ Colors: {} unique fill colors — consider reducing for visual cohesion.", unique_colors.len()));
+                            findings.push(format!("{} Colors: {} unique fill colors — consider reducing for visual cohesion.", ph::INFO, unique_colors.len()));
                         }
                         let off_canvas = infos
                             .iter()
@@ -7457,14 +7654,15 @@ impl PhotonicApp {
                             })
                             .count();
                         if off_canvas > 0 {
-                            findings.push(format!("⚠ Off-canvas: {} object(s) outside bounds — won't appear in exports.", off_canvas));
+                            findings.push(format!("{} Off-canvas: {} object(s) outside bounds — won't appear in exports.", ph::WARNING, off_canvas));
                         }
                         if findings
                             .iter()
-                            .all(|f| f.starts_with('✓') || f.starts_with('ℹ'))
+                            .all(|f| f.starts_with(ph::CHECK) || f.starts_with(ph::INFO))
                         {
                             findings.push(format!(
-                                "✓ {} node(s) analyzed. No critical issues.",
+                                "{} {} node(s) analyzed. No critical issues.",
+                                ph::CHECK,
                                 infos.len()
                             ));
                         }
@@ -11177,7 +11375,7 @@ impl PhotonicApp {
                 self.lua_console.tab = ConsoleTab::Claude;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✕").clicked() {
+                if ui.small_button(ph::X).clicked() {
                     self.lua_console.visible = false;
                 }
                 let expand_icon = if self.lua_console.expanded {
@@ -12809,7 +13007,7 @@ impl PhotonicApp {
                             });
                         ui.add_space(2.0);
                     } else {
-                        let is_err = text.starts_with("⚠");
+                        let is_err = text.starts_with(ph::WARNING);
                         let frame_color = if is_err {
                             Color32::from_rgb(35, 10, 15)
                         } else {

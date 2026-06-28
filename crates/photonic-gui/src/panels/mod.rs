@@ -1289,7 +1289,7 @@ pub fn draw_properties_panel(
                 .hint_text("Search properties…")
                 .desired_width(ui.available_width() - 24.0),
         );
-        if !prop_search.is_empty() && ui.small_button("✕").on_hover_text("Clear search").clicked()
+        if !prop_search.is_empty() && ui.small_button(ph::X).on_hover_text("Clear search").clicked()
         {
             prop_search.clear();
             response.surrender_focus();
@@ -2711,7 +2711,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                                 if ui
-                                    .small_button("✕")
+                                    .small_button(ph::X)
                                     .on_hover_text("Delete this character style")
                                     .clicked()
                                 {
@@ -2756,7 +2756,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                                 if ui
-                                    .small_button("✕")
+                                    .small_button(ph::X)
                                     .on_hover_text("Delete this paragraph style")
                                     .clicked()
                                 {
@@ -4600,7 +4600,7 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(format!("{} ({})", profile.name, profile.format));
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text("Remove this profile")
                                 .clicked()
                             {
@@ -4683,7 +4683,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteColorSwatch {
                                     name: swatch.name.clone(),
                                 });
@@ -4775,7 +4775,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteSpotColor {
                                     name: sc.name.clone(),
                                 });
@@ -4823,7 +4823,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteGradientSwatch { name: swatch.name.clone() });
                             }
                         });
@@ -4885,7 +4885,7 @@ pub fn draw_properties_panel(
                                 }
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text("Delete this style")
                                 .clicked()
                             {
@@ -4959,7 +4959,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteWidthProfile {
                                     name: wp.name.clone(),
                                 });
@@ -5113,7 +5113,7 @@ pub fn draw_properties_panel(
                                 let label = format!("{} axis: {:.1}px", dim.axis, dim.distance());
                                 ui.label(RichText::new(&label).small());
                                 if ui
-                                    .small_button("✕")
+                                    .small_button(ph::X)
                                     .on_hover_text("Remove this dimension")
                                     .clicked()
                                 {
@@ -5187,7 +5187,7 @@ pub fn draw_properties_panel(
                     for (name, rule_type) in grammar_rules {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{} ({})", name, rule_type)).small());
-                            if ui.small_button("✕").on_hover_text("Delete rule").clicked() {
+                            if ui.small_button(ph::X).on_hover_text("Delete rule").clicked() {
                                 action =
                                     Some(PanelAction::DeleteGrammarRule { name: name.clone() });
                             }
@@ -5253,7 +5253,7 @@ pub fn draw_properties_panel(
                 if !grammar_check_results.is_empty() {
                     ui.add_space(4.0);
                     for (rule_name, passed, message) in grammar_check_results {
-                        let icon = if *passed { "✓" } else { "✗" };
+                        let icon = if *passed { ph::CHECK } else { ph::X };
                         let color = if *passed {
                             Color32::from_rgb(60, 160, 60)
                         } else {
@@ -5329,7 +5329,7 @@ pub fn draw_properties_panel(
                                 action = Some(PanelAction::PlayAction { name: name.clone() });
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text(format!("Delete '{}'", name))
                                 .clicked()
                             {
@@ -5434,7 +5434,7 @@ pub fn draw_properties_panel(
                 for (ev, an) in &triggers {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{} → {}", ev, an)).small());
-                        if ui.small_button("✕").clicked() {
+                        if ui.small_button(ph::X).clicked() {
                             action = Some(PanelAction::RemoveEventTrigger {
                                 event: ev.clone(),
                                 action_name: Some(an.clone()),
@@ -5548,7 +5548,7 @@ pub fn draw_properties_panel(
                                 });
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text(format!("Delete workspace '{}'", ws.name))
                                 .clicked()
                             {
@@ -5607,7 +5607,7 @@ pub fn draw_properties_panel(
                                 action = Some(PanelAction::BranchSwitch { name: name.clone() });
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text(format!("Delete branch '{}'", name))
                                 .clicked()
                             {
@@ -5637,7 +5637,7 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{} =", var.name)).small().strong());
                             ui.label(RichText::new(&var.value).small());
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteVariable {
                                     name: var.name.clone(),
                                 });
@@ -6166,7 +6166,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     {
                         stop_changed = true;
                     }
-                    if can_remove && ui.small_button("✕").clicked() {
+                    if can_remove && ui.small_button(ph::X).clicked() {
                         remove_idx = Some(i);
                     }
                 });
@@ -6236,7 +6236,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     {
                         pt_changed = true;
                     }
-                    if can_remove && ui.small_button("✕").clicked() {
+                    if can_remove && ui.small_button(ph::X).clicked() {
                         remove_idx = Some(i);
                     }
                 });
@@ -6938,7 +6938,7 @@ pub fn draw_audit_panel(
             ui.horizontal(|ui| {
                 ui.label("Filter:");
                 ui.text_edit_singleline(filter);
-                if ui.small_button("✕").clicked() {
+                if ui.small_button(ph::X).clicked() {
                     filter.clear();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
