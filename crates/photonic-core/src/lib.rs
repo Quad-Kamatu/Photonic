@@ -20,10 +20,10 @@ pub use annotation::{Annotation, AnnotationId};
 pub use audit::{audit_timestamp, AuditEntry, AuditLog};
 pub use color::Color;
 pub use document::{
-    sample_fill_at, ActionSet, CharacterStyle, ColorSwatch, DimensionAnnotation, Document,
-    DocumentId, DocumentVariable, EventTrigger, ExportProfile, GradientSwatch, GrammarRule,
-    GraphicStyle, Guide, GuideOrientation, Page, ParagraphStyle, SpotColor, Symbol, WidthProfile,
-    Workspace,
+    sample_fill_at, ActionSet, Artboard, ArtboardId, CharacterStyle, ColorSwatch,
+    DimensionAnnotation, Document, DocumentId, DocumentVariable, EventTrigger, ExportProfile,
+    GradientSwatch, GrammarRule, GraphicStyle, Guide, GuideOrientation, Page, ParagraphStyle,
+    SpotColor, Symbol, WidthProfile, Workspace,
 };
 pub use history::{CheckpointInfo, Command, CommandHistory};
 pub use import::{import_svg, ImportError};

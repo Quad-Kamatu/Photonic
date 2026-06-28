@@ -468,6 +468,46 @@ pub struct CharacterStyle {
     pub line_height: Option<f64>,
 }
 
+/// Identifier for an [`Artboard`].
+pub type ArtboardId = Uuid;
+
+/// A named rectangular region in the document's shared coordinate space.
+///
+/// Photonic uses a **spatial** (Illustrator-style) multi-artboard model: every
+/// node lives in one absolute coordinate space, and an artboard is simply a
+/// named crop/export rectangle over that space. The document always has at
+/// least one artboard; legacy single-canvas documents migrate to a single
+/// artboard at the origin covering `(0, 0, width, height)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artboard {
+    pub id: ArtboardId,
+    pub name: String,
+    /// Top-left corner in document coordinates.
+    pub x: f64,
+    pub y: f64,
+    /// Size in document units (logical pixels at 96 dpi).
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Artboard {
+    pub fn new(name: impl Into<String>, x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The artboard rectangle as `(min_x, min_y, max_x, max_y)`.
+    pub fn rect(&self) -> (f64, f64, f64, f64) {
+        (self.x, self.y, self.x + self.width, self.y + self.height)
+    }
+}
+
 /// The root document — contains pages, layers, and the scene graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
@@ -573,6 +613,14 @@ pub struct Document {
     /// Persisted in `.photonic` files; stripped from all export formats.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionAnnotation>,
+    /// Artboards — named crop/export rectangles in the shared coordinate space.
+    /// Always contains at least one entry after construction or load; legacy
+    /// documents migrate to a single artboard covering `(0, 0, width, height)`.
+    #[serde(default)]
+    pub artboards: Vec<Artboard>,
+    /// The currently active artboard (target for new work / export defaults).
+    #[serde(default)]
+    pub active_artboard: Option<ArtboardId>,
 }
 
 // ─── Dimension Annotation ─────────────────────────────────────────────────────
@@ -661,6 +709,9 @@ impl Document {
         let mut layers = HashMap::new();
         layers.insert(layer_id, default_layer);
 
+        let artboard = Artboard::new("Artboard 1", 0.0, 0.0, width, height);
+        let active_artboard = Some(artboard.id);
+
         Self {
             format_version: CURRENT_FORMAT_VERSION,
             id: Uuid::new_v4(),
@@ -697,12 +748,77 @@ impl Document {
             event_triggers: Vec::new(),
             workspaces: Vec::new(),
             dimensions: Vec::new(),
+            artboards: vec![artboard],
+            active_artboard,
         }
     }
 
     /// Default A4-landscape artboard.
     pub fn default_artboard() -> Self {
         Self::new("Untitled", 1123.0, 794.0)
+    }
+
+    // ─── Artboards ──────────────────────────────────────────────────────────
+
+    /// Ensure the document has at least one artboard. Legacy single-canvas
+    /// documents (saved before multi-artboard) gain one artboard at the origin
+    /// covering `(0, 0, width, height)`. Idempotent.
+    pub fn ensure_default_artboard(&mut self) {
+        if self.artboards.is_empty() {
+            let ab = Artboard::new("Artboard 1", 0.0, 0.0, self.width, self.height);
+            self.active_artboard = Some(ab.id);
+            self.artboards.push(ab);
+        }
+        if self.active_artboard.is_none() {
+            self.active_artboard = self.artboards.first().map(|a| a.id);
+        }
+    }
+
+    /// The active artboard, or the first one if none is explicitly active.
+    pub fn active_artboard(&self) -> Option<&Artboard> {
+        self.active_artboard
+            .and_then(|id| self.artboards.iter().find(|a| a.id == id))
+            .or_else(|| self.artboards.first())
+    }
+
+    /// Append an artboard and make it active; returns its id.
+    pub fn add_artboard(&mut self, artboard: Artboard) -> ArtboardId {
+        let id = artboard.id;
+        self.artboards.push(artboard);
+        self.active_artboard = Some(id);
+        id
+    }
+
+    /// Remove an artboard by id (no-op if it is the last remaining one). If the
+    /// removed artboard was active, the first remaining artboard becomes active.
+    pub fn remove_artboard(&mut self, id: ArtboardId) {
+        if self.artboards.len() <= 1 {
+            return;
+        }
+        self.artboards.retain(|a| a.id != id);
+        if self.active_artboard == Some(id) {
+            self.active_artboard = self.artboards.first().map(|a| a.id);
+        }
+    }
+
+    /// Bounding box of all artboards as `(min_x, min_y, max_x, max_y)`.
+    /// Falls back to `(0, 0, width, height)` when there are no artboards.
+    pub fn artboards_bounds(&self) -> (f64, f64, f64, f64) {
+        if self.artboards.is_empty() {
+            return (0.0, 0.0, self.width, self.height);
+        }
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for a in &self.artboards {
+            let (ax0, ay0, ax1, ay1) = a.rect();
+            min_x = min_x.min(ax0);
+            min_y = min_y.min(ay0);
+            max_x = max_x.max(ax1);
+            max_y = max_y.max(ay1);
+        }
+        (min_x, min_y, max_x, max_y)
     }
 
     /// Record a recently used color. Deduplicates and caps at 20 entries.
@@ -1060,7 +1176,10 @@ impl Document {
                 .map_err(serde::de::Error::custom)?;
         }
 
-        serde_json::from_value(value)
+        let mut doc: Document = serde_json::from_value(value)?;
+        // Legacy documents predate multi-artboard — synthesize the first one.
+        doc.ensure_default_artboard();
+        Ok(doc)
     }
 }
 

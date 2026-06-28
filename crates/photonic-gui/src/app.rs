@@ -1001,8 +1001,43 @@ impl PhotonicApp {
                         name,
                         width,
                         height,
+                        bleed_mm,
+                        slug_mm,
+                        margin,
+                        artboards,
                     } => {
-                        *doc = photonic_core::Document::new(name, width, height);
+                        let mut new_doc = photonic_core::Document::new(name, width, height);
+                        new_doc.bleed_mm = bleed_mm;
+                        new_doc.slug_mm = slug_mm;
+                        new_doc.margin_top = margin;
+                        new_doc.margin_right = margin;
+                        new_doc.margin_bottom = margin;
+                        new_doc.margin_left = margin;
+                        // Multiple artboards: lay out N same-size boards in a grid.
+                        if artboards > 1 {
+                            let gap = (width * 0.06).max(40.0);
+                            let cols = (artboards as f64).sqrt().ceil().max(1.0) as usize;
+                            let mut boards = Vec::with_capacity(artboards);
+                            for i in 0..artboards {
+                                let col = (i % cols) as f64;
+                                let row = (i / cols) as f64;
+                                boards.push(photonic_core::Artboard::new(
+                                    format!("Artboard {}", i + 1),
+                                    col * (width + gap),
+                                    row * (height + gap),
+                                    width,
+                                    height,
+                                ));
+                            }
+                            new_doc.active_artboard = boards.first().map(|a| a.id);
+                            new_doc.artboards = boards;
+                        }
+                        *doc = new_doc;
+                        // Frame all artboards so multi-artboard documents are
+                        // fully visible immediately, not just the first board.
+                        let (bx0, by0, bx1, by1) = doc.artboards_bounds();
+                        view.fit_to_rect(bx0, by0, (bx1 - bx0).max(1.0), (by1 - by0).max(1.0));
+                        self.smooth.log_zoom_target = view.zoom.ln();
                         self.current_file = None;
                         self.selected_id = None;
                         self.show_welcome = false;

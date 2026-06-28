@@ -727,7 +727,7 @@ impl PhotonicRenderer {
             arrowhead_end: photonic_core::style::ArrowheadStyle,
         }
 
-        let (artboard_w, artboard_h, nodes): (f32, f32, Vec<NodeSnapshot>) = {
+        let (artboard_w, artboard_h, artboards, nodes): (f32, f32, Vec<[f32; 4]>, Vec<NodeSnapshot>) = {
             // try_lock — never block; return cached geometry if lock is contended.
             let doc = match self.document.try_lock() {
                 Ok(g) => g,
@@ -738,6 +738,12 @@ impl PhotonicRenderer {
             };
             let w = doc.width as f32;
             let h = doc.height as f32;
+            // Snapshot each artboard rect (x, y, w, h) in document space.
+            let artboards: Vec<[f32; 4]> = doc
+                .artboards
+                .iter()
+                .map(|a| [a.x as f32, a.y as f32, a.width as f32, a.height as f32])
+                .collect();
 
             // Single pass: snapshot text nodes for glyphon and path nodes for
             // tessellation in one traversal, halving scene graph walk cost per frame.
@@ -855,7 +861,7 @@ impl PhotonicRenderer {
                     _ => {} // Group nodes and future kinds: no GPU geometry of their own
                 }
             }
-            (w, h, nodes)
+            (w, h, artboards, nodes)
         }; // doc lock released here
 
         // ── Tessellate phase: all CPU work happens with no locks held ─────────
@@ -863,28 +869,36 @@ impl PhotonicRenderer {
         let mut verts: Vec<Vertex> = Vec::new();
         let mut idxs: Vec<u32> = Vec::new();
 
-        // White artboard rectangle
+        // White artboard rectangles — one per artboard (spatial multi-artboard
+        // model). Falls back to the full document bounds when none are present.
         let white = [1.0f32, 1.0, 1.0, 1.0];
-        let base = verts.len() as u32;
-        verts.extend_from_slice(&[
-            Vertex {
-                position: [0.0, 0.0],
-                color: white,
-            },
-            Vertex {
-                position: [artboard_w, 0.0],
-                color: white,
-            },
-            Vertex {
-                position: [artboard_w, artboard_h],
-                color: white,
-            },
-            Vertex {
-                position: [0.0, artboard_h],
-                color: white,
-            },
-        ]);
-        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let mut boards = artboards;
+        if boards.is_empty() {
+            boards.push([0.0, 0.0, artboard_w, artboard_h]);
+        }
+        for b in &boards {
+            let (x0, y0, x1, y1) = (b[0], b[1], b[0] + b[2], b[1] + b[3]);
+            let base = verts.len() as u32;
+            verts.extend_from_slice(&[
+                Vertex {
+                    position: [x0, y0],
+                    color: white,
+                },
+                Vertex {
+                    position: [x1, y0],
+                    color: white,
+                },
+                Vertex {
+                    position: [x1, y1],
+                    color: white,
+                },
+                Vertex {
+                    position: [x0, y1],
+                    color: white,
+                },
+            ]);
+            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
 
         // Helpers for appending tessellated meshes to the vertex/index buffers.
         // Defined as closures to keep the loop body readable.
