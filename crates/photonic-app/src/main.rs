@@ -185,7 +185,11 @@ fn main() -> Result<()> {
     };
 
     event_loop.run_app(&mut app)?;
-    Ok(())
+
+    // Guarantee a full process exit once the window closes — the MCP server runs
+    // on a detached background thread, so terminate the whole process (and that
+    // thread) deterministically rather than relying on unwind order.
+    std::process::exit(0);
 }
 
 // ─── Claude streaming events ─────────────────────────────────────────────────

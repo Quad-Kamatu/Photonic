@@ -1,6 +1,7 @@
 pub mod app;
 pub mod panels;
 pub mod preferences;
+pub mod quit;
 pub mod radial_wheel;
 pub mod theme;
 pub mod tools;
