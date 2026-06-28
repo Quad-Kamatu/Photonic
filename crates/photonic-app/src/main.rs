@@ -244,14 +244,25 @@ impl ApplicationHandler for PhotonicWinitApp {
         }
 
         let window_icon = load_window_icon();
+        #[allow(unused_mut)]
+        let mut attrs = WindowAttributes::default()
+            .with_title("Photonic")
+            .with_inner_size(PhysicalSize::new(1280u32, 800u32))
+            .with_window_icon(window_icon);
+        // On Linux the compositor (esp. Wayland/KWin) ignores the embedded .ico
+        // for the titlebar/taskbar icon and instead maps the window to a desktop
+        // file by its app_id / WM class. Set both to "photonic" so it resolves
+        // photonic.desktop and uses its (improved) themed icon.
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs = WindowAttributesExtWayland::with_name(attrs, "photonic", "photonic");
+            attrs = WindowAttributesExtX11::with_name(attrs, "photonic", "photonic");
+        }
         let window = Arc::new(
             event_loop
-                .create_window(
-                    WindowAttributes::default()
-                        .with_title("Photonic")
-                        .with_inner_size(PhysicalSize::new(1280u32, 800u32))
-                        .with_window_icon(window_icon),
-                )
+                .create_window(attrs)
                 .expect("Failed to create window"),
         );
 
