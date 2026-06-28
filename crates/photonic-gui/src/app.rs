@@ -379,6 +379,9 @@ pub struct PhotonicApp {
     /// Re-uploaded only when the pixel/mask content hash changes.
     raster_tex_cache: std::collections::HashMap<photonic_core::node::NodeId, RasterTexCache>,
 
+    /// Lazily-loaded Photonic logo texture for the top toolbar (embedded PNG).
+    logo_texture: Option<egui::TextureHandle>,
+
     // ── Interactive raster brush state ─────────────────────────────────────────
     /// Brush radius (pixels) for the RasterBrush/RasterEraser tools.
     pub raster_brush_radius: f32,
@@ -680,6 +683,7 @@ impl Default for PhotonicApp {
             recolor_palette_input: String::new(),
 
             eyedropper: EyedropperState::default(),
+            logo_texture: None,
             raster_tex_cache: std::collections::HashMap::new(),
             raster_brush_radius: 16.0,
             raster_brush_hardness: 0.8,
@@ -974,6 +978,20 @@ impl PhotonicApp {
         }
         ctx.set_pixels_per_point(self.prefs.ui_scale);
 
+        // Lazily upload the embedded Photonic logo for the top toolbar (once).
+        if self.logo_texture.is_none() {
+            if let Ok(img) = photonic_core::raster::image::RasterImage::from_encoded(include_bytes!(
+                "../assets/logo.png"
+            )) {
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.pixels,
+                );
+                self.logo_texture =
+                    Some(ctx.load_texture("photonic_logo", color, egui::TextureOptions::LINEAR));
+            }
+        }
+
         // ── Welcome screen (shown before the editor on first launch) ─────────
         if self.show_welcome {
             if let Some(action) = self.welcome.draw(ctx) {
@@ -1110,7 +1128,13 @@ impl PhotonicApp {
                     // Pass the file-status message into the toolbar so the zoom
                     // readout and status text share one right-aligned cluster
                     // instead of overlapping in the top-right corner.
-                    panels::draw_toolbar(ui, &doc.name, view.zoom, self.file_status.as_deref());
+                    panels::draw_toolbar(
+                        ui,
+                        &doc.name,
+                        view.zoom,
+                        self.file_status.as_deref(),
+                        self.logo_texture.as_ref(),
+                    );
                 });
             });
 

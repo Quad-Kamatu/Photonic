@@ -738,13 +738,32 @@ pub enum ZOrderOp {
 }
 
 /// Draw the horizontal toolbar (logo, doc name, zoom — no tool buttons).
-pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64, file_status: Option<&str>) {
+pub fn draw_toolbar(
+    ui: &mut Ui,
+    doc_name: &str,
+    zoom: f64,
+    file_status: Option<&str>,
+    logo: Option<&egui::TextureHandle>,
+) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{} Photonic", ph::HEXAGON))
-                .strong()
-                .color(Color32::from_rgb(110, 86, 207)),
-        );
+        // Show the actual Photonic logo when loaded; fall back to a glyph.
+        if let Some(tex) = logo {
+            ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(18.0, 18.0)))
+                    .maintain_aspect_ratio(true),
+            );
+            ui.label(
+                RichText::new("Photonic")
+                    .strong()
+                    .color(Color32::from_rgb(110, 86, 207)),
+            );
+        } else {
+            ui.label(
+                RichText::new(format!("{} Photonic", ph::HEXAGON))
+                    .strong()
+                    .color(Color32::from_rgb(110, 86, 207)),
+            );
+        }
         ui.separator();
         ui.label(doc_name);
 
