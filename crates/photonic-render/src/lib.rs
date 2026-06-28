@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod compositor;
 pub mod headless;
 pub mod pipeline;
 pub mod renderer;

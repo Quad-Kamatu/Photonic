@@ -710,6 +710,8 @@ pub async fn update_node(state: &AppState, args: UpdateNodeArgs) -> ToolResult {
             }
         }
         SceneNodeKind::Group(_) => {}
+        // raster: no vector fill/stroke/text properties to update
+        SceneNodeKind::Raster(_) => {}
     }
 
     // Write phase: acquire both locks, execute synchronously, release both.
@@ -1516,6 +1518,7 @@ pub async fn find_nodes(state: &AppState, args: FindNodesArgs) -> ToolResult {
                 SceneNodeKind::Path(_) => "path",
                 SceneNodeKind::Group(_) => "group",
                 SceneNodeKind::Text(_) => "text",
+                SceneNodeKind::Raster(_) => "raster",
             };
             if kind_str != nt.as_str() {
                 continue;
@@ -1583,6 +1586,7 @@ pub async fn find_nodes(state: &AppState, args: FindNodesArgs) -> ToolResult {
                 SceneNodeKind::Path(_) => "path",
                 SceneNodeKind::Group(_) => "group",
                 SceneNodeKind::Text(_) => "text",
+                SceneNodeKind::Raster(_) => "raster",
             };
             serde_json::json!({
                 "id":       node.id,
@@ -2570,6 +2574,8 @@ pub async fn find_replace_style(state: &AppState, args: FindReplaceStyleArgs) ->
             SceneNodeKind::Group(_) => {
                 // Groups carry no direct fill/stroke — skip style matching.
             }
+            // raster: no vector fill/stroke/font to match
+            SceneNodeKind::Raster(_) => {}
         }
 
         // Node-level opacity override applied to any matched node.
@@ -3150,6 +3156,8 @@ pub async fn inspect_node(state: &AppState, args: InspectNodeArgs) -> ToolResult
                         }
                     }
                     SceneNodeKind::Group(_) => {} // handled by DFS stack
+                    // raster: no anchors/fill/stroke to aggregate
+                    SceneNodeKind::Raster(_) => {}
                 }
             }
 
@@ -3199,6 +3207,21 @@ pub async fn inspect_node(state: &AppState, args: InspectNodeArgs) -> ToolResult
                 name, char_count, line_count, text_node.font_family
             ))
             .with_data(data)
+        }
+
+        // raster: pixel layer — no vector geometry, fill, or stroke
+        SceneNodeKind::Raster(_) => {
+            let world_bounds = world_aabb_of(&node).map(aabb_to_json);
+
+            let data = serde_json::json!({
+                "id": id_str,
+                "name": name,
+                "type": "raster",
+                "world_bounds": world_bounds,
+            });
+
+            ToolResult::text(format!("inspect_node '{}': raster (pixel layer)", name))
+                .with_data(data)
         }
     }
 }
@@ -3332,6 +3355,8 @@ fn generate_name(node: &SceneNode) -> String {
             };
             format!("{} {}", color_part, geo_part)
         }
+        // raster: pixel layer — no fill/geometry to describe
+        SceneNodeKind::Raster(_) => "raster".to_string(),
     }
 }
 
@@ -3655,6 +3680,13 @@ pub async fn get_css_preview(state: &AppState, args: GetCssPreviewArgs) -> ToolR
                     .to_string(),
             );
         }
+        // raster: no vector fill or stroke
+        SceneNodeKind::Raster(_) => {
+            notes.push(
+                "Raster nodes have no fill or stroke — CSS shown covers size and positioning only."
+                    .to_string(),
+            );
+        }
     }
 
     // Opacity (node-level).
@@ -3691,6 +3723,7 @@ pub async fn get_css_preview(state: &AppState, args: GetCssPreviewArgs) -> ToolR
         SceneNodeKind::Path(_) => "path",
         SceneNodeKind::Text(_) => "text",
         SceneNodeKind::Group(_) => "group",
+        SceneNodeKind::Raster(_) => "raster",
     };
 
     let css_block = if lines.is_empty() {
@@ -3797,6 +3830,13 @@ pub async fn check_style_continuity(
             }
             SceneNodeKind::Group(_) => {
                 // Groups are included only for opacity analysis, not fill/stroke/font.
+                if check_opacity {
+                    let op = format!("{:.2}", node.opacity);
+                    opacity_bucket.push((op, nid.clone(), nname.clone()));
+                }
+            }
+            // raster: no vector fill/stroke/font — opacity analysis only
+            SceneNodeKind::Raster(_) => {
                 if check_opacity {
                     let op = format!("{:.2}", node.opacity);
                     opacity_bucket.push((op, nid.clone(), nname.clone()));
@@ -5946,6 +5986,7 @@ pub async fn get_selection(state: &AppState) -> ToolResult {
                     SceneNodeKind::Path(_) => "path",
                     SceneNodeKind::Text(_) => "text",
                     SceneNodeKind::Group(_) => "group",
+                    SceneNodeKind::Raster(_) => "raster",
                 };
                 serde_json::json!({
                     "id": nid,
@@ -8087,7 +8128,8 @@ pub async fn flip_nodes(state: &AppState, args: FlipNodesArgs) -> ToolResult {
                 }
                 pn.path_data = PathData::from_bez_path(&new_bez);
             }
-            SceneNodeKind::Text(_) | SceneNodeKind::Group(_) => {
+            // raster: no path geometry — flip via transform scale like text/groups
+            SceneNodeKind::Text(_) | SceneNodeKind::Group(_) | SceneNodeKind::Raster(_) => {
                 // For text/groups, flip via transform scale.
                 if flip_h {
                     new_node.transform.matrix[0] *= -1.0;
@@ -9088,6 +9130,8 @@ pub async fn add_drop_shadow(state: &AppState, args: AddDropShadowArgs) -> ToolR
             SceneNodeKind::Group(_) => {
                 // For groups, just offset and set opacity — child colors preserved as silhouette.
             }
+            // raster: no vector fill to recolor — offset + opacity only
+            SceneNodeKind::Raster(_) => {}
         }
 
         history.execute(
@@ -10083,6 +10127,8 @@ pub async fn clean_up(state: &AppState, args: CleanUpArgs) -> ToolResult {
                     }
                 }
                 SceneNodeKind::Group(_) => {}
+                // raster: not subject to stray/unpainted/empty-text cleanup
+                SceneNodeKind::Raster(_) => {}
             }
         }
         found
@@ -13201,6 +13247,8 @@ fn node_world_aabb(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
         }
         SceneNodeKind::Text(_) => (0.0, 0.0, 1.0, 1.0),
         SceneNodeKind::Group(_) => (0.0, 0.0, 1.0, 1.0),
+        // raster: no path geometry — fallback local AABB
+        SceneNodeKind::Raster(_) => (0.0, 0.0, 1.0, 1.0),
     };
     // Transform all four corners of the local AABB and compute the world AABB.
     let fwd = node.transform.to_kurbo();
@@ -13811,7 +13859,8 @@ pub async fn mirror_copy(state: &AppState, args: MirrorCopyArgs) -> ToolResult {
                     }
                     pn.path_data = PathData::from_bez_path(&new_bez);
                 }
-                SceneNodeKind::Text(_) | SceneNodeKind::Group(_) => {
+                // raster: no path geometry — mirror via transform like text/group
+                SceneNodeKind::Text(_) | SceneNodeKind::Group(_) | SceneNodeKind::Raster(_) => {
                     if flip_h {
                         root.transform.matrix[0] *= -1.0;
                         root.transform.matrix[2] *= -1.0;
@@ -14230,6 +14279,10 @@ pub async fn select_similar(state: &AppState, args: SelectSimilarArgs) -> ToolRe
                 SceneNodeKind::Group(_) => {
                     ref_kinds.push("group");
                 }
+                // raster: no vector fill/stroke attributes to collect
+                SceneNodeKind::Raster(_) => {
+                    ref_kinds.push("raster");
+                }
             }
         }
     }
@@ -14285,6 +14338,8 @@ pub async fn select_similar(state: &AppState, args: SelectSimilarArgs) -> ToolRe
                         }
                     }
                     SceneNodeKind::Group(_) => false,
+                    // raster: no vector fill/stroke
+                    SceneNodeKind::Raster(_) => false,
                 },
                 "stroke_color" => match &node.kind {
                     SceneNodeKind::Path(p) => {
@@ -14308,6 +14363,8 @@ pub async fn select_similar(state: &AppState, args: SelectSimilarArgs) -> ToolRe
                         }
                     }
                     SceneNodeKind::Group(_) => false,
+                    // raster: no vector fill/stroke
+                    SceneNodeKind::Raster(_) => false,
                 },
                 "stroke_width" => match &node.kind {
                     SceneNodeKind::Path(p) => {
@@ -14329,12 +14386,15 @@ pub async fn select_similar(state: &AppState, args: SelectSimilarArgs) -> ToolRe
                         }
                     }
                     SceneNodeKind::Group(_) => false,
+                    // raster: no vector fill/stroke
+                    SceneNodeKind::Raster(_) => false,
                 },
                 "kind" => {
                     let k = match &node.kind {
                         SceneNodeKind::Path(_) => "path",
                         SceneNodeKind::Text(_) => "text",
                         SceneNodeKind::Group(_) => "group",
+                        SceneNodeKind::Raster(_) => "raster",
                     };
                     ref_kinds.contains(&k)
                 }
@@ -15863,6 +15923,8 @@ pub async fn flatten_transparency(state: &AppState, args: FlattenTransparencyArg
             SceneNodeKind::Group(_) => {
                 // Group opacity baking is skipped — children are processed individually
             }
+            // raster: no vector fill/stroke to bake
+            SceneNodeKind::Raster(_) => {}
         }
 
         commands.push(Command::UpdateNode {
@@ -15940,7 +16002,10 @@ pub async fn apply_flex_layout(state: &AppState, args: ApplyFlexLayoutArgs) -> T
                     (60.0, 30.0)
                 }
             }
-            SceneNodeKind::Text(_) | SceneNodeKind::Group(_) => (60.0, 30.0),
+            // raster: no path geometry — use default dimensions
+            SceneNodeKind::Text(_) | SceneNodeKind::Group(_) | SceneNodeKind::Raster(_) => {
+                (60.0, 30.0)
+            }
         };
         let tx = child.transform.matrix[4];
         let ty = child.transform.matrix[5];
@@ -16112,7 +16177,10 @@ pub async fn apply_stack_layout(state: &AppState, args: ApplyStackLayoutArgs) ->
                     (60.0, 30.0)
                 }
             }
-            SceneNodeKind::Text(_) | SceneNodeKind::Group(_) => (60.0, 30.0),
+            // raster: no path geometry — use default dimensions
+            SceneNodeKind::Text(_) | SceneNodeKind::Group(_) | SceneNodeKind::Raster(_) => {
+                (60.0, 30.0)
+            }
         };
         let tx = child.transform.matrix[4];
         let ty = child.transform.matrix[5];

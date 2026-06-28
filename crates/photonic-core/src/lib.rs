@@ -10,6 +10,7 @@ pub mod migration;
 pub mod node;
 pub mod ops;
 pub mod path;
+pub mod raster;
 pub mod selection;
 pub mod style;
 pub mod transform;
@@ -28,10 +29,11 @@ pub use history::{CheckpointInfo, Command, CommandHistory};
 pub use import::{import_svg, ImportError};
 pub use layer::{BlendMode, Layer, LayerId};
 pub use node::{
-    AssetExportSpec, FontStyle, GaussianGlow, GlowEffect, NodeId, PrimitiveKind, SceneNode,
-    SceneNodeKind,
+    AssetExportSpec, FontStyle, GaussianGlow, GlowEffect, NodeId, PrimitiveKind, RasterNode,
+    SceneNode, SceneNodeKind,
 };
 pub use path::PathData;
+pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
     interpolate_stops, ArrowheadStyle, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,

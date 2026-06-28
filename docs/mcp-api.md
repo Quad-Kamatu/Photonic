@@ -3,11 +3,11 @@
 <!-- GENERATED FILE — do not edit by hand. -->
 <!-- Regenerate with: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md -->
 
-This document lists all **286** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
+This document lists all **300** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
 
 ## Tools
 
-[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_scatter_plot`](#create-scatter-plot), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_character_styles`](#list-character-styles), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_paragraph_styles`](#list-paragraph-styles), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_stroke`](#remove-stroke), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_layer`](#set-active-layer), [`set_artboard_margins`](#set-artboard-margins), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`simplify_path`](#simplify-path), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
+[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_character_styles`](#list-character-styles), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_paragraph_styles`](#list-paragraph-styles), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_stroke`](#remove-stroke), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_layer`](#set-active-layer), [`set_artboard_margins`](#set-artboard-margins), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`simplify_path`](#simplify-path), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
 
 ---
 
@@ -156,6 +156,19 @@ Analyze the visual composition of the current document and return advisory findi
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | no | Optional list of node UUIDs or names to restrict the analysis to. Defaults to all visible nodes. |
 
+## `apply_adjustment`
+
+Apply a non-spatial color adjustment to a raster node (Photoshop Image > Adjustments). `adjustment` selects the operation; `params` carries its arguments; optional `selection` confines the edit to a region.
+
+adjustment ∈ {brightness_contrast(brightness,contrast -1..1), levels(in_black,in_white,gamma,out_black,out_white), curves(points:[[x,y],...] 0..1), exposure(stops), hue_saturation(hue deg,saturation -1..1,lightness -1..1), color_balance(shadows/midtones/highlights:[r,g,b] -1..1), vibrance(amount -1..1), desaturate, black_and_white(weights:[r,g,b]), invert, posterize(levels), threshold(level 0..1), photo_filter(color:[r,g,b] 0..1,density 0..1,preserve_luminosity), channel_mixer(red/green/blue:[r,g,b]), gradient_map(stops:[{pos,color}]), selective_color(target:[r,g,b],adjust:[r,g,b],range), shadows_highlights(shadows 0..1,highlights 0..1), gamma(gamma), auto_contrast, auto_levels}.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `adjustment` | string | yes | Adjustment name (see description) |
+| `node_id` | string | yes | Raster node id or name |
+| `params` | object | no | Adjustment-specific parameters |
+| `selection` | object | no | Optional selection mask (see make-selection schema in apply_filter) |
+
 ## `apply_character_style`
 
 Apply a named character style to one or more text nodes. Only attributes defined in the style are changed; unset attributes are left as-is.
@@ -181,6 +194,21 @@ Apply a previously captured document template to the current document. Canvas si
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `template_json` | string | yes | Template JSON string as returned by get_document_template. |
+
+## `apply_filter`
+
+Apply a spatial filter to a raster node (Photoshop Filter menu). `filter` selects the operation; `params` carries its arguments; optional `selection` confines the edit.
+
+filter ∈ {gaussian_blur(radius), box_blur(radius), motion_blur(angle deg,distance px), sharpen(amount), unsharp_mask(radius,amount,threshold 0..255), median(radius), add_noise(amount 0..1,monochrome bool,seed), emboss, find_edges, mosaic(block px), high_pass(radius), surface_blur(radius,threshold), lens_blur(radius), smart_sharpen(amount,radius,threshold), reduce_noise(strength), clarity(amount), vignette(amount,feather), chromatic_aberration(amount)}.
+
+selection (shared by adjustment/filter/brush): {kind:'rect'|'ellipse'|'polygon'|'wand'|'color_range'|'whole', x,y,w,h | points:[[x,y]] | tolerance,color | feather,invert,grow,contract}.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `filter` | string | yes | Filter name (see description) |
+| `node_id` | string | yes |  |
+| `params` | object | no |  |
+| `selection` | object | no |  |
 
 ## `apply_flex_layout`
 
@@ -392,6 +420,34 @@ Break the link between an instance node and its symbol master, converting it to 
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Instance node ID (UUID or name) to detach. |
 
+## `brush_stroke`
+
+Paint (or erase) a brush stroke along a polyline on a raster node. Points are in the image's local pixel space. mode 'paint' (default) composites `color`; mode 'erase' removes alpha.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
+| `points` | array<array<number>> | yes | [[x,y],...] in image pixel space |
+| `color` | any | no | Brush color: hex or [r,g,b,a] |
+| `flow` | number | no | Per-dab build-up 0..1 (default 1) |
+| `hardness` | number | no | 0 soft .. 1 hard (default 0.8) |
+| `mode` | enum (`paint`, `erase`) | no | Default paint |
+| `opacity` | number | no | Stroke opacity 0..1 (default 1) |
+| `radius` | number | no | Brush radius in px (default 10) |
+| `selection` | object | no |  |
+
+## `bucket_fill`
+
+Flood-fill a contiguous region of a raster node from a seed pixel, by color tolerance (paint bucket).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `color` | any | yes | Fill color: hex or [r,g,b,a] |
+| `node_id` | string | yes |  |
+| `x` | integer | yes |  |
+| `y` | integer | yes |  |
+| `tolerance` | number | no | 0..1 color tolerance (default 0) |
+
 ## `build_shape_from_points`
 
 Place any number of [x,y] points and connect them in any order to build a filled/stroked shape. Use connection_order to specify a custom vertex sequence; omit it to connect in the order given.
@@ -459,6 +515,14 @@ Remove the blend spine assignment from a group node, reverting it to default str
 Remove all unlocked ruler guides from the document. Locked guides are preserved.
 
 _No parameters._
+
+## `clear_layer_mask`
+
+Remove the layer mask from a raster node (fully reveal).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
 
 ## `clear_symbol_overrides`
 
@@ -552,6 +616,18 @@ Useful for AI workflows where you want to save a node or group for later reuse w
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | IDs of the nodes to copy. Groups include all descendants automatically. |
 | `label` | string | no | Optional human-readable label for this clipboard entry. Defaults to "N node(s)". |
+
+## `create_adjustment_layer`
+
+Create a NON-DESTRUCTIVE adjustment layer — a Photoshop adjustment layer. It carries no pixels; its adjustment is re-applied to the composite of every layer beneath it on each render, and the layer `opacity` controls the adjustment strength. `adjustment` and `params` use the exact same vocabulary as `apply_adjustment`. Move/reorder/hide it like any node; delete it to fully revert.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `adjustment` | string | yes | Adjustment name (see apply_adjustment) |
+| `layer_id` | string | no |  |
+| `name` | string | no |  |
+| `opacity` | number | no | Adjustment strength 0..1 (default 1) |
+| `params` | object | no | Adjustment-specific parameters |
 
 ## `create_array`
 
@@ -891,6 +967,20 @@ Useful for comparing profiles (skills, stats, attributes) across multiple subjec
 | `radius` | number | no | Outer radius (default: 100) |
 | `series_names` | array<string> | no | Series names for node labeling (optional) |
 | `stroke_width` | number | no | Stroke width for series polygons (default: 1.5) |
+
+## `create_raster_layer`
+
+Create a blank raster (pixel) layer of a given size — a transparent canvas to paint on, or filled with a solid color. Edit with brush_stroke, gradient_fill, apply_filter, etc.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `height` | integer | yes | Height in pixels |
+| `width` | integer | yes | Width in pixels |
+| `fill` | any | no | Optional fill color: hex string (#rrggbb / #rrggbbaa) or [r,g,b,a] (0-255). Default: transparent. |
+| `layer_id` | string | no |  |
+| `name` | string | no |  |
+| `x` | number | no | X position in document space (default 0) |
+| `y` | number | no | Y position in document space (default 0) |
 
 ## `create_scatter_plot`
 
@@ -1633,6 +1723,14 @@ Return the active OpenType feature tags on a text node. Read-only.
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Text node ID or name. |
 
+## `get_raster_info`
+
+Read-only: report a raster node's dimensions, whether it has a layer mask, its source file, and a 16-bucket luma histogram.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
+
 ## `get_recent_colors`
 
 Return the list of recently used fill and stroke colors for this document, ordered most-recently-used first (up to 20 entries). Useful for quickly re-applying a palette or building color suggestions.
@@ -1644,6 +1742,21 @@ _No parameters._
 Return the current selection — list of selected node IDs with name, kind, visibility, and lock state. Read-only.
 
 _No parameters._
+
+## `gradient_fill`
+
+Fill a raster node with a linear gradient from (x0,y0) to (x1,y1), optionally confined to a selection.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `color0` | any | yes | Start color: hex or [r,g,b,a] |
+| `color1` | any | yes | End color: hex or [r,g,b,a] |
+| `node_id` | string | yes |  |
+| `x0` | number | yes |  |
+| `x1` | number | yes |  |
+| `y0` | number | yes |  |
+| `y1` | number | yes |  |
+| `selection` | object | no |  |
 
 ## `group_nodes`
 
@@ -1762,6 +1875,17 @@ Link two text nodes as a threaded text chain so that content overflow from the u
 | --- | --- | --- | --- |
 | `from_id` | string | yes | ID or name of the upstream text node (overflow flows out from here). |
 | `to_id` | string | yes | ID or name of the downstream text node (overflow flows into here). |
+
+## `liquify`
+
+Liquify / distortion on a raster node. op ∈ {push(cx,cy,dx,dy,radius,strength — forward warp), twirl(cx,cy,radius,angle), pucker(cx,cy,radius,amount), bloat(cx,cy,radius,amount), pinch(amount), spherize(amount), ripple(amplitude,wavelength), perspective(corners:[[x,y]×4] TL,TR,BR,BL)}.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
+| `op` | string | yes | Liquify/distort operation (see description) |
+| `params` | object | no |  |
+| `selection` | object | no |  |
 
 ## `list_actions`
 
@@ -2136,6 +2260,19 @@ Create persistent ruler guides at the edges and/or center of selected nodes. Gui
 | `edges` | string | no | Which edges to pin: "all" (default), "center" (center_h + center_v), "edges" (top+bottom+left+right), or comma-separated from: top, bottom, left, right, center_h, center_v. |
 | `node_ids` | array<string> | no | UUIDs or names of nodes. Uses current selection if empty. |
 
+## `place_image`
+
+Place a raster (pixel) image as a new layer — the Photoshop-style bitmap import. Supply either `path` (a file on disk: PNG/JPEG/WebP/…) or `data_base64` (base64-encoded image bytes). The image becomes a Raster node positioned at (x,y); edit it afterward with apply_adjustment / apply_filter / brush_stroke / transform_image.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `data_base64` | string | no | Base64-encoded image bytes (alternative to path) |
+| `layer_id` | string | no |  |
+| `name` | string | no |  |
+| `path` | string | no | Path to an image file on disk |
+| `x` | number | no | X position in document space (default 0) |
+| `y` | number | no | Y position in document space (default 0) |
+
 ## `place_symbol`
 
 Place an instance of a named symbol at the given position. The instance is a clone of the master node with a symbol_ref tag. Edit the master to see design intent; use break_link_to_symbol to detach an instance for independent editing.
@@ -2348,6 +2485,17 @@ Mark an annotation as resolved. The annotation is retained in the file (for audi
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `annotation_id` | string | yes | UUID of the annotation to resolve. |
+
+## `retouch`
+
+Photoshop retouching tools on a raster node. op ∈ {healing_brush(cx,cy,radius,src_dx,src_dy — frequency-separation seamless clone), spot_healing(cx,cy,radius — auto-heal a blemish from its surroundings), content_aware_fill(requires `selection` — inpaint the selected region from surrounding pixels), red_eye(cx,cy,radius), dust_and_scratches(radius,threshold)}.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
+| `op` | string | yes | Retouch operation (see description) |
+| `params` | object | no |  |
+| `selection` | object | no | Required for content_aware_fill |
 
 ## `reverse_blend_spine`
 
@@ -2611,6 +2759,15 @@ Set the font weight (100–900) on a text node. Common values: 400 = Regular, 70
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Text node ID (UUID or name). |
 | `weight` | integer | yes | Font weight (100=Thin, 400=Regular, 700=Bold, 900=Black). |
+
+## `set_layer_mask`
+
+Attach a non-destructive layer mask to a raster node, built from a selection spec (rect/ellipse/polygon/wand/color_range, with feather/invert/grow/contract). The mask gates the node's compositing without altering its pixels.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
+| `selection` | object | yes | Selection spec defining the mask |
 
 ## `set_locked`
 
@@ -2905,6 +3062,16 @@ All copies are placed on the same layer as the source.
 | `scale` | number | no | Scale factor per copy (default: 1.0). 0.9 = shrink 10% each. |
 | `translate_x` | number | no | X offset per copy in document units (default: 0) |
 | `translate_y` | number | no | Y offset per copy in document units (default: 0) |
+
+## `transform_image`
+
+Geometric op on a raster node's pixels. op ∈ {crop(x,y,width,height), resize(width,height,filter:'nearest'|'bilinear'|'lanczos3'), resize_canvas(width,height,offset_x,offset_y), rotate90, rotate180, rotate270, flip_h, flip_v, rotate(angle deg)}.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `node_id` | string | yes |  |
+| `op` | string | yes | Operation name (see description) |
+| `params` | object | no |  |
 
 ## `twirl_path`
 

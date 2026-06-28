@@ -222,6 +222,12 @@ fn node_world_bbox(node: &SceneNode, doc: &Document) -> Option<kurbo::Rect> {
             combined?
         }
         SceneNodeKind::Text(_) => return None,
+        SceneNodeKind::Raster(r) => {
+            if r.is_adjustment_layer() {
+                return None;
+            }
+            kurbo::Rect::new(0.0, 0.0, r.image.width as f64, r.image.height as f64)
+        }
     };
     Some(node.transform.to_kurbo().transform_rect_bbox(local))
 }
@@ -390,6 +396,31 @@ fn emit_node_inner(
                 fill,
                 stroke,
                 content,
+            ));
+        }
+        SceneNodeKind::Raster(r) => {
+            // Non-destructive adjustment layers carry no pixels of their own —
+            // they recolor the composite beneath them, which a flat SVG cannot
+            // represent. Skip them rather than emit a bogus 1×1 placeholder
+            // (the .photonic format preserves them; PNG/JPEG bake them in).
+            if r.is_adjustment_layer() {
+                return;
+            }
+            // Embed the pixel data as a base64 PNG <image>. The node transform
+            // positions/scales it; the image spans its native pixel size.
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(r.image.to_png());
+            body.push_str(&format!(
+                "{}<image{}{}{}{} width=\"{}\" height=\"{}\" \
+                 href=\"data:image/png;base64,{}\"/>\n",
+                pad,
+                id_attr,
+                transform,
+                opacity,
+                blend,
+                r.image.width,
+                r.image.height,
+                b64,
             ));
         }
     }

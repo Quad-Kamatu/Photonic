@@ -50,6 +50,7 @@ pub async fn get_document_state(state: &AppState, args: GetDocumentStateArgs) ->
                             SceneNodeKind::Path(_) => "path",
                             SceneNodeKind::Group(_) => "group",
                             SceneNodeKind::Text(_) => "text",
+                            SceneNodeKind::Raster(_) => "raster",
                         };
                         return json!({
                             "id": node.id,
@@ -150,6 +151,8 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
             SceneNodeKind::Group(_) => {
                 group_count += 1;
             }
+            // raster: no vector geometry / fill / font to tally
+            SceneNodeKind::Raster(_) => {}
         }
     }
 
@@ -780,6 +783,8 @@ pub async fn export_design_tokens(state: &AppState, args: ExportDesignTokensArgs
                 push_unique_f64(&mut font_sizes, t.font_size);
             }
             SceneNodeKind::Group(_) => {}
+            // raster: no fill/stroke/font tokens to collect
+            SceneNodeKind::Raster(_) => {}
         }
     }
 
@@ -1051,6 +1056,7 @@ pub async fn diff_checkpoints(state: &AppState, args: DiffCheckpointsArgs) -> To
             SceneNodeKind::Path(_) => "path",
             SceneNodeKind::Group(_) => "group",
             SceneNodeKind::Text(_) => "text",
+            SceneNodeKind::Raster(_) => "raster",
         };
         if !from_doc.nodes.contains_key(id) {
             added_nodes.push(json!({ "id": id.to_string(), "name": node.name, "kind": kind_str }));
@@ -1082,6 +1088,7 @@ pub async fn diff_checkpoints(state: &AppState, args: DiffCheckpointsArgs) -> To
                 SceneNodeKind::Path(_) => "path",
                 SceneNodeKind::Group(_) => "group",
                 SceneNodeKind::Text(_) => "text",
+                SceneNodeKind::Raster(_) => "raster",
             };
             removed_nodes
                 .push(json!({ "id": id.to_string(), "name": node.name, "kind": kind_str }));
@@ -1553,6 +1560,8 @@ pub async fn apply_color_swatch(state: &AppState, args: ApplyColorSwatchArgs) ->
                     }
                 }
                 photonic_core::SceneNodeKind::Group(_) => {}
+                // raster: no fill/stroke to recolor
+                photonic_core::SceneNodeKind::Raster(_) => {}
             }
             commands.push(Command::UpdateNode {
                 old: node,
@@ -1823,6 +1832,11 @@ pub async fn define_graphic_style(state: &AppState, args: DefineGraphicStyleArgs
                         use photonic_core::style::{Fill, Stroke};
                         (Fill::default(), Stroke::none())
                     }
+                    // raster: no fill/stroke to capture
+                    SceneNodeKind::Raster(_) => {
+                        use photonic_core::style::{Fill, Stroke};
+                        (Fill::default(), Stroke::none())
+                    }
                 };
                 let fj = serde_json::to_string(&fill).unwrap_or_default();
                 let sj = serde_json::to_string(&stroke).unwrap_or_default();
@@ -1926,6 +1940,8 @@ pub async fn apply_graphic_style(state: &AppState, args: ApplyGraphicStyleArgs) 
                         tn.fill = fill.clone();
                     }
                     SceneNodeKind::Group(_) => {}
+                    // raster: no fill/stroke to apply
+                    SceneNodeKind::Raster(_) => {}
                 }
                 commands.push(Command::UpdateNode {
                     old: node,
@@ -2549,6 +2565,8 @@ pub async fn get_canvas_overview(state: &AppState, args: GetCanvasOverviewArgs) 
                 _ => "#000000".to_string(),
             },
             SceneNodeKind::Group(_) => "#group".to_string(),
+            // raster: no vector fill
+            SceneNodeKind::Raster(_) => "#raster".to_string(),
         };
 
         let layer_name = doc
@@ -2566,6 +2584,7 @@ pub async fn get_canvas_overview(state: &AppState, args: GetCanvasOverviewArgs) 
                 SceneNodeKind::Path(_) => "path",
                 SceneNodeKind::Text(_) => "text",
                 SceneNodeKind::Group(_) => "group",
+                SceneNodeKind::Raster(_) => "raster",
             },
             "bounds": { "x": bx, "y": by, "w": bw, "h": bh },
             "fill_hex": fill_hex,
@@ -2617,6 +2636,8 @@ pub async fn save_gradient_swatch(state: &AppState, args: SaveGradientSwatchArgs
         SceneNodeKind::Path(pn) => pn.fill.clone(),
         SceneNodeKind::Text(tn) => tn.fill.clone(),
         SceneNodeKind::Group(_) => return ToolResult::error("Group nodes do not have a fill."),
+        // raster: no vector fill
+        SceneNodeKind::Raster(_) => return ToolResult::error("Raster nodes do not have a fill."),
     };
 
     // Ensure it's a gradient (not solid/none)
@@ -2814,6 +2835,8 @@ pub async fn analyze_composition(state: &AppState, args: AnalyzeCompositionArgs)
                 _ => (0.0, 0.0, 0.0, true),
             },
             SceneNodeKind::Group(_) => (0.5, 0.5, 0.5, false),
+            // raster: no vector fill
+            SceneNodeKind::Raster(_) => (0.5, 0.5, 0.5, false),
         };
         infos.push(NodeInfo {
             cx: bx + bw / 2.0,
@@ -3579,6 +3602,8 @@ pub async fn check_grammar(state: &AppState, args: CheckGrammarArgs) -> ToolResu
                 }
             }
             SceneNodeKind::Group(_) => {}
+            // raster: no fill color / text size to sample
+            SceneNodeKind::Raster(_) => {}
         }
     }
     let layer_names: Vec<String> = doc
@@ -4061,6 +4086,10 @@ pub async fn apply_spot_color(state: &AppState, args: ApplySpotColorArgs) -> Too
                         tn.fill = fill.clone();
                     }
                     SceneNodeKind::Group(_) => {
+                        continue;
+                    }
+                    // raster: no fill to apply
+                    SceneNodeKind::Raster(_) => {
                         continue;
                     }
                 }

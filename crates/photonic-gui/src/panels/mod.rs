@@ -3078,6 +3078,8 @@ pub fn draw_properties_panel(
                 SceneNodeKind::Path(_) => n_path += 1,
                 SceneNodeKind::Text(_) => n_text += 1,
                 SceneNodeKind::Group(_) => n_group += 1,
+                // raster nodes are not counted in the vector node summary
+                SceneNodeKind::Raster(_) => {}
             }
         }
         let total = n_path + n_text + n_group;
@@ -3339,6 +3341,8 @@ pub fn draw_properties_panel(
                 SceneNodeKind::Path(p) => Some(&p.fill),
                 SceneNodeKind::Text(t) => Some(&t.fill),
                 SceneNodeKind::Group(_) => None,
+                // raster nodes have no vector fill
+                SceneNodeKind::Raster(_) => None,
             };
             if let Some(fill) = fill_opt {
                 if fill.enabled {

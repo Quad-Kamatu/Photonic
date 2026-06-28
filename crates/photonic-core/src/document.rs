@@ -63,7 +63,11 @@ impl Guide {
 
 /// File format version written into every saved `.photon` file.
 /// Increment this when a breaking schema change is made.
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+///
+/// - v1 → v2: introduced `SceneNodeKind::Raster` (pixel layers). Additive — v1
+///   files contain no raster nodes and load unchanged; the migration is a
+///   no-op version bump (see `migration::migrations`).
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
 fn default_format_version() -> u32 {
     CURRENT_FORMAT_VERSION

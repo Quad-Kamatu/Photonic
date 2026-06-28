@@ -3323,8 +3323,10 @@ name = "photonic-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bitflags 2.13.0",
  "geo",
+ "image",
  "kurbo",
  "peniko 0.3.2",
  "roxmltree",

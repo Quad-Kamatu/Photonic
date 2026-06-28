@@ -220,6 +220,13 @@ pub struct DiffOverlayState {
     pub overlay_active: bool,
 }
 
+/// A cached egui texture for a raster node, with the content hash it was built
+/// from so it can be invalidated when the pixels or mask change.
+struct RasterTexCache {
+    handle: egui::TextureHandle,
+    hash: u64,
+}
+
 pub struct PhotonicApp {
     pub active_tool: Tool,
     pub fill_color: [f32; 4],
@@ -367,6 +374,20 @@ pub struct PhotonicApp {
     // ── Outline Mode ─────────────────────────────────────────────────────────
     /// When true, the canvas shows path wireframes only (no fills or strokes).
     pub outline_mode: bool,
+
+    /// Cache of uploaded egui textures for raster nodes, keyed by node id.
+    /// Re-uploaded only when the pixel/mask content hash changes.
+    raster_tex_cache: std::collections::HashMap<photonic_core::node::NodeId, RasterTexCache>,
+
+    // ── Interactive raster brush state ─────────────────────────────────────────
+    /// Brush radius (pixels) for the RasterBrush/RasterEraser tools.
+    pub raster_brush_radius: f32,
+    /// Brush edge hardness (0 soft .. 1 hard).
+    pub raster_brush_hardness: f32,
+    /// Pre-stroke snapshot of the node being painted, for a single undo step.
+    raster_stroke_orig: Option<(photonic_core::node::NodeId, photonic_core::node::SceneNode)>,
+    /// Local-space points accumulated during the current drag.
+    raster_stroke_pts: Vec<(f32, f32)>,
 
     // ── Guides ────────────────────────────────────────────────────────────────
     /// When true, ruler guides are rendered on the canvas (toggle with Ctrl+;).
@@ -659,6 +680,11 @@ impl Default for PhotonicApp {
             recolor_palette_input: String::new(),
 
             eyedropper: EyedropperState::default(),
+            raster_tex_cache: std::collections::HashMap::new(),
+            raster_brush_radius: 16.0,
+            raster_brush_hardness: 0.8,
+            raster_stroke_orig: None,
+            raster_stroke_pts: Vec::new(),
             window_logical_pos: (0, 0),
             window_scale_factor: 1.0,
             outline_mode: false,
@@ -708,6 +734,198 @@ fn load_document(path: &Path) -> Result<Document, String> {
 }
 
 impl PhotonicApp {
+    /// Get (or build) the egui texture for a raster node's current pixels, with
+    /// its layer mask baked into the alpha. Re-uploads only when content changes.
+    fn raster_texture(
+        &mut self,
+        ctx: &egui::Context,
+        id: photonic_core::node::NodeId,
+        rn: &photonic_core::node::RasterNode,
+    ) -> egui::TextureId {
+        // FNV-1a content hash over pixels + mask (cheap change detection).
+        let mut hash: u64 = 0xcbf29ce484222325;
+        let feed = |bytes: &[u8], hash: &mut u64| {
+            for &b in bytes {
+                *hash ^= b as u64;
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+        };
+        feed(&rn.image.pixels, &mut hash);
+        if let Some(m) = &rn.mask {
+            feed(&m.data, &mut hash);
+        }
+
+        if let Some(c) = self.raster_tex_cache.get(&id) {
+            if c.hash == hash {
+                return c.handle.id();
+            }
+        }
+
+        let w = rn.image.width as usize;
+        let h = rn.image.height as usize;
+        let mask_ok = rn
+            .mask
+            .as_ref()
+            .map(|m| m.data.len() == w * h)
+            .unwrap_or(false);
+        let mut pixels = Vec::with_capacity(w * h);
+        for i in 0..(w * h) {
+            let p = &rn.image.pixels[i * 4..i * 4 + 4];
+            let mut a = p[3];
+            if mask_ok {
+                let cov = rn.mask.as_ref().unwrap().data[i] as u16;
+                a = ((a as u16 * cov) / 255) as u8;
+            }
+            pixels.push(egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], a));
+        }
+        let color_img = egui::ColorImage {
+            size: [w.max(1), h.max(1)],
+            pixels,
+        };
+        let handle = ctx.load_texture(format!("raster_{id}"), color_img, egui::TextureOptions::LINEAR);
+        let tex_id = handle.id();
+        self.raster_tex_cache.insert(id, RasterTexCache { handle, hash });
+        tex_id
+    }
+
+    /// Paint all visible raster nodes as textured quads over the GPU vector
+    /// layer, transformed by each node's affine and the camera. Mirrors the
+    /// headless export compositor (raster composites over vectors).
+    fn paint_raster_nodes(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        doc: &Document,
+        view: &CanvasView,
+    ) {
+        let raster_ids: Vec<photonic_core::node::NodeId> = doc
+            .nodes_in_draw_order()
+            .iter()
+            .filter(|n| {
+                n.visible
+                    && matches!(&n.kind, SceneNodeKind::Raster(r) if !r.is_adjustment_layer())
+            })
+            .map(|n| n.id)
+            .collect();
+        for id in raster_ids {
+            let Some(node) = doc.get_node(&id) else { continue };
+            let SceneNodeKind::Raster(rn) = &node.kind else {
+                continue;
+            };
+            if node.opacity <= 0.0 || rn.image.width == 0 || rn.image.height == 0 {
+                continue;
+            }
+            let tex = self.raster_texture(ctx, id, rn);
+            let (w, h) = (rn.image.width as f64, rn.image.height as f64);
+            let local = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+            let uv = [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ];
+            let a = (node.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let tint = egui::Color32::from_white_alpha(a);
+            let mut mesh = egui::Mesh::with_texture(tex);
+            for (i, (lx, ly)) in local.iter().enumerate() {
+                let (dx, dy) = node.transform.apply(*lx, *ly);
+                let (sx, sy) = view.canvas_to_screen(dx, dy);
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: egui::pos2(sx as f32, sy as f32),
+                    uv: uv[i],
+                    color: tint,
+                });
+            }
+            mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
+
+    /// Handle the interactive RasterBrush/RasterEraser tools: paint/erase onto
+    /// the selected raster layer as the pointer drags, committing one undoable
+    /// `UpdateNode` per stroke.
+    fn handle_raster_brush(
+        &mut self,
+        response: &egui::Response,
+        doc: &mut Document,
+        view: &CanvasView,
+        history: &mut CommandHistory,
+    ) {
+        use photonic_core::raster::brush;
+        let erase = self.active_tool == Tool::RasterEraser;
+
+        // Resolve the active raster (non-adjustment) node.
+        let Some(nid) = self.selected_id else {
+            return;
+        };
+        let is_raster = matches!(
+            doc.get_node(&nid).map(|n| &n.kind),
+            Some(SceneNodeKind::Raster(r)) if !r.is_adjustment_layer()
+        );
+        if !is_raster {
+            return;
+        }
+
+        if response.drag_started() {
+            self.raster_stroke_pts.clear();
+            self.raster_stroke_orig = doc.get_node(&nid).cloned().map(|n| (nid, n));
+        }
+
+        if (response.dragged() || response.drag_started()) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                // Screen → canvas → node-local pixel coordinates.
+                let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                let local = doc.get_node(&nid).map(|node| {
+                    let inv = node.transform.to_kurbo().inverse();
+                    let lp = inv * kurbo::Point::new(cx, cy);
+                    (lp.x as f32, lp.y as f32)
+                });
+                if let Some(p) = local {
+                    self.raster_stroke_pts.push(p);
+                    let n = self.raster_stroke_pts.len();
+                    let tail: Vec<(f32, f32)> = if n >= 2 {
+                        self.raster_stroke_pts[n - 2..].to_vec()
+                    } else {
+                        self.raster_stroke_pts.clone()
+                    };
+                    let color = [
+                        (self.fill_color[0] * 255.0).round() as u8,
+                        (self.fill_color[1] * 255.0).round() as u8,
+                        (self.fill_color[2] * 255.0).round() as u8,
+                        (self.fill_color[3] * 255.0).round() as u8,
+                    ];
+                    if let Some(node) = doc.get_node_mut(&nid) {
+                        if let SceneNodeKind::Raster(rn) = &mut node.kind {
+                            let mut b = brush::Brush::new(self.raster_brush_radius, color);
+                            b.hardness = self.raster_brush_hardness;
+                            if erase {
+                                brush::erase(&mut rn.image, &tail, &b, None);
+                            } else {
+                                brush::stroke(&mut rn.image, &tail, &b, None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            if let Some((onid, orig)) = self.raster_stroke_orig.take() {
+                if let Some(cur) = doc.get_node(&onid).cloned() {
+                    // The stroke was painted live; record it as one undoable step.
+                    history.execute(
+                        Command::UpdateNode {
+                            old: orig,
+                            new: cur,
+                        },
+                        doc,
+                    );
+                }
+            }
+            self.raster_stroke_pts.clear();
+        }
+    }
+
     pub fn new() -> Self {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
@@ -1216,6 +1434,7 @@ impl PhotonicApp {
                                 ("Shapes", &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Arc, Tool::Polygon, Tool::Star, Tool::Line, Tool::Grid, Tool::PolarGrid]),
                                 ("Drawing & Text", &[Tool::Pen, Tool::ShapeBuilder, Tool::Text]),
                                 ("Path Editing", &[Tool::Scissors, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth]),
+                                ("Raster", &[Tool::RasterBrush, Tool::RasterEraser]),
                             ];
 
                             let mut tool_to_activate: Option<Tool> = None;
@@ -1555,6 +1774,11 @@ impl PhotonicApp {
                 let rect = ui.available_rect_before_wrap();
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
+                // ── Interactive raster brush / eraser ────────────────────────
+                if matches!(self.active_tool, Tool::RasterBrush | Tool::RasterEraser) {
+                    self.handle_raster_brush(&response, doc, view, history);
+                }
+
                 // ── Cursor coordinate overlay (Info Panel) ───────────────────
                 if let Some(cursor_screen) = ui.input(|i| i.pointer.hover_pos()) {
                     if rect.contains(cursor_screen) {
@@ -1582,6 +1806,14 @@ impl PhotonicApp {
                         fg_painter.rect_filled(text_rect.expand(2.0), 2.0, bg_color);
                         fg_painter.galley(text_pos, galley, text_color);
                     }
+                }
+
+                // ── Raster (pixel) layers ──────────────────────────────────────
+                // Painted over the GPU-rendered vector layer as textured quads,
+                // matching the headless export compositor. Skipped in outline mode.
+                if !self.outline_mode {
+                    let raster_painter = ui.painter_at(rect);
+                    self.paint_raster_nodes(ctx, &raster_painter, doc, view);
                 }
 
                 // ── Outline Mode overlay ──────────────────────────────────────
@@ -5446,6 +5678,8 @@ impl PhotonicApp {
                                 tn.stroke = Stroke::none();
                             }
                             SceneNodeKind::Group(_) => {}
+                            // raster nodes have no vector fill/stroke
+                            SceneNodeKind::Raster(_) => {}
                         }
                         history.execute(
                             Command::AddNode {
@@ -6021,12 +6255,14 @@ impl PhotonicApp {
                                                 SceneNodeKind::Path(_) => "path",
                                                 SceneNodeKind::Text(_) => "text",
                                                 SceneNodeKind::Group(_) => "group",
+                                                SceneNodeKind::Raster(_) => "raster",
                                             })
                                             .unwrap_or("");
                                         let this_kind = match &node.kind {
                                             SceneNodeKind::Path(_) => "path",
                                             SceneNodeKind::Text(_) => "text",
                                             SceneNodeKind::Group(_) => "group",
+                                            SceneNodeKind::Raster(_) => "raster",
                                         };
                                         this_kind == ref_kind
                                     }
@@ -6263,6 +6499,11 @@ impl PhotonicApp {
                                 use photonic_core::style::{Fill, Stroke};
                                 (Fill::default(), Stroke::none())
                             }
+                            // raster nodes have no vector fill/stroke
+                            SceneNodeKind::Raster(_) => {
+                                use photonic_core::style::{Fill, Stroke};
+                                (Fill::default(), Stroke::none())
+                            }
                         };
                         let fill_json = serde_json::to_string(&fill).unwrap_or_default();
                         let stroke_json = serde_json::to_string(&stroke).unwrap_or_default();
@@ -6305,6 +6546,8 @@ impl PhotonicApp {
                                     tn.fill = fill;
                                 }
                                 SceneNodeKind::Group(_) => {}
+                                // raster nodes have no vector fill/stroke
+                                SceneNodeKind::Raster(_) => {}
                             }
                             history.execute(
                                 Command::UpdateNode {
@@ -6382,6 +6625,8 @@ impl PhotonicApp {
                                     tn.fill = bake_fill(&tn.fill, combined);
                                 }
                                 SceneNodeKind::Group(_) => {}
+                                // raster nodes have no vector fill to bake
+                                SceneNodeKind::Raster(_) => {}
                             }
                             cmds.push(Command::UpdateNode {
                                 old: node.clone(),
@@ -6753,6 +6998,8 @@ impl PhotonicApp {
                                         tn.fill = fill;
                                     }
                                     SceneNodeKind::Group(_) => {}
+                                    // raster nodes have no vector fill
+                                    SceneNodeKind::Raster(_) => {}
                                 }
                                 history.execute(
                                     Command::UpdateNode {
@@ -6888,6 +7135,8 @@ impl PhotonicApp {
                                 _ => (0.0, 0.0, 0.0, true),
                             },
                             SceneNodeKind::Group(_) => (0.5, 0.5, 0.5, false),
+                            // raster nodes have no vector fill color
+                            SceneNodeKind::Raster(_) => (0.5, 0.5, 0.5, false),
                         };
                         infos.push(Info {
                             bx,
@@ -7350,6 +7599,8 @@ impl PhotonicApp {
                                 }
                             }
                             SceneNodeKind::Group(_) => {}
+                            // raster nodes contribute no vector fill colors or text size
+                            SceneNodeKind::Raster(_) => {}
                         }
                     }
                     let layer_names: Vec<String> = doc
@@ -13016,6 +13267,8 @@ fn node_world_aabb_opt(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
         SceneNodeKind::Path(pn) => pn.path_data.bounding_box()?,
         SceneNodeKind::Text(_) => return None,
         SceneNodeKind::Group(_) => return None,
+        // raster nodes have no vector geometry
+        SceneNodeKind::Raster(_) => return None,
     };
     let tf = node.transform.to_kurbo();
     let corners = [
