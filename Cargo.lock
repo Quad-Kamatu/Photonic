@@ -3401,6 +3401,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "ttf-parser 0.21.1",
  "wgpu",
  "winit",
 ]
