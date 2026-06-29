@@ -2,7 +2,8 @@ use crate::{
     canvas::CanvasView,
     pipeline::{
         create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
-        create_fill_pipeline, BlurParams, CameraUniform, Vertex,
+        create_fill_pipeline, create_fill_pipeline_with_blend, separable_blend_state, BlurParams,
+        CameraUniform, Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke},
 };
@@ -14,6 +15,7 @@ use glyphon::{
 use image::{ImageBuffer, Rgba};
 use photonic_core::{
     document::Document,
+    layer::BlendMode,
     node::SceneNodeKind,
     style::{FillKind, StrokeAlign},
 };
@@ -56,6 +58,10 @@ pub struct PhotonicRenderer {
     surface_format: wgpu::TextureFormat,
 
     fill_pipeline: wgpu::RenderPipeline,
+    /// One fill-pipeline variant per separable blend mode (Multiply/Screen/
+    /// Darken/Lighten), built at `MSAA_SAMPLES`. Modes without an entry fall back
+    /// to `fill_pipeline` (normal alpha blending).
+    blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
@@ -72,6 +78,10 @@ pub struct PhotonicRenderer {
     /// Last successfully built geometry — returned as-is when the doc lock is contended.
     cached_vertices: Vec<Vertex>,
     cached_indices: Vec<u32>,
+    /// Per-blend-mode index ranges for the current frame, in draw order. Read by
+    /// `record_document_pass` to issue one draw call per contiguous run.
+    draw_segments: Vec<DrawSegment>,
+    cached_segments: Vec<DrawSegment>,
 
     // ── Text rendering (glyphon) ───────────────────────────────────────────────
     font_system: FontSystem,
@@ -97,6 +107,17 @@ pub struct PhotonicRenderer {
     glow_tex_b_view: wgpu::TextureView,
     /// Gaussian glow jobs built each frame by build_geometry, consumed by render_gaussian_glow_pass.
     pending_gaussian_glows: Vec<GaussianGlowJob>,
+}
+
+/// A contiguous run of indices that share one blend mode, drawn in a single
+/// `draw_indexed` call with the matching pipeline.
+#[derive(Clone)]
+struct DrawSegment {
+    mode: BlendMode,
+    /// Offset into the index buffer.
+    start: u32,
+    /// Number of indices in the run.
+    count: u32,
 }
 
 /// Screen-space snapshot of one text node, ready for glyphon.
@@ -218,6 +239,24 @@ impl PhotonicRenderer {
 
         let fill_pipeline =
             create_fill_pipeline(&device, surface_format, &camera_bgl, MSAA_SAMPLES);
+        // One pipeline variant per separable blend mode, sharing the fill shader.
+        let blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)> = SEPARABLE_BLEND_MODES
+            .iter()
+            .filter_map(|&mode| {
+                separable_blend_state(mode).map(|blend| {
+                    (
+                        mode,
+                        create_fill_pipeline_with_blend(
+                            &device,
+                            surface_format,
+                            &camera_bgl,
+                            MSAA_SAMPLES,
+                            blend,
+                        ),
+                    )
+                })
+            })
+            .collect();
         let (msaa_texture, msaa_view) = create_msaa_texture(&device, surface_format, width, height);
 
         let blur_bgl = create_blur_bgl(&device);
@@ -262,6 +301,7 @@ impl PhotonicRenderer {
             surface_config,
             surface_format,
             fill_pipeline,
+            blend_pipelines,
             camera_buffer,
             camera_bind_group,
             msaa_texture,
@@ -273,6 +313,8 @@ impl PhotonicRenderer {
             height,
             cached_vertices: Vec::new(),
             cached_indices: Vec::new(),
+            draw_segments: Vec::new(),
+            cached_segments: Vec::new(),
             font_system,
             swash_cache,
             text_glyph_cache,
@@ -722,6 +764,7 @@ impl PhotonicRenderer {
             is_compound: bool,
             arrowhead_start: photonic_core::style::ArrowheadStyle,
             arrowhead_end: photonic_core::style::ArrowheadStyle,
+            blend_mode: BlendMode,
         }
 
         let (artboard_w, artboard_h, nodes): (f32, f32, Vec<NodeSnapshot>) = {
@@ -730,6 +773,7 @@ impl PhotonicRenderer {
                 Ok(g) => g,
                 Err(_) => {
                     tracing::debug!("render: doc lock contended — reusing cached geometry");
+                    self.draw_segments = self.cached_segments.clone();
                     return (self.cached_vertices.clone(), self.cached_indices.clone());
                 }
             };
@@ -797,6 +841,7 @@ impl PhotonicRenderer {
                             is_compound: path_node.is_compound,
                             arrowhead_start: sc.arrowhead_start,
                             arrowhead_end: sc.arrowhead_end,
+                            blend_mode: node.blend_mode,
                             outer_glow: if node.outer_glow.enabled {
                                 let c = &node.outer_glow.color;
                                 Some((
@@ -1119,7 +1164,14 @@ impl PhotonicRenderer {
                 Some((start_pt, start_tan, end_pt, end_tan))
             };
 
+        // Per-node index ranges tagged with their blend mode, coalesced into
+        // `draw_segments` after the loop. The artboard rect (already appended
+        // above) blends normally.
+        let mut raw_segments: Vec<(BlendMode, u32, u32)> =
+            vec![(BlendMode::Normal, 0, idxs.len() as u32)];
+
         for node in &nodes {
+            let seg_start = idxs.len() as u32;
             // ── Outer glow: behind fill so fill clips the inward half ─────────
             if let Some((ref og, og_join)) = node.outer_glow {
                 append_glow(
@@ -1271,11 +1323,37 @@ impl PhotonicRenderer {
                     });
                 }
             }
+
+            // Tag this node's fill/stroke/arrowhead geometry with its blend mode.
+            // (Gaussian glow lives in a separate buffer and is unaffected.)
+            raw_segments.push((node.blend_mode, seg_start, idxs.len() as u32));
+        }
+
+        // Coalesce adjacent runs that share a mode (the common all-Normal scene
+        // collapses to a single draw call, matching the previous behaviour).
+        let mut segments: Vec<DrawSegment> = Vec::new();
+        for (mode, start, end) in raw_segments {
+            if end == start {
+                continue;
+            }
+            if let Some(last) = segments.last_mut() {
+                if last.mode == mode && last.start + last.count == start {
+                    last.count += end - start;
+                    continue;
+                }
+            }
+            segments.push(DrawSegment {
+                mode,
+                start,
+                count: end - start,
+            });
         }
 
         // Update cache for next frame (used when lock is contended).
         self.cached_vertices = verts.clone();
         self.cached_indices = idxs.clone();
+        self.draw_segments = segments.clone();
+        self.cached_segments = segments;
 
         (verts, idxs)
     }
@@ -1321,11 +1399,27 @@ impl PhotonicRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.fill_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
             pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            // Draw each blend-mode run with its pipeline. Runs are in draw order,
+            // so fixed-function blend modes composite against the correct backdrop.
+            // Empty `draw_segments` (e.g. first frame) falls back to one normal draw.
+            if self.draw_segments.is_empty() {
+                pass.set_pipeline(&self.fill_pipeline);
+                pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            } else {
+                for seg in &self.draw_segments {
+                    let pipeline = self
+                        .blend_pipelines
+                        .iter()
+                        .find(|(m, _)| *m == seg.mode)
+                        .map(|(_, p)| p)
+                        .unwrap_or(&self.fill_pipeline);
+                    pass.set_pipeline(pipeline);
+                    pass.draw_indexed(seg.start..seg.start + seg.count, 0, 0..1);
+                }
+            }
         } else {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),
