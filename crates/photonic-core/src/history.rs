@@ -595,6 +595,13 @@ pub enum Command {
     /// Replace the entire guide list. Stores old and new for self-contained undo.
     SetGuides { old: Vec<Guide>, new: Vec<Guide> },
 
+    /// Replace the entire artboard list (move/resize/rename/add/remove of
+    /// artboards). Stores old and new for self-contained undo.
+    SetArtboards {
+        old: Vec<crate::Artboard>,
+        new: Vec<crate::Artboard>,
+    },
+
     /// Resize the document canvas.
     ResizeCanvas {
         old_width: f64,
@@ -622,6 +629,7 @@ impl Command {
             Command::UpdateLayer { new_name, .. } => format!("Update layer \"{}\"", new_name),
             Command::MoveNodeToLayer { .. } => "Move node to layer".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
+            Command::SetArtboards { .. } => "Update artboards".to_string(),
             Command::ResizeCanvas {
                 new_width,
                 new_height,
@@ -770,6 +778,16 @@ impl Command {
                 doc.guides = new.clone();
             }
 
+            Command::SetArtboards { new, .. } => {
+                doc.artboards = new.clone();
+                if doc
+                    .active_artboard
+                    .map_or(true, |id| !doc.artboards.iter().any(|a| a.id == id))
+                {
+                    doc.active_artboard = doc.artboards.first().map(|a| a.id);
+                }
+            }
+
             Command::ResizeCanvas {
                 new_width,
                 new_height,
@@ -903,6 +921,11 @@ impl Command {
             }),
 
             Command::SetGuides { old, new } => Some(Command::SetGuides {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+
+            Command::SetArtboards { old, new } => Some(Command::SetArtboards {
                 old: new.clone(),
                 new: old.clone(),
             }),

@@ -478,7 +478,7 @@ pub type ArtboardId = Uuid;
 /// named crop/export rectangle over that space. The document always has at
 /// least one artboard; legacy single-canvas documents migrate to a single
 /// artboard at the origin covering `(0, 0, width, height)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Artboard {
     pub id: ArtboardId,
     pub name: String,

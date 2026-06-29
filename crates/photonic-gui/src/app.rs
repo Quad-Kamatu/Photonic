@@ -237,7 +237,9 @@ struct ArtboardDrag {
     grab_dy: f64,
     orig_x: f64,
     orig_y: f64,
-    nodes: Vec<(photonic_core::node::NodeId, f64, f64)>,
+    /// Full clones of the artwork that travels with the board, captured at drag
+    /// start — used for live moving and for the undo record.
+    orig_nodes: Vec<photonic_core::node::SceneNode>,
 }
 
 pub struct PhotonicApp {
@@ -311,6 +313,9 @@ pub struct PhotonicApp {
     /// Set on new/open to fit all artboards to the viewport on the next frame
     /// (once the actual viewport rect is known).
     fit_pending: bool,
+    /// Artboard list snapshot taken at the start of a move/resize/rename/add/
+    /// remove, so the change is recorded as one undoable SetArtboards step.
+    artboard_pre: Option<Vec<photonic_core::Artboard>>,
     /// Global search (command palette) query string.
     global_search: String,
     /// On-device semantic index for the global search (background embedder).
@@ -641,6 +646,7 @@ impl Default for PhotonicApp {
             artboard_resize: None,
             artboard_rename: None,
             fit_pending: false,
+            artboard_pre: None,
             global_search: String::new(),
             semantic: crate::global_search::SemanticIndex::new(
                 crate::global_search::items()
@@ -2324,6 +2330,7 @@ impl PhotonicApp {
                 }
 
                 // ── Artboards: labels, select, drag, resize, rename, add/remove ─
+                let mut over_artboard_label = false;
                 {
                     let accent = egui::Color32::from_rgb(110, 86, 207);
                     // Snapshot (id, name, rect) so we can mutate `doc` afterward.
@@ -2382,6 +2389,7 @@ impl PhotonicApp {
                                 );
                                 if nresp.hovered() {
                                     ctx.set_cursor_icon(egui::CursorIcon::Text);
+                                    over_artboard_label = true;
                                 }
                                 if nresp.double_clicked() {
                                     start_rename = Some((*id, name.clone()));
@@ -2397,13 +2405,15 @@ impl PhotonicApp {
                                 );
                                 if hresp.hovered() {
                                     ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                    over_artboard_label = true;
                                 }
                                 if hresp.drag_started() {
                                     if let Some(p) = hresp.interact_pointer_pos() {
                                         let (cx, cy) =
                                             view.screen_to_canvas(p.x as f64, p.y as f64);
-                                        // Capture artwork whose centre lies on this board.
-                                        let mut nodes = Vec::new();
+                                        // Capture (full clones of) the artwork
+                                        // whose centre lies on this board.
+                                        let mut orig_nodes = Vec::new();
                                         for node in doc.nodes.values() {
                                             if let Some((nx0, ny0, nx1, ny1)) =
                                                 text_aware_canvas_bounds(node, renderer)
@@ -2415,21 +2425,18 @@ impl PhotonicApp {
                                                     && ncy >= *y
                                                     && ncy <= *y + *h
                                                 {
-                                                    nodes.push((
-                                                        node.id,
-                                                        node.transform.matrix[4],
-                                                        node.transform.matrix[5],
-                                                    ));
+                                                    orig_nodes.push(node.clone());
                                                 }
                                             }
                                         }
+                                        self.artboard_pre = Some(doc.artboards.clone());
                                         self.artboard_drag = Some(ArtboardDrag {
                                             id: *id,
                                             grab_dx: cx - *x,
                                             grab_dy: cy - *y,
                                             orig_x: *x,
                                             orig_y: *y,
-                                            nodes,
+                                            orig_nodes,
                                         });
                                         select = Some(*id);
                                     }
@@ -2482,8 +2489,10 @@ impl PhotonicApp {
                                         } else {
                                             egui::CursorIcon::ResizeNeSw
                                         });
+                                        over_artboard_label = true;
                                     }
                                     if hresp.drag_started() {
+                                        self.artboard_pre = Some(doc.artboards.clone());
                                         self.artboard_resize = Some((*id, hidx, *x, *y, *w, *h));
                                     }
                                     painter.rect_filled(hrect.shrink(2.5), 1.0, accent);
@@ -2505,8 +2514,58 @@ impl PhotonicApp {
                         if down {
                             if let Some(p) = pointer {
                                 let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
-                                let nx = self.snap(cx - d.grab_dx);
-                                let ny = self.snap(cy - d.grab_dy);
+                                let mut nx = self.snap(cx - d.grab_dx);
+                                let mut ny = self.snap(cy - d.grab_dy);
+
+                                // Alignment snapping: snap this board's left/centre/
+                                // right (and top/middle/bottom) to other boards'
+                                // matching edges when within ~8px on screen.
+                                let (bw, bh) = boards
+                                    .iter()
+                                    .find(|b| b.0 == d.id)
+                                    .map(|b| (b.4, b.5))
+                                    .unwrap_or((100.0, 100.0));
+                                let thresh = 8.0 / view.zoom.max(1e-6);
+                                let mut guide_x: Option<f64> = None;
+                                let mut guide_y: Option<f64> = None;
+                                let mut best_dx: Option<f64> = None;
+                                let mut best_dy: Option<f64> = None;
+                                for b in boards.iter().filter(|b| b.0 != d.id) {
+                                    let (ox, oy, ow, oh) = (b.2, b.3, b.4, b.5);
+                                    for mx in [nx, nx + bw * 0.5, nx + bw] {
+                                        for tx in [ox, ox + ow * 0.5, ox + ow] {
+                                            let diff = tx - mx;
+                                            if diff.abs() < thresh
+                                                && best_dx.map_or(true, |bb: f64| {
+                                                    diff.abs() < bb.abs()
+                                                })
+                                            {
+                                                best_dx = Some(diff);
+                                                guide_x = Some(tx);
+                                            }
+                                        }
+                                    }
+                                    for my in [ny, ny + bh * 0.5, ny + bh] {
+                                        for ty in [oy, oy + oh * 0.5, oy + oh] {
+                                            let diff = ty - my;
+                                            if diff.abs() < thresh
+                                                && best_dy.map_or(true, |bb: f64| {
+                                                    diff.abs() < bb.abs()
+                                                })
+                                            {
+                                                best_dy = Some(diff);
+                                                guide_y = Some(ty);
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(ddx) = best_dx {
+                                    nx += ddx;
+                                }
+                                if let Some(ddy) = best_dy {
+                                    ny += ddy;
+                                }
+
                                 let dx = nx - d.orig_x;
                                 let dy = ny - d.orig_y;
                                 if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == d.id) {
@@ -2514,20 +2573,70 @@ impl PhotonicApp {
                                     ab.y = ny;
                                 }
                                 // Move the artwork that sits on the board with it.
-                                for (nid, otx, oty) in &d.nodes {
-                                    if let Some(node) = doc.nodes.get_mut(nid) {
-                                        node.transform.matrix[4] = otx + dx;
-                                        node.transform.matrix[5] = oty + dy;
+                                for on in &d.orig_nodes {
+                                    if let Some(node) = doc.nodes.get_mut(&on.id) {
+                                        node.transform.matrix[4] = on.transform.matrix[4] + dx;
+                                        node.transform.matrix[5] = on.transform.matrix[5] + dy;
                                     }
                                 }
                                 doc_modified = true;
+
+                                // Draw the alignment guide lines (full viewport).
+                                let gp = ui.painter_at(rect);
+                                let guide = egui::Color32::from_rgb(150, 128, 240);
+                                if let Some(gx) = guide_x {
+                                    let (sx, _) = view.canvas_to_screen(gx, 0.0);
+                                    gp.line_segment(
+                                        [
+                                            egui::pos2(sx as f32, rect.top()),
+                                            egui::pos2(sx as f32, rect.bottom()),
+                                        ],
+                                        egui::Stroke::new(1.0, guide),
+                                    );
+                                }
+                                if let Some(gy) = guide_y {
+                                    let (_, sy) = view.canvas_to_screen(0.0, gy);
+                                    gp.line_segment(
+                                        [
+                                            egui::pos2(rect.left(), sy as f32),
+                                            egui::pos2(rect.right(), sy as f32),
+                                        ],
+                                        egui::Stroke::new(1.0, guide),
+                                    );
+                                }
                             }
                         } else {
                             end_artboard_drag = true;
                         }
                     }
                     if end_artboard_drag {
-                        self.artboard_drag = None;
+                        // Record the completed move (board + artwork) as one
+                        // undoable, change-logged step.
+                        if let Some(d) = self.artboard_drag.take() {
+                            let mut cmds: Vec<Command> = Vec::new();
+                            if let Some(pre) = self.artboard_pre.take() {
+                                if pre != doc.artboards {
+                                    cmds.push(Command::SetArtboards {
+                                        old: pre,
+                                        new: doc.artboards.clone(),
+                                    });
+                                }
+                            }
+                            for on in &d.orig_nodes {
+                                if let Some(cur) = doc.nodes.get(&on.id) {
+                                    if cur.transform.matrix != on.transform.matrix {
+                                        cmds.push(Command::UpdateNode {
+                                            old: on.clone(),
+                                            new: cur.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                            if !cmds.is_empty() {
+                                history.execute(Command::Batch(cmds), doc);
+                                doc_modified = true;
+                            }
+                        }
                     }
                     if let Some((id, hidx, ox, oy, ow, oh)) = self.artboard_resize {
                         if down {
@@ -2564,7 +2673,20 @@ impl PhotonicApp {
                                 }
                             }
                         } else {
+                            // Resize released — record it.
                             self.artboard_resize = None;
+                            if let Some(pre) = self.artboard_pre.take() {
+                                if pre != doc.artboards {
+                                    history.execute(
+                                        Command::SetArtboards {
+                                            old: pre,
+                                            new: doc.artboards.clone(),
+                                        },
+                                        doc,
+                                    );
+                                    doc_modified = true;
+                                }
+                            }
                         }
                     }
 
@@ -2573,6 +2695,7 @@ impl PhotonicApp {
                         doc_modified = true;
                     }
                     if let Some(r) = start_rename {
+                        self.artboard_pre = Some(doc.artboards.clone());
                         self.artboard_rename = Some(r);
                     }
 
@@ -2616,8 +2739,23 @@ impl PhotonicApp {
                                             }
                                         }
                                     }
+                                    // Record the rename.
+                                    if let Some(pre) = self.artboard_pre.take() {
+                                        if pre != doc.artboards {
+                                            history.execute(
+                                                Command::SetArtboards {
+                                                    old: pre,
+                                                    new: doc.artboards.clone(),
+                                                },
+                                                doc,
+                                            );
+                                        }
+                                    }
                                 }
-                                Some(false) => self.artboard_rename = None,
+                                Some(false) => {
+                                    self.artboard_rename = None;
+                                    self.artboard_pre = None;
+                                }
                                 None => {}
                             }
                         } else {
@@ -2629,7 +2767,8 @@ impl PhotonicApp {
                     let mut do_add = false;
                     let mut do_remove = false;
                     egui::Area::new(ui.id().with("artboard_tools"))
-                        .fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 42.0))
+                        // Sit above the cursor-coordinate readout (bottom-left).
+                        .fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 58.0))
                         .show(ctx, |ui| {
                             egui::Frame::popup(ui.style()).show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -2653,6 +2792,7 @@ impl PhotonicApp {
                             });
                         });
                     if do_add {
+                        let pre = doc.artboards.clone();
                         let (_, by0, bx1, _) = doc.artboards_bounds();
                         let (aw, ah) = doc
                             .active_artboard()
@@ -2668,19 +2808,37 @@ impl PhotonicApp {
                             ah,
                         );
                         doc.add_artboard(ab);
+                        history.execute(
+                            Command::SetArtboards {
+                                old: pre,
+                                new: doc.artboards.clone(),
+                            },
+                            doc,
+                        );
                         doc_modified = true;
                     }
                     if do_remove {
                         if let Some(id) = doc.active_artboard {
+                            let pre = doc.artboards.clone();
                             doc.remove_artboard(id);
-                            doc_modified = true;
+                            if pre != doc.artboards {
+                                history.execute(
+                                    Command::SetArtboards {
+                                        old: pre,
+                                        new: doc.artboards.clone(),
+                                    },
+                                    doc,
+                                );
+                                doc_modified = true;
+                            }
                         }
                     }
                 }
 
-                // While manipulating an artboard, don't let the regular tools
-                // also act on the same drag.
-                if self.artboard_drag.is_some()
+                // While manipulating or hovering an artboard label/handle, don't
+                // let the regular tools also act (or override the cursor).
+                if over_artboard_label
+                    || self.artboard_drag.is_some()
                     || self.artboard_resize.is_some()
                     || self.artboard_rename.is_some()
                 {
