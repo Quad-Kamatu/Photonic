@@ -1,9 +1,10 @@
 use crate::{
     canvas::CanvasView,
     pipeline::{
-        create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
-        create_fill_pipeline, create_fill_pipeline_with_blend, separable_blend_state, BlurParams,
-        CameraUniform, Vertex, SEPARABLE_BLEND_MODES,
+        coalesce_segments, create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
+        create_fill_pipeline, create_fill_pipeline_with_blend, draw_segments,
+        separable_blend_state, BlurParams, CameraUniform, DrawSegment, Vertex,
+        SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke},
 };
@@ -107,17 +108,6 @@ pub struct PhotonicRenderer {
     glow_tex_b_view: wgpu::TextureView,
     /// Gaussian glow jobs built each frame by build_geometry, consumed by render_gaussian_glow_pass.
     pending_gaussian_glows: Vec<GaussianGlowJob>,
-}
-
-/// A contiguous run of indices that share one blend mode, drawn in a single
-/// `draw_indexed` call with the matching pipeline.
-#[derive(Clone)]
-struct DrawSegment {
-    mode: BlendMode,
-    /// Offset into the index buffer.
-    start: u32,
-    /// Number of indices in the run.
-    count: u32,
 }
 
 /// Screen-space snapshot of one text node, ready for glyphon.
@@ -1329,25 +1319,7 @@ impl PhotonicRenderer {
             raw_segments.push((node.blend_mode, seg_start, idxs.len() as u32));
         }
 
-        // Coalesce adjacent runs that share a mode (the common all-Normal scene
-        // collapses to a single draw call, matching the previous behaviour).
-        let mut segments: Vec<DrawSegment> = Vec::new();
-        for (mode, start, end) in raw_segments {
-            if end == start {
-                continue;
-            }
-            if let Some(last) = segments.last_mut() {
-                if last.mode == mode && last.start + last.count == start {
-                    last.count += end - start;
-                    continue;
-                }
-            }
-            segments.push(DrawSegment {
-                mode,
-                start,
-                count: end - start,
-            });
-        }
+        let segments = coalesce_segments(raw_segments);
 
         // Update cache for next frame (used when lock is contended).
         self.cached_vertices = verts.clone();
@@ -1402,24 +1374,13 @@ impl PhotonicRenderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
             pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            // Draw each blend-mode run with its pipeline. Runs are in draw order,
-            // so fixed-function blend modes composite against the correct backdrop.
-            // Empty `draw_segments` (e.g. first frame) falls back to one normal draw.
-            if self.draw_segments.is_empty() {
-                pass.set_pipeline(&self.fill_pipeline);
-                pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
-            } else {
-                for seg in &self.draw_segments {
-                    let pipeline = self
-                        .blend_pipelines
-                        .iter()
-                        .find(|(m, _)| *m == seg.mode)
-                        .map(|(_, p)| p)
-                        .unwrap_or(&self.fill_pipeline);
-                    pass.set_pipeline(pipeline);
-                    pass.draw_indexed(seg.start..seg.start + seg.count, 0, 0..1);
-                }
-            }
+            draw_segments(
+                &mut pass,
+                &self.draw_segments,
+                &self.blend_pipelines,
+                &self.fill_pipeline,
+                indices.len() as u32,
+            );
         } else {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),

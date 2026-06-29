@@ -65,6 +65,69 @@ pub fn separable_blend_state(mode: BlendMode) -> Option<wgpu::BlendState> {
     })
 }
 
+/// A contiguous run of indices that share one blend mode, drawn in a single
+/// `draw_indexed` call with the matching pipeline.
+#[derive(Clone)]
+pub(crate) struct DrawSegment {
+    pub mode: BlendMode,
+    /// Offset into the index buffer.
+    pub start: u32,
+    /// Number of indices in the run.
+    pub count: u32,
+}
+
+/// Coalesce per-node `(mode, start, end)` index ranges (in draw order) into
+/// contiguous draw runs, merging adjacent runs that share a mode. The common
+/// all-`Normal` scene collapses to a single segment.
+pub(crate) fn coalesce_segments(raw: Vec<(BlendMode, u32, u32)>) -> Vec<DrawSegment> {
+    let mut segments: Vec<DrawSegment> = Vec::new();
+    for (mode, start, end) in raw {
+        if end == start {
+            continue;
+        }
+        if let Some(last) = segments.last_mut() {
+            if last.mode == mode && last.start + last.count == start {
+                last.count += end - start;
+                continue;
+            }
+        }
+        segments.push(DrawSegment {
+            mode,
+            start,
+            count: end - start,
+        });
+    }
+    segments
+}
+
+/// Issue one `draw_indexed` per blend-mode run, selecting the matching blend
+/// pipeline and falling back to `fill_pipeline` for modes without one. Runs are
+/// in draw order, so fixed-function blends composite against the correct
+/// backdrop. With no segments (e.g. first frame), draws all indices once with
+/// `fill_pipeline`, preserving the original single-draw behaviour.
+pub(crate) fn draw_segments<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    segments: &[DrawSegment],
+    blend_pipelines: &'a [(BlendMode, wgpu::RenderPipeline)],
+    fill_pipeline: &'a wgpu::RenderPipeline,
+    index_count: u32,
+) {
+    if segments.is_empty() {
+        pass.set_pipeline(fill_pipeline);
+        pass.draw_indexed(0..index_count, 0, 0..1);
+        return;
+    }
+    for seg in segments {
+        let pipeline = blend_pipelines
+            .iter()
+            .find(|(m, _)| *m == seg.mode)
+            .map(|(_, p)| p)
+            .unwrap_or(fill_pipeline);
+        pass.set_pipeline(pipeline);
+        pass.draw_indexed(seg.start..seg.start + seg.count, 0, 0..1);
+    }
+}
+
 /// A single vertex: 2D position + RGBA colour.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
