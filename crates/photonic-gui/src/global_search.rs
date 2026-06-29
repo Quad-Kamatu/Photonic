@@ -123,6 +123,104 @@ pub fn items() -> Vec<SearchItem> {
     v
 }
 
+/// The text embedded for an item's semantic vector: title + description.
+pub fn corpus_text(it: &SearchItem) -> String {
+    format!("{}. {}", it.title, it.description)
+}
+
+// ─── On-device semantic index (background embedder) ─────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+
+/// Background semantic search over the (fixed) catalog using a local embedding
+/// model. The worker loads the model (downloading once), embeds the corpus, then
+/// answers queries with cosine-ranked `(item index, score)` results. Indices map
+/// into `items()` (same deterministic order). Falls back silently to nothing if
+/// the model can't load — the UI then uses keyword/fuzzy matching.
+pub struct SemanticIndex {
+    req_tx: Sender<String>,
+    res_rx: Receiver<Vec<(usize, f32)>>,
+    ready: Arc<AtomicBool>,
+    last_query: String,
+    pub results: Vec<(usize, f32)>,
+}
+
+impl SemanticIndex {
+    pub fn new(corpus: Vec<String>) -> Self {
+        let (req_tx, req_rx) = channel::<String>();
+        let (res_tx, res_rx) = channel::<Vec<(usize, f32)>>();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_w = Arc::clone(&ready);
+        std::thread::Builder::new()
+            .name("photonic-embed".into())
+            .spawn(move || {
+                let embedder = match photonic_embed::Embedder::new() {
+                    Ok(e) => e,
+                    Err(_) => return, // unavailable → UI uses keyword fallback
+                };
+                let corpus_vecs = match embedder.embed(&corpus) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                ready_w.store(true, Ordering::SeqCst);
+                while let Ok(mut query) = req_rx.recv() {
+                    // Coalesce to the most recent pending query.
+                    while let Ok(newer) = req_rx.try_recv() {
+                        query = newer;
+                    }
+                    let q = query.trim();
+                    if q.is_empty() {
+                        let _ = res_tx.send(Vec::new());
+                        continue;
+                    }
+                    if let Ok(qv) = embedder.embed(&[q.to_string()]) {
+                        let mut scored: Vec<(usize, f32)> = corpus_vecs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| (i, photonic_embed::cosine(&qv[0], v)))
+                            .collect();
+                        scored.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let _ = res_tx.send(scored);
+                    }
+                }
+            })
+            .ok();
+        Self {
+            req_tx,
+            res_rx,
+            ready,
+            last_query: String::new(),
+            results: Vec::new(),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    /// Submit a query (only re-sends when it changed).
+    pub fn set_query(&mut self, q: &str) {
+        if q != self.last_query {
+            self.last_query = q.to_string();
+            if q.trim().is_empty() {
+                self.results.clear();
+            }
+            let _ = self.req_tx.send(q.to_string());
+        }
+    }
+
+    /// Drain the latest ranked results.
+    pub fn pump(&mut self) {
+        while let Ok(res) = self.res_rx.try_recv() {
+            self.results = res;
+        }
+    }
+}
+
 /// True if every (non-space) char of `q` appears in `s` in order.
 pub fn fuzzy_subseq(q: &str, s: &str) -> bool {
     let mut chars = s.chars();

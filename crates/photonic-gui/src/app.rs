@@ -313,6 +313,8 @@ pub struct PhotonicApp {
     fit_pending: bool,
     /// Global search (command palette) query string.
     global_search: String,
+    /// On-device semantic index for the global search (background embedder).
+    semantic: crate::global_search::SemanticIndex,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -640,6 +642,12 @@ impl Default for PhotonicApp {
             artboard_rename: None,
             fit_pending: false,
             global_search: String::new(),
+            semantic: crate::global_search::SemanticIndex::new(
+                crate::global_search::items()
+                    .iter()
+                    .map(crate::global_search::corpus_text)
+                    .collect(),
+            ),
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -9996,7 +10004,15 @@ impl PhotonicApp {
                 .hint_text(format!("{}  Search tools & actions", ph::MAGNIFYING_GLASS))
                 .desired_width(230.0),
         );
-        let q = self.global_search.trim().to_lowercase();
+        // Drive the on-device semantic index.
+        self.semantic.pump();
+        let raw_q = self.global_search.trim().to_string();
+        self.semantic.set_query(&raw_q);
+        if !raw_q.is_empty() {
+            ui.ctx().request_repaint(); // pick up async semantic results
+        }
+
+        let q = raw_q.to_lowercase();
         if q.is_empty() {
             return;
         }
@@ -10007,21 +10023,42 @@ impl PhotonicApp {
             .filter(|it| it.title.to_lowercase().contains(&q))
             .collect();
         direct.sort_by_key(|it| (!it.title.to_lowercase().starts_with(&q), it.title.len()));
-        let semantic: Vec<&crate::global_search::SearchItem> = items
-            .iter()
-            .filter(|it| {
-                let tl = it.title.to_lowercase();
-                if tl.contains(&q) {
-                    return false;
-                }
-                // Semantic-ish: every query token appears somewhere in the
-                // title + description + keywords, or the title fuzzy-matches.
-                let hay =
-                    format!("{} {} {}", tl, it.description.to_lowercase(), it.keywords.join(" "));
-                q.split_whitespace().all(|t| hay.contains(t))
-                    || crate::global_search::fuzzy_subseq(&q, &tl)
-            })
-            .collect();
+
+        // Semantic "Related": cosine-ranked embedding results when the on-device
+        // model is ready; otherwise a keyword/fuzzy fallback (no AI needed).
+        let semantic: Vec<&crate::global_search::SearchItem> = if self.semantic.is_ready()
+            && !self.semantic.results.is_empty()
+        {
+            self.semantic
+                .results
+                .iter()
+                .filter(|(idx, score)| {
+                    *score > 0.25
+                        && *idx < items.len()
+                        && !items[*idx].title.to_lowercase().contains(&q)
+                })
+                .take(6)
+                .map(|(idx, _)| &items[*idx])
+                .collect()
+        } else {
+            items
+                .iter()
+                .filter(|it| {
+                    let tl = it.title.to_lowercase();
+                    if tl.contains(&q) {
+                        return false;
+                    }
+                    let hay = format!(
+                        "{} {} {}",
+                        tl,
+                        it.description.to_lowercase(),
+                        it.keywords.join(" ")
+                    );
+                    q.split_whitespace().all(|t| hay.contains(t))
+                        || crate::global_search::fuzzy_subseq(&q, &tl)
+                })
+                .collect()
+        };
 
         let mut chosen: Option<crate::global_search::SearchAction> = None;
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));

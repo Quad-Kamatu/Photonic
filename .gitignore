@@ -2,3 +2,6 @@
 *.pdb
 *.exe
 *.dll
+
+# Local embedding model cache (downloaded at runtime, not source)
+.fastembed_cache/
