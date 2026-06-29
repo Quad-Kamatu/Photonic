@@ -185,7 +185,11 @@ fn main() -> Result<()> {
     };
 
     event_loop.run_app(&mut app)?;
-    Ok(())
+
+    // Guarantee a full process exit once the window closes — the MCP server runs
+    // on a detached background thread, so terminate the whole process (and that
+    // thread) deterministically rather than relying on unwind order.
+    std::process::exit(0);
 }
 
 // ─── Claude streaming events ─────────────────────────────────────────────────
@@ -240,14 +244,25 @@ impl ApplicationHandler for PhotonicWinitApp {
         }
 
         let window_icon = load_window_icon();
+        #[allow(unused_mut)]
+        let mut attrs = WindowAttributes::default()
+            .with_title("Photonic")
+            .with_inner_size(PhysicalSize::new(1280u32, 800u32))
+            .with_window_icon(window_icon);
+        // On Linux the compositor (esp. Wayland/KWin) ignores the embedded .ico
+        // for the titlebar/taskbar icon and instead maps the window to a desktop
+        // file by its app_id / WM class. Set both to "photonic" so it resolves
+        // photonic.desktop and uses its (improved) themed icon.
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs = WindowAttributesExtWayland::with_name(attrs, "photonic", "photonic");
+            attrs = WindowAttributesExtX11::with_name(attrs, "photonic", "photonic");
+        }
         let window = Arc::new(
             event_loop
-                .create_window(
-                    WindowAttributes::default()
-                        .with_title("Photonic")
-                        .with_inner_size(PhysicalSize::new(1280u32, 800u32))
-                        .with_window_icon(window_icon),
-                )
+                .create_window(attrs)
                 .expect("Failed to create window"),
         );
 
@@ -289,8 +304,16 @@ impl ApplicationHandler for PhotonicWinitApp {
             None,
         );
 
-        let egui_renderer =
+        let mut egui_renderer =
             egui_wgpu::Renderer::new(renderer.device(), renderer.surface_format(), None, 1, false);
+        // Install the Lightfall background shader pipeline so the welcome screens
+        // can render it via an egui paint callback.
+        egui_renderer
+            .callback_resources
+            .insert(photonic_gui::lightfall::LightfallResources::new(
+                renderer.device(),
+                renderer.surface_format(),
+            ));
 
         write_mcp_config();
         info!("GPU renderer + egui initialized — window open");

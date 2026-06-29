@@ -1,3 +1,16 @@
+mod geometry;
+use geometry::*;
+mod demos;
+use demos::*;
+mod hit_test;
+use hit_test::*;
+mod command_center;
+mod direct_select;
+mod erase_tools;
+mod layer_ops;
+mod rulers;
+mod tool_handlers;
+mod width_tool;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -7,6 +20,7 @@ use photonic_core::{
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
+pub(crate) use rulers::GuideEditPopup;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -63,6 +77,34 @@ pub enum ResizeHandle {
     BottomRight,
 }
 
+/// Which side of an anchor a bezier control handle belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind {
+    /// Incoming handle — `c2` of the `CurveTo` whose endpoint is this anchor.
+    In,
+    /// Outgoing handle — `c1` of the `CurveTo` element following this anchor.
+    Out,
+}
+
+/// What the Direct Selection tool is currently dragging.
+#[derive(Debug, Clone)]
+pub enum DirectDrag {
+    /// Moving the set of selected anchor points.
+    Anchors,
+    /// Dragging a single bezier control handle on `anchor` (`In`/`Out` side).
+    Handle { anchor: usize, kind: HandleKind },
+    /// Dragging the Live-Corners rounding widget. `pivot` is the anchor whose
+    /// widget was grabbed; the same radius is applied to all selected straight
+    /// corners. `origin_bez` is the path captured at drag start (local space).
+    /// `grab_dist` is the pivot-corner→press distance in local units, subtracted
+    /// so the radius starts at 0 on grab instead of snapping to the widget offset.
+    Corner {
+        pivot: usize,
+        origin_bez: kurbo::BezPath,
+        grab_dist: f64,
+    },
+}
+
 // ─── Diff highlight ────────────────────────────────────────────────────────────
 
 /// Category of a node in a checkpoint diff, used to colour canvas highlights.
@@ -77,7 +119,13 @@ pub enum DiffCategory {
 }
 
 const FILE_OPTIONS: &[&str] = &["Document", "Save", "Export"];
-const EDIT_OPTIONS: &[&str] = &["Appearance", "Canvas", "Tool Defaults", "Behavior"];
+const EDIT_OPTIONS: &[&str] = &[
+    "Appearance",
+    "Canvas",
+    "Tool Defaults",
+    "Behavior",
+    "Keyboard Shortcuts",
+];
 
 // ─── Export dialog ────────────────────────────────────────────────────────────
 
@@ -140,6 +188,7 @@ impl ExportDialog {
             crop_to_content: self.crop_to_content,
             ico_sizes,
             jpeg_quality: self.jpeg_quality,
+            region: None,
         }
     }
 }
@@ -220,6 +269,27 @@ pub struct DiffOverlayState {
     pub overlay_active: bool,
 }
 
+/// A cached egui texture for a raster node, with the content hash it was built
+/// from so it can be invalidated when the pixels or mask change.
+struct RasterTexCache {
+    handle: egui::TextureHandle,
+    hash: u64,
+}
+
+/// In-progress artboard move: the board id, the cursor→origin grab offset, the
+/// board's original position, and the artwork that travels with it (node id +
+/// original translation) so dragging the board moves its contents too.
+struct ArtboardDrag {
+    id: photonic_core::ArtboardId,
+    grab_dx: f64,
+    grab_dy: f64,
+    orig_x: f64,
+    orig_y: f64,
+    /// Full clones of the artwork that travels with the board, captured at drag
+    /// start — used for live moving and for the undo record.
+    orig_nodes: Vec<photonic_core::node::SceneNode>,
+}
+
 pub struct PhotonicApp {
     pub active_tool: Tool,
     pub fill_color: [f32; 4],
@@ -277,8 +347,58 @@ pub struct PhotonicApp {
     /// Selection bounding-box top-left at move start — the point snapped to the
     /// grid as the selection is dragged.
     move_snap_ref: Option<(f64, f64)>,
+    /// Full selection bounding box `(x0, y0, x1, y1)` at move start, in canvas
+    /// space — used as the basis for object-aware snapping (#66).
+    move_snap_bbox: Option<(f64, f64, f64, f64)>,
+    /// Active smart-guide snap from the current move drag, or `None`. Set each
+    /// frame the dragged selection aligns to a nearby node; cleared on release.
+    /// The paint pass reads this to draw guide lines + distance labels.
+    last_snap_result: Option<crate::snap::SnapResult>,
     /// Canvas-space cursor position where the move drag began.
     move_snap_press: Option<(f64, f64)>,
+    /// True when the current move drag is duplicating the selection (Alt-drag):
+    /// copies were spawned at drag start and the originals stay put.
+    dup_drag: bool,
+    /// Dragging an artboard (moves the board + its artwork).
+    artboard_drag: Option<ArtboardDrag>,
+    /// Resizing an artboard: (id, corner 0=TL/1=TR/2=BL/3=BR, orig x, y, w, h).
+    artboard_resize: Option<(photonic_core::ArtboardId, u8, f64, f64, f64, f64)>,
+    /// Inline-renaming an artboard: (id, edit buffer).
+    artboard_rename: Option<(photonic_core::ArtboardId, String)>,
+    /// Request focus for the rename field on the next frame it draws.
+    artboard_rename_focus: bool,
+    /// Set on new/open to fit all artboards to the viewport on the next frame
+    /// (once the actual viewport rect is known).
+    fit_pending: bool,
+    /// Artboard list snapshot taken at the start of a move/resize/rename/add/
+    /// remove, so the change is recorded as one undoable SetArtboards step.
+    artboard_pre: Option<Vec<photonic_core::Artboard>>,
+    /// Global search (command palette) query string.
+    global_search: String,
+    /// On-device semantic index for the global search (background embedder).
+    semantic: crate::global_search::SemanticIndex,
+    /// Ctrl/Cmd+K command palette (#140): open state, query, and selection.
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_sel: usize,
+    /// Request focus for the palette input on the frame it opens.
+    command_palette_focus: bool,
+    /// Command id currently capturing a new key in the Keyboard Shortcuts page.
+    shortcut_capture: Option<String>,
+    /// In-flight self-update check (result polled each frame).
+    update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateStatus>>,
+    /// In-flight launch-time "is a newer release available?" check (no download).
+    update_check_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateCheck>>,
+    /// Newer version found by the launch check; drives the update prompt banner.
+    update_available: Option<String>,
+    /// Whether the once-per-launch update check has been kicked off yet.
+    update_checked_startup: bool,
+    /// Release notes to show in the "What's New" popup (versions newly skipped).
+    whats_new_notes: Vec<crate::release_notes::ReleaseNote>,
+    /// Whether the "What's New" popup is currently open.
+    show_whats_new: bool,
+    /// Whether the once-per-launch "did the version change?" check has run.
+    whats_new_checked: bool,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -306,6 +426,9 @@ pub struct PhotonicApp {
     /// Snapshot of the node captured at drag-start (None when not dragging).
     /// Used to build the UpdateNode undo command on drag release.
     point_drag_origin: Option<SceneNode>,
+    /// What the current Direct Selection drag is manipulating (None = anchors
+    /// or no active drag). Set on drag-start, cleared on release.
+    point_drag_mode: Option<DirectDrag>,
 
     // ── Shape Builder tool state ──────────────────────────────────────────────
     /// Node under cursor in Shape Builder mode (for highlight preview).
@@ -368,9 +491,41 @@ pub struct PhotonicApp {
     /// When true, the canvas shows path wireframes only (no fills or strokes).
     pub outline_mode: bool,
 
+    /// Cache of uploaded egui textures for raster nodes, keyed by node id.
+    /// Re-uploaded only when the pixel/mask content hash changes.
+    raster_tex_cache: std::collections::HashMap<photonic_core::node::NodeId, RasterTexCache>,
+
+    /// Lazily-loaded Photonic logo texture for the top toolbar (embedded PNG).
+    logo_texture: Option<egui::TextureHandle>,
+
+    // ── Interactive raster brush state ─────────────────────────────────────────
+    /// Brush radius (pixels) for the RasterBrush/RasterEraser tools.
+    pub raster_brush_radius: f32,
+    /// Brush edge hardness (0 soft .. 1 hard).
+    pub raster_brush_hardness: f32,
+    /// Pre-stroke snapshot of the node being painted, for a single undo step.
+    raster_stroke_orig: Option<(photonic_core::node::NodeId, photonic_core::node::SceneNode)>,
+    /// Local-space points accumulated during the current drag.
+    raster_stroke_pts: Vec<(f32, f32)>,
+
     // ── Guides ────────────────────────────────────────────────────────────────
     /// When true, ruler guides are rendered on the canvas (toggle with Ctrl+;).
     pub guides_visible: bool,
+    /// Active drag originating from a ruler strip to create a new guide.
+    /// `Horizontal` = dragged out of the top ruler; `Vertical` = left ruler.
+    /// `None` when no ruler-create drag is in progress.
+    pub ruler_drag: Option<photonic_core::GuideOrientation>,
+    /// Live canvas-space position of the guide being created from a ruler drag
+    /// (Y for horizontal, X for vertical). Used for the floating drag label.
+    pub ruler_drag_pos: f64,
+    /// Index into `doc.guides` of the guide currently being moved by a drag.
+    /// `None` when no existing guide is being dragged.
+    pub guide_dragging: Option<usize>,
+    /// Snapshot of `doc.guides` captured at the start of a guide move/create
+    /// drag, used as the `old` state for the undoable `Command::SetGuides`.
+    pub guide_drag_old: Option<Vec<photonic_core::Guide>>,
+    /// Open exact-position editor popup for a guide (double-click to open).
+    pub(crate) guide_edit_popup: Option<GuideEditPopup>,
 
     // ── Isolation Mode ───────────────────────────────────────────────────────
     /// When set, only children of this group are selectable/editable.
@@ -384,6 +539,14 @@ pub struct PhotonicApp {
     // ── Lasso tool state ─────────────────────────────────────────────────────
     /// Screen-space points collected during an active lasso drag.
     lasso_points: Vec<egui::Pos2>,
+
+    // ── Knife / Eraser (destructive path edit) tool state ─────────────────────
+    /// Canvas-space points collected during an active Eraser drag.
+    eraser_points: Vec<(f64, f64)>,
+    /// Eraser head radius in canvas units (scales with zoom). Default ~10px.
+    pub eraser_radius: f64,
+    /// Canvas-space points collected during an active Knife drag.
+    knife_points: Vec<(f64, f64)>,
 
     // ── Magic Wand tool options ───────────────────────────────────────────────
     /// Which attribute the Magic Wand matches when clicked.
@@ -414,6 +577,21 @@ pub struct PhotonicApp {
     pub graphic_style_name_input: String,
     /// Text input for naming a new width profile in the Width Profiles panel.
     pub width_profile_name_input: String,
+    // ── Width tool (interactive variable-width stroke editing) ──────────────
+    /// Path node the Width-tool cursor is currently hovering, if any.
+    pub width_tool_hovered_node: Option<NodeId>,
+    /// Normalized arc-length position `[0, 1]` on the hovered path under the cursor.
+    pub width_tool_hovered_t: f64,
+    /// Index (into the active profile's samples) of the width handle being edited.
+    pub width_tool_selected_point: Option<usize>,
+    /// Which side handle is being dragged: `true` = right/bottom, `false` = left/top.
+    pub width_tool_drag_right: bool,
+    /// Canvas-space `y` recorded when a width-handle drag began (for delta math).
+    pub width_tool_drag_origin_y: Option<f64>,
+    /// Snapshot of `doc.width_profiles` taken at drag start, for a single undo step.
+    pub width_tool_profiles_before: Option<Vec<photonic_core::WidthProfile>>,
+    /// Text input for naming the profile saved from the Width tool.
+    pub width_tool_save_name: String,
     /// Cached grammar rule list: (name, rule_type).
     pub grammar_rules: Vec<(String, String)>,
     /// Text input for the new grammar rule name.
@@ -582,7 +760,35 @@ impl Default for PhotonicApp {
             move_drag_origins: Vec::new(),
             move_snap_origins: Vec::new(),
             move_snap_ref: None,
+            move_snap_bbox: None,
+            last_snap_result: None,
             move_snap_press: None,
+            dup_drag: false,
+            artboard_drag: None,
+            artboard_resize: None,
+            artboard_rename: None,
+            artboard_rename_focus: false,
+            fit_pending: false,
+            artboard_pre: None,
+            global_search: String::new(),
+            semantic: crate::global_search::SemanticIndex::new(
+                crate::global_search::items()
+                    .iter()
+                    .map(crate::global_search::corpus_text)
+                    .collect(),
+            ),
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_sel: 0,
+            command_palette_focus: false,
+            shortcut_capture: None,
+            update_rx: None,
+            update_check_rx: None,
+            update_available: None,
+            update_checked_startup: false,
+            whats_new_notes: Vec::new(),
+            show_whats_new: false,
+            whats_new_checked: false,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -593,6 +799,7 @@ impl Default for PhotonicApp {
             point_edit_node: None,
             point_selected: Vec::new(),
             point_drag_origin: None,
+            point_drag_mode: None,
             shape_builder_hovered: None,
             shape_builder_drag_ids: Vec::new(),
             shape_builder_subtract_mode: false,
@@ -634,6 +841,13 @@ impl Default for PhotonicApp {
             swatch_library_selected: String::new(),
             graphic_style_name_input: String::new(),
             width_profile_name_input: String::new(),
+            width_tool_hovered_node: None,
+            width_tool_hovered_t: 0.0,
+            width_tool_selected_point: None,
+            width_tool_drag_right: false,
+            width_tool_drag_origin_y: None,
+            width_tool_profiles_before: None,
+            width_tool_save_name: String::new(),
             grammar_rules: Vec::new(),
             grammar_rule_name_input: String::new(),
             grammar_rule_type_selected: String::new(),
@@ -659,13 +873,27 @@ impl Default for PhotonicApp {
             recolor_palette_input: String::new(),
 
             eyedropper: EyedropperState::default(),
+            logo_texture: None,
+            raster_tex_cache: std::collections::HashMap::new(),
+            raster_brush_radius: 16.0,
+            raster_brush_hardness: 0.8,
+            raster_stroke_orig: None,
+            raster_stroke_pts: Vec::new(),
             window_logical_pos: (0, 0),
             window_scale_factor: 1.0,
             outline_mode: false,
             guides_visible: true,
+            ruler_drag: None,
+            ruler_drag_pos: 0.0,
+            guide_dragging: None,
+            guide_drag_old: None,
+            guide_edit_popup: None,
             isolated_group: None,
             pencil_points: Vec::new(),
             lasso_points: Vec::new(),
+            eraser_points: Vec::new(),
+            eraser_radius: 10.0,
+            knife_points: Vec::new(),
             magic_wand_attribute: SelectSameAttr::FillColor,
             magic_wand_tolerance: 0.05,
             gui_clipboard: Vec::new(),
@@ -693,6 +921,153 @@ where
     std::thread::spawn(f).join().unwrap_or(None)
 }
 
+/// Fit and center the artboard bounding box `(bx0,by0,bx1,by1)` (canvas units)
+/// inside the on-screen viewport `rect`, so the artwork lands properly scaled in
+/// the actual visible canvas area (not the full window). Sets zoom + pan
+/// directly in the same point-space the overlays and GPU camera share.
+/// One result row in the global-search popup: icon + title + dim description,
+/// full-width and clickable. `dim` styles semantic/related results more subtly.
+fn search_result_row(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    description: &str,
+    dim: bool,
+) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let title_color = if dim {
+        egui::Color32::from_gray(185)
+    } else {
+        egui::Color32::from_gray(235)
+    };
+    let desc = if description.chars().count() > 52 {
+        format!("{}…", description.chars().take(51).collect::<String>())
+    } else {
+        description.to_string()
+    };
+    let p = ui.painter();
+    p.text(
+        egui::pos2(rect.left() + 11.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(15.0),
+        title_color,
+    );
+    p.text(
+        egui::pos2(rect.left() + 34.0, rect.top() + 7.0),
+        egui::Align2::LEFT_TOP,
+        title,
+        egui::FontId::proportional(13.0),
+        title_color,
+    );
+    p.text(
+        egui::pos2(rect.left() + 34.0, rect.top() + 21.0),
+        egui::Align2::LEFT_TOP,
+        desc,
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_gray(130),
+    );
+    resp.clicked()
+}
+
+/// Draw a horizontal distance measurement between two boards' facing edges
+/// (left board's right edge → right board's left edge), with end ticks and a px
+/// label, at their vertical-overlap midline. Rects are `(x, y, w, h)` in canvas.
+fn draw_h_gap(
+    p: &egui::Painter,
+    view: &CanvasView,
+    l: (f64, f64, f64, f64),
+    r: (f64, f64, f64, f64),
+    color: egui::Color32,
+) {
+    let lx = l.0 + l.2;
+    let rx = r.0;
+    if rx <= lx {
+        return;
+    }
+    let ym = (l.1.max(r.1) + (l.1 + l.3).min(r.1 + r.3)) * 0.5;
+    let (sx1, sy) = view.canvas_to_screen(lx, ym);
+    let (sx2, _) = view.canvas_to_screen(rx, ym);
+    let (sx1, sy, sx2) = (sx1 as f32, sy as f32, sx2 as f32);
+    let stroke = egui::Stroke::new(1.0, color);
+    p.line_segment([egui::pos2(sx1, sy), egui::pos2(sx2, sy)], stroke);
+    p.line_segment(
+        [egui::pos2(sx1, sy - 4.0), egui::pos2(sx1, sy + 4.0)],
+        stroke,
+    );
+    p.line_segment(
+        [egui::pos2(sx2, sy - 4.0), egui::pos2(sx2, sy + 4.0)],
+        stroke,
+    );
+    gap_label(p, egui::pos2((sx1 + sx2) * 0.5, sy - 9.0), rx - lx, color);
+}
+
+/// Vertical distance measurement (top board's bottom → bottom board's top).
+fn draw_v_gap(
+    p: &egui::Painter,
+    view: &CanvasView,
+    t: (f64, f64, f64, f64),
+    b: (f64, f64, f64, f64),
+    color: egui::Color32,
+) {
+    let ty = t.1 + t.3;
+    let by = b.1;
+    if by <= ty {
+        return;
+    }
+    let xm = (t.0.max(b.0) + (t.0 + t.2).min(b.0 + b.2)) * 0.5;
+    let (sx, sy1) = view.canvas_to_screen(xm, ty);
+    let (_, sy2) = view.canvas_to_screen(xm, by);
+    let (sx, sy1, sy2) = (sx as f32, sy1 as f32, sy2 as f32);
+    let stroke = egui::Stroke::new(1.0, color);
+    p.line_segment([egui::pos2(sx, sy1), egui::pos2(sx, sy2)], stroke);
+    p.line_segment(
+        [egui::pos2(sx - 4.0, sy1), egui::pos2(sx + 4.0, sy1)],
+        stroke,
+    );
+    p.line_segment(
+        [egui::pos2(sx - 4.0, sy2), egui::pos2(sx + 4.0, sy2)],
+        stroke,
+    );
+    gap_label(p, egui::pos2(sx + 14.0, (sy1 + sy2) * 0.5), by - ty, color);
+}
+
+/// A small filled px label for a distance measurement.
+fn gap_label(p: &egui::Painter, center: egui::Pos2, value: f64, color: egui::Color32) {
+    let galley = p.layout_no_wrap(
+        format!("{:.0}", value),
+        egui::FontId::proportional(10.0),
+        egui::Color32::WHITE,
+    );
+    let rect = egui::Rect::from_center_size(center, galley.size() + egui::vec2(6.0, 3.0));
+    p.rect_filled(rect, 2.0, color);
+    p.galley(
+        rect.center() - galley.size() * 0.5,
+        galley,
+        egui::Color32::WHITE,
+    );
+}
+
+fn fit_artboard_to_rect(view: &mut CanvasView, rect: egui::Rect, bounds: (f64, f64, f64, f64)) {
+    let (bx0, by0, bx1, by1) = bounds;
+    let bw = (bx1 - bx0).max(1.0);
+    let bh = (by1 - by0).max(1.0);
+    let zoom_x = rect.width() as f64 / bw;
+    let zoom_y = rect.height() as f64 / bh;
+    let zoom = (zoom_x.min(zoom_y) * 0.92).clamp(0.01, 64.0);
+    view.zoom = zoom;
+    let cx = (bx0 + bx1) * 0.5;
+    let cy = (by0 + by1) * 0.5;
+    view.pan_x = rect.center().x as f64 - cx * zoom;
+    view.pan_y = rect.center().y as f64 - cy * zoom;
+}
+
 fn load_document(path: &Path) -> Result<Document, String> {
     let ext = path
         .extension()
@@ -708,6 +1083,204 @@ fn load_document(path: &Path) -> Result<Document, String> {
 }
 
 impl PhotonicApp {
+    /// Get (or build) the egui texture for a raster node's current pixels, with
+    /// its layer mask baked into the alpha. Re-uploads only when content changes.
+    fn raster_texture(
+        &mut self,
+        ctx: &egui::Context,
+        id: photonic_core::node::NodeId,
+        rn: &photonic_core::node::RasterNode,
+    ) -> egui::TextureId {
+        // FNV-1a content hash over pixels + mask (cheap change detection).
+        let mut hash: u64 = 0xcbf29ce484222325;
+        let feed = |bytes: &[u8], hash: &mut u64| {
+            for &b in bytes {
+                *hash ^= b as u64;
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+        };
+        feed(&rn.image.pixels, &mut hash);
+        if let Some(m) = &rn.mask {
+            feed(&m.data, &mut hash);
+        }
+
+        if let Some(c) = self.raster_tex_cache.get(&id) {
+            if c.hash == hash {
+                return c.handle.id();
+            }
+        }
+
+        let w = rn.image.width as usize;
+        let h = rn.image.height as usize;
+        let mask_ok = rn
+            .mask
+            .as_ref()
+            .map(|m| m.data.len() == w * h)
+            .unwrap_or(false);
+        let mut pixels = Vec::with_capacity(w * h);
+        for i in 0..(w * h) {
+            let p = &rn.image.pixels[i * 4..i * 4 + 4];
+            let mut a = p[3];
+            if mask_ok {
+                let cov = rn.mask.as_ref().unwrap().data[i] as u16;
+                a = ((a as u16 * cov) / 255) as u8;
+            }
+            pixels.push(egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], a));
+        }
+        let color_img = egui::ColorImage {
+            size: [w.max(1), h.max(1)],
+            pixels,
+        };
+        let handle = ctx.load_texture(
+            format!("raster_{id}"),
+            color_img,
+            egui::TextureOptions::LINEAR,
+        );
+        let tex_id = handle.id();
+        self.raster_tex_cache
+            .insert(id, RasterTexCache { handle, hash });
+        tex_id
+    }
+
+    /// Paint all visible raster nodes as textured quads over the GPU vector
+    /// layer, transformed by each node's affine and the camera. Mirrors the
+    /// headless export compositor (raster composites over vectors).
+    fn paint_raster_nodes(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        doc: &Document,
+        view: &CanvasView,
+    ) {
+        let raster_ids: Vec<photonic_core::node::NodeId> = doc
+            .nodes_in_draw_order()
+            .iter()
+            .filter(|n| {
+                n.visible && matches!(&n.kind, SceneNodeKind::Raster(r) if !r.is_adjustment_layer())
+            })
+            .map(|n| n.id)
+            .collect();
+        for id in raster_ids {
+            let Some(node) = doc.get_node(&id) else {
+                continue;
+            };
+            let SceneNodeKind::Raster(rn) = &node.kind else {
+                continue;
+            };
+            if node.opacity <= 0.0 || rn.image.width == 0 || rn.image.height == 0 {
+                continue;
+            }
+            let tex = self.raster_texture(ctx, id, rn);
+            let (w, h) = (rn.image.width as f64, rn.image.height as f64);
+            let local = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+            let uv = [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ];
+            let a = (node.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let tint = egui::Color32::from_white_alpha(a);
+            let mut mesh = egui::Mesh::with_texture(tex);
+            for (i, (lx, ly)) in local.iter().enumerate() {
+                let (dx, dy) = node.transform.apply(*lx, *ly);
+                let (sx, sy) = view.canvas_to_screen(dx, dy);
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: egui::pos2(sx as f32, sy as f32),
+                    uv: uv[i],
+                    color: tint,
+                });
+            }
+            mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
+
+    /// Handle the interactive RasterBrush/RasterEraser tools: paint/erase onto
+    /// the selected raster layer as the pointer drags, committing one undoable
+    /// `UpdateNode` per stroke.
+    fn handle_raster_brush(
+        &mut self,
+        response: &egui::Response,
+        doc: &mut Document,
+        view: &CanvasView,
+        history: &mut CommandHistory,
+    ) {
+        use photonic_core::raster::brush;
+        let erase = self.active_tool == Tool::RasterEraser;
+
+        // Resolve the active raster (non-adjustment) node.
+        let Some(nid) = self.selected_id else {
+            return;
+        };
+        let is_raster = matches!(
+            doc.get_node(&nid).map(|n| &n.kind),
+            Some(SceneNodeKind::Raster(r)) if !r.is_adjustment_layer()
+        );
+        if !is_raster {
+            return;
+        }
+
+        if response.drag_started() {
+            self.raster_stroke_pts.clear();
+            self.raster_stroke_orig = doc.get_node(&nid).cloned().map(|n| (nid, n));
+        }
+
+        if (response.dragged() || response.drag_started()) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                // Screen → canvas → node-local pixel coordinates.
+                let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                let local = doc.get_node(&nid).map(|node| {
+                    let inv = node.transform.to_kurbo().inverse();
+                    let lp = inv * kurbo::Point::new(cx, cy);
+                    (lp.x as f32, lp.y as f32)
+                });
+                if let Some(p) = local {
+                    self.raster_stroke_pts.push(p);
+                    let n = self.raster_stroke_pts.len();
+                    let tail: Vec<(f32, f32)> = if n >= 2 {
+                        self.raster_stroke_pts[n - 2..].to_vec()
+                    } else {
+                        self.raster_stroke_pts.clone()
+                    };
+                    let color = [
+                        (self.fill_color[0] * 255.0).round() as u8,
+                        (self.fill_color[1] * 255.0).round() as u8,
+                        (self.fill_color[2] * 255.0).round() as u8,
+                        (self.fill_color[3] * 255.0).round() as u8,
+                    ];
+                    if let Some(node) = doc.get_node_mut(&nid) {
+                        if let SceneNodeKind::Raster(rn) = &mut node.kind {
+                            let mut b = brush::Brush::new(self.raster_brush_radius, color);
+                            b.hardness = self.raster_brush_hardness;
+                            if erase {
+                                brush::erase(&mut rn.image, &tail, &b, None);
+                            } else {
+                                brush::stroke(&mut rn.image, &tail, &b, None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            if let Some((onid, orig)) = self.raster_stroke_orig.take() {
+                if let Some(cur) = doc.get_node(&onid).cloned() {
+                    // The stroke was painted live; record it as one undoable step.
+                    history.execute(
+                        Command::UpdateNode {
+                            old: orig,
+                            new: cur,
+                        },
+                        doc,
+                    );
+                }
+            }
+            self.raster_stroke_pts.clear();
+        }
+    }
+
     pub fn new() -> Self {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
@@ -748,6 +1321,131 @@ impl PhotonicApp {
     ) -> bool {
         let mut doc_modified = false;
 
+        // ── Command palette (Ctrl/Cmd+K) — drawn on top of everything ─────────
+        // Handled before tool dispatch so a chosen command runs this frame.
+        if self.command_palette(ctx, doc, history) {
+            doc_modified = true;
+        }
+
+        // ── Poll an in-flight self-update check ───────────────────────────────
+        if let Some(rx) = &self.update_rx {
+            if let Ok(status) = rx.try_recv() {
+                use crate::update::UpdateStatus;
+                self.file_status = Some(match status {
+                    UpdateStatus::UpToDate(v) => format!("Photonic is up to date (v{v})"),
+                    UpdateStatus::Updated(v) => {
+                        format!("Updated to v{v} — restart Photonic to apply")
+                    }
+                    UpdateStatus::Error(e) => format!("Update check failed: {e}"),
+                });
+                self.update_rx = None;
+            } else {
+                ctx.request_repaint(); // keep polling until the check returns
+            }
+        }
+
+        // ── Auto-check for a newer release, once per launch ───────────────────
+        // Lightweight (no download): just asks GitHub for the latest version.
+        // If a newer one exists, `update_available` drives a dismissable banner.
+        if !self.update_checked_startup && self.prefs.auto_check_updates && self.update_rx.is_none()
+        {
+            self.update_checked_startup = true;
+            self.update_check_rx = Some(crate::update::check_latest());
+        }
+        if let Some(rx) = &self.update_check_rx {
+            if let Ok(check) = rx.try_recv() {
+                use crate::update::UpdateCheck;
+                if let UpdateCheck::Available(v) = check {
+                    self.update_available = Some(v);
+                }
+                self.update_check_rx = None;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+
+        // ── Update-available banner (dismissable, floats top-center) ──────────
+        if let Some(ver) = self.update_available.clone() {
+            let mut dismiss = false;
+            let mut do_update = false;
+            egui::Area::new(egui::Id::new("update_available_banner"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style())
+                        .fill(Color32::from_rgb(30, 41, 59))
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(59, 130, 246)))
+                        .rounding(10.0)
+                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(ph::ARROW_CIRCLE_UP)
+                                        .size(18.0)
+                                        .color(Color32::from_rgb(96, 165, 250)),
+                                );
+                                ui.label(
+                                    RichText::new(format!("Photonic v{ver} is available"))
+                                        .strong()
+                                        .color(Color32::from_rgb(226, 232, 240)),
+                                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .button(
+                                        RichText::new(format!(
+                                            "{} Update now",
+                                            ph::DOWNLOAD_SIMPLE
+                                        ))
+                                        .color(Color32::WHITE),
+                                    )
+                                    .clicked()
+                                {
+                                    do_update = true;
+                                }
+                                if ui.button("Later").clicked() {
+                                    dismiss = true;
+                                }
+                            });
+                        });
+                });
+            if do_update {
+                if self.update_rx.is_none() {
+                    self.update_rx = Some(crate::update::check_and_update());
+                    self.file_status = Some(format!(
+                        "Downloading Photonic v{ver}… (current {})",
+                        crate::update::CURRENT_VERSION
+                    ));
+                }
+                self.update_available = None;
+            } else if dismiss {
+                self.update_available = None;
+            }
+        }
+
+        // ── "What's New" after an update ──────────────────────────────────────
+        // Once per launch, compare the running build to the last version this
+        // user actually ran. If it moved forward, queue the notes for the gap.
+        if !self.whats_new_checked {
+            self.whats_new_checked = true;
+            let cur = crate::update::CURRENT_VERSION;
+            if self.prefs.last_seen_version.is_empty() {
+                // Fresh install — record silently, never nag on first run.
+                self.prefs.last_seen_version = cur.to_string();
+                self.prefs.save();
+            } else if self.prefs.last_seen_version != cur {
+                let notes = crate::release_notes::since(&self.prefs.last_seen_version);
+                self.prefs.last_seen_version = cur.to_string();
+                self.prefs.save();
+                if !notes.is_empty() {
+                    self.whats_new_notes = notes;
+                    self.show_whats_new = true;
+                }
+            }
+        }
+        if self.show_whats_new {
+            self.draw_whats_new(ctx);
+        }
+
         // ── Apply theme ───────────────────────────────────────────────────────
         if self.prefs.dark_mode {
             ctx.set_visuals(crate::theme::build_dark_theme());
@@ -755,6 +1453,20 @@ impl PhotonicApp {
             ctx.set_visuals(crate::theme::build_light_theme());
         }
         ctx.set_pixels_per_point(self.prefs.ui_scale);
+
+        // Lazily upload the embedded Photonic logo for the top toolbar (once).
+        if self.logo_texture.is_none() {
+            if let Ok(img) = photonic_core::raster::image::RasterImage::from_encoded(
+                include_bytes!("../../assets/logo.png"),
+            ) {
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.pixels,
+                );
+                self.logo_texture =
+                    Some(ctx.load_texture("photonic_logo", color, egui::TextureOptions::LINEAR));
+            }
+        }
 
         // ── Welcome screen (shown before the editor on first launch) ─────────
         if self.show_welcome {
@@ -765,8 +1477,41 @@ impl PhotonicApp {
                         name,
                         width,
                         height,
+                        bleed_mm,
+                        slug_mm,
+                        margin,
+                        artboards,
                     } => {
-                        *doc = photonic_core::Document::new(name, width, height);
+                        let mut new_doc = photonic_core::Document::new(name, width, height);
+                        new_doc.bleed_mm = bleed_mm;
+                        new_doc.slug_mm = slug_mm;
+                        new_doc.margin_top = margin;
+                        new_doc.margin_right = margin;
+                        new_doc.margin_bottom = margin;
+                        new_doc.margin_left = margin;
+                        // Multiple artboards: lay out N same-size boards in a grid.
+                        if artboards > 1 {
+                            let gap = (width * 0.06).max(40.0);
+                            let cols = (artboards as f64).sqrt().ceil().max(1.0) as usize;
+                            let mut boards = Vec::with_capacity(artboards);
+                            for i in 0..artboards {
+                                let col = (i % cols) as f64;
+                                let row = (i / cols) as f64;
+                                boards.push(photonic_core::Artboard::new(
+                                    format!("Artboard {}", i + 1),
+                                    col * (width + gap),
+                                    row * (height + gap),
+                                    width,
+                                    height,
+                                ));
+                            }
+                            new_doc.active_artboard = boards.first().map(|a| a.id);
+                            new_doc.artboards = boards;
+                        }
+                        *doc = new_doc;
+                        // Fit all artboards to the viewport on the next frame
+                        // (once the real viewport rect is known).
+                        self.fit_pending = true;
                         self.current_file = None;
                         self.selected_id = None;
                         self.show_welcome = false;
@@ -776,6 +1521,7 @@ impl PhotonicApp {
                         Ok(loaded) => {
                             self.welcome.add_recent(path.clone(), loaded.name.clone());
                             *doc = loaded;
+                            self.fit_pending = true;
                             self.current_file = Some(path);
                             self.selected_id = None;
                             self.show_welcome = false;
@@ -785,6 +1531,12 @@ impl PhotonicApp {
                             self.file_status = Some(format!("Open failed: {e}"));
                         }
                     },
+                    WelcomeAction::AddDiskRoot => {
+                        if let Some(dir) = run_file_dialog(|| rfd::FileDialog::new().pick_folder())
+                        {
+                            self.welcome.add_disk_root(dir);
+                        }
+                    }
                     WelcomeAction::OpenBrowse => {
                         if let Some(path) = run_file_dialog(|| {
                             rfd::FileDialog::new()
@@ -797,6 +1549,7 @@ impl PhotonicApp {
                                 Ok(loaded) => {
                                     self.welcome.add_recent(path.clone(), loaded.name.clone());
                                     *doc = loaded;
+                                    self.fit_pending = true;
                                     self.current_file = Some(path);
                                     self.selected_id = None;
                                     self.show_welcome = false;
@@ -872,12 +1625,16 @@ impl PhotonicApp {
                         self.audit.panel_open = !self.audit.panel_open;
                     }
 
+                    // Global search (command palette) — tools + actions.
+                    ui.separator();
+                    self.global_search_ui(ui, doc, history);
+
                     // Diff overlay clear button (only visible when a diff is active)
                     if self.diff.overlay_active {
                         ui.separator();
                         if ui
                             .button(
-                                RichText::new("✕ Clear Diff")
+                                RichText::new(format!("{} Clear Diff", ph::X))
                                     .small()
                                     .color(Color32::from_rgb(239, 68, 68)),
                             )
@@ -892,46 +1649,13 @@ impl PhotonicApp {
                     // Pass the file-status message into the toolbar so the zoom
                     // readout and status text share one right-aligned cluster
                     // instead of overlapping in the top-right corner.
-                    panels::draw_toolbar(ui, &doc.name, view.zoom, self.file_status.as_deref());
-                });
-            });
-
-        // ── Drawer pull tabs ─────────────────────────────────────────────────
-        // Persistent thin strip below the toolbar — one small clickable tab per
-        // drawer. Tabs stay visible whether the drawer is open or closed so the
-        // user always has a direct affordance to expand or collapse each drawer.
-        let tab_strip_resp = egui::TopBottomPanel::top("drawer_pull_tabs")
-            .frame(
-                egui::Frame::side_top_panel(&ctx.style())
-                    .inner_margin(egui::Margin::symmetric(6.0, 2.0)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for &kind in &[DrawerKind::File, DrawerKind::Edit, DrawerKind::Tools] {
-                        let is_open = self.active_drawer == Some(kind);
-                        let name = match kind {
-                            DrawerKind::File => "File",
-                            DrawerKind::Edit => "Edit",
-                            DrawerKind::Tools => "Tools",
-                        };
-                        let arrow = if is_open { "▲" } else { "▼" };
-                        let label = format!("{arrow} {name}");
-                        if ui
-                            .selectable_label(is_open, RichText::new(label).small())
-                            .on_hover_text(if is_open {
-                                format!("Close {name} drawer")
-                            } else {
-                                format!("Open {name} drawer")
-                            })
-                            .clicked()
-                        {
-                            if is_open && kind == DrawerKind::Edit {
-                                self.prefs.save();
-                            }
-                            self.active_drawer = if is_open { None } else { Some(kind) };
-                            self.selected_drawer_option = None;
-                        }
-                    }
+                    panels::draw_toolbar(
+                        ui,
+                        &doc.name,
+                        view.zoom,
+                        self.file_status.as_deref(),
+                        self.logo_texture.as_ref(),
+                    );
                 });
             });
 
@@ -947,8 +1671,8 @@ impl PhotonicApp {
         // ── Menu drawer (floating overlay) ────────────────────────────────────
         if let Some(drawer_kind) = self.active_drawer {
             let screen = ctx.screen_rect();
-            // Open the drawer below the pull-tab strip so the tabs remain visible.
-            let toolbar_bottom = tab_strip_resp.response.rect.bottom();
+            // Open the drawer just below the top toolbar.
+            let toolbar_bottom = toolbar_resp.response.rect.bottom();
             let drawer_height = (screen.height() * 0.6).max(300.0);
             let content_height = drawer_height - 24.0; // subtract Frame::popup inner_margin (12 * 2)
             let drawer_width = screen.width();
@@ -1000,6 +1724,7 @@ impl PhotonicApp {
                                                     Ok(loaded) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
                                                         *doc = loaded;
+                                                        self.fit_pending = true;
                                                         self.selected_id = None;
                                                         doc_modified = true;
                                                         self.file_status = Some(format!("Opened {}", path.file_name().unwrap_or_default().to_string_lossy()));
@@ -1143,6 +1868,18 @@ impl PhotonicApp {
                                                 ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.grid_color);
                                             });
                                             ui.checkbox(&mut self.prefs.snap_to_grid, "Snap to Grid");
+                                            ui.checkbox(&mut self.prefs.snap_to_objects, "Snap to Objects")
+                                                .on_hover_text("Align edges/centers to nearby objects while dragging (#66).");
+                                            ui.add_enabled_ui(self.prefs.snap_to_objects, |ui| {
+                                                ui.checkbox(&mut self.prefs.snap_show_guides, "Show Smart Guides");
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Snap Tolerance");
+                                                    ui.add(
+                                                        egui::Slider::new(&mut self.prefs.snap_tolerance_px, 1.0..=20.0)
+                                                            .suffix("px"),
+                                                    );
+                                                });
+                                            });
                                         });
                                         ui.checkbox(&mut self.prefs.show_rulers, "Show Rulers");
                                         ui.checkbox(&mut self.outline_mode, "Outline Mode")
@@ -1187,6 +1924,9 @@ impl PhotonicApp {
                                         ui.add_space(4.0);
                                         ui.checkbox(&mut self.prefs.console_open_on_start, "Open Console on Start");
                                         ui.add_space(4.0);
+                                        ui.checkbox(&mut self.prefs.auto_check_updates, "Check for updates on launch")
+                                            .on_hover_text("Once per launch, ask GitHub for a newer release and show a banner if one exists. No automatic download.");
+                                        ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Arrow nudge (px):");
                                             ui.add(egui::DragValue::new(&mut self.prefs.nudge_distance)
@@ -1195,6 +1935,125 @@ impl PhotonicApp {
                                                 .fixed_decimals(1))
                                                 .on_hover_text("Distance moved per arrow key press (Shift×10)");
                                         });
+                                    }
+                                    Some(4) => {
+                                        ui.label(RichText::new("Keyboard Shortcuts").strong());
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{}  Press Ctrl/Cmd+K anywhere to open the command palette.",
+                                                ph::COMMAND
+                                            ))
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(6.0);
+
+                                        // While capturing, the next non-modifier key press becomes the
+                                        // new binding. Escape cancels.
+                                        if let Some(cap_id) = self.shortcut_capture.clone() {
+                                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                                self.shortcut_capture = None;
+                                            } else if let Some((k, m)) = ui.input(|i| {
+                                                egui::Key::ALL
+                                                    .iter()
+                                                    .copied()
+                                                    .find(|k| {
+                                                        *k != egui::Key::Escape && i.key_pressed(*k)
+                                                    })
+                                                    .map(|k| (k, i.modifiers))
+                                            }) {
+                                                let b = crate::commands::KeyBinding {
+                                                    key: k,
+                                                    ctrl: m.ctrl || m.command || m.mac_cmd,
+                                                    shift: m.shift,
+                                                    alt: m.alt,
+                                                    command: false,
+                                                };
+                                                self.prefs.keymap.insert(cap_id, b);
+                                                self.prefs.save();
+                                                self.shortcut_capture = None;
+                                            }
+                                        }
+
+                                        let mut begin: Option<String> = None;
+                                        let mut reset: Option<String> = None;
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("shortcuts_scroll")
+                                            .max_height((content_height - 70.0).max(120.0))
+                                            .show(ui, |ui| {
+                                                egui::Grid::new("shortcuts_grid")
+                                                    .num_columns(3)
+                                                    .striped(true)
+                                                    .spacing([12.0, 6.0])
+                                                    .show(ui, |ui| {
+                                                        for def in crate::commands::REGISTRY {
+                                                            ui.label(def.label);
+                                                            let binding =
+                                                                self.prefs.resolve_binding(def.id);
+                                                            let capturing = self
+                                                                .shortcut_capture
+                                                                .as_deref()
+                                                                == Some(def.id);
+                                                            let btn_text = if capturing {
+                                                                "Press a key…".to_string()
+                                                            } else {
+                                                                binding
+                                                                    .map(|b| b.display())
+                                                                    .unwrap_or_else(|| "—".to_string())
+                                                            };
+                                                            if ui
+                                                                .add_sized(
+                                                                    [140.0, 20.0],
+                                                                    egui::Button::new(btn_text),
+                                                                )
+                                                                .on_hover_text(
+                                                                    "Click, then press the new shortcut (Esc cancels)",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                begin = Some(def.id.to_string());
+                                                            }
+                                                            ui.horizontal(|ui| {
+                                                                if let Some(b) = binding {
+                                                                    if let Some(other) = self
+                                                                        .prefs
+                                                                        .binding_conflict(def.id, b)
+                                                                    {
+                                                                        ui.colored_label(
+                                                                            Color32::from_rgb(
+                                                                                220, 150, 60,
+                                                                            ),
+                                                                            format!(
+                                                                                "{} conflicts with {}",
+                                                                                ph::WARNING, other
+                                                                            ),
+                                                                        );
+                                                                    }
+                                                                }
+                                                                if self
+                                                                    .prefs
+                                                                    .keymap
+                                                                    .contains_key(def.id)
+                                                                    && ui
+                                                                        .small_button("Reset")
+                                                                        .clicked()
+                                                                {
+                                                                    reset =
+                                                                        Some(def.id.to_string());
+                                                                }
+                                                            });
+                                                            ui.end_row();
+                                                        }
+                                                    });
+                                            });
+                                        if let Some(id) = begin {
+                                            self.shortcut_capture = Some(id);
+                                        }
+                                        if let Some(id) = reset {
+                                            self.prefs.keymap.remove(&id);
+                                            self.prefs.save();
+                                        }
                                     }
                                     _ => {}
                                 },
@@ -1215,7 +2074,8 @@ impl PhotonicApp {
                                 ("Selection & Navigation", &[Tool::Select, Tool::DirectSelect, Tool::Pan]),
                                 ("Shapes", &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Arc, Tool::Polygon, Tool::Star, Tool::Line, Tool::Grid, Tool::PolarGrid]),
                                 ("Drawing & Text", &[Tool::Pen, Tool::ShapeBuilder, Tool::Text]),
-                                ("Path Editing", &[Tool::Scissors, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth]),
+                                ("Path Editing", &[Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth, Tool::Width]),
+                                ("Raster", &[Tool::RasterBrush, Tool::RasterEraser]),
                             ];
 
                             let mut tool_to_activate: Option<Tool> = None;
@@ -1308,6 +2168,7 @@ impl PhotonicApp {
                                 self.point_edit_node = None;
                                 self.point_selected.clear();
                                 self.point_drag_origin = None;
+                                self.point_drag_mode = None;
                                 self.active_tool = tool;
                                 self.active_drawer = None;
                                 self.selected_drawer_option = None;
@@ -1326,7 +2187,6 @@ impl PhotonicApp {
                     .map(|pos| {
                         drawer_resp.response.rect.contains(pos)
                             || toolbar_resp.response.rect.contains(pos)
-                            || tab_strip_resp.response.rect.contains(pos)
                     })
                     .unwrap_or(false);
                 if !clicked_inside {
@@ -1368,9 +2228,9 @@ impl PhotonicApp {
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if mcp_running {
-                            ui.label(RichText::new("MCP :7842 ✓").color(Color32::from_rgb(52, 211, 153)));
+                            ui.label(RichText::new(format!("MCP :7842 {}", ph::CHECK)).color(Color32::from_rgb(52, 211, 153)));
                         } else {
-                            ui.label(RichText::new("MCP offline ✗").color(Color32::from_rgb(248, 113, 113)))
+                            ui.label(RichText::new(format!("MCP offline {}", ph::X)).color(Color32::from_rgb(248, 113, 113)))
                                 .on_hover_text("MCP server failed to bind — another Photonic instance may be running on port 7842");
                         }
                         ui.separator();
@@ -1402,6 +2262,7 @@ impl PhotonicApp {
                     self.point_edit_node = None;
                     self.point_selected.clear();
                     self.point_drag_origin = None;
+                    self.point_drag_mode = None;
                     self.active_tool = tool;
                     if tool != Tool::Select && tool != Tool::DirectSelect {
                         self.selected_id = None;
@@ -1414,6 +2275,10 @@ impl PhotonicApp {
         egui::SidePanel::left("properties")
             .default_width(220.0)
             .min_width(160.0)
+            // Cap the width so content (e.g. the search field sizing off
+            // available_width during egui's sizing pass) can't balloon the
+            // panel to fill the screen.
+            .max_width(360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
@@ -1434,6 +2299,8 @@ impl PhotonicApp {
                         self.selected_id,
                         selection_count,
                         &doc.selection.node_ids.iter().cloned().collect::<Vec<_>>(),
+                        self.point_edit_node,
+                        &self.point_selected,
                         &mut self.prop_search,
                         &mut self.shear_x,
                         &mut self.shear_y,
@@ -1450,6 +2317,7 @@ impl PhotonicApp {
                         &mut self.recolor_palette_input,
                         &mut self.magic_wand_attribute,
                         &mut self.magic_wand_tolerance,
+                        &mut self.eraser_radius,
                         &self.composition_findings,
                         &self.rhythm_findings,
                         &self.branch_names.clone(),
@@ -1555,6 +2423,20 @@ impl PhotonicApp {
                 let rect = ui.available_rect_before_wrap();
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
+                // ── Deferred fit-to-viewport on new/open ─────────────────────
+                // Runs now that the real viewport `rect` is known, so artwork
+                // lands properly scaled in the visible canvas (not the window).
+                if self.fit_pending {
+                    self.fit_pending = false;
+                    fit_artboard_to_rect(view, rect, doc.artboards_bounds());
+                    self.smooth.log_zoom_target = view.zoom.ln();
+                }
+
+                // ── Interactive raster brush / eraser ────────────────────────
+                if matches!(self.active_tool, Tool::RasterBrush | Tool::RasterEraser) {
+                    self.handle_raster_brush(&response, doc, view, history);
+                }
+
                 // ── Cursor coordinate overlay (Info Panel) ───────────────────
                 if let Some(cursor_screen) = ui.input(|i| i.pointer.hover_pos()) {
                     if rect.contains(cursor_screen) {
@@ -1582,6 +2464,14 @@ impl PhotonicApp {
                         fg_painter.rect_filled(text_rect.expand(2.0), 2.0, bg_color);
                         fg_painter.galley(text_pos, galley, text_color);
                     }
+                }
+
+                // ── Raster (pixel) layers ──────────────────────────────────────
+                // Painted over the GPU-rendered vector layer as textured quads,
+                // matching the headless export compositor. Skipped in outline mode.
+                if !self.outline_mode {
+                    let raster_painter = ui.painter_at(rect);
+                    self.paint_raster_nodes(ctx, &raster_painter, doc, view);
                 }
 
                 // ── Outline Mode overlay ──────────────────────────────────────
@@ -1725,7 +2615,7 @@ impl PhotonicApp {
                             painter.text(
                                 egui::pos2(sx + 2.0, rect.min.y + 2.0),
                                 egui::Align2::LEFT_TOP,
-                                format!("{}", c as i64),
+                                self.format_ruler_value(c),
                                 egui::FontId::proportional(9.0),
                                 tick_col,
                             );
@@ -1747,10 +2637,20 @@ impl PhotonicApp {
                                 ],
                                 egui::Stroke::new(1.0, tick_col),
                             );
+                            painter.text(
+                                egui::pos2(rect.min.x + 1.0, sy + 1.0),
+                                egui::Align2::LEFT_TOP,
+                                self.format_ruler_value(c),
+                                egui::FontId::proportional(8.0),
+                                tick_col,
+                            );
                         }
                         c += tick;
                     }
                 }
+
+                // ── Ruler interaction (guides, readout, unit selector) ───────
+                self.handle_ruler_interaction(ui, rect, view, doc, history);
 
                 // ── Guide overlay ─────────────────────────────────────────────
                 // Render horizontal/vertical guide lines across the canvas.
@@ -1810,6 +2710,74 @@ impl PhotonicApp {
                                         );
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // ── Smart guides (object snap) overlay ────────────────────────
+                // While a move drag is snapping the selection to nearby nodes,
+                // draw a dashed line across the canvas at each active alignment
+                // plus a small pixel-distance label (#66). Cleared on release.
+                if self.prefs.snap_show_guides {
+                    if let Some(snap) = &self.last_snap_result {
+                        let painter = ui.painter_at(rect);
+                        let color = egui::Color32::from_rgb(255, 64, 160); // magenta
+                        let stroke = egui::Stroke::new(1.0, color);
+                        for guide in &snap.active {
+                            match guide.axis {
+                                crate::snap::SnapAxis::Vertical => {
+                                    let (sx, _) = view.canvas_to_screen(guide.coord, 0.0);
+                                    let sx = sx as f32;
+                                    if sx >= rect.min.x && sx <= rect.max.x {
+                                        painter.extend(egui::Shape::dashed_line(
+                                            &[
+                                                egui::pos2(sx, rect.min.y),
+                                                egui::pos2(sx, rect.max.y),
+                                            ],
+                                            stroke,
+                                            5.0,
+                                            4.0,
+                                        ));
+                                    }
+                                }
+                                crate::snap::SnapAxis::Horizontal => {
+                                    let (_, sy) = view.canvas_to_screen(0.0, guide.coord);
+                                    let sy = sy as f32;
+                                    if sy >= rect.min.y && sy <= rect.max.y {
+                                        painter.extend(egui::Shape::dashed_line(
+                                            &[
+                                                egui::pos2(rect.min.x, sy),
+                                                egui::pos2(rect.max.x, sy),
+                                            ],
+                                            stroke,
+                                            5.0,
+                                            4.0,
+                                        ));
+                                    }
+                                }
+                            }
+                            // Pixel-distance label near the snap, placed at the
+                            // mid-point of the guide on screen.
+                            let dist_px = (guide.distance * view.zoom).round() as i64;
+                            if dist_px > 0 {
+                                let (lx, ly) = match guide.axis {
+                                    crate::snap::SnapAxis::Vertical => {
+                                        let (sx, _) = view.canvas_to_screen(guide.coord, 0.0);
+                                        (sx as f32 + 4.0, rect.center().y)
+                                    }
+                                    crate::snap::SnapAxis::Horizontal => {
+                                        let (_, sy) = view.canvas_to_screen(0.0, guide.coord);
+                                        (rect.center().x, sy as f32 + 4.0)
+                                    }
+                                };
+                                painter.text(
+                                    egui::pos2(lx, ly),
+                                    egui::Align2::LEFT_TOP,
+                                    format!("{dist_px}px"),
+                                    egui::FontId::proportional(10.0),
+                                    color,
+                                );
                             }
                         }
                     }
@@ -1895,6 +2863,668 @@ impl PhotonicApp {
                             dim_color,
                         );
                     }
+                }
+
+                // ── Artboards: labels, select, drag, resize, rename, add/remove ─
+                let mut over_artboard_label = false;
+                {
+                    let accent = egui::Color32::from_rgb(110, 86, 207);
+                    // Snapshot (id, name, rect) so we can mutate `doc` afterward.
+                    let boards: Vec<(photonic_core::ArtboardId, String, f64, f64, f64, f64)> = doc
+                        .artboards
+                        .iter()
+                        .map(|a| (a.id, a.name.clone(), a.x, a.y, a.width, a.height))
+                        .collect();
+                    let active_id = doc.active_artboard.or_else(|| boards.first().map(|b| b.0));
+                    let mut select: Option<photonic_core::ArtboardId> = None;
+                    let mut start_rename: Option<(photonic_core::ArtboardId, String)> = None;
+
+                    // Show the name + handles for every artboard, including a
+                    // lone one (the name is always visible / editable).
+                    if !boards.is_empty() {
+                        let painter = ui.painter_at(rect);
+                        for (i, (id, name, x, y, w, h)) in boards.iter().enumerate() {
+                            let (sx0, sy0) = view.canvas_to_screen(*x, *y);
+                            let (sx1, sy1) = view.canvas_to_screen(*x + *w, *y + *h);
+                            let is_active = active_id == Some(*id);
+                            let col = if is_active {
+                                accent
+                            } else {
+                                egui::Color32::from_gray(140)
+                            };
+
+                            // Label: a drag handle (left of the name, shown on
+                            // hover) moves the board + its artwork; the name
+                            // selects / double-click renames (text cursor).
+                            let renaming_this =
+                                matches!(&self.artboard_rename, Some((rid, _)) if rid == id);
+                            if !renaming_this {
+                                let galley = painter.layout_no_wrap(
+                                    name.clone(),
+                                    egui::FontId::proportional(12.0),
+                                    col,
+                                );
+                                let handle_w = 16.0_f32;
+                                let name_pos = egui::pos2(sx0 as f32 + handle_w, sy0 as f32 - 19.0);
+                                let name_rect = egui::Rect::from_min_size(name_pos, galley.size());
+                                let handle_rect = egui::Rect::from_min_size(
+                                    egui::pos2(sx0 as f32, sy0 as f32 - 20.0),
+                                    egui::vec2(handle_w, 16.0),
+                                );
+                                let area = handle_rect.union(name_rect).expand(3.0);
+                                let hovered_area = ui
+                                    .input(|i| i.pointer.hover_pos())
+                                    .map_or(false, |p| area.contains(p));
+
+                                // Name → select / rename, with a text-edit cursor.
+                                let nresp = ui.interact(
+                                    name_rect.expand(2.0),
+                                    ui.id().with(("ab_name", i)),
+                                    egui::Sense::click(),
+                                );
+                                if nresp.hovered() {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Text);
+                                    over_artboard_label = true;
+                                }
+                                if nresp.clicked() || nresp.double_clicked() {
+                                    select = Some(*id);
+                                    start_rename = Some((*id, name.clone()));
+                                }
+
+                                // Drag handle → move the board and its artwork.
+                                let hresp = ui.interact(
+                                    handle_rect,
+                                    ui.id().with(("ab_drag", i)),
+                                    egui::Sense::click_and_drag(),
+                                );
+                                if hresp.hovered() {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                    over_artboard_label = true;
+                                }
+                                if hresp.drag_started() {
+                                    if let Some(p) = hresp.interact_pointer_pos() {
+                                        let (cx, cy) =
+                                            view.screen_to_canvas(p.x as f64, p.y as f64);
+                                        // Capture (full clones of) the artwork
+                                        // whose centre lies on this board.
+                                        let mut orig_nodes = Vec::new();
+                                        for node in doc.nodes.values() {
+                                            if let Some((nx0, ny0, nx1, ny1)) =
+                                                text_aware_canvas_bounds(node, renderer)
+                                            {
+                                                let ncx = (nx0 + nx1) * 0.5;
+                                                let ncy = (ny0 + ny1) * 0.5;
+                                                if ncx >= *x
+                                                    && ncx <= *x + *w
+                                                    && ncy >= *y
+                                                    && ncy <= *y + *h
+                                                {
+                                                    orig_nodes.push(node.clone());
+                                                }
+                                            }
+                                        }
+                                        self.artboard_pre = Some(doc.artboards.clone());
+                                        self.artboard_drag = Some(ArtboardDrag {
+                                            id: *id,
+                                            grab_dx: cx - *x,
+                                            grab_dy: cy - *y,
+                                            orig_x: *x,
+                                            orig_y: *y,
+                                            orig_nodes,
+                                        });
+                                        select = Some(*id);
+                                    }
+                                }
+
+                                painter.galley(name_pos, galley, col);
+                                let dragging_this =
+                                    matches!(&self.artboard_drag, Some(d) if d.id == *id);
+                                if hovered_area || is_active || dragging_this {
+                                    painter.text(
+                                        handle_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        ph::DOTS_SIX_VERTICAL,
+                                        egui::FontId::proportional(14.0),
+                                        col,
+                                    );
+                                }
+                            }
+
+                            // Active board: border + corner resize handles.
+                            if is_active {
+                                painter.rect_stroke(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(sx0 as f32, sy0 as f32),
+                                        egui::pos2(sx1 as f32, sy1 as f32),
+                                    ),
+                                    0.0,
+                                    egui::Stroke::new(1.5, accent),
+                                );
+                                let corners = [
+                                    (sx0, sy0, 0u8),
+                                    (sx1, sy0, 1u8),
+                                    (sx0, sy1, 2u8),
+                                    (sx1, sy1, 3u8),
+                                ];
+                                for (hx, hy, hidx) in corners {
+                                    let hc = egui::pos2(hx as f32, hy as f32);
+                                    let hrect =
+                                        egui::Rect::from_center_size(hc, egui::vec2(11.0, 11.0));
+                                    let hresp = ui.interact(
+                                        hrect,
+                                        ui.id().with(("ab_handle", i, hidx)),
+                                        egui::Sense::click_and_drag(),
+                                    );
+                                    if hresp.hovered() {
+                                        ctx.set_cursor_icon(if hidx == 0 || hidx == 3 {
+                                            egui::CursorIcon::ResizeNwSe
+                                        } else {
+                                            egui::CursorIcon::ResizeNeSw
+                                        });
+                                        over_artboard_label = true;
+                                    }
+                                    if hresp.drag_started() {
+                                        self.artboard_pre = Some(doc.artboards.clone());
+                                        self.artboard_resize = Some((*id, hidx, *x, *y, *w, *h));
+                                    }
+                                    painter.rect_filled(hrect.shrink(2.5), 1.0, accent);
+                                    painter.rect_stroke(
+                                        hrect.shrink(2.5),
+                                        1.0,
+                                        egui::Stroke::new(1.0, egui::Color32::WHITE),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Apply an in-progress drag / resize ──────────────────────
+                    let pointer = ui.input(|i| i.pointer.interact_pos());
+                    let down = ui.input(|i| i.pointer.primary_down());
+                    let mut end_artboard_drag = false;
+                    if let Some(d) = self.artboard_drag.as_ref() {
+                        if down {
+                            if let Some(p) = pointer {
+                                let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
+                                let mut nx = self.snap(cx - d.grab_dx);
+                                let mut ny = self.snap(cy - d.grab_dy);
+
+                                // Alignment snapping: snap this board's left/centre/
+                                // right (and top/middle/bottom) to other boards'
+                                // matching edges when within ~8px on screen.
+                                let (bw, bh) = boards
+                                    .iter()
+                                    .find(|b| b.0 == d.id)
+                                    .map(|b| (b.4, b.5))
+                                    .unwrap_or((100.0, 100.0));
+                                let thresh = 8.0 / view.zoom.max(1e-6);
+                                let mut guide_x: Option<f64> = None;
+                                let mut guide_y: Option<f64> = None;
+                                let mut best_dx: Option<f64> = None;
+                                let mut best_dy: Option<f64> = None;
+                                for b in boards.iter().filter(|b| b.0 != d.id) {
+                                    let (ox, oy, ow, oh) = (b.2, b.3, b.4, b.5);
+                                    for mx in [nx, nx + bw * 0.5, nx + bw] {
+                                        for tx in [ox, ox + ow * 0.5, ox + ow] {
+                                            let diff = tx - mx;
+                                            if diff.abs() < thresh
+                                                && best_dx
+                                                    .map_or(true, |bb: f64| diff.abs() < bb.abs())
+                                            {
+                                                best_dx = Some(diff);
+                                                guide_x = Some(tx);
+                                            }
+                                        }
+                                    }
+                                    for my in [ny, ny + bh * 0.5, ny + bh] {
+                                        for ty in [oy, oy + oh * 0.5, oy + oh] {
+                                            let diff = ty - my;
+                                            if diff.abs() < thresh
+                                                && best_dy
+                                                    .map_or(true, |bb: f64| diff.abs() < bb.abs())
+                                            {
+                                                best_dy = Some(diff);
+                                                guide_y = Some(ty);
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(ddx) = best_dx {
+                                    nx += ddx;
+                                }
+                                if let Some(ddy) = best_dy {
+                                    ny += ddy;
+                                }
+
+                                // Equal-distance (distribution) snapping: if the
+                                // gap to a neighbour matches an existing gap
+                                // between boards, lock to it (only when edge
+                                // alignment didn't already claim that axis).
+                                let others: Vec<(f64, f64, f64, f64)> = boards
+                                    .iter()
+                                    .filter(|b| b.0 != d.id)
+                                    .map(|b| (b.2, b.3, b.4, b.5))
+                                    .collect();
+                                let ov_y = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+                                    a.1 < b.1 + b.3 && a.1 + a.3 > b.1
+                                };
+                                let ov_x = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+                                    a.0 < b.0 + b.2 && a.0 + a.2 > b.0
+                                };
+                                let mut dist_x: Vec<((f64, f64, f64, f64), (f64, f64, f64, f64))> =
+                                    Vec::new();
+                                let mut dist_y: Vec<((f64, f64, f64, f64), (f64, f64, f64, f64))> =
+                                    Vec::new();
+
+                                if best_dx.is_none() {
+                                    let mut gaps: Vec<f64> = Vec::new();
+                                    for i in 0..others.len() {
+                                        for j in 0..others.len() {
+                                            if i != j && ov_y(others[i], others[j]) {
+                                                let g = others[j].0 - (others[i].0 + others[i].2);
+                                                if g > 1.0 {
+                                                    gaps.push(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut best_adj: Option<f64> = None;
+                                    let mut snap_g: Option<f64> = None;
+                                    for &o in &others {
+                                        if !ov_y((nx, ny, bw, bh), o) {
+                                            continue;
+                                        }
+                                        for &g in &gaps {
+                                            for t in [o.0 + o.2 + g, o.0 - g - bw] {
+                                                let a = t - nx;
+                                                if a.abs() < thresh
+                                                    && best_adj
+                                                        .map_or(true, |b: f64| a.abs() < b.abs())
+                                                {
+                                                    best_adj = Some(a);
+                                                    snap_g = Some(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if let Some(adj) = best_adj {
+                                        nx += adj;
+                                    }
+                                    if let Some(g) = snap_g {
+                                        let dn = (nx, ny, bw, bh);
+                                        for &o in &others {
+                                            if ov_y(dn, o) {
+                                                if ((dn.0 - (o.0 + o.2)) - g).abs() < 0.6 {
+                                                    dist_x.push((o, dn));
+                                                }
+                                                if ((o.0 - (dn.0 + dn.2)) - g).abs() < 0.6 {
+                                                    dist_x.push((dn, o));
+                                                }
+                                            }
+                                        }
+                                        for i in 0..others.len() {
+                                            for j in 0..others.len() {
+                                                if i != j && ov_y(others[i], others[j]) {
+                                                    let gg =
+                                                        others[j].0 - (others[i].0 + others[i].2);
+                                                    if (gg - g).abs() < 0.6 {
+                                                        dist_x.push((others[i], others[j]));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if best_dy.is_none() {
+                                    let mut gaps: Vec<f64> = Vec::new();
+                                    for i in 0..others.len() {
+                                        for j in 0..others.len() {
+                                            if i != j && ov_x(others[i], others[j]) {
+                                                let g = others[j].1 - (others[i].1 + others[i].3);
+                                                if g > 1.0 {
+                                                    gaps.push(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut best_adj: Option<f64> = None;
+                                    let mut snap_g: Option<f64> = None;
+                                    for &o in &others {
+                                        if !ov_x((nx, ny, bw, bh), o) {
+                                            continue;
+                                        }
+                                        for &g in &gaps {
+                                            for t in [o.1 + o.3 + g, o.1 - g - bh] {
+                                                let a = t - ny;
+                                                if a.abs() < thresh
+                                                    && best_adj
+                                                        .map_or(true, |b: f64| a.abs() < b.abs())
+                                                {
+                                                    best_adj = Some(a);
+                                                    snap_g = Some(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if let Some(adj) = best_adj {
+                                        ny += adj;
+                                    }
+                                    if let Some(g) = snap_g {
+                                        let dn = (nx, ny, bw, bh);
+                                        for &o in &others {
+                                            if ov_x(dn, o) {
+                                                if ((dn.1 - (o.1 + o.3)) - g).abs() < 0.6 {
+                                                    dist_y.push((o, dn));
+                                                }
+                                                if ((o.1 - (dn.1 + dn.3)) - g).abs() < 0.6 {
+                                                    dist_y.push((dn, o));
+                                                }
+                                            }
+                                        }
+                                        for i in 0..others.len() {
+                                            for j in 0..others.len() {
+                                                if i != j && ov_x(others[i], others[j]) {
+                                                    let gg =
+                                                        others[j].1 - (others[i].1 + others[i].3);
+                                                    if (gg - g).abs() < 0.6 {
+                                                        dist_y.push((others[i], others[j]));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let dx = nx - d.orig_x;
+                                let dy = ny - d.orig_y;
+                                if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == d.id) {
+                                    ab.x = nx;
+                                    ab.y = ny;
+                                }
+                                // Move the artwork that sits on the board with it.
+                                for on in &d.orig_nodes {
+                                    if let Some(node) = doc.nodes.get_mut(&on.id) {
+                                        node.transform.matrix[4] = on.transform.matrix[4] + dx;
+                                        node.transform.matrix[5] = on.transform.matrix[5] + dy;
+                                    }
+                                }
+                                doc_modified = true;
+
+                                // Draw the alignment guide lines (full viewport).
+                                let gp = ui.painter_at(rect);
+                                let guide = egui::Color32::from_rgb(150, 128, 240);
+                                if let Some(gx) = guide_x {
+                                    let (sx, _) = view.canvas_to_screen(gx, 0.0);
+                                    gp.line_segment(
+                                        [
+                                            egui::pos2(sx as f32, rect.top()),
+                                            egui::pos2(sx as f32, rect.bottom()),
+                                        ],
+                                        egui::Stroke::new(1.0, guide),
+                                    );
+                                }
+                                if let Some(gy) = guide_y {
+                                    let (_, sy) = view.canvas_to_screen(0.0, gy);
+                                    gp.line_segment(
+                                        [
+                                            egui::pos2(rect.left(), sy as f32),
+                                            egui::pos2(rect.right(), sy as f32),
+                                        ],
+                                        egui::Stroke::new(1.0, guide),
+                                    );
+                                }
+                                // Equal-distance measurements between matching boards.
+                                for (l, r) in &dist_x {
+                                    draw_h_gap(&gp, view, *l, *r, guide);
+                                }
+                                for (t, b) in &dist_y {
+                                    draw_v_gap(&gp, view, *t, *b, guide);
+                                }
+                            }
+                        } else {
+                            end_artboard_drag = true;
+                        }
+                    }
+                    if end_artboard_drag {
+                        // Record the completed move (board + artwork) as one
+                        // undoable, change-logged step.
+                        if let Some(d) = self.artboard_drag.take() {
+                            let mut cmds: Vec<Command> = Vec::new();
+                            if let Some(pre) = self.artboard_pre.take() {
+                                if pre != doc.artboards {
+                                    cmds.push(Command::SetArtboards {
+                                        old: pre,
+                                        new: doc.artboards.clone(),
+                                    });
+                                }
+                            }
+                            for on in &d.orig_nodes {
+                                if let Some(cur) = doc.nodes.get(&on.id) {
+                                    if cur.transform.matrix != on.transform.matrix {
+                                        cmds.push(Command::UpdateNode {
+                                            old: on.clone(),
+                                            new: cur.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                            if !cmds.is_empty() {
+                                history.execute(Command::Batch(cmds), doc);
+                                doc_modified = true;
+                            }
+                        }
+                    }
+                    if let Some((id, hidx, ox, oy, ow, oh)) = self.artboard_resize {
+                        if down {
+                            if let Some(p) = pointer {
+                                let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
+                                let (mut x0, mut y0, mut x1, mut y1) = (ox, oy, ox + ow, oy + oh);
+                                match hidx {
+                                    0 => {
+                                        x0 = self.snap(cx);
+                                        y0 = self.snap(cy);
+                                    }
+                                    1 => {
+                                        x1 = self.snap(cx);
+                                        y0 = self.snap(cy);
+                                    }
+                                    2 => {
+                                        x0 = self.snap(cx);
+                                        y1 = self.snap(cy);
+                                    }
+                                    _ => {
+                                        x1 = self.snap(cx);
+                                        y1 = self.snap(cy);
+                                    }
+                                }
+                                if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == id) {
+                                    ab.x = x0.min(x1);
+                                    ab.y = y0.min(y1);
+                                    ab.width = (x1 - x0).abs().max(16.0);
+                                    ab.height = (y1 - y0).abs().max(16.0);
+                                    doc_modified = true;
+                                }
+                            }
+                        } else {
+                            // Resize released — record it.
+                            self.artboard_resize = None;
+                            if let Some(pre) = self.artboard_pre.take() {
+                                if pre != doc.artboards {
+                                    history.execute(
+                                        Command::SetArtboards {
+                                            old: pre,
+                                            new: doc.artboards.clone(),
+                                        },
+                                        doc,
+                                    );
+                                    doc_modified = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(id) = select {
+                        doc.active_artboard = Some(id);
+                        doc_modified = true;
+                    }
+                    if let Some(r) = start_rename {
+                        self.artboard_pre = Some(doc.artboards.clone());
+                        self.artboard_rename = Some(r);
+                        self.artboard_rename_focus = true;
+                    }
+
+                    // ── Inline rename popup ─────────────────────────────────────
+                    if let Some((rid, _)) = self.artboard_rename.clone() {
+                        if let Some((bx, by)) =
+                            boards.iter().find(|b| b.0 == rid).map(|b| (b.2, b.3))
+                        {
+                            let (sx0, sy0) = view.canvas_to_screen(bx, by);
+                            let mut close: Option<bool> = None; // Some(true)=commit
+                            egui::Area::new(ui.id().with(("ab_rename", rid)))
+                                .fixed_pos(egui::pos2(sx0 as f32 + 16.0, sy0 as f32 - 24.0))
+                                .order(egui::Order::Foreground)
+                                .show(ctx, |ui| {
+                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                        if let Some((_, buf)) = self.artboard_rename.as_mut() {
+                                            let r = ui.add(
+                                                egui::TextEdit::singleline(buf)
+                                                    .desired_width(140.0),
+                                            );
+                                            // Focus once when opened (not every
+                                            // frame) so clicking away can commit.
+                                            if self.artboard_rename_focus {
+                                                r.request_focus();
+                                                self.artboard_rename_focus = false;
+                                            }
+                                            // Commit on focus loss (Enter or click
+                                            // away); Escape cancels.
+                                            let esc =
+                                                ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                            if esc {
+                                                close = Some(false);
+                                            } else if r.lost_focus() {
+                                                close = Some(true);
+                                            }
+                                        }
+                                    });
+                                });
+                            match close {
+                                Some(true) => {
+                                    if let Some((id, buf)) = self.artboard_rename.take() {
+                                        let name = buf.trim().to_string();
+                                        if !name.is_empty() {
+                                            if let Some(ab) =
+                                                doc.artboards.iter_mut().find(|a| a.id == id)
+                                            {
+                                                ab.name = name;
+                                                doc_modified = true;
+                                            }
+                                        }
+                                    }
+                                    // Record the rename.
+                                    if let Some(pre) = self.artboard_pre.take() {
+                                        if pre != doc.artboards {
+                                            history.execute(
+                                                Command::SetArtboards {
+                                                    old: pre,
+                                                    new: doc.artboards.clone(),
+                                                },
+                                                doc,
+                                            );
+                                        }
+                                    }
+                                }
+                                Some(false) => {
+                                    self.artboard_rename = None;
+                                    self.artboard_pre = None;
+                                }
+                                None => {}
+                            }
+                        } else {
+                            self.artboard_rename = None;
+                        }
+                    }
+
+                    // Compact add/remove toolbar pinned to the viewport corner.
+                    let mut do_add = false;
+                    let mut do_remove = false;
+                    egui::Area::new(ui.id().with("artboard_tools"))
+                        // Sit above the cursor-coordinate readout (bottom-left).
+                        .fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 58.0))
+                        .show(ctx, |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("Artboards: {}", boards.len()))
+                                            .size(11.5),
+                                    );
+                                    if ui.add(egui::Button::new(ph::PLUS).small()).clicked() {
+                                        do_add = true;
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            boards.len() > 1,
+                                            egui::Button::new(ph::MINUS).small(),
+                                        )
+                                        .clicked()
+                                    {
+                                        do_remove = true;
+                                    }
+                                });
+                            });
+                        });
+                    if do_add {
+                        let pre = doc.artboards.clone();
+                        let (_, by0, bx1, _) = doc.artboards_bounds();
+                        let (aw, ah) = doc
+                            .active_artboard()
+                            .map(|a| (a.width, a.height))
+                            .unwrap_or((doc.width, doc.height));
+                        let gap = (aw * 0.06).max(40.0);
+                        let n = doc.artboards.len() + 1;
+                        let ab = photonic_core::Artboard::new(
+                            format!("Artboard {n}"),
+                            bx1 + gap,
+                            by0,
+                            aw,
+                            ah,
+                        );
+                        doc.add_artboard(ab);
+                        history.execute(
+                            Command::SetArtboards {
+                                old: pre,
+                                new: doc.artboards.clone(),
+                            },
+                            doc,
+                        );
+                        doc_modified = true;
+                    }
+                    if do_remove {
+                        if let Some(id) = doc.active_artboard {
+                            let pre = doc.artboards.clone();
+                            doc.remove_artboard(id);
+                            if pre != doc.artboards {
+                                history.execute(
+                                    Command::SetArtboards {
+                                        old: pre,
+                                        new: doc.artboards.clone(),
+                                    },
+                                    doc,
+                                );
+                                doc_modified = true;
+                            }
+                        }
+                    }
+                }
+
+                // While manipulating or hovering an artboard label/handle, don't
+                // let the regular tools also act (or override the cursor).
+                if over_artboard_label
+                    || self.artboard_drag.is_some()
+                    || self.artboard_resize.is_some()
+                    || self.artboard_rename.is_some()
+                {
+                    return;
                 }
 
                 // ── Right-click radial wheel ──────────────────────────────────
@@ -2408,6 +4038,18 @@ impl PhotonicApp {
                     return;
                 }
 
+                // ── Knife tool (freehand slice) ───────────────────────────────
+                if self.active_tool == Tool::Knife {
+                    self.handle_knife_tool(ui, &response, doc, view, &mut doc_modified, history);
+                    return;
+                }
+
+                // ── Eraser tool (vector boolean subtract) ─────────────────────
+                if self.active_tool == Tool::Eraser {
+                    self.handle_eraser_tool(ui, &response, doc, view, &mut doc_modified, history);
+                    return;
+                }
+
                 // ── Magic Wand tool ───────────────────────────────────────────
                 if self.active_tool == Tool::MagicWand {
                     ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -2693,6 +4335,12 @@ impl PhotonicApp {
                     if response.dragged_by(egui::PointerButton::Primary) {
                         return;
                     }
+                }
+
+                // ── Width tool (interactive variable-width stroke editing) ────
+                if self.active_tool == Tool::Width {
+                    self.handle_width_tool(ui, &response, doc, view, &mut doc_modified, history);
+                    return;
                 }
 
                 // ── Text tool ─────────────────────────────────────────────────
@@ -5446,6 +7094,8 @@ impl PhotonicApp {
                                 tn.stroke = Stroke::none();
                             }
                             SceneNodeKind::Group(_) => {}
+                            // raster nodes have no vector fill/stroke
+                            SceneNodeKind::Raster(_) => {}
                         }
                         history.execute(
                             Command::AddNode {
@@ -6021,12 +7671,14 @@ impl PhotonicApp {
                                                 SceneNodeKind::Path(_) => "path",
                                                 SceneNodeKind::Text(_) => "text",
                                                 SceneNodeKind::Group(_) => "group",
+                                                SceneNodeKind::Raster(_) => "raster",
                                             })
                                             .unwrap_or("");
                                         let this_kind = match &node.kind {
                                             SceneNodeKind::Path(_) => "path",
                                             SceneNodeKind::Text(_) => "text",
                                             SceneNodeKind::Group(_) => "group",
+                                            SceneNodeKind::Raster(_) => "raster",
                                         };
                                         this_kind == ref_kind
                                     }
@@ -6250,6 +7902,31 @@ impl PhotonicApp {
                     doc_modified = true;
                 }
 
+                PanelAction::RenameWidthProfile { old_name, new_name } => {
+                    let new_name = new_name.trim().to_string();
+                    let exists = doc.width_profiles.iter().any(|p| p.name == old_name);
+                    let clashes = doc
+                        .width_profiles
+                        .iter()
+                        .any(|p| p.name == new_name && p.name != old_name);
+                    if exists && !new_name.is_empty() && !clashes {
+                        let before = doc.width_profiles.clone();
+                        let mut after = before.clone();
+                        if let Some(p) = after.iter_mut().find(|p| p.name == old_name) {
+                            p.name = new_name;
+                        }
+                        history.execute(
+                            Command::SetWidthProfiles {
+                                old: before,
+                                new: after,
+                            },
+                            doc,
+                        );
+                        self.width_profile_name_input.clear();
+                        doc_modified = true;
+                    }
+                }
+
                 PanelAction::SaveGraphicStyle { node_id, name } => {
                     use photonic_core::GraphicStyle;
                     if let Some(node) = doc.nodes.get(&node_id) {
@@ -6260,6 +7937,11 @@ impl PhotonicApp {
                                 (tn.fill.clone(), Stroke::none())
                             }
                             SceneNodeKind::Group(_) => {
+                                use photonic_core::style::{Fill, Stroke};
+                                (Fill::default(), Stroke::none())
+                            }
+                            // raster nodes have no vector fill/stroke
+                            SceneNodeKind::Raster(_) => {
                                 use photonic_core::style::{Fill, Stroke};
                                 (Fill::default(), Stroke::none())
                             }
@@ -6305,6 +7987,8 @@ impl PhotonicApp {
                                     tn.fill = fill;
                                 }
                                 SceneNodeKind::Group(_) => {}
+                                // raster nodes have no vector fill/stroke
+                                SceneNodeKind::Raster(_) => {}
                             }
                             history.execute(
                                 Command::UpdateNode {
@@ -6382,6 +8066,8 @@ impl PhotonicApp {
                                     tn.fill = bake_fill(&tn.fill, combined);
                                 }
                                 SceneNodeKind::Group(_) => {}
+                                // raster nodes have no vector fill to bake
+                                SceneNodeKind::Raster(_) => {}
                             }
                             cmds.push(Command::UpdateNode {
                                 old: node.clone(),
@@ -6753,6 +8439,8 @@ impl PhotonicApp {
                                         tn.fill = fill;
                                     }
                                     SceneNodeKind::Group(_) => {}
+                                    // raster nodes have no vector fill
+                                    SceneNodeKind::Raster(_) => {}
                                 }
                                 history.execute(
                                     Command::UpdateNode {
@@ -6888,6 +8576,8 @@ impl PhotonicApp {
                                 _ => (0.0, 0.0, 0.0, true),
                             },
                             SceneNodeKind::Group(_) => (0.5, 0.5, 0.5, false),
+                            // raster nodes have no vector fill color
+                            SceneNodeKind::Raster(_) => (0.5, 0.5, 0.5, false),
                         };
                         infos.push(Info {
                             bx,
@@ -6924,34 +8614,44 @@ impl PhotonicApp {
                         if h_imb > 40 {
                             let side = if left > right { "left" } else { "right" };
                             findings.push(format!(
-                                "⚠ Balance: {}% more objects on the {} ({} left, {} right).",
-                                h_imb, side, left, right
+                                "{} Balance: {}% more objects on the {} ({} left, {} right).",
+                                ph::WARNING,
+                                h_imb,
+                                side,
+                                left,
+                                right
                             ));
                         }
                         if v_imb > 40 {
                             let side = if top > bottom { "top" } else { "bottom" };
                             findings.push(format!(
-                                "ℹ Balance: {}% more objects near the {} ({} top, {} bottom).",
-                                v_imb, side, top, bottom
+                                "{} Balance: {}% more objects near the {} ({} top, {} bottom).",
+                                ph::INFO,
+                                v_imb,
+                                side,
+                                top,
+                                bottom
                             ));
                         }
                         if h_imb <= 20 && v_imb <= 20 {
-                            findings.push(
-                                "✓ Balance: objects distributed evenly across quadrants."
-                                    .to_string(),
-                            );
+                            findings.push(format!(
+                                "{} Balance: objects distributed evenly across quadrants.",
+                                ph::CHECK
+                            ));
                         }
                         let total_area: f64 = infos.iter().map(|n| n.bw * n.bh).sum();
                         let canvas_area = (canvas_w * canvas_h).max(1.0);
                         let density = (total_area / canvas_area * 100.0).min(200.0);
                         if density < 5.0 {
                             findings.push(format!(
-                                "ℹ Density: very sparse ({:.1}% canvas coverage).",
+                                "{} Density: very sparse ({:.1}% canvas coverage).",
+                                ph::INFO,
                                 density
                             ));
                         } else if density > 120.0 {
                             findings.push(format!(
-                                "⚠ Density: may be overcrowded ({:.1}% combined coverage).",
+                                "{} Density: may be overcrowded ({:.1}% combined coverage).",
+                                ph::WARNING,
                                 density
                             ));
                         }
@@ -6974,7 +8674,8 @@ impl PhotonicApp {
                         }
                         if overlap_count > 0 {
                             findings.push(format!(
-                                "ℹ Overlaps: {} overlapping object pair(s) detected.",
+                                "{} Overlaps: {} overlapping object pair(s) detected.",
+                                ph::INFO,
                                 overlap_count
                             ));
                         }
@@ -6990,7 +8691,7 @@ impl PhotonicApp {
                             })
                             .collect();
                         if unique_colors.len() > 12 {
-                            findings.push(format!("ℹ Colors: {} unique fill colors — consider reducing for visual cohesion.", unique_colors.len()));
+                            findings.push(format!("{} Colors: {} unique fill colors — consider reducing for visual cohesion.", ph::INFO, unique_colors.len()));
                         }
                         let off_canvas = infos
                             .iter()
@@ -7002,14 +8703,15 @@ impl PhotonicApp {
                             })
                             .count();
                         if off_canvas > 0 {
-                            findings.push(format!("⚠ Off-canvas: {} object(s) outside bounds — won't appear in exports.", off_canvas));
+                            findings.push(format!("{} Off-canvas: {} object(s) outside bounds — won't appear in exports.", ph::WARNING, off_canvas));
                         }
                         if findings
                             .iter()
-                            .all(|f| f.starts_with('✓') || f.starts_with('ℹ'))
+                            .all(|f| f.starts_with(ph::CHECK) || f.starts_with(ph::INFO))
                         {
                             findings.push(format!(
-                                "✓ {} node(s) analyzed. No critical issues.",
+                                "{} {} node(s) analyzed. No critical issues.",
+                                ph::CHECK,
                                 infos.len()
                             ));
                         }
@@ -7350,6 +9052,8 @@ impl PhotonicApp {
                                 }
                             }
                             SceneNodeKind::Group(_) => {}
+                            // raster nodes contribute no vector fill colors or text size
+                            SceneNodeKind::Raster(_) => {}
                         }
                     }
                     let layer_names: Vec<String> = doc
@@ -8204,6 +9908,116 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::SetAnchorPosition {
+                    node_id,
+                    index,
+                    x,
+                    y,
+                } => {
+                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            let new_bez =
+                                bez_set_anchor_position(&pn.path_data.to_bez_path(), index, x, y);
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
+                                np.path_data = PathData::from_bez_path(&new_bez);
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node,
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::RoundSelectedCorners {
+                    node_id,
+                    indices,
+                    radius,
+                } => {
+                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            let bez = pn.path_data.to_bez_path();
+                            // Only fillet true straight corners — rounding a
+                            // curve-adjacent anchor would flatten the curve.
+                            let straight = straight_corners(&bez);
+                            let sel: std::collections::HashSet<usize> = indices
+                                .iter()
+                                .copied()
+                                .filter(|i| straight.contains_key(i))
+                                .collect();
+                            let new_bez = round_selected_corners(&bez, &sel, radius);
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
+                                np.path_data = PathData::from_bez_path(&new_bez);
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node,
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            // Rounding restructures element indices; drop the stale selection.
+                            self.point_selected.clear();
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::ConvertAnchorType {
+                    node_id,
+                    indices,
+                    smooth,
+                } => {
+                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            let sel: std::collections::HashSet<usize> =
+                                indices.iter().copied().collect();
+                            let new_bez =
+                                bez_convert_anchors(&pn.path_data.to_bez_path(), &sel, smooth);
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
+                                np.path_data = PathData::from_bez_path(&new_bez);
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node,
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::DeleteAnchors { node_id, indices } => {
+                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            let new_bez =
+                                bez_remove_elements(&pn.path_data.to_bez_path(), &indices);
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
+                                np.path_data = PathData::from_bez_path(&new_bez);
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node,
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            self.point_selected.clear();
+                            doc_modified = true;
+                        }
+                    }
+                }
+
                 PanelAction::WarpEnvelope {
                     node_ids,
                     warp_type,
@@ -8871,6 +10685,7 @@ impl PhotonicApp {
                             }
                         }
                         self.selected_id = doc.selection.ids().next().copied();
+                        self.invalidate_point_edit(doc);
                         doc_modified = true;
                     } else if target > current {
                         for _ in 0..(target - current) {
@@ -8879,6 +10694,7 @@ impl PhotonicApp {
                             }
                         }
                         self.selected_id = doc.selection.ids().next().copied();
+                        self.invalidate_point_edit(doc);
                         doc_modified = true;
                     }
                 }
@@ -9154,1939 +10970,174 @@ impl PhotonicApp {
 
     // ── Select tool handler ───────────────────────────────────────────────────
 
-    fn handle_select_tool(
+    /// Apply a global-search result (set a tool or run a command).
+    fn apply_search(
         &mut self,
-        ui: &egui::Ui,
-        response: &egui::Response,
+        action: crate::global_search::SearchAction,
         doc: &mut Document,
-        view: &CanvasView,
-        renderer: &mut PhotonicRenderer,
-        doc_modified: &mut bool,
         history: &mut CommandHistory,
     ) {
-        // ── Keyboard shortcuts (skipped when a text widget has focus) ─────────
-        if viewport_kb(ui.ctx()) {
-            if let Some(sel_id) = self.selected_id {
-                let (delete, ctrl, shift, bracket_right, bracket_left, key_g) = ui.input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                        i.modifiers.ctrl,
-                        i.modifiers.shift,
-                        i.key_pressed(egui::Key::CloseBracket),
-                        i.key_pressed(egui::Key::OpenBracket),
-                        i.key_pressed(egui::Key::G),
-                    )
-                });
-
-                // Delete / Backspace: remove all selected nodes
-                if delete {
-                    let ids_to_delete: Vec<NodeId> = doc.selection.ids().copied().collect();
-                    for id in ids_to_delete {
-                        doc.remove_node(&id);
-                    }
-                    doc.selection.clear();
-                    self.selected_id = None;
-                    *doc_modified = true;
-                    return;
-                }
-
-                // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
-                if ctrl && (bracket_right || bracket_left) {
-                    if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
-                        let layer_len = doc
-                            .layers
-                            .get(&layer_id)
-                            .map(|l| l.node_ids.len())
-                            .unwrap_or(0);
-                        if layer_len > 0 {
-                            let new_index = if bracket_right && shift {
-                                layer_len - 1 // Bring to Front
-                            } else if bracket_left && shift {
-                                0 // Send to Back
-                            } else if bracket_right {
-                                (cur_idx + 1).min(layer_len - 1) // Bring Forward
-                            } else {
-                                cur_idx.saturating_sub(1) // Send Backward
-                            };
-                            if new_index != cur_idx {
-                                let cmd = Command::ReorderNode {
-                                    layer_id,
-                                    node_id: sel_id,
-                                    old_index: cur_idx,
-                                    new_index,
-                                };
-                                history.execute(cmd, doc);
-                                *doc_modified = true;
-                            }
-                        }
-                    }
-                }
-
-                // Ctrl+Shift+G: ungroup (only if selected node is a group)
-                if ctrl && shift && key_g {
-                    if let Some(node) = doc.get_node(&sel_id) {
-                        if let SceneNodeKind::Group(g) = &node.kind {
-                            let children = g.children.clone();
-                            let node_clone = node.clone();
-                            if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id)
-                            {
-                                let first_child = children.first().copied();
-                                let cmd = Command::UngroupNodes {
-                                    group: node_clone,
-                                    layer_id,
-                                    group_index,
-                                    children,
-                                };
-                                history.execute(cmd, doc);
-                                self.selected_id = first_child;
-                                if let Some(fc) = first_child {
-                                    doc.selection = Selection::single(fc);
-                                } else {
-                                    doc.selection.clear();
-                                }
-                                *doc_modified = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Ctrl+G: group selected nodes (requires 2+ in selection)
-            let (ctrl_g, shift_g) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
-                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
-                )
-            });
-            if ctrl_g && !shift_g && doc.selection.count() >= 2 {
-                self.do_group_selected(doc, history, doc_modified);
-            }
-
-            // Ctrl+Y: toggle Outline Mode
-            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
-                self.outline_mode = !self.outline_mode;
-            }
-
-            // Ctrl+;: toggle guide visibility
-            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Semicolon)) {
-                self.guides_visible = !self.guides_visible;
-            }
-
-            // Ctrl+C: copy selected nodes to in-process clipboard.
-            if ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::C)) {
-                self.gui_clipboard.clear();
-                for nid in doc.selection.ids() {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        self.gui_clipboard.push(node.clone());
-                    }
-                }
-            }
-
-            // Ctrl+V: paste from clipboard with +10px offset.
-            // Ctrl+Shift+V: paste in place (exact original coordinates).
-            let (paste, paste_in_place) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V),
-                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::V),
-                )
-            });
-            if (paste || paste_in_place) && !self.gui_clipboard.is_empty() {
-                let offset = if paste { 10.0_f64 } else { 0.0 };
-                if let Some(target_layer) = doc
-                    .active_layer_id
-                    .or_else(|| doc.layer_order.first().copied())
-                {
-                    let mut cmds: Vec<Command> = Vec::new();
-                    let mut new_ids: Vec<NodeId> = Vec::new();
-                    for src in &self.gui_clipboard {
-                        let mut new_node = src.clone();
-                        new_node.id = uuid::Uuid::new_v4();
-                        new_node.layer_id = target_layer;
-                        if offset.abs() > 1e-9 {
-                            new_node.transform.matrix[4] += offset;
-                            new_node.transform.matrix[5] += offset;
-                        }
-                        new_ids.push(new_node.id);
-                        cmds.push(Command::AddNode {
-                            node: new_node,
-                            layer_id: Some(target_layer),
-                        });
-                    }
-                    if !cmds.is_empty() {
-                        history.execute(Command::Batch(cmds), doc);
-                        doc.selection = Selection::from_ids(new_ids.iter().copied());
-                        if let Some(first) = new_ids.first() {
-                            self.selected_id = Some(*first);
-                        }
-                        *doc_modified = true;
-                    }
-                }
-            }
-
-            // Ctrl+Shift+H: flip horizontal / Ctrl+Shift+V: flip vertical
-            if ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::H)) {
-                let sel: Vec<NodeId> = doc.selection.node_ids.iter().copied().collect();
-                for nid in &sel {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        if let SceneNodeKind::Path(pn) = &node.kind {
-                            use kurbo::Shape;
-                            let bez = pn.path_data.to_bez_path();
-                            let bbox = bez.bounding_box();
-                            let cx = bbox.x0 + bbox.width() / 2.0;
-                            let mut new_bez = BezPath::new();
-                            for el in bez.elements() {
-                                let flip = |p: kurbo::Point| kurbo::Point::new(2.0 * cx - p.x, p.y);
-                                match *el {
-                                    PathEl::MoveTo(p) => new_bez.move_to(flip(p)),
-                                    PathEl::LineTo(p) => new_bez.line_to(flip(p)),
-                                    PathEl::CurveTo(c1, c2, p) => {
-                                        new_bez.curve_to(flip(c1), flip(c2), flip(p))
-                                    }
-                                    PathEl::QuadTo(c, p) => new_bez.quad_to(flip(c), flip(p)),
-                                    PathEl::ClosePath => new_bez.close_path(),
-                                }
-                            }
-                            let mut new_node = node.clone();
-                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
-                                np.path_data = PathData::from_bez_path(&new_bez);
-                            }
-                            history.execute(
-                                Command::UpdateNode {
-                                    old: node.clone(),
-                                    new: new_node,
-                                },
-                                doc,
-                            );
-                            *doc_modified = true;
-                        }
-                    }
-                }
-            }
-            if ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::J)) {
-                let sel: Vec<NodeId> = doc.selection.node_ids.iter().copied().collect();
-                for nid in &sel {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        if let SceneNodeKind::Path(pn) = &node.kind {
-                            use kurbo::Shape;
-                            let bez = pn.path_data.to_bez_path();
-                            let bbox = bez.bounding_box();
-                            let cy = bbox.y0 + bbox.height() / 2.0;
-                            let mut new_bez = BezPath::new();
-                            for el in bez.elements() {
-                                let flip = |p: kurbo::Point| kurbo::Point::new(p.x, 2.0 * cy - p.y);
-                                match *el {
-                                    PathEl::MoveTo(p) => new_bez.move_to(flip(p)),
-                                    PathEl::LineTo(p) => new_bez.line_to(flip(p)),
-                                    PathEl::CurveTo(c1, c2, p) => {
-                                        new_bez.curve_to(flip(c1), flip(c2), flip(p))
-                                    }
-                                    PathEl::QuadTo(c, p) => new_bez.quad_to(flip(c), flip(p)),
-                                    PathEl::ClosePath => new_bez.close_path(),
-                                }
-                            }
-                            let mut new_node = node.clone();
-                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
-                                np.path_data = PathData::from_bez_path(&new_bez);
-                            }
-                            history.execute(
-                                Command::UpdateNode {
-                                    old: node.clone(),
-                                    new: new_node,
-                                },
-                                doc,
-                            );
-                            *doc_modified = true;
-                        }
-                    }
-                }
-            }
-
-            // Ctrl+Z: undo / Ctrl+R: redo
-
-            let (ctrl_z, ctrl_r) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                    i.modifiers.ctrl && i.key_pressed(egui::Key::R),
-                )
-            });
-            if ctrl_z {
+        use crate::global_search::SearchAction as A;
+        match action {
+            A::Tool(t) => self.active_tool = t,
+            A::ToggleGrid => self.prefs.show_grid = !self.prefs.show_grid,
+            A::ToggleGuides => self.guides_visible = !self.guides_visible,
+            A::ToggleAudit => self.audit.panel_open = !self.audit.panel_open,
+            A::FileMenu => self.active_drawer = Some(DrawerKind::File),
+            A::EditMenu => self.active_drawer = Some(DrawerKind::Edit),
+            A::ToolsMenu => self.active_drawer = Some(DrawerKind::Tools),
+            A::Undo => {
                 if history.undo(doc) {
-                    self.selected_id = doc.selection.ids().next().copied();
-                    *doc_modified = true;
+                    self.invalidate_point_edit(doc);
                 }
             }
-            if ctrl_r {
+            A::Redo => {
                 if history.redo(doc) {
-                    self.selected_id = doc.selection.ids().next().copied();
-                    *doc_modified = true;
+                    self.invalidate_point_edit(doc);
                 }
             }
-        } // end viewport_kb
-
-        // ── Isolation Mode: Escape exits ─────────────────────────────────────
-        if self.isolated_group.is_some() {
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.isolated_group = None;
-                doc.selection.clear();
-                self.selected_id = None;
-            }
-        }
-
-        // ── Double-click: enter Isolation Mode on a group ─────────────────────
-        if response.double_clicked_by(egui::PointerButton::Primary) {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                let hit = hit_test(doc, cx, cy, renderer);
-                if let Some(id) = hit {
-                    if let Some(node) = doc.nodes.get(&id) {
-                        if matches!(node.kind, SceneNodeKind::Group(_)) {
-                            self.isolated_group = Some(id);
-                            // Select children of the group.
-                            if let SceneNodeKind::Group(g) = &node.kind {
-                                doc.selection.clear();
-                                for cid in &g.children {
-                                    doc.selection.add(*cid);
-                                }
-                                self.selected_id = g.children.first().copied();
-                            }
-                            *doc_modified = true;
-                            return;
-                        }
-                    }
-                }
-                // Double-click on non-group or empty: exit isolation if active
-                if self.isolated_group.is_some() {
-                    self.isolated_group = None;
-                    doc.selection.clear();
-                    self.selected_id = None;
+            A::FitView => self.fit_pending = true,
+            A::OutlineMode => self.outline_mode = !self.outline_mode,
+            A::CheckUpdates => {
+                if self.update_rx.is_none() {
+                    self.update_rx = Some(crate::update::check_and_update());
+                    self.file_status = Some(format!(
+                        "Checking for updates… (current {})",
+                        crate::update::CURRENT_VERSION
+                    ));
                 }
             }
         }
+    }
 
-        // Drag-to-move or resize selected node
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            // Use press_origin (where the user first clicked) rather than
-            // interact_pointer_pos (current position after drag threshold), so that
-            // clicks near bounding-box edges still register as "on the selected node".
-            if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
-                let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                let shift = ui.input(|i| i.modifiers.shift);
-
-                // Compute effective selection bounds: combined bbox for multi, single for one.
-                let sel_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
-                let effective_bounds = if sel_ids.len() > 1 {
-                    selection_canvas_bounds(doc, &sel_ids, renderer)
-                } else {
-                    self.selected_id
-                        .and_then(|id| doc.nodes.get(&id))
-                        .and_then(|n| text_aware_canvas_bounds(n, renderer))
-                };
-
-                // Check if click lands on a corner resize handle.
-                const HANDLE_HIT: f32 = 6.0;
-                let resize_hit = effective_bounds.and_then(|(bx0, by0, bx1, by1)| {
-                    let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
-                    let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
-                    let p = pos;
-                    let corners = [
-                        (egui::pos2(sx0 as f32, sy0 as f32), ResizeHandle::TopLeft),
-                        (egui::pos2(sx1 as f32, sy0 as f32), ResizeHandle::TopRight),
-                        (egui::pos2(sx0 as f32, sy1 as f32), ResizeHandle::BottomLeft),
-                        (
-                            egui::pos2(sx1 as f32, sy1 as f32),
-                            ResizeHandle::BottomRight,
-                        ),
-                    ];
-                    corners
-                        .iter()
-                        .find(|(c, _)| (p - *c).length() <= HANDLE_HIT)
-                        .map(|(_, h)| *h)
-                });
-
-                if let Some(handle) = resize_hit {
-                    self.resizing = Some(handle);
-                    self.resize_origin_bounds = effective_bounds;
-                    // Snapshot the nodes being resized so the drag can be recorded
-                    // as a single undoable history step on release (#5).
-                    self.resize_drag_origins = if sel_ids.len() > 1 {
-                        sel_ids
-                            .iter()
-                            .filter_map(|id| doc.nodes.get(id).cloned())
-                            .collect()
-                    } else {
-                        self.selected_id
-                            .and_then(|id| doc.nodes.get(&id))
-                            .cloned()
-                            .into_iter()
-                            .collect()
-                    };
-                    if sel_ids.len() > 1 {
-                        // Multi-node resize: capture every selected node's transform
-                        self.resize_multi_origins = sel_ids
-                            .iter()
-                            .filter_map(|&id| doc.nodes.get(&id).map(|n| (id, n.transform.matrix)))
-                            .collect();
-                        self.resize_origin_transform = None;
-                        self.resize_origin_font_size = None;
-                    } else {
-                        // Single-node resize: existing behaviour (text gets font_size scaling)
-                        self.resize_multi_origins.clear();
-                        self.resize_origin_transform = self
-                            .selected_id
-                            .and_then(|id| doc.nodes.get(&id))
-                            .map(|n| n.transform.matrix);
-                        self.resize_origin_font_size = self
-                            .selected_id
-                            .and_then(|id| doc.nodes.get(&id))
-                            .and_then(|n| {
-                                if let SceneNodeKind::Text(t) = &n.kind {
-                                    Some(t.font_size)
-                                } else {
-                                    None
-                                }
-                            });
-                    }
-                } else {
-                    // Check if click is within the effective selection bounds (body).
-                    let on_selected = match effective_bounds {
-                        Some((x0, y0, x1, y1)) => cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1,
-                        None => self.selected_id.is_some(),
-                    };
-
-                    if on_selected && !shift {
-                        self.moving = true;
-                    } else {
-                        // Try selecting a new node at the click point
-                        let hit = {
-                            let raw = hit_test(doc, cx, cy, renderer);
-                            // In isolation mode, only accept hits that are children of the isolated group.
-                            if let Some(iso_id) = self.isolated_group {
-                                raw.filter(|id| {
-                                    doc.nodes
-                                        .get(&iso_id)
-                                        .and_then(|n| {
-                                            if let SceneNodeKind::Group(g) = &n.kind {
-                                                Some(&g.children)
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .map(|children| children.contains(id))
-                                        .unwrap_or(false)
-                                })
-                            } else {
-                                raw
-                            }
-                        };
-                        if shift {
-                            if let Some(id) = hit {
-                                doc.selection.toggle(id);
-                                self.selected_id = Some(id);
-                            } else {
-                                // Shift+drag on empty space → additive marquee
-                                self.marquee_start = Some(pos);
-                            }
-                        } else {
-                            let alt = ui.input(|i| i.modifiers.alt);
-                            // Alt+click: if the hit node is a group, select the
-                            // topmost child of that group instead (Group Selection behavior).
-                            let effective_hit = if alt {
-                                hit.and_then(|id| {
-                                    if let Some(SceneNodeKind::Group(g)) =
-                                        doc.nodes.get(&id).map(|n| &n.kind)
-                                    {
-                                        // Return topmost (last) child that exists in the document.
-                                        g.children
-                                            .iter()
-                                            .rev()
-                                            .find(|cid| doc.nodes.contains_key(*cid))
-                                            .copied()
-                                    } else {
-                                        Some(id)
-                                    }
-                                })
-                            } else {
-                                hit
-                            };
-                            self.selected_id = effective_hit;
-                            self.moving = effective_hit.is_some() && !alt;
-                            match self.selected_id {
-                                Some(id) => doc.selection = Selection::single(id),
-                                None => {
-                                    doc.selection.clear();
-                                    // Drag on empty space → begin marquee selection
-                                    self.marquee_start = Some(pos);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    /// Draw the global search box and (when there's a query) a results popup
+    /// listing direct matches first, then semantic ("Related") matches.
+    fn global_search_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.global_search)
+                .hint_text(format!("{}  Search tools & actions", ph::MAGNIFYING_GLASS))
+                .desired_width(230.0),
+        );
+        // Drive the on-device semantic index.
+        self.semantic.pump();
+        let raw_q = self.global_search.trim().to_string();
+        self.semantic.set_query(&raw_q);
+        if !raw_q.is_empty() {
+            ui.ctx().request_repaint(); // pick up async semantic results
         }
 
-        if response.dragged_by(egui::PointerButton::Primary) {
-            if self.resizing.is_some() {
-                if let (Some(handle), Some((bx0, by0, bx1, by1))) =
-                    (self.resizing, self.resize_origin_bounds)
-                {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        let (px, py) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                        let orig_w = bx1 - bx0;
-                        let orig_h = by1 - by0;
-                        if orig_w.abs() > 1e-9 && orig_h.abs() > 1e-9 {
-                            let (anchor_x, anchor_y, mut sx, mut sy) = match handle {
-                                ResizeHandle::TopLeft => {
-                                    (bx1, by1, (bx1 - px) / orig_w, (by1 - py) / orig_h)
-                                }
-                                ResizeHandle::TopRight => {
-                                    (bx0, by1, (px - bx0) / orig_w, (by1 - py) / orig_h)
-                                }
-                                ResizeHandle::BottomLeft => {
-                                    (bx1, by0, (bx1 - px) / orig_w, (py - by0) / orig_h)
-                                }
-                                ResizeHandle::BottomRight => {
-                                    (bx0, by0, (px - bx0) / orig_w, (py - by0) / orig_h)
-                                }
-                            };
-
-                            // Shift constrains the resize to a uniform scale so the
-                            // selection keeps its aspect ratio (#4). The
-                            // larger-magnitude axis wins; signs (flips across the
-                            // anchor) are preserved.
-                            if ui.input(|i| i.modifiers.shift) {
-                                let s = sx.abs().max(sy.abs());
-                                sx = s.copysign(sx);
-                                sy = s.copysign(sy);
-                            }
-
-                            if !self.resize_multi_origins.is_empty() {
-                                // Multi-node resize: apply the same scale to every node
-                                use photonic_core::transform::Transform;
-                                let t_scale = Transform::scale_around(sx, sy, anchor_x, anchor_y);
-                                let origins = self.resize_multi_origins.clone();
-                                for (id, orig_xf) in origins {
-                                    if let Some(node) = doc.nodes.get_mut(&id) {
-                                        node.transform =
-                                            Transform { matrix: orig_xf }.then(&t_scale);
-                                    }
-                                }
-                                *doc_modified = true;
-                            } else if let (Some(orig_xf), Some(sel_id)) =
-                                (self.resize_origin_transform, self.selected_id)
-                            {
-                                // Single-node resize (with text font_size special case)
-                                if let Some(node) = doc.nodes.get_mut(&sel_id) {
-                                    if let SceneNodeKind::Text(text) = &mut node.kind {
-                                        if let Some(orig_fs) = self.resize_origin_font_size {
-                                            let scale = sy.abs().max(0.01);
-                                            text.font_size = (orig_fs * scale).max(1.0);
-                                            let new_w = (bx1 - bx0) * scale;
-                                            let new_h = (by1 - by0) * scale;
-                                            let (tx, ty) = match handle {
-                                                ResizeHandle::BottomRight => (bx0, by0),
-                                                ResizeHandle::TopLeft => (bx1 - new_w, by1 - new_h),
-                                                ResizeHandle::TopRight => (bx0, by1 - new_h),
-                                                ResizeHandle::BottomLeft => (bx1 - new_w, by0),
-                                            };
-                                            node.transform.matrix = [1.0, 0.0, 0.0, 1.0, tx, ty];
-                                        }
-                                    } else {
-                                        use photonic_core::transform::Transform;
-                                        let t_orig = Transform { matrix: orig_xf };
-                                        let t_scale =
-                                            Transform::scale_around(sx, sy, anchor_x, anchor_y);
-                                        node.transform = t_orig.then(&t_scale);
-                                    }
-                                    *doc_modified = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if self.moving {
-                let ids_to_move: Vec<NodeId> = doc.selection.ids().copied().collect();
-                // Capture the starting translations, reference point and press
-                // position on the first move frame, so the move is applied
-                // absolutely (origin + total delta) and can be snapped to grid
-                // (#12). Also snapshot the full nodes so the whole drag becomes a
-                // single undoable history step on release (#11).
-                if self.move_snap_origins.is_empty() {
-                    self.move_drag_origins = ids_to_move
-                        .iter()
-                        .filter_map(|id| doc.nodes.get(id).cloned())
-                        .collect();
-                    self.move_snap_origins = ids_to_move
-                        .iter()
-                        .filter_map(|id| {
-                            doc.nodes
-                                .get(id)
-                                .map(|n| (*id, n.transform.matrix[4], n.transform.matrix[5]))
-                        })
-                        .collect();
-                    self.move_snap_ref = selection_canvas_bounds(doc, &ids_to_move, renderer)
-                        .map(|(x0, y0, _, _)| (x0, y0));
-                    self.move_snap_press = ui
-                        .input(|i| i.pointer.press_origin())
-                        .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
-                }
-
-                if let (Some((px, py)), Some(cur)) =
-                    (self.move_snap_press, response.interact_pointer_pos())
-                {
-                    let (curx, cury) = view.screen_to_canvas(cur.x as f64, cur.y as f64);
-                    let raw_dx = curx - px;
-                    let raw_dy = cury - py;
-                    // Snap the reference point's target to the grid (no-op when
-                    // snap-to-grid is off), then move every node by that delta so
-                    // the selection keeps its internal layout.
-                    let (dx, dy) = match self.move_snap_ref {
-                        Some((rx, ry)) => {
-                            (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
-                        }
-                        None => (raw_dx, raw_dy),
-                    };
-                    for (id, ox, oy) in &self.move_snap_origins {
-                        if let Some(node) = doc.nodes.get_mut(id) {
-                            node.transform.matrix[4] = ox + dx;
-                            node.transform.matrix[5] = oy + dy;
-                            *doc_modified = true;
-                        }
-                    }
-                }
-            }
+        let q = raw_q.to_lowercase();
+        if q.is_empty() {
+            return;
         }
 
-        if response.drag_stopped_by(egui::PointerButton::Primary) {
-            self.moving = false;
-            // Record the completed move as a single undoable history step (#11).
-            // The doc already holds the moved state, so re-applying UpdateNode is
-            // a no-op; it just captures the inverse for undo/redo.
-            if !self.move_drag_origins.is_empty() {
-                let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
-                    .into_iter()
-                    .filter_map(|old| {
-                        doc.nodes.get(&old.id).and_then(|cur| {
-                            (cur.transform.matrix != old.transform.matrix).then(|| {
-                                Command::UpdateNode {
-                                    old,
-                                    new: cur.clone(),
-                                }
-                            })
-                        })
-                    })
-                    .collect();
-                if !cmds.is_empty() {
-                    history.execute(Command::Batch(cmds), doc);
-                    *doc_modified = true;
-                }
-            }
-            self.move_snap_origins.clear();
-            self.move_snap_ref = None;
-            self.move_snap_press = None;
-            self.resizing = None;
-            self.resize_origin_bounds = None;
-            self.resize_origin_transform = None;
-            self.resize_origin_font_size = None;
-            self.resize_multi_origins.clear();
+        let items = crate::global_search::items();
+        let mut direct: Vec<&crate::global_search::SearchItem> = items
+            .iter()
+            .filter(|it| it.title.to_lowercase().contains(&q))
+            .collect();
+        direct.sort_by_key(|it| (!it.title.to_lowercase().starts_with(&q), it.title.len()));
 
-            // Record the completed resize as a single undoable history step (#5).
-            // The doc already holds the resized state, so re-applying UpdateNode
-            // is a no-op; it just captures the inverse for undo/redo.
-            if !self.resize_drag_origins.is_empty() {
-                let cmds: Vec<Command> = std::mem::take(&mut self.resize_drag_origins)
-                    .into_iter()
-                    .filter_map(|old| {
-                        doc.nodes.get(&old.id).and_then(|cur| {
-                            let text_changed = matches!(
-                                (&cur.kind, &old.kind),
-                                (SceneNodeKind::Text(a), SceneNodeKind::Text(b))
-                                    if a.font_size != b.font_size
-                            );
-                            (cur.transform.matrix != old.transform.matrix || text_changed).then(
-                                || Command::UpdateNode {
-                                    old,
-                                    new: cur.clone(),
-                                },
-                            )
-                        })
-                    })
-                    .collect();
-                if !cmds.is_empty() {
-                    history.execute(Command::Batch(cmds), doc);
-                    *doc_modified = true;
-                }
-            }
-
-            // Complete marquee selection if one was in progress
-            if let Some(start_pos) = self.marquee_start.take() {
-                let end_pos = response
-                    .interact_pointer_pos()
-                    .or_else(|| ui.input(|i| i.pointer.hover_pos()))
-                    .unwrap_or(start_pos);
-                let shift = ui.input(|i| i.modifiers.shift);
-                let (cx0, cy0) = view.screen_to_canvas(start_pos.x as f64, start_pos.y as f64);
-                let (cx1, cy1) = view.screen_to_canvas(end_pos.x as f64, end_pos.y as f64);
-                let mx0 = cx0.min(cx1);
-                let my0 = cy0.min(cy1);
-                let mx1 = cx0.max(cx1);
-                let my1 = cy0.max(cy1);
-
-                // Collect nodes whose bounds intersect the marquee rect
-                let to_select: Vec<NodeId> = {
-                    let nodes = doc.nodes_in_draw_order();
-                    let mut ids = Vec::new();
-                    for node in nodes {
-                        if let Some((nx0, ny0, nx1, ny1)) = text_aware_canvas_bounds(node, renderer)
-                        {
-                            if nx1 >= mx0 && nx0 <= mx1 && ny1 >= my0 && ny0 <= my1 {
-                                ids.push(node.id);
-                            }
-                        }
-                    }
-                    ids
-                };
-
-                if !shift {
-                    doc.selection.clear();
-                    self.selected_id = None;
-                }
-                for id in to_select {
-                    doc.selection.add(id);
-                    self.selected_id = Some(id);
-                }
-            }
-        }
-
-        // Click on empty space to deselect (without shift)
-        if response.clicked_by(egui::PointerButton::Primary) && !self.moving {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                let shift = ui.input(|i| i.modifiers.shift);
-                let hit = hit_test(doc, cx, cy, renderer);
-                if shift {
-                    if let Some(id) = hit {
-                        doc.selection.toggle(id);
-                        self.selected_id = Some(id);
-                    }
-                } else {
-                    self.selected_id = hit;
-                    match self.selected_id {
-                        Some(id) => doc.selection = Selection::single(id),
-                        None => doc.selection.clear(),
-                    }
-                }
-            }
-        }
-
-        // ── Selection overlay ────────────────────────────────────────────────
-        let accent = Color32::from_rgb(110, 86, 207);
-        let thick_stroke = egui::Stroke::new(1.5, accent);
-        let sel_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
-
-        if sel_ids.len() > 1 {
-            // Multi-select: one unified bounding box with resize handles over the
-            // union of all selected nodes (no per-node boxes — they act as a unit).
-            if let Some((cx0, cy0, cx1, cy1)) = selection_canvas_bounds(doc, &sel_ids, renderer) {
-                let (sx0, sy0) = view.canvas_to_screen(cx0, cy0);
-                let (sx1, sy1) = view.canvas_to_screen(cx1, cy1);
-                let sel_rect = egui::Rect::from_min_max(
-                    egui::pos2(sx0 as f32, sy0 as f32),
-                    egui::pos2(sx1 as f32, sy1 as f32),
-                );
-                ui.painter().rect_stroke(sel_rect, 0.0, thick_stroke);
-                for corner in [
-                    sel_rect.left_top(),
-                    sel_rect.right_top(),
-                    sel_rect.left_bottom(),
-                    sel_rect.right_bottom(),
-                ] {
-                    let handle = egui::Rect::from_center_size(corner, egui::Vec2::splat(7.0));
-                    ui.painter().rect_filled(handle, 0.0, Color32::WHITE);
-                    ui.painter().rect_stroke(handle, 0.0, thick_stroke);
-                }
-            }
-        } else if let Some(sel_id) = self.selected_id {
-            // Single-select: outline + resize handles on that node
-            if let Some(node) = doc.nodes.get(&sel_id) {
-                if let Some((cx0, cy0, cx1, cy1)) = text_aware_canvas_bounds(node, renderer) {
-                    let (sx0, sy0) = view.canvas_to_screen(cx0, cy0);
-                    let (sx1, sy1) = view.canvas_to_screen(cx1, cy1);
-                    let sel_rect = egui::Rect::from_min_max(
-                        egui::pos2(sx0 as f32, sy0 as f32),
-                        egui::pos2(sx1 as f32, sy1 as f32),
-                    );
-                    ui.painter().rect_stroke(sel_rect, 0.0, thick_stroke);
-                    for corner in [
-                        sel_rect.left_top(),
-                        sel_rect.right_top(),
-                        sel_rect.left_bottom(),
-                        sel_rect.right_bottom(),
-                    ] {
-                        let handle = egui::Rect::from_center_size(corner, egui::Vec2::splat(7.0));
-                        ui.painter().rect_filled(handle, 0.0, Color32::WHITE);
-                        ui.painter().rect_stroke(handle, 0.0, thick_stroke);
-                    }
-                }
-            }
-        }
-
-        // ── Marquee selection overlay ────────────────────────────────────────
-        if let Some(start_pos) = self.marquee_start {
-            let current_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(start_pos);
-            let rect = egui::Rect::from_two_pos(start_pos, current_pos);
-            let accent = Color32::from_rgb(110, 86, 207);
-            ui.painter().rect(
-                rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(110, 86, 207, 30),
-                egui::Stroke::new(1.0, accent),
-            );
-        }
-
-        // ── Cursor icon ──────────────────────────────────────────────────────
-        let cursor = if let Some(handle) = self.resizing {
-            // Mid-drag: hold the resize cursor
-            match handle {
-                ResizeHandle::TopLeft | ResizeHandle::BottomRight => egui::CursorIcon::ResizeNwSe,
-                ResizeHandle::TopRight | ResizeHandle::BottomLeft => egui::CursorIcon::ResizeNeSw,
-            }
-        } else if self.moving {
-            egui::CursorIcon::Move
-        } else if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
-            // Use effective (combined) bounds for cursor feedback
-            const HANDLE_HIT: f32 = 6.0;
-            let hover_sel_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
-            let hover_bounds = if hover_sel_ids.len() > 1 {
-                selection_canvas_bounds(doc, &hover_sel_ids, renderer)
-            } else {
-                self.selected_id
-                    .and_then(|id| doc.nodes.get(&id))
-                    .and_then(|n| text_aware_canvas_bounds(n, renderer))
-            };
-
-            let corner_hit = hover_bounds.and_then(|(bx0, by0, bx1, by1)| {
-                let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
-                let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
-                let corners = [
-                    (egui::pos2(sx0 as f32, sy0 as f32), ResizeHandle::TopLeft),
-                    (egui::pos2(sx1 as f32, sy0 as f32), ResizeHandle::TopRight),
-                    (egui::pos2(sx0 as f32, sy1 as f32), ResizeHandle::BottomLeft),
-                    (
-                        egui::pos2(sx1 as f32, sy1 as f32),
-                        ResizeHandle::BottomRight,
-                    ),
-                ];
-                corners
+        // Semantic "Related": cosine-ranked embedding results when the on-device
+        // model is ready; otherwise a keyword/fuzzy fallback (no AI needed).
+        let semantic: Vec<&crate::global_search::SearchItem> =
+            if self.semantic.is_ready() && !self.semantic.results.is_empty() {
+                self.semantic
+                    .results
                     .iter()
-                    .find(|(c, _)| (hover_pos - *c).length() <= HANDLE_HIT)
-                    .map(|(_, h)| *h)
-            });
-
-            if let Some(handle) = corner_hit {
-                match handle {
-                    ResizeHandle::TopLeft | ResizeHandle::BottomRight => {
-                        egui::CursorIcon::ResizeNwSe
-                    }
-                    ResizeHandle::TopRight | ResizeHandle::BottomLeft => {
-                        egui::CursorIcon::ResizeNeSw
-                    }
-                }
+                    .filter(|(idx, score)| {
+                        *score > 0.25
+                            && *idx < items.len()
+                            && !items[*idx].title.to_lowercase().contains(&q)
+                    })
+                    .take(6)
+                    .map(|(idx, _)| &items[*idx])
+                    .collect()
             } else {
-                let on_body = hover_bounds
-                    .map(|(bx0, by0, bx1, by1)| {
-                        let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
-                        let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
-                        egui::Rect::from_min_max(
-                            egui::pos2(sx0 as f32, sy0 as f32),
-                            egui::pos2(sx1 as f32, sy1 as f32),
-                        )
-                        .contains(hover_pos)
-                    })
-                    .unwrap_or(false);
-                if on_body {
-                    egui::CursorIcon::Move
-                } else {
-                    egui::CursorIcon::Default
-                }
-            }
-        } else {
-            egui::CursorIcon::Default
-        };
-        ui.ctx().set_cursor_icon(cursor);
-    }
-
-    // ── Pen tool handler ──────────────────────────────────────────────────────
-
-    fn handle_pen_tool(
-        &mut self,
-        ui: &egui::Ui,
-        response: &egui::Response,
-        doc: &mut Document,
-        view: &CanvasView,
-        doc_modified: &mut bool,
-    ) {
-        // Escape cancels the in-progress path
-        if viewport_kb(ui.ctx()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.pen_points.clear();
-            return;
-        }
-
-        // Double-click finalises the path (also fires clicked, so handle first)
-        if response.double_clicked_by(egui::PointerButton::Primary) {
-            if self.pen_points.len() >= 2 {
-                if let Some(path) = self.build_pen_path() {
-                    let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
-                        (
-                            self.prefs.default_stroke_color,
-                            self.prefs.default_stroke_width,
-                        )
-                    });
-                    let node = make_node(
-                        path,
-                        self.fill_color,
-                        stroke_arg,
-                        "Pen",
-                        doc.node_count() + 1,
-                    );
-                    doc.add_node(node, None);
-                    *doc_modified = true;
-                }
-            }
-            self.pen_points.clear();
-            return;
-        }
-
-        // Single click: add an anchor point
-        if response.clicked_by(egui::PointerButton::Primary) {
-            if !ui.input(|i| i.modifiers.alt) {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                    self.pen_points.push((cx, cy));
-                }
-            }
-        }
-
-        // ── Preview ──────────────────────────────────────────────────────────
-        let painter = ui.painter();
-        let path_stroke = egui::Stroke::new(1.5, Color32::from_rgb(110, 86, 207));
-        let rubber_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(110, 86, 207, 128));
-
-        // Lines between placed points
-        for i in 0..self.pen_points.len().saturating_sub(1) {
-            let (x0, y0) = self.pen_points[i];
-            let (x1, y1) = self.pen_points[i + 1];
-            let (sx0, sy0) = view.canvas_to_screen(x0, y0);
-            let (sx1, sy1) = view.canvas_to_screen(x1, y1);
-            painter.line_segment(
-                [
-                    egui::pos2(sx0 as f32, sy0 as f32),
-                    egui::pos2(sx1 as f32, sy1 as f32),
-                ],
-                path_stroke,
-            );
-        }
-
-        // Anchor dots
-        for &(cx, cy) in &self.pen_points {
-            let (sx, sy) = view.canvas_to_screen(cx, cy);
-            let center = egui::pos2(sx as f32, sy as f32);
-            painter.rect_filled(
-                egui::Rect::from_center_size(center, egui::Vec2::splat(6.0)),
-                0.0,
-                Color32::WHITE,
-            );
-            painter.rect_stroke(
-                egui::Rect::from_center_size(center, egui::Vec2::splat(6.0)),
-                0.0,
-                path_stroke,
-            );
-        }
-
-        // Rubber-band line from last point to cursor
-        if let Some(&(lx, ly)) = self.pen_points.last() {
-            if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-                let (sx, sy) = view.canvas_to_screen(lx, ly);
-                painter.line_segment([egui::pos2(sx as f32, sy as f32), cursor], rubber_stroke);
-            }
-        }
-    }
-
-    /// Build a `PathData` polyline from the accumulated pen points.
-    fn build_pen_path(&self) -> Option<PathData> {
-        if self.pen_points.len() < 2 {
-            return None;
-        }
-        let mut bez = BezPath::new();
-        let (x0, y0) = self.pen_points[0];
-        bez.move_to((x0, y0));
-        for &(x, y) in &self.pen_points[1..] {
-            bez.line_to((x, y));
-        }
-        Some(PathData::from_bez_path(&bez))
-    }
-
-    // ── Direct Selection tool handler ─────────────────────────────────────────
-
-    fn handle_direct_select_tool(
-        &mut self,
-        ui: &egui::Ui,
-        response: &egui::Response,
-        doc: &mut Document,
-        view: &CanvasView,
-        renderer: &mut PhotonicRenderer,
-        doc_modified: &mut bool,
-        history: &mut CommandHistory,
-    ) {
-        // Generous hit radius — makes anchors easy to grab
-        const ANCHOR_RADIUS_PX: f64 = 12.0;
-
-        // Escape: exit point-edit mode
-        if viewport_kb(ui.ctx()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.point_edit_node = None;
-            self.point_selected.clear();
-            self.point_drag_origin = None;
-            return;
-        }
-
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-
-        let ctrl = ui.input(|i| i.modifiers.ctrl);
-
-        // hover_pos is used ONLY for the visual highlight — NOT for hit-testing on
-        // click/drag events.  All interaction positions come from interact_pointer_pos()
-        // so that the test point is at the press location, not the current cursor position
-        // (by the time drag_started fires the cursor may have moved off the anchor).
-        let hover_canvas = ui
-            .input(|i| i.pointer.hover_pos())
-            .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
-
-        // Helper closure: hit-test anchors of the current edit node at canvas pos (cx, cy)
-        let find_anchor = |nid: NodeId, cx: f64, cy: f64, doc: &Document| -> Option<usize> {
-            doc.nodes.get(&nid).and_then(|node| {
-                if let SceneNodeKind::Path(pn) = &node.kind {
-                    let bez = pn.path_data.to_bez_path();
-                    nearest_anchor_screen(&bez, &node.transform, view, cx, cy, ANCHOR_RADIUS_PX)
-                } else {
-                    None
-                }
-            })
-        };
-
-        // ── Delete selected anchor points ─────────────────────────────────────
-        let delete =
-            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
-        if delete && !self.point_selected.is_empty() && viewport_kb(ui.ctx()) {
-            if let Some(nid) = self.point_edit_node {
-                if let Some(node) = doc.nodes.get(&nid) {
-                    let old_node = node.clone();
-                    if let SceneNodeKind::Path(pn) = &node.kind {
-                        let bez = pn.path_data.to_bez_path();
-                        let new_bez = bez_remove_elements(&bez, &self.point_selected);
-                        let mut new_node = old_node.clone();
-                        if let SceneNodeKind::Path(new_pn) = &mut new_node.kind {
-                            new_pn.path_data = PathData::from_bez_path(&new_bez);
+                items
+                    .iter()
+                    .filter(|it| {
+                        let tl = it.title.to_lowercase();
+                        if tl.contains(&q) {
+                            return false;
                         }
-                        history.execute(
-                            Command::UpdateNode {
-                                old: old_node,
-                                new: new_node,
-                            },
-                            doc,
+                        let hay = format!(
+                            "{} {} {}",
+                            tl,
+                            it.description.to_lowercase(),
+                            it.keywords.join(" ")
                         );
-                        self.point_selected.clear();
-                        *doc_modified = true;
-                    }
-                }
-            }
-            return;
-        }
-
-        // ── Drag start: use interact_pointer_pos() — the press location ───────
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(press_pos) = response.interact_pointer_pos() {
-                let (cx, cy) = view.screen_to_canvas(press_pos.x as f64, press_pos.y as f64);
-
-                let hit_anchor = self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
-
-                if let Some(anchor_idx) = hit_anchor {
-                    // Select this anchor (replace unless Ctrl is held)
-                    if ctrl {
-                        if !self.point_selected.contains(&anchor_idx) {
-                            self.point_selected.push(anchor_idx);
-                        }
-                    } else if !self.point_selected.contains(&anchor_idx) {
-                        self.point_selected = vec![anchor_idx];
-                    }
-                    // Snapshot the current node for undo
-                    self.point_drag_origin = self
-                        .point_edit_node
-                        .and_then(|nid| doc.nodes.get(&nid).cloned());
-                } else {
-                    // Missed all anchors — try switching to a different shape
-                    let hit_shape = hit_test(doc, cx, cy, renderer);
-                    self.point_edit_node = hit_shape;
-                    self.point_selected.clear();
-                    self.point_drag_origin = None;
-                }
-            }
-        }
-
-        // ── During drag: move selected anchors by the per-frame delta ─────────
-        if response.dragged_by(egui::PointerButton::Primary)
-            && self.point_drag_origin.is_some()
-            && !self.point_selected.is_empty()
-        {
-            if let Some(nid) = self.point_edit_node {
-                let delta = response.drag_delta();
-                let dcx = delta.x as f64 / view.zoom;
-                let dcy = delta.y as f64 / view.zoom;
-                if let Some(node) = doc.nodes.get_mut(&nid) {
-                    // Invert the node's linear transform to get a local-space delta
-                    let [a, b, c, d, _, _] = node.transform.matrix;
-                    let det = a * d - b * c;
-                    let (dlx, dly) = if det.abs() > 1e-10 {
-                        ((d * dcx - c * dcy) / det, (-b * dcx + a * dcy) / det)
-                    } else {
-                        (dcx, dcy)
-                    };
-                    if let SceneNodeKind::Path(pn) = &mut node.kind {
-                        let bez = pn.path_data.to_bez_path();
-                        let new_bez = bez_move_anchors(&bez, &self.point_selected, dlx, dly);
-                        pn.path_data = PathData::from_bez_path(&new_bez);
-                        *doc_modified = true;
-                    }
-                }
-            }
-        }
-
-        // ── Drag end: push undo command ───────────────────────────────────────
-        if response.drag_stopped_by(egui::PointerButton::Primary) {
-            if let Some(old_node) = self.point_drag_origin.take() {
-                if let Some(nid) = self.point_edit_node {
-                    if let Some(new_node) = doc.nodes.get(&nid).cloned() {
-                        let changed = match (&old_node.kind, &new_node.kind) {
-                            (SceneNodeKind::Path(op), SceneNodeKind::Path(np)) => {
-                                op.path_data != np.path_data
-                            }
-                            _ => false,
-                        };
-                        if changed {
-                            history.execute(
-                                Command::UpdateNode {
-                                    old: old_node,
-                                    new: new_node,
-                                },
-                                doc,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Click (no drag): select anchor or pick shape ──────────────────────
-        // Use interact_pointer_pos() here too — same reasoning as drag_started.
-        if response.clicked_by(egui::PointerButton::Primary) {
-            if let Some(click_pos) = response.interact_pointer_pos() {
-                let (cx, cy) = view.screen_to_canvas(click_pos.x as f64, click_pos.y as f64);
-
-                let hit_anchor = self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
-
-                if let Some(anchor_idx) = hit_anchor {
-                    if ctrl {
-                        // Toggle
-                        if let Some(pos) = self.point_selected.iter().position(|&i| i == anchor_idx)
-                        {
-                            self.point_selected.remove(pos);
-                        } else {
-                            self.point_selected.push(anchor_idx);
-                        }
-                    } else {
-                        self.point_selected = vec![anchor_idx];
-                    }
-                } else {
-                    let hit_shape = hit_test(doc, cx, cy, renderer);
-                    if let Some(nid) = hit_shape {
-                        if Some(nid) != self.point_edit_node {
-                            self.point_edit_node = Some(nid);
-                            self.point_selected.clear();
-                        } else if !ctrl {
-                            self.point_selected.clear();
-                        }
-                    } else {
-                        self.point_edit_node = None;
-                        self.point_selected.clear();
-                    }
-                }
-            }
-        }
-
-        // ── Visual overlay ────────────────────────────────────────────────────
-        if let Some(nid) = self.point_edit_node {
-            if let Some(node) = doc.nodes.get(&nid) {
-                if let SceneNodeKind::Path(pn) = &node.kind {
-                    let bez = pn.path_data.to_bez_path();
-                    let painter = ui.painter();
-
-                    // Path outline (blue, no fill)
-                    let outline_pts = bez_to_screen_points_xf(&bez, view, &node.transform);
-                    if outline_pts.len() >= 2 {
-                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                            points: outline_pts,
-                            closed: true,
-                            fill: Color32::TRANSPARENT,
-                            stroke: egui::epaint::PathStroke::new(
-                                1.5,
-                                Color32::from_rgb(110, 86, 207),
-                            ),
-                        }));
-                    }
-
-                    // Which anchor is nearest the hover cursor (for grab highlight)
-                    let hovered_anchor = hover_canvas.and_then(|(hx, hy)| {
-                        nearest_anchor_screen(&bez, &node.transform, view, hx, hy, ANCHOR_RADIUS_PX)
-                    });
-
-                    // Anchor point squares
-                    for (idx, local_pt) in path_anchor_points(&bez) {
-                        let (cx, cy) = node.transform.apply(local_pt.x, local_pt.y);
-                        let (sx, sy) = view.canvas_to_screen(cx, cy);
-                        let center = egui::pos2(sx as f32, sy as f32);
-                        let half = 4.5f32;
-                        let rect =
-                            egui::Rect::from_center_size(center, egui::Vec2::splat(half * 2.0));
-                        let selected = self.point_selected.contains(&idx);
-                        let hovered = hovered_anchor == Some(idx);
-                        let accent = Color32::from_rgb(110, 86, 207);
-                        if selected {
-                            painter.rect_filled(rect, 0.0, accent);
-                        } else if hovered {
-                            let big = egui::Rect::from_center_size(
-                                center,
-                                egui::Vec2::splat((half + 2.0) * 2.0),
-                            );
-                            painter.rect_filled(
-                                big,
-                                0.0,
-                                Color32::from_rgba_unmultiplied(110, 86, 207, 60),
-                            );
-                            painter.rect_stroke(big, 0.0, egui::Stroke::new(1.5, accent));
-                        } else {
-                            painter.rect_filled(rect, 0.0, Color32::WHITE);
-                            painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.5, accent));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Shape Builder tool handler ────────────────────────────────────────────
-
-    fn handle_shape_builder_tool(
-        &mut self,
-        ui: &egui::Ui,
-        response: &egui::Response,
-        doc: &mut Document,
-        view: &CanvasView,
-        renderer: &mut PhotonicRenderer,
-        doc_modified: &mut bool,
-        history: &mut CommandHistory,
-    ) {
-        let alt_held = ui.input(|i| i.modifiers.alt);
-
-        // Cursor: minus = subtract, crosshair = union
-        ui.ctx().set_cursor_icon(if alt_held {
-            egui::CursorIcon::NoDrop
-        } else {
-            egui::CursorIcon::Crosshair
-        });
-
-        // Canvas position under pointer
-        let canvas_pos = ui
-            .input(|i| i.pointer.hover_pos())
-            .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
-
-        // Update hovered node
-        self.shape_builder_hovered =
-            canvas_pos.and_then(|(cx, cy)| hit_test(doc, cx, cy, renderer));
-
-        // Drag start: record mode, reset collected set
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            self.shape_builder_subtract_mode = alt_held;
-            self.shape_builder_drag_ids.clear();
-            // Add the initial shape under the cursor
-            if let Some(id) = self.shape_builder_hovered {
-                self.shape_builder_drag_ids.push(id);
-            }
-        }
-
-        // During drag: accumulate every new shape the cursor enters
-        if response.dragged_by(egui::PointerButton::Primary) {
-            let pos = response
-                .interact_pointer_pos()
-                .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64))
-                .or(canvas_pos);
-            if let Some((cx, cy)) = pos {
-                if let Some(id) = hit_test(doc, cx, cy, renderer) {
-                    if !self.shape_builder_drag_ids.contains(&id) {
-                        self.shape_builder_drag_ids.push(id);
-                    }
-                }
-            }
-        }
-
-        // Drag end: perform the boolean operation
-        if response.drag_stopped_by(egui::PointerButton::Primary) {
-            let ids = std::mem::take(&mut self.shape_builder_drag_ids);
-            let subtract = self.shape_builder_subtract_mode;
-            if !ids.is_empty() {
-                self.execute_shape_builder(doc, history, &ids, subtract, doc_modified);
-            }
-        }
-
-        // ── Visual feedback ───────────────────────────────────────────────────
-        let painter = ui.painter();
-
-        // Highlight shapes being collected in current drag
-        for &id in &self.shape_builder_drag_ids {
-            if let Some(node) = doc.nodes.get(&id) {
-                if let SceneNodeKind::Path(pn) = &node.kind {
-                    let baked = gui_apply_affine_to_path(&pn.path_data, node.transform.to_kurbo());
-                    let pts = bez_to_screen_points(&baked.to_bez_path(), view);
-                    if pts.len() >= 2 {
-                        let fill = if self.shape_builder_subtract_mode {
-                            Color32::from_rgba_unmultiplied(248, 113, 113, 100)
-                        } else {
-                            Color32::from_rgba_unmultiplied(52, 211, 153, 100)
-                        };
-                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                            points: pts,
-                            closed: true,
-                            fill,
-                            stroke: egui::epaint::PathStroke::new(0.0, Color32::TRANSPARENT),
-                        }));
-                    }
-                }
-            }
-        }
-
-        // Highlight the hovered shape (if not already in drag set)
-        if let Some(hovered_id) = self.shape_builder_hovered {
-            if !self.shape_builder_drag_ids.contains(&hovered_id) {
-                if let Some(node) = doc.nodes.get(&hovered_id) {
-                    if let SceneNodeKind::Path(pn) = &node.kind {
-                        let baked =
-                            gui_apply_affine_to_path(&pn.path_data, node.transform.to_kurbo());
-                        let pts = bez_to_screen_points(&baked.to_bez_path(), view);
-                        if pts.len() >= 2 {
-                            let (fill_color, stroke_color) = if alt_held {
-                                (
-                                    Color32::from_rgba_unmultiplied(248, 113, 113, 60),
-                                    Color32::from_rgb(248, 113, 113),
-                                )
-                            } else {
-                                (
-                                    Color32::from_rgba_unmultiplied(52, 211, 153, 60),
-                                    Color32::from_rgb(52, 211, 153),
-                                )
-                            };
-                            painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                                points: pts,
-                                closed: true,
-                                fill: fill_color,
-                                stroke: egui::epaint::PathStroke::new(2.0, stroke_color),
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Execute a Shape Builder operation on `ids`.
-    ///
-    /// - Union mode (`subtract = false`): union all touched shapes into one.
-    /// - Subtract mode (`subtract = true`, Alt held): subtract all touched shapes
-    ///   (after the first) from the first one; if only one shape is touched, delete it.
-    fn execute_shape_builder(
-        &mut self,
-        doc: &mut Document,
-        history: &mut CommandHistory,
-        ids: &[NodeId],
-        subtract: bool,
-        doc_modified: &mut bool,
-    ) {
-        use photonic_core::ops::boolean::{boolean_op, BooleanOp};
-
-        // Gather (id, layer_id, z-index) for each touched node
-        let mut indexed: Vec<(NodeId, photonic_core::layer::LayerId, usize)> = ids
-            .iter()
-            .filter_map(|&id| doc.node_layer_and_index(&id).map(|(l, i)| (id, l, i)))
-            .collect();
-
-        if indexed.is_empty() {
-            return;
-        }
-
-        // All must be in the same layer
-        let layer_id = indexed[0].1;
-        if indexed.iter().any(|(_, l, _)| *l != layer_id) {
-            return;
-        }
-
-        // Sort by ascending z-order
-        indexed.sort_by_key(|(_, _, idx)| *idx);
-
-        if subtract && indexed.len() == 1 {
-            // Delete single alt-clicked shape
-            let node_id = indexed[0].0;
-            history.execute(photonic_core::history::Command::RemoveNode { node_id }, doc);
-            self.shape_builder_hovered = None;
-            *doc_modified = true;
-            return;
-        }
-
-        if !subtract && indexed.len() < 2 {
-            // Nothing to union
-            return;
-        }
-
-        // Bake transforms for all shapes
-        let baked_paths: Vec<_> = indexed
-            .iter()
-            .filter_map(|(id, _, _)| {
-                let n = doc.get_node(id)?;
-                if let SceneNodeKind::Path(pn) = &n.kind {
-                    Some((
-                        *id,
-                        gui_apply_affine_to_path(&pn.path_data, n.transform.to_kurbo()),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if baked_paths.is_empty() {
-            return;
-        }
-
-        // Get style from the bottom-most shape (first in z-order)
-        let (fill, stroke) = doc
-            .get_node(&indexed[0].0)
-            .and_then(|n| {
-                if let SceneNodeKind::Path(pn) = &n.kind {
-                    Some((pn.fill.clone(), pn.stroke.clone()))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
-        // Compute result path
-        let op = if subtract {
-            BooleanOp::Subtract
-        } else {
-            BooleanOp::Union
-        };
-        let mut result_path = baked_paths[0].1.clone();
-        for (_, path) in &baked_paths[1..] {
-            match boolean_op(&result_path, path, op) {
-                Ok(p) => result_path = p,
-                Err(_) => return,
-            }
-        }
-
-        // Build result node inheriting the first shape's style
-        let mut result_pn = photonic_core::node::PathNode::new(result_path);
-        result_pn.fill = fill;
-        result_pn.stroke = stroke;
-        let result_node = SceneNode::new("Shape", layer_id, SceneNodeKind::Path(result_pn));
-        let result_id = result_node.id;
-
-        // Place the result at the z-position of the lowest input shape
-        let insert_z = indexed[0].2;
-        let layer_len = doc
-            .layers
-            .get(&layer_id)
-            .map(|l| l.node_ids.len())
-            .unwrap_or(0);
-        let result_pos = layer_len.saturating_sub(indexed.len()); // position after removes + add
-        let new_index = insert_z.min(result_pos);
-
-        let mut cmds: Vec<photonic_core::history::Command> = indexed
-            .iter()
-            .map(|(id, _, _)| photonic_core::history::Command::RemoveNode { node_id: *id })
-            .collect();
-        cmds.push(photonic_core::history::Command::AddNode {
-            node: result_node,
-            layer_id: Some(layer_id),
-        });
-        if new_index != result_pos {
-            cmds.push(photonic_core::history::Command::ReorderNode {
-                layer_id,
-                node_id: result_id,
-                old_index: result_pos,
-                new_index,
-            });
-        }
-
-        history.execute(photonic_core::history::Command::Batch(cmds), doc);
-        self.selected_id = Some(result_id);
-        doc.selection = Selection::single(result_id);
-        *doc_modified = true;
-    }
-
-    // ── Console panel ─────────────────────────────────────────────────────────
-
-    fn draw_console(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(self.lua_console.tab == ConsoleTab::Lua, "Lua")
-                .clicked()
-            {
-                self.lua_console.tab = ConsoleTab::Lua;
-            }
-            if ui
-                .selectable_label(self.lua_console.tab == ConsoleTab::Claude, "Claude")
-                .clicked()
-            {
-                self.lua_console.tab = ConsoleTab::Claude;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✕").clicked() {
-                    self.lua_console.visible = false;
-                }
-                let expand_icon = if self.lua_console.expanded {
-                    "▼"
-                } else {
-                    "▲"
-                };
-                if ui
-                    .small_button(expand_icon)
-                    .on_hover_text(if self.lua_console.expanded {
-                        "Collapse"
-                    } else {
-                        "Expand"
+                        q.split_whitespace().all(|t| hay.contains(t))
+                            || crate::global_search::fuzzy_subseq(&q, &tl)
                     })
-                    .clicked()
-                {
-                    self.lua_console.expanded = !self.lua_console.expanded;
-                }
-                if ui.small_button("Clear").clicked() {
-                    self.lua_console.log.clear();
-                }
-                if self.lua_console.tab == ConsoleTab::Claude {
-                    if ui
-                        .small_button("Copy")
-                        .on_hover_text("Copy conversation to clipboard")
-                        .clicked()
-                    {
-                        let mut text = String::new();
-                        for (is_user, msg) in &self.claude_chat.messages {
-                            let role = if *is_user { "You" } else { "Claude" };
-                            text.push_str(role);
-                            text.push_str(": ");
-                            text.push_str(msg);
-                            text.push_str("\n\n");
-                        }
-                        ui.output_mut(|o| o.copied_text = text);
-                    }
-                }
-            });
-        });
-        ui.separator();
-
-        match self.lua_console.tab {
-            ConsoleTab::Lua => self.draw_lua_tab(ui),
-            ConsoleTab::Claude => self.draw_claude_tab(ui),
-        }
-    }
-
-    fn draw_lua_tab(&mut self, ui: &mut egui::Ui) {
-        // Output scroll area
-        let available = ui.available_height() - 32.0;
-        egui::ScrollArea::vertical()
-            .id_salt("console_out")
-            .max_height(available.max(40.0))
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for (is_err, line) in &self.lua_console.log {
-                    let color = if *is_err {
-                        Color32::from_rgb(248, 113, 113)
-                    } else {
-                        Color32::from_rgb(187, 187, 210)
-                    };
-                    ui.label(egui::RichText::new(line).monospace().color(color));
-                }
-            });
-
-        ui.separator();
-
-        // Input row
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(">")
-                    .monospace()
-                    .color(Color32::from_rgb(144, 119, 224)),
-            );
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.lua_console.input)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(ui.available_width() - 50.0)
-                    .hint_text("photonic.create_rect(100, 100, 200, 150)"),
-            );
-            let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Run").clicked() || submitted {
-                if !self.lua_console.input.trim().is_empty() {
-                    let code = self.lua_console.input.clone();
-                    self.lua_console.log.push((false, format!("> {code}")));
-                    self.lua_console.pending = Some(code);
-                    self.lua_console.input.clear();
-                }
-                resp.request_focus();
-            }
-        });
-    }
-
-    // ── Shape factory ─────────────────────────────────────────────────────────
-
-    fn build_shape(&self, sx: f64, sy: f64, ex: f64, ey: f64) -> Option<PathData> {
-        let min_x = sx.min(ex);
-        let min_y = sy.min(ey);
-        let max_x = sx.max(ex);
-        let max_y = sy.max(ey);
-        let w = max_x - min_x;
-        let h = max_y - min_y;
-        let cx = (min_x + max_x) / 2.0;
-        let cy = (min_y + max_y) / 2.0;
-        let radius = ((ex - sx).hypot(ey - sy)) / 2.0;
-
-        let path = match self.active_tool {
-            Tool::Rectangle => PathData::rect(min_x, min_y, w, h),
-            Tool::Ellipse => PathData::ellipse(cx, cy, w / 2.0, h / 2.0),
-            Tool::Polygon => PathData::regular_polygon(cx, cy, radius, self.polygon_sides as usize),
-            Tool::Star => PathData::star(
-                cx,
-                cy,
-                radius,
-                radius * self.star_inner_ratio as f64,
-                self.star_points as usize,
-            ),
-            Tool::Spiral => PathData::spiral(
-                cx,
-                cy,
-                radius,
-                (self.spiral_inner_radius as f64).min(radius),
-                self.spiral_turns as f64,
-                self.spiral_segs_per_turn as usize,
-            ),
-            // Line uses the raw drag start/end (not a bounding box).
-            Tool::Line => PathData::line(sx, sy, ex, ey),
-            Tool::Arc => PathData::arc(
-                cx,
-                cy,
-                w / 2.0,
-                h / 2.0,
-                self.arc_start_angle,
-                self.arc_end_angle,
-                !self.arc_open,
-            ),
-            Tool::Grid => PathData::grid(min_x, min_y, w, h, self.grid_cols, self.grid_rows),
-            Tool::PolarGrid => {
-                let outer_r = (w.min(h)) / 2.0;
-                let inner_r = outer_r * self.polar_grid_inner_ratio as f64;
-                PathData::polar_grid(
-                    cx,
-                    cy,
-                    outer_r,
-                    inner_r,
-                    self.polar_grid_rings,
-                    self.polar_grid_sectors,
-                )
-            }
-            _ => return None,
-        };
-
-        Some(path)
-    }
-
-    /// Like `build_shape` but takes an explicit `Tool` instead of reading `self.active_tool`.
-    /// Used by `CreateShapeAtPos` so active tool state is not polluted.
-    fn build_shape_with_tool(
-        &self,
-        tool: Tool,
-        sx: f64,
-        sy: f64,
-        ex: f64,
-        ey: f64,
-    ) -> Option<PathData> {
-        let min_x = sx.min(ex);
-        let min_y = sy.min(ey);
-        let max_x = sx.max(ex);
-        let max_y = sy.max(ey);
-        let w = max_x - min_x;
-        let h = max_y - min_y;
-        let cx = (min_x + max_x) / 2.0;
-        let cy = (min_y + max_y) / 2.0;
-        let radius = ((ex - sx).hypot(ey - sy)) / 2.0;
-
-        let path = match tool {
-            Tool::Rectangle => PathData::rect(min_x, min_y, w, h),
-            Tool::RoundedRect => {
-                PathData::rounded_rect(min_x, min_y, w, h, self.rounded_rect_radius)
-            }
-            Tool::Ellipse => PathData::ellipse(cx, cy, w / 2.0, h / 2.0),
-            Tool::Polygon => PathData::regular_polygon(cx, cy, radius, self.polygon_sides as usize),
-            Tool::Star => PathData::star(
-                cx,
-                cy,
-                radius,
-                radius * self.star_inner_ratio as f64,
-                self.star_points as usize,
-            ),
-            Tool::Spiral => PathData::spiral(
-                cx,
-                cy,
-                radius,
-                (self.spiral_inner_radius as f64).min(radius),
-                self.spiral_turns as f64,
-                self.spiral_segs_per_turn as usize,
-            ),
-            Tool::Line => PathData::line(sx, sy, ex, ey),
-            Tool::Arc => PathData::arc(
-                cx,
-                cy,
-                w / 2.0,
-                h / 2.0,
-                self.arc_start_angle,
-                self.arc_end_angle,
-                !self.arc_open,
-            ),
-            Tool::Grid => PathData::grid(min_x, min_y, w, h, self.grid_cols, self.grid_rows),
-            Tool::PolarGrid => {
-                let outer_r = (w.min(h)) / 2.0;
-                let inner_r = outer_r * self.polar_grid_inner_ratio as f64;
-                PathData::polar_grid(
-                    cx,
-                    cy,
-                    outer_r,
-                    inner_r,
-                    self.polar_grid_rings,
-                    self.polar_grid_sectors,
-                )
-            }
-            _ => return None,
-        };
-
-        Some(path)
-    }
-
-    /// Group the currently selected nodes. Requires 2+ nodes in selection.
-    fn do_group_selected(
-        &mut self,
-        doc: &mut Document,
-        history: &mut CommandHistory,
-        doc_modified: &mut bool,
-    ) {
-        if doc.selection.count() < 2 {
-            return;
-        }
-        let sel_ids: Vec<_> = doc.selection.ids().copied().collect();
-        if let Some((layer_id, mut indexed)) = doc.nodes_layer_and_indices(&sel_ids) {
-            indexed.sort_by_key(|(_, idx)| *idx);
-            let children: Vec<_> = indexed.iter().map(|(id, _)| *id).collect();
-            let insert_index = indexed[0].1;
-            let group_kind = SceneNodeKind::Group(GroupNode {
-                children: children.clone(),
-                clip_children: false,
-                clip_node_id: None,
-                blend_spine_id: None,
-            });
-            let group = SceneNode::new("Group", layer_id, group_kind);
-            let group_id = group.id;
-            let cmd = Command::GroupNodes {
-                group,
-                layer_id,
-                insert_index,
-                children,
+                    .collect()
             };
-            history.execute(cmd, doc);
-            self.selected_id = Some(group_id);
-            doc.selection = Selection::single(group_id);
-            *doc_modified = true;
-        }
-    }
 
-    fn do_collect_in_new_layer(
-        &mut self,
-        node_ids: Vec<NodeId>,
-        doc: &mut Document,
-        history: &mut CommandHistory,
-        doc_modified: &mut bool,
-    ) {
-        // Fall back to current selection when no explicit ids given
-        let raw_ids: Vec<NodeId> = if node_ids.is_empty() {
-            doc.selection.ids().copied().collect()
-        } else {
-            node_ids
-        };
-        if raw_ids.is_empty() {
-            return;
-        }
+        let mut chosen: Option<crate::global_search::SearchAction> = None;
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
 
-        // Resolve group children to their top-level ancestors (deduplicated)
-        let mut resolved: Vec<NodeId> = Vec::new();
-        for id in raw_ids {
-            if let Some(tid) = doc.top_level_ancestor(id) {
-                if !resolved.contains(&tid) {
-                    resolved.push(tid);
-                }
-            }
-        }
-        if resolved.is_empty() {
-            return;
-        }
-
-        let new_layer = Layer::new("Collected Layer");
-        let new_layer_id = new_layer.id;
-
-        let mut cmds = vec![Command::AddLayer { layer: new_layer }];
-        for (i, nid) in resolved.iter().enumerate() {
-            if let Some((old_layer_id, old_index)) = doc.node_layer_and_index(nid) {
-                cmds.push(Command::MoveNodeToLayer {
-                    node_id: *nid,
-                    old_layer_id,
-                    new_layer_id,
-                    old_index,
-                    new_index: i,
+        egui::Area::new(ui.id().with("global_search_popup"))
+            .fixed_pos(resp.rect.left_bottom() + egui::vec2(0.0, 4.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.set_max_width(340.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .show(ui, |ui| {
+                            if direct.is_empty() && semantic.is_empty() {
+                                ui.label(RichText::new("No matches").weak());
+                            }
+                            for it in &direct {
+                                if search_result_row(ui, it.icon, &it.title, &it.description, false)
+                                {
+                                    chosen = Some(it.action);
+                                }
+                            }
+                            if !semantic.is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new("Related").small().weak());
+                                ui.add_space(2.0);
+                                for it in &semantic {
+                                    if search_result_row(
+                                        ui,
+                                        it.icon,
+                                        &it.title,
+                                        &it.description,
+                                        true,
+                                    ) {
+                                        chosen = Some(it.action);
+                                    }
+                                }
+                            }
+                        });
                 });
-            }
-        }
-        history.execute(Command::Batch(cmds), doc);
-        *doc_modified = true;
-    }
+            });
 
-    fn do_release_to_layers(
-        &mut self,
-        node_ids: Vec<NodeId>,
-        doc: &mut Document,
-        history: &mut CommandHistory,
-        doc_modified: &mut bool,
-    ) {
-        let raw_ids: Vec<NodeId> = if node_ids.is_empty() {
-            doc.selection.ids().copied().collect()
-        } else {
-            node_ids
-        };
-        if raw_ids.is_empty() {
-            return;
+        if chosen.is_none() && enter {
+            chosen = direct
+                .first()
+                .or_else(|| semantic.first())
+                .map(|it| it.action);
         }
-
-        // Resolve group children to top-level ancestors (deduplicated).
-        let mut resolved: Vec<NodeId> = Vec::new();
-        for id in raw_ids {
-            if let Some(tid) = doc.top_level_ancestor(id) {
-                if !resolved.contains(&tid) {
-                    resolved.push(tid);
-                }
-            }
-        }
-        if resolved.is_empty() {
-            return;
-        }
-
-        // One new layer per node.
-        let mut cmds: Vec<Command> = Vec::new();
-        for (seq, nid) in resolved.iter().enumerate() {
-            if let Some((old_layer_id, old_index)) = doc.node_layer_and_index(nid) {
-                let new_layer = Layer::new(&format!("Layer {}", seq + 1));
-                let new_layer_id = new_layer.id;
-                cmds.push(Command::AddLayer { layer: new_layer });
-                cmds.push(Command::MoveNodeToLayer {
-                    node_id: *nid,
-                    old_layer_id,
-                    new_layer_id,
-                    old_index,
-                    new_index: 0,
-                });
-            }
-        }
-        if !cmds.is_empty() {
-            history.execute(Command::Batch(cmds), doc);
-            *doc_modified = true;
+        if let Some(a) = chosen {
+            self.apply_search(a, doc, history);
+            self.global_search.clear();
+        } else if escape {
+            self.global_search.clear();
         }
     }
 
-    fn do_merge_layers(
-        &mut self,
-        layer_ids: Vec<photonic_core::layer::LayerId>,
-        doc: &mut Document,
-        history: &mut CommandHistory,
-        doc_modified: &mut bool,
-    ) {
-        if layer_ids.len() < 2 {
-            return;
-        }
-        // Validate
-        for lid in &layer_ids {
-            if !doc.layers.contains_key(lid) {
-                return;
-            }
-        }
+    // (Select / Pen / Shape Builder handlers moved to `mod tool_handlers`)
 
-        // Target = first of the selected layers in document order (bottom-most).
-        let target_id = match doc.layer_order.iter().find(|id| layer_ids.contains(id)) {
-            Some(&id) => id,
-            None => return,
-        };
-
-        let source_ids: Vec<_> = layer_ids
-            .iter()
-            .filter(|&&id| id != target_id)
-            .copied()
-            .collect();
-
-        let mut cmds: Vec<Command> = Vec::new();
-
-        // Process sources in document order.
-        let ordered_sources: Vec<_> = doc
-            .layer_order
-            .iter()
-            .filter(|id| source_ids.contains(id))
-            .copied()
-            .collect();
-
-        let mut new_index_offset = doc.layers[&target_id].node_ids.len();
-
-        for src_id in &ordered_sources {
-            let src_layer = doc.layers[src_id].clone();
-            for node_id in src_layer.node_ids.clone() {
-                if let Some((old_layer_id, old_index)) = doc.node_layer_and_index(&node_id) {
-                    cmds.push(Command::MoveNodeToLayer {
-                        node_id,
-                        old_layer_id,
-                        new_layer_id: target_id,
-                        old_index,
-                        new_index: new_index_offset,
-                    });
-                    new_index_offset += 1;
-                }
-            }
-            cmds.push(Command::RemoveLayerFull { layer: src_layer });
-        }
-
-        if !cmds.is_empty() {
-            history.execute(Command::Batch(cmds), doc);
-            *doc_modified = true;
-        }
-    }
+    // (Layer/group operations moved to `mod layer_ops`)
 
     /// Snap a canvas coordinate to the grid if snap-to-grid is enabled.
     fn snap(&self, v: f64) -> f64 {
@@ -11113,1093 +11164,8 @@ fn viewport_kb(ctx: &egui::Context) -> bool {
 
 /// Flatten a kurbo `BezPath` into screen-space egui points, approximating
 /// cubic and quadratic bezier segments with line segments.
-fn bez_to_screen_points(bez: &BezPath, view: &CanvasView) -> Vec<egui::Pos2> {
-    let mut pts: Vec<egui::Pos2> = Vec::new();
-    let mut cur = (0.0f64, 0.0f64);
-    for el in bez.elements() {
-        match el {
-            PathEl::MoveTo(p) => {
-                cur = (p.x, p.y);
-                let (sx, sy) = view.canvas_to_screen(p.x, p.y);
-                pts.push(egui::pos2(sx as f32, sy as f32));
-            }
-            PathEl::LineTo(p) => {
-                cur = (p.x, p.y);
-                let (sx, sy) = view.canvas_to_screen(p.x, p.y);
-                pts.push(egui::pos2(sx as f32, sy as f32));
-            }
-            PathEl::CurveTo(c1, c2, p) => {
-                let (x0, y0) = cur;
-                for i in 1..=16u32 {
-                    let t = i as f64 / 16.0;
-                    let u = 1.0 - t;
-                    let x = u * u * u * x0
-                        + 3.0 * u * u * t * c1.x
-                        + 3.0 * u * t * t * c2.x
-                        + t * t * t * p.x;
-                    let y = u * u * u * y0
-                        + 3.0 * u * u * t * c1.y
-                        + 3.0 * u * t * t * c2.y
-                        + t * t * t * p.y;
-                    let (sx, sy) = view.canvas_to_screen(x, y);
-                    pts.push(egui::pos2(sx as f32, sy as f32));
-                }
-                cur = (p.x, p.y);
-            }
-            PathEl::QuadTo(c, p) => {
-                let (x0, y0) = cur;
-                for i in 1..=8u32 {
-                    let t = i as f64 / 8.0;
-                    let u = 1.0 - t;
-                    let x = u * u * x0 + 2.0 * u * t * c.x + t * t * p.x;
-                    let y = u * u * y0 + 2.0 * u * t * c.y + t * t * p.y;
-                    let (sx, sy) = view.canvas_to_screen(x, y);
-                    pts.push(egui::pos2(sx as f32, sy as f32));
-                }
-                cur = (p.x, p.y);
-            }
-            PathEl::ClosePath => {}
-        }
-    }
-    pts
-}
 
-fn make_node(
-    path: PathData,
-    fill_color: [f32; 4],
-    stroke: Option<([f32; 4], f32)>,
-    label: &str,
-    num: usize,
-) -> SceneNode {
-    let [r, g, b, a] = fill_color;
-    let fill = Fill::solid(Color { r, g, b, a });
-    let mut path_node = PathNode::new(path).with_fill(fill);
-    if let Some(([sr, sg, sb, sa], width)) = stroke {
-        path_node = path_node.with_stroke(Stroke::solid(
-            Color {
-                r: sr,
-                g: sg,
-                b: sb,
-                a: sa,
-            },
-            width as f64,
-        ));
-    }
-    let kind = SceneNodeKind::Path(path_node);
-    SceneNode::new(format!("{} {}", label, num), Default::default(), kind)
-}
-
-/// Like `canvas_bounds` but uses glyphon layout for accurate TextNode dimensions.
-fn text_aware_canvas_bounds(
-    node: &SceneNode,
-    renderer: &mut PhotonicRenderer,
-) -> Option<(f64, f64, f64, f64)> {
-    let local = match &node.kind {
-        SceneNodeKind::Text(t) => {
-            let (w, h) = renderer.measure_text(&t.content, &t.font_family, t.font_size);
-            kurbo::Rect::new(0.0, 0.0, w, h)
-        }
-        _ => node.local_bounds()?,
-    };
-    let corners = [
-        node.transform.apply(local.x0, local.y0),
-        node.transform.apply(local.x1, local.y0),
-        node.transform.apply(local.x0, local.y1),
-        node.transform.apply(local.x1, local.y1),
-    ];
-    let min_x = corners.iter().map(|&(x, _)| x).fold(f64::MAX, f64::min);
-    let min_y = corners.iter().map(|&(_, y)| y).fold(f64::MAX, f64::min);
-    let max_x = corners.iter().map(|&(x, _)| x).fold(f64::MIN, f64::max);
-    let max_y = corners.iter().map(|&(_, y)| y).fold(f64::MIN, f64::max);
-    Some((min_x, min_y, max_x, max_y))
-}
-
-/// Returns the axis-aligned bounding box that covers all nodes in `ids`,
-/// or `None` if none of them have computable bounds.
-fn selection_canvas_bounds(
-    doc: &Document,
-    ids: &[NodeId],
-    renderer: &mut PhotonicRenderer,
-) -> Option<(f64, f64, f64, f64)> {
-    let mut min_x = f64::INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for &id in ids {
-        if let Some(node) = doc.nodes.get(&id) {
-            if let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) {
-                min_x = min_x.min(x0);
-                min_y = min_y.min(y0);
-                max_x = max_x.max(x1);
-                max_y = max_y.max(y1);
-            }
-        }
-    }
-    if min_x.is_finite() {
-        Some((min_x, min_y, max_x, max_y))
-    } else {
-        None
-    }
-}
-
-// ─── Direct-select helpers ────────────────────────────────────────────────────
-
-/// Like `bez_to_screen_points` but applies a node transform before projecting.
-fn bez_to_screen_points_xf(
-    bez: &BezPath,
-    view: &CanvasView,
-    transform: &photonic_core::transform::Transform,
-) -> Vec<egui::Pos2> {
-    use kurbo::PathEl;
-    let mut pts: Vec<egui::Pos2> = Vec::new();
-    let mut cur_local = (0.0f64, 0.0f64);
-    for el in bez.elements() {
-        match el {
-            PathEl::MoveTo(p) => {
-                cur_local = (p.x, p.y);
-                let (cx, cy) = transform.apply(p.x, p.y);
-                let (sx, sy) = view.canvas_to_screen(cx, cy);
-                pts.push(egui::pos2(sx as f32, sy as f32));
-            }
-            PathEl::LineTo(p) => {
-                cur_local = (p.x, p.y);
-                let (cx, cy) = transform.apply(p.x, p.y);
-                let (sx, sy) = view.canvas_to_screen(cx, cy);
-                pts.push(egui::pos2(sx as f32, sy as f32));
-            }
-            PathEl::CurveTo(c1, c2, p) => {
-                let (x0, y0) = cur_local;
-                for i in 1..=16u32 {
-                    let t = i as f64 / 16.0;
-                    let u = 1.0 - t;
-                    let lx = u * u * u * x0
-                        + 3.0 * u * u * t * c1.x
-                        + 3.0 * u * t * t * c2.x
-                        + t * t * t * p.x;
-                    let ly = u * u * u * y0
-                        + 3.0 * u * u * t * c1.y
-                        + 3.0 * u * t * t * c2.y
-                        + t * t * t * p.y;
-                    let (cx, cy) = transform.apply(lx, ly);
-                    let (sx, sy) = view.canvas_to_screen(cx, cy);
-                    pts.push(egui::pos2(sx as f32, sy as f32));
-                }
-                cur_local = (p.x, p.y);
-            }
-            PathEl::QuadTo(c, p) => {
-                let (x0, y0) = cur_local;
-                for i in 1..=8u32 {
-                    let t = i as f64 / 8.0;
-                    let u = 1.0 - t;
-                    let lx = u * u * x0 + 2.0 * u * t * c.x + t * t * p.x;
-                    let ly = u * u * y0 + 2.0 * u * t * c.y + t * t * p.y;
-                    let (cx, cy) = transform.apply(lx, ly);
-                    let (sx, sy) = view.canvas_to_screen(cx, cy);
-                    pts.push(egui::pos2(sx as f32, sy as f32));
-                }
-                cur_local = (p.x, p.y);
-            }
-            PathEl::ClosePath => {}
-        }
-    }
-    pts
-}
-
-/// Extract `(element_index, local_point)` for every element that has an endpoint.
-/// `ClosePath` is excluded (no anchor).
-fn path_anchor_points(bez: &BezPath) -> Vec<(usize, Point)> {
-    bez.elements()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, el)| match el {
-            PathEl::MoveTo(p) | PathEl::LineTo(p) => Some((i, *p)),
-            PathEl::CurveTo(_, _, p) => Some((i, *p)),
-            PathEl::QuadTo(_, p) => Some((i, *p)),
-            PathEl::ClosePath => None,
-        })
-        .collect()
-}
-
-/// Find the element index of the anchor point nearest to `(cursor_cx, cursor_cy)`
-/// in canvas space, within `threshold_px` pixels on screen.
-fn nearest_anchor_screen(
-    bez: &BezPath,
-    transform: &photonic_core::transform::Transform,
-    view: &CanvasView,
-    cursor_cx: f64,
-    cursor_cy: f64,
-    threshold_px: f64,
-) -> Option<usize> {
-    let (cursor_sx, cursor_sy) = view.canvas_to_screen(cursor_cx, cursor_cy);
-    let mut best: Option<(usize, f64)> = None;
-    for (idx, local_pt) in path_anchor_points(bez) {
-        let (cx, cy) = transform.apply(local_pt.x, local_pt.y);
-        let (sx, sy) = view.canvas_to_screen(cx, cy);
-        let dist = ((sx - cursor_sx).powi(2) + (sy - cursor_sy).powi(2)).sqrt();
-        if dist < threshold_px {
-            if best.map_or(true, |(_, d)| dist < d) {
-                best = Some((idx, dist));
-            }
-        }
-    }
-    best.map(|(idx, _)| idx)
-}
-
-/// Move the selected anchor points in a `BezPath` by `(dx, dy)` in local space.
-///
-/// For each selected element:
-/// - The element's endpoint is shifted by `(dx, dy)`.
-/// - If the element is `CurveTo`, its incoming handle (c2) is also shifted.
-/// - The next element's outgoing handle (c1 for `CurveTo`, c for `QuadTo`) is
-///   shifted only if the next anchor is NOT also in the selection (prevents
-///   double-moving shared handles).
-fn bez_move_anchors(bez: &BezPath, selected: &[usize], dx: f64, dy: f64) -> BezPath {
-    let els: Vec<PathEl> = bez.elements().iter().copied().collect();
-    let n = els.len();
-    let sel_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
-    let mut new_els = els.clone();
-
-    for &i in selected {
-        if i >= n {
-            continue;
-        }
-        // Move endpoint (and incoming handle for curved elements)
-        new_els[i] = match els[i] {
-            PathEl::MoveTo(p) => PathEl::MoveTo(Point::new(p.x + dx, p.y + dy)),
-            PathEl::LineTo(p) => PathEl::LineTo(Point::new(p.x + dx, p.y + dy)),
-            PathEl::CurveTo(c1, c2, p) => PathEl::CurveTo(
-                c1,
-                Point::new(c2.x + dx, c2.y + dy),
-                Point::new(p.x + dx, p.y + dy),
-            ),
-            PathEl::QuadTo(c, p) => PathEl::QuadTo(
-                Point::new(c.x + dx, c.y + dy),
-                Point::new(p.x + dx, p.y + dy),
-            ),
-            PathEl::ClosePath => PathEl::ClosePath,
-        };
-        // Move outgoing handle (on the NEXT element) only if next anchor isn't also selected
-        let j = i + 1;
-        if j < n && !sel_set.contains(&j) {
-            new_els[j] = match els[j] {
-                PathEl::CurveTo(c1, c2, p) => {
-                    PathEl::CurveTo(Point::new(c1.x + dx, c1.y + dy), c2, p)
-                }
-                PathEl::QuadTo(c, p) => PathEl::QuadTo(Point::new(c.x + dx, c.y + dy), p),
-                other => other,
-            };
-        }
-    }
-
-    let mut result = BezPath::new();
-    for el in new_els {
-        result.push(el);
-    }
-    result
-}
-
-/// Remove the elements at `indices` from a `BezPath`, rebuilding a valid path.
-/// Apply zig-zag distortion to a BezPath (GUI version, mirrors MCP logic).
-fn gui_zig_zag(bez: &BezPath, size: f64, ridges: usize, smooth: bool) -> BezPath {
-    use kurbo::{PathEl, Point};
-
-    let mut result = BezPath::new();
-    let mut current = Point::ZERO;
-    let mut subpath_start = Point::ZERO;
-
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
-                subpath_start = p;
-            }
-            PathEl::ClosePath => {
-                if current != subpath_start {
-                    gui_zig_zag_segment(&mut result, current, subpath_start, size, ridges, smooth);
-                }
-                result.close_path();
-                current = subpath_start;
-            }
-            _ => {
-                let endpoint = match *el {
-                    PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => p,
-                    _ => unreachable!(),
-                };
-                // Find previous endpoint.
-                let start = {
-                    let els = result.elements();
-                    let mut pt = Point::ZERO;
-                    for e in els.iter().rev() {
-                        match e {
-                            PathEl::MoveTo(p)
-                            | PathEl::LineTo(p)
-                            | PathEl::CurveTo(_, _, p)
-                            | PathEl::QuadTo(_, p) => {
-                                pt = *p;
-                                break;
-                            }
-                            PathEl::ClosePath => {}
-                        }
-                    }
-                    pt
-                };
-                gui_zig_zag_segment(&mut result, start, endpoint, size, ridges, smooth);
-                current = endpoint;
-            }
-        }
-    }
-    result
-}
-
-fn gui_zig_zag_segment(
-    path: &mut BezPath,
-    from: kurbo::Point,
-    to: kurbo::Point,
-    size: f64,
-    ridges: usize,
-    smooth: bool,
-) {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1e-9 {
-        path.line_to(to);
-        return;
-    }
-    let tx = dx / len;
-    let ty = dy / len;
-    let nx = -ty;
-    let ny = tx;
-    let steps = ridges * 2;
-    let step_len = len / steps as f64;
-
-    for i in 1..=steps {
-        let t = i as f64 / steps as f64;
-        let px = from.x + dx * t;
-        let py = from.y + dy * t;
-        let disp = if i == steps {
-            0.0
-        } else if i % 2 == 1 {
-            size / 2.0
-        } else {
-            -size / 2.0
-        };
-        let pt = kurbo::Point::new(px + nx * disp, py + ny * disp);
-
-        if smooth && i < steps {
-            let handle_len = step_len * 0.3;
-            let prev_disp = if i == 1 {
-                0.0
-            } else if (i - 1) % 2 == 1 {
-                size / 2.0
-            } else {
-                -size / 2.0
-            };
-            let prev_t = (i - 1) as f64 / steps as f64;
-            let prev_x = from.x + dx * prev_t + nx * prev_disp;
-            let prev_y = from.y + dy * prev_t + ny * prev_disp;
-            let cp1 = kurbo::Point::new(prev_x + tx * handle_len, prev_y + ty * handle_len);
-            let cp2 = kurbo::Point::new(pt.x - tx * handle_len, pt.y - ty * handle_len);
-            path.curve_to(cp1, cp2, pt);
-        } else {
-            path.line_to(pt);
-        }
-    }
-}
-
-fn gui_path_centroid(bez: &BezPath) -> kurbo::Point {
-    let mut sx = 0.0;
-    let mut sy = 0.0;
-    let mut n = 0usize;
-    for el in bez.elements() {
-        let pt = match *el {
-            PathEl::MoveTo(p)
-            | PathEl::LineTo(p)
-            | PathEl::CurveTo(_, _, p)
-            | PathEl::QuadTo(_, p) => Some(p),
-            PathEl::ClosePath => None,
-        };
-        if let Some(p) = pt {
-            sx += p.x;
-            sy += p.y;
-            n += 1;
-        }
-    }
-    if n == 0 {
-        kurbo::Point::ZERO
-    } else {
-        kurbo::Point::new(sx / n as f64, sy / n as f64)
-    }
-}
-
-fn gui_pucker_bloat(bez: &BezPath, strength: f64, center: kurbo::Point) -> BezPath {
-    let displace = |p: kurbo::Point| -> kurbo::Point {
-        let dx = p.x - center.x;
-        let dy = p.y - center.y;
-        let dist = (dx * dx + dy * dy).sqrt();
-        if dist < 1e-9 {
-            return p;
-        }
-        let factor = 1.0 + strength;
-        kurbo::Point::new(center.x + dx * factor, center.y + dy * factor)
-    };
-    let mut result = BezPath::new();
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => result.move_to(displace(p)),
-            PathEl::LineTo(p) => result.line_to(displace(p)),
-            PathEl::CurveTo(c1, c2, p) => result.curve_to(displace(c1), displace(c2), displace(p)),
-            PathEl::QuadTo(c, p) => result.quad_to(displace(c), displace(p)),
-            PathEl::ClosePath => result.close_path(),
-        }
-    }
-    result
-}
-
-fn gui_round_corners(bez: &BezPath, radius: f64) -> BezPath {
-    let elements = bez.elements();
-    if elements.is_empty() || radius <= 0.0 {
-        return bez.clone();
-    }
-
-    let mut result = BezPath::new();
-    let mut subpath: Vec<kurbo::Point> = Vec::new();
-    let mut is_closed = false;
-
-    let flush = |result: &mut BezPath, pts: &[kurbo::Point], closed: bool, radius: f64| {
-        if pts.len() < 2 {
-            if let Some(&p) = pts.first() {
-                result.move_to(p);
-            }
-            return;
-        }
-        let n = pts.len();
-        for i in 0..n {
-            let prev = if i == 0 {
-                if closed {
-                    pts[n - 1]
-                } else {
-                    pts[0]
-                }
-            } else {
-                pts[i - 1]
-            };
-            let curr = pts[i];
-            let next = if i == n - 1 {
-                if closed {
-                    pts[0]
-                } else {
-                    pts[n - 1]
-                }
-            } else {
-                pts[i + 1]
-            };
-            let is_ep = !closed && (i == 0 || i == n - 1);
-            if is_ep {
-                if i == 0 {
-                    result.move_to(curr);
-                } else {
-                    result.line_to(curr);
-                }
-            } else {
-                let dx_in = curr.x - prev.x;
-                let dy_in = curr.y - prev.y;
-                let len_in = (dx_in * dx_in + dy_in * dy_in).sqrt();
-                let dx_out = next.x - curr.x;
-                let dy_out = next.y - curr.y;
-                let len_out = (dx_out * dx_out + dy_out * dy_out).sqrt();
-                if len_in < 1e-9 || len_out < 1e-9 {
-                    if i == 0 {
-                        result.move_to(curr);
-                    } else {
-                        result.line_to(curr);
-                    }
-                    continue;
-                }
-                let r = radius.min(len_in / 2.0).min(len_out / 2.0);
-                let fs =
-                    kurbo::Point::new(curr.x - (dx_in / len_in) * r, curr.y - (dy_in / len_in) * r);
-                let fe = kurbo::Point::new(
-                    curr.x + (dx_out / len_out) * r,
-                    curr.y + (dy_out / len_out) * r,
-                );
-                if i == 0 {
-                    result.move_to(fs);
-                } else {
-                    result.line_to(fs);
-                }
-                result.quad_to(curr, fe);
-            }
-        }
-        if closed {
-            result.close_path();
-        }
-    };
-
-    for el in elements {
-        match *el {
-            PathEl::MoveTo(p) => {
-                if !subpath.is_empty() {
-                    flush(&mut result, &subpath, is_closed, radius);
-                }
-                subpath.clear();
-                subpath.push(p);
-                is_closed = false;
-            }
-            PathEl::LineTo(p) => {
-                subpath.push(p);
-            }
-            PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => {
-                subpath.push(p);
-            }
-            PathEl::ClosePath => {
-                is_closed = true;
-            }
-        }
-    }
-    if !subpath.is_empty() {
-        flush(&mut result, &subpath, is_closed, radius);
-    }
-    result
-}
-
-fn gui_warp_envelope(bez: &BezPath, warp_type: &str, bend: f64) -> BezPath {
-    // Compute bounding box.
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
-    for el in bez.elements() {
-        let pts: Vec<kurbo::Point> = match *el {
-            PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
-            PathEl::CurveTo(c1, c2, p) => vec![c1, c2, p],
-            PathEl::QuadTo(c, p) => vec![c, p],
-            PathEl::ClosePath => vec![],
-        };
-        for p in pts {
-            min_x = min_x.min(p.x);
-            min_y = min_y.min(p.y);
-            max_x = max_x.max(p.x);
-            max_y = max_y.max(p.y);
-        }
-    }
-    let w = max_x - min_x;
-    let h = max_y - min_y;
-    if w < 1e-9 || h < 1e-9 {
-        return bez.clone();
-    }
-
-    let warp = |p: kurbo::Point| -> kurbo::Point {
-        let nx = (p.x - min_x) / w;
-        let ny = (p.y - min_y) / h;
-        let (dx, dy) = match warp_type {
-            "arc" => (0.0, bend * (nx * (1.0 - nx) * 4.0) * h * 0.25),
-            "bulge" => {
-                let cx = nx - 0.5;
-                let cy = ny - 0.5;
-                let r = (cx * cx + cy * cy).sqrt().min(0.5);
-                let f = bend * (1.0 - r * 2.0).max(0.0);
-                (cx * f * w, cy * f * h)
-            }
-            "wave" => (
-                0.0,
-                bend * (std::f64::consts::PI * 2.0 * nx).sin() * h * 0.25,
-            ),
-            "flag" => (
-                0.0,
-                bend * nx * (std::f64::consts::PI * 2.0 * ny).sin() * h * 0.25,
-            ),
-            _ => (0.0, 0.0),
-        };
-        kurbo::Point::new(p.x + dx, p.y + dy)
-    };
-
-    let mut result = BezPath::new();
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => result.move_to(warp(p)),
-            PathEl::LineTo(p) => result.line_to(warp(p)),
-            PathEl::CurveTo(c1, c2, p) => result.curve_to(warp(c1), warp(c2), warp(p)),
-            PathEl::QuadTo(c, p) => result.quad_to(warp(c), warp(p)),
-            PathEl::ClosePath => result.close_path(),
-        }
-    }
-    result
-}
-
-fn gui_crystallize(bez: &BezPath, size: f64, count: usize) -> BezPath {
-    let mut result = BezPath::new();
-    let mut current = kurbo::Point::ZERO;
-    let mut subpath_start = kurbo::Point::ZERO;
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
-                subpath_start = p;
-            }
-            PathEl::ClosePath => {
-                if current != subpath_start {
-                    gui_crystallize_seg(&mut result, current, subpath_start, size, count);
-                }
-                result.close_path();
-                current = subpath_start;
-            }
-            _ => {
-                let endpoint = match *el {
-                    PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => p,
-                    _ => unreachable!(),
-                };
-                let start = {
-                    let els = result.elements();
-                    let mut pt = kurbo::Point::ZERO;
-                    for e in els.iter().rev() {
-                        match e {
-                            PathEl::MoveTo(p)
-                            | PathEl::LineTo(p)
-                            | PathEl::CurveTo(_, _, p)
-                            | PathEl::QuadTo(_, p) => {
-                                pt = *p;
-                                break;
-                            }
-                            PathEl::ClosePath => {}
-                        }
-                    }
-                    pt
-                };
-                gui_crystallize_seg(&mut result, start, endpoint, size, count);
-                current = endpoint;
-            }
-        }
-    }
-    result
-}
-
-fn gui_crystallize_seg(
-    path: &mut BezPath,
-    from: kurbo::Point,
-    to: kurbo::Point,
-    size: f64,
-    count: usize,
-) {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1e-9 {
-        path.line_to(to);
-        return;
-    }
-    let nx = -dy / len;
-    let ny = dx / len;
-    for i in 0..count {
-        let t_peak = (i as f64 + 0.5) / count as f64;
-        let t_end = (i + 1) as f64 / count as f64;
-        let peak = kurbo::Point::new(
-            from.x + dx * t_peak + nx * size,
-            from.y + dy * t_peak + ny * size,
-        );
-        let base_end = kurbo::Point::new(from.x + dx * t_end, from.y + dy * t_end);
-        path.line_to(peak);
-        path.line_to(base_end);
-    }
-}
-
-fn gui_scallop(bez: &BezPath, depth: f64, count: usize) -> BezPath {
-    let mut result = BezPath::new();
-    let mut current = kurbo::Point::ZERO;
-    let mut subpath_start = kurbo::Point::ZERO;
-
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
-                subpath_start = p;
-            }
-            PathEl::ClosePath => {
-                if current != subpath_start {
-                    gui_scallop_seg(&mut result, current, subpath_start, depth, count);
-                }
-                result.close_path();
-                current = subpath_start;
-            }
-            _ => {
-                let endpoint = match *el {
-                    PathEl::LineTo(p) | PathEl::CurveTo(_, _, p) | PathEl::QuadTo(_, p) => p,
-                    _ => unreachable!(),
-                };
-                let start = {
-                    let els = result.elements();
-                    let mut pt = kurbo::Point::ZERO;
-                    for e in els.iter().rev() {
-                        match e {
-                            PathEl::MoveTo(p)
-                            | PathEl::LineTo(p)
-                            | PathEl::CurveTo(_, _, p)
-                            | PathEl::QuadTo(_, p) => {
-                                pt = *p;
-                                break;
-                            }
-                            PathEl::ClosePath => {}
-                        }
-                    }
-                    pt
-                };
-                gui_scallop_seg(&mut result, start, endpoint, depth, count);
-                current = endpoint;
-            }
-        }
-    }
-    result
-}
-
-fn gui_scallop_seg(
-    path: &mut BezPath,
-    from: kurbo::Point,
-    to: kurbo::Point,
-    depth: f64,
-    count: usize,
-) {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1e-9 {
-        path.line_to(to);
-        return;
-    }
-    let nx = dy / len;
-    let ny = -dx / len;
-    for i in 0..count {
-        let t0 = i as f64 / count as f64;
-        let t1 = (i + 1) as f64 / count as f64;
-        let tmid = (t0 + t1) / 2.0;
-        let p1 = kurbo::Point::new(from.x + dx * t1, from.y + dy * t1);
-        let p0 = kurbo::Point::new(from.x + dx * t0, from.y + dy * t0);
-        let pmid = kurbo::Point::new(
-            from.x + dx * tmid + nx * depth,
-            from.y + dy * tmid + ny * depth,
-        );
-        let qx = 2.0 * pmid.x - 0.5 * (p0.x + p1.x);
-        let qy = 2.0 * pmid.y - 0.5 * (p0.y + p1.y);
-        path.quad_to(kurbo::Point::new(qx, qy), p1);
-    }
-}
-
-fn gui_blend_objects(
-    nid_a: NodeId,
-    nid_b: NodeId,
-    steps: usize,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    use photonic_core::color::Color;
-    use photonic_core::style::{Fill, FillKind};
-
-    let (node_a, node_b) = match (
-        doc.nodes.get(&nid_a).cloned(),
-        doc.nodes.get(&nid_b).cloned(),
-    ) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return,
-    };
-    let (pn_a, pn_b) = match (&node_a.kind, &node_b.kind) {
-        (SceneNodeKind::Path(a), SceneNodeKind::Path(b)) => (a.clone(), b.clone()),
-        _ => return,
-    };
-    let bez_a = pn_a.path_data.to_bez_path();
-    let bez_b = pn_b.path_data.to_bez_path();
-    if bez_a.elements().len() != bez_b.elements().len() {
-        return;
-    }
-
-    let color_a = match &pn_a.fill.kind {
-        FillKind::Solid(c) => Some(*c),
-        _ => None,
-    };
-    let color_b = match &pn_b.fill.kind {
-        FillKind::Solid(c) => Some(*c),
-        _ => None,
-    };
-    let tx_a = (node_a.transform.matrix[4], node_a.transform.matrix[5]);
-    let tx_b = (node_b.transform.matrix[4], node_b.transform.matrix[5]);
-    let layer_id = node_a.layer_id;
-
-    let lerp_pt = |a: kurbo::Point, b: kurbo::Point, t: f64| {
-        kurbo::Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
-    };
-
-    for i in 1..=steps {
-        let t = i as f64 / (steps + 1) as f64;
-        let mut interp = BezPath::new();
-        for (ea, eb) in bez_a.elements().iter().zip(bez_b.elements().iter()) {
-            match (*ea, *eb) {
-                (PathEl::MoveTo(a), PathEl::MoveTo(b)) => interp.move_to(lerp_pt(a, b, t)),
-                (PathEl::LineTo(a), PathEl::LineTo(b)) => interp.line_to(lerp_pt(a, b, t)),
-                (PathEl::CurveTo(a1, a2, a3), PathEl::CurveTo(b1, b2, b3)) => {
-                    interp.curve_to(lerp_pt(a1, b1, t), lerp_pt(a2, b2, t), lerp_pt(a3, b3, t))
-                }
-                (PathEl::QuadTo(a1, a2), PathEl::QuadTo(b1, b2)) => {
-                    interp.quad_to(lerp_pt(a1, b1, t), lerp_pt(a2, b2, t))
-                }
-                (PathEl::ClosePath, PathEl::ClosePath) => interp.close_path(),
-                _ => interp.push(*ea),
-            }
-        }
-        let mut new_pn = pn_a.clone();
-        new_pn.path_data = PathData::from_bez_path(&interp);
-        if let (Some(ca), Some(cb)) = (&color_a, &color_b) {
-            new_pn.fill = Fill {
-                kind: FillKind::Solid(Color::new(
-                    ca.r + (cb.r - ca.r) * t as f32,
-                    ca.g + (cb.g - ca.g) * t as f32,
-                    ca.b + (cb.b - ca.b) * t as f32,
-                    ca.a + (cb.a - ca.a) * t as f32,
-                )),
-                ..pn_a.fill.clone()
-            };
-        }
-        let opacity = node_a.opacity + (node_b.opacity - node_a.opacity) * t as f32;
-        let name = format!("Blend {}/{}", i, steps);
-        let mut node = SceneNode::new(&name, layer_id, SceneNodeKind::Path(new_pn));
-        node.opacity = opacity;
-        let itx = (
-            tx_a.0 + (tx_b.0 - tx_a.0) * t,
-            tx_a.1 + (tx_b.1 - tx_a.1) * t,
-        );
-        node.transform = photonic_core::transform::Transform::translate(itx.0, itx.1);
-        history.execute(
-            Command::AddNode {
-                node,
-                layer_id: Some(layer_id),
-            },
-            doc,
-        );
-    }
-    *doc_modified = true;
-}
-
-/// Blend using Smooth Color mode: auto-compute steps from color distance.
-fn gui_blend_objects_smooth_color(
-    nid_a: NodeId,
-    nid_b: NodeId,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    use photonic_core::style::FillKind;
-    let (node_a, node_b) = match (
-        doc.nodes.get(&nid_a).cloned(),
-        doc.nodes.get(&nid_b).cloned(),
-    ) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return,
-    };
-    let (pn_a, pn_b) = match (&node_a.kind, &node_b.kind) {
-        (SceneNodeKind::Path(a), SceneNodeKind::Path(b)) => (a.clone(), b.clone()),
-        _ => return,
-    };
-    let color_a = match &pn_a.fill.kind {
-        FillKind::Solid(c) => Some(*c),
-        _ => None,
-    };
-    let color_b = match &pn_b.fill.kind {
-        FillKind::Solid(c) => Some(*c),
-        _ => None,
-    };
-    let steps = if let (Some(ca), Some(cb)) = (&color_a, &color_b) {
-        let dr = ((cb.r - ca.r).abs() * 255.0) as f64;
-        let dg = ((cb.g - ca.g).abs() * 255.0) as f64;
-        let db = ((cb.b - ca.b).abs() * 255.0) as f64;
-        (dr.max(dg).max(db).ceil() as usize).max(1)
-    } else {
-        5
-    };
-    gui_blend_objects(nid_a, nid_b, steps, doc, history, doc_modified);
-}
-
-/// Blend using Specified Distance mode: space steps by pixel distance.
-fn gui_blend_objects_spacing(
-    nid_a: NodeId,
-    nid_b: NodeId,
-    spacing: f64,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    if spacing <= 0.0 {
-        return;
-    }
-    let (node_a, node_b) = match (
-        doc.nodes.get(&nid_a).cloned(),
-        doc.nodes.get(&nid_b).cloned(),
-    ) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return,
-    };
-    let tx_a = (node_a.transform.matrix[4], node_a.transform.matrix[5]);
-    let tx_b = (node_b.transform.matrix[4], node_b.transform.matrix[5]);
-    let dx = tx_b.0 - tx_a.0;
-    let dy = tx_b.1 - tx_a.1;
-    let dist = (dx * dx + dy * dy).sqrt();
-    let steps = ((dist / spacing).ceil() as usize).saturating_sub(1).max(1);
-    gui_blend_objects(nid_a, nid_b, steps, doc, history, doc_modified);
-}
-
-fn gui_twirl(bez: &BezPath, angle_rad: f64, center: kurbo::Point) -> BezPath {
-    let mut max_dist = 0.0f64;
-    for el in bez.elements() {
-        let pts: Vec<kurbo::Point> = match *el {
-            PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
-            PathEl::CurveTo(c1, c2, p) => vec![c1, c2, p],
-            PathEl::QuadTo(c, p) => vec![c, p],
-            PathEl::ClosePath => vec![],
-        };
-        for p in pts {
-            let d = ((p.x - center.x).powi(2) + (p.y - center.y).powi(2)).sqrt();
-            if d > max_dist {
-                max_dist = d;
-            }
-        }
-    }
-    if max_dist < 1e-9 {
-        return bez.clone();
-    }
-
-    let twirl = |p: kurbo::Point| -> kurbo::Point {
-        let dx = p.x - center.x;
-        let dy = p.y - center.y;
-        let dist = (dx * dx + dy * dy).sqrt();
-        let t = 1.0 - (dist / max_dist).min(1.0);
-        let a = angle_rad * t;
-        kurbo::Point::new(
-            center.x + dx * a.cos() - dy * a.sin(),
-            center.y + dx * a.sin() + dy * a.cos(),
-        )
-    };
-
-    let mut result = BezPath::new();
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => result.move_to(twirl(p)),
-            PathEl::LineTo(p) => result.line_to(twirl(p)),
-            PathEl::CurveTo(c1, c2, p) => result.curve_to(twirl(c1), twirl(c2), twirl(p)),
-            PathEl::QuadTo(c, p) => result.quad_to(twirl(c), twirl(p)),
-            PathEl::ClosePath => result.close_path(),
-        }
-    }
-    result
-}
-
-fn gui_xorshift64(state: &mut u64) -> f64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    (s as f64 / u64::MAX as f64) * 2.0 - 1.0
-}
-
-fn gui_subdivide_bez(bez: &BezPath) -> BezPath {
-    let mut result = BezPath::new();
-    let mut current = kurbo::Point::ZERO;
-    let mid =
-        |a: kurbo::Point, b: kurbo::Point| kurbo::Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => {
-                result.move_to(p);
-                current = p;
-            }
-            PathEl::LineTo(p) => {
-                result.line_to(mid(current, p));
-                result.line_to(p);
-                current = p;
-            }
-            PathEl::CurveTo(c1, c2, p) => {
-                let m01 = mid(current, c1);
-                let m12 = mid(c1, c2);
-                let m23 = mid(c2, p);
-                let m012 = mid(m01, m12);
-                let m123 = mid(m12, m23);
-                let m0123 = mid(m012, m123);
-                result.curve_to(m01, m012, m0123);
-                result.curve_to(m123, m23, p);
-                current = p;
-            }
-            PathEl::QuadTo(c, p) => {
-                let mc0 = mid(current, c);
-                let mc1 = mid(c, p);
-                let m = mid(mc0, mc1);
-                result.quad_to(mc0, m);
-                result.quad_to(mc1, p);
-                current = p;
-            }
-            PathEl::ClosePath => {
-                result.close_path();
-            }
-        }
-    }
-    result
-}
-
-fn gui_roughen(bez: &BezPath, size: f64, seed: u64) -> BezPath {
-    let mut rng = seed.max(1);
-    let displace = |p: kurbo::Point, rng: &mut u64| -> kurbo::Point {
-        kurbo::Point::new(
-            p.x + gui_xorshift64(rng) * size,
-            p.y + gui_xorshift64(rng) * size,
-        )
-    };
-    let mut result = BezPath::new();
-    for el in bez.elements() {
-        match *el {
-            PathEl::MoveTo(p) => result.move_to(displace(p, &mut rng)),
-            PathEl::LineTo(p) => result.line_to(displace(p, &mut rng)),
-            PathEl::CurveTo(c1, c2, p) => result.curve_to(
-                displace(c1, &mut rng),
-                displace(c2, &mut rng),
-                displace(p, &mut rng),
-            ),
-            PathEl::QuadTo(c, p) => result.quad_to(displace(c, &mut rng), displace(p, &mut rng)),
-            PathEl::ClosePath => result.close_path(),
-        }
-    }
-    result
-}
-
-fn bez_remove_elements(bez: &BezPath, indices: &[usize]) -> BezPath {
-    let remove_set: std::collections::HashSet<usize> = indices.iter().copied().collect();
-    let mut result = BezPath::new();
-    let mut needs_move = true;
-    for (i, el) in bez.elements().iter().enumerate() {
-        if remove_set.contains(&i) {
-            needs_move = true;
-            continue;
-        }
-        if needs_move {
-            // Patch: replace a non-MoveTo element that follows a gap with a MoveTo
-            let endpoint = match el {
-                PathEl::MoveTo(p) | PathEl::LineTo(p) => Some(*p),
-                PathEl::CurveTo(_, _, p) => Some(*p),
-                PathEl::QuadTo(_, p) => Some(*p),
-                PathEl::ClosePath => None,
-            };
-            if let Some(p) = endpoint {
-                result.push(PathEl::MoveTo(p));
-                needs_move = false;
-                // Skip emitting the original element if it was already a MoveTo
-                if !matches!(el, PathEl::MoveTo(_)) {
-                    result.push(*el);
-                }
-            }
-        } else {
-            result.push(*el);
-        }
-    }
-    result
-}
+// ── path geometry helpers moved to `mod geometry` (see geometry.rs) ──
 
 // ─── Claude tab ───────────────────────────────────────────────────────────────
 
@@ -12292,7 +11258,7 @@ impl PhotonicApp {
                             });
                         ui.add_space(2.0);
                     } else {
-                        let is_err = text.starts_with("⚠");
+                        let is_err = text.starts_with(ph::WARNING);
                         let frame_color = if is_err {
                             Color32::from_rgb(35, 10, 15)
                         } else {
@@ -12324,6 +11290,78 @@ impl PhotonicApp {
                 }); // end top_down layout
             });
         });
+    }
+
+    // ── "What's New" popup ─────────────────────────────────────────────────────
+
+    /// Centered modal listing release notes for versions the user just skipped.
+    /// Dimming scrim behind, single "Got it" button to dismiss.
+    fn draw_whats_new(&mut self, ctx: &egui::Context) {
+        // Dim the rest of the app.
+        egui::Area::new(egui::Id::new("whats_new_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter()
+                    .rect_filled(screen, 0.0, Color32::from_black_alpha(160));
+                // Swallow clicks on the backdrop.
+                ui.allocate_rect(screen, egui::Sense::click());
+            });
+
+        let mut open = true;
+        let cur = crate::update::CURRENT_VERSION;
+        egui::Window::new(RichText::new(format!("{}  What's New", ph::SPARKLE)).size(17.0))
+            .id(egui::Id::new("whats_new_window"))
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(
+                    RichText::new(format!("Photonic updated to v{cur}"))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for note in &self.whats_new_notes {
+                            let title = match &note.date {
+                                Some(d) => format!("v{}  ·  {}", note.version, d),
+                                None => format!("v{}", note.version),
+                            };
+                            ui.label(
+                                RichText::new(title)
+                                    .strong()
+                                    .size(15.0)
+                                    .color(Color32::from_rgb(96, 165, 250)),
+                            );
+                            ui.add_space(2.0);
+                            render_changelog_body(ui, &note.body);
+                            ui.add_space(10.0);
+                        }
+                    });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(RichText::new("Got it").color(Color32::WHITE))
+                        .clicked()
+                    {
+                        open = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.show_whats_new = false;
+            self.whats_new_notes.clear();
+        }
     }
 
     // ── Export modal ─────────────────────────────────────────────────────────
@@ -12731,6 +11769,59 @@ impl PhotonicApp {
             path
         };
 
+        // ── Multi-artboard raster export: one file per artboard ──────────────
+        // Each board exports at its own pixel size into `<stem>_<name>.<ext>`.
+        // SVG/ICO keep whole-document behaviour.
+        if matches!(
+            format,
+            ExportFormat::Png
+                | ExportFormat::Jpeg
+                | ExportFormat::WebP
+                | ExportFormat::Gif
+                | ExportFormat::Tiff
+        ) && doc.artboards.len() > 1
+        {
+            let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+            let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| doc.name.clone());
+            let mut err: Option<String> = None;
+            let mut count = 0usize;
+            for ab in &doc.artboards {
+                let mut o = opts.clone();
+                o.region = Some((ab.x, ab.y, ab.width, ab.height));
+                let aw = ab.width.round().max(1.0) as u32;
+                let ah = ab.height.round().max(1.0) as u32;
+                let bytes = match format {
+                    ExportFormat::Png => renderer.render_png_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Jpeg => renderer.render_jpeg_with_opts(doc, aw, ah, &o),
+                    ExportFormat::WebP => renderer.render_webp_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Gif => renderer.render_gif_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Tiff => renderer.render_tiff_with_opts(doc, aw, ah, &o),
+                    _ => unreachable!(),
+                };
+                let safe: String = ab
+                    .name
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let p = parent.join(format!("{stem}_{safe}.{ext}"));
+                if let Err(e) = std::fs::write(&p, bytes) {
+                    err = Some(e.to_string());
+                    break;
+                }
+                count += 1;
+            }
+            self.export_dialog = None;
+            self.file_status = Some(match err {
+                None => format!("Exported {count} artboards → {stem}_*.{ext}"),
+                Some(e) => format!("Export failed: {e}"),
+            });
+            return;
+        }
+
         let result = match format {
             ExportFormat::Svg => {
                 // Honor the Background selector: Transparent => no rect,
@@ -12793,744 +11884,202 @@ impl PhotonicApp {
     }
 }
 
-/// Apply a kurbo Affine to all points in a PathData (bakes transform into path coords).
-fn gui_apply_affine_to_path(path: &PathData, affine: kurbo::Affine) -> PathData {
-    use kurbo::PathEl;
-    let mut result = BezPath::new();
-    for el in path.to_bez_path().elements() {
-        let t = match *el {
-            PathEl::MoveTo(p) => PathEl::MoveTo(affine * p),
-            PathEl::LineTo(p) => PathEl::LineTo(affine * p),
-            PathEl::CurveTo(c1, c2, p) => PathEl::CurveTo(affine * c1, affine * c2, affine * p),
-            PathEl::QuadTo(c, p) => PathEl::QuadTo(affine * c, affine * p),
-            PathEl::ClosePath => PathEl::ClosePath,
-        };
-        result.push(t);
-    }
-    PathData::from_bez_path(&result)
-}
+// ── hit-testing & node helpers moved to `mod hit_test` (see hit_test.rs) ──
+// ── chart/tiling demo generators moved to `mod demos` (see demos.rs) ──
 
-/// Return the topmost node (reverse draw order) whose bounding box contains (cx, cy).
-/// Tests whether the canvas-space point `(cx, cy)` lands on a path node's
-/// actual geometry: inside its filled area (non-zero winding) or within a small
-/// tolerance of its outline (so thin / open / stroke-only paths stay clickable).
-///
-/// Returns `None` for non-path nodes so the caller can fall back to a plain
-/// bounding-box test (text, images and groups have no fillable outline here).
-fn path_geometry_hit(node: &SceneNode, cx: f64, cy: f64) -> Option<bool> {
-    use kurbo::{ParamCurveNearest, Shape};
-    let SceneNodeKind::Path(pn) = &node.kind else {
-        return None;
-    };
-    let bez = pn.path_data.to_bez_path();
-    if bez.elements().is_empty() {
-        return Some(false);
-    }
-    // Transform into canvas space so the click point and the tolerance share
-    // units (the click is already in canvas coordinates).
-    let canvas_bez = node.transform.to_kurbo() * bez;
-    let pt = kurbo::Point::new(cx, cy);
-
-    // Filled interior: only a *filled* shape should be selectable through its
-    // body — an unfilled outline is clickable only on its edge, matching the
-    // "click through transparent areas" behaviour requested in #3.
-    if pn.fill.enabled && canvas_bez.contains(pt) {
-        return Some(true);
-    }
-
-    // Outline proximity: clickable within half the stroke width plus a few
-    // canvas units of slack so hairline strokes and open paths stay grabbable.
-    let tol = (pn.stroke.width * 0.5) + 3.0;
-    let tol_sq = tol * tol;
-    let on_edge = canvas_bez
-        .segments()
-        .any(|seg| seg.nearest(pt, 0.1).distance_sq <= tol_sq);
-    Some(on_edge)
-}
-
-fn hit_test(doc: &Document, cx: f64, cy: f64, renderer: &mut PhotonicRenderer) -> Option<NodeId> {
-    for node in doc.nodes_in_draw_order().into_iter().rev() {
-        if node.locked {
+/// Render a Keep-a-Changelog section body with light formatting: `### Foo`
+/// becomes a small heading, `- item` / `* item` become bullets, everything
+/// else is a wrapped paragraph. (We don't pull in a full markdown renderer.)
+fn render_changelog_body(ui: &mut egui::Ui, body: &str) {
+    for raw in body.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() {
+            ui.add_space(3.0);
             continue;
         }
-        // Cheap reject: the click must at least fall inside the bounding box.
-        let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) else {
-            continue;
-        };
-        if cx < x0 || cx > x1 || cy < y0 || cy > y1 {
-            continue;
-        }
-        // Refine path nodes to their real geometry so clicks fall through the
-        // transparent parts of a non-rectangular shape onto whatever is below;
-        // other node kinds keep the bounding-box hit.
-        match path_geometry_hit(node, cx, cy) {
-            Some(true) | None => return Some(node.id),
-            Some(false) => continue,
-        }
-    }
-    None
-}
-
-/// Horizontal center of a path node's bounding box in local space.
-fn gui_path_center_x(node: &SceneNode) -> f32 {
-    if let SceneNodeKind::Path(p) = &node.kind {
-        if let Some(bb) = p.path_data.bounding_box() {
-            return ((bb.x0 + bb.x1) / 2.0) as f32;
-        }
-    }
-    0.0
-}
-
-/// Vertical center of a path node's bounding box in local space.
-fn gui_path_center_y(node: &SceneNode) -> f32 {
-    if let SceneNodeKind::Path(p) = &node.kind {
-        if let Some(bb) = p.path_data.bounding_box() {
-            return ((bb.y0 + bb.y1) / 2.0) as f32;
-        }
-    }
-    0.0
-}
-
-/// Extract the solid fill color from a node's path fill, or None if absent.
-fn gui_solid_fill_color(node: &SceneNode) -> Option<photonic_core::color::Color> {
-    use photonic_core::style::FillKind;
-    if let SceneNodeKind::Path(pn) = &node.kind {
-        if pn.fill.enabled {
-            if let FillKind::Solid(c) = pn.fill.kind {
-                return Some(c);
-            }
-        }
-    }
-    None
-}
-
-/// Euclidean distance between two RGBA colors in [0,1] space.
-fn gui_color_dist(a: photonic_core::color::Color, b: photonic_core::color::Color) -> f32 {
-    let dr = a.r - b.r;
-    let dg = a.g - b.g;
-    let db = a.b - b.b;
-    let da = a.a - b.a;
-    (dr * dr + dg * dg + db * db + da * da).sqrt()
-}
-
-/// Snap the line endpoint `(ex, ey)` from start `(sx, sy)` to the nearest 45° angle.
-/// The distance from start to the snapped end is preserved.
-fn snap_line_to_45(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
-    let dx = ex - sx;
-    let dy = ey - sy;
-    let len = dx.hypot(dy);
-    if len < 1e-6 {
-        return (ex, ey);
-    }
-    let angle = dy.atan2(dx);
-    // Round to nearest multiple of 45° (π/4 radians).
-    let snapped = (angle / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
-    (sx + len * snapped.cos(), sy + len * snapped.sin())
-}
-
-/// Treat `(sx, sy)` as the center of a shape and mirror the drag end through it,
-/// returning the two opposite corners `((ax, ay), (bx, by))`. Used when Alt is
-/// held while drawing so the shape grows symmetrically from the start point.
-fn shape_corners_from_center(sx: f64, sy: f64, ex: f64, ey: f64) -> ((f64, f64), (f64, f64)) {
-    let dx = ex - sx;
-    let dy = ey - sy;
-    ((sx - dx, sy - dy), (sx + dx, sy + dy))
-}
-
-/// Constrain a drag rectangle to a 1:1 square while keeping `(sx, sy)` as the
-/// anchor corner. The larger of the two deltas wins, so the endpoint moves
-/// along the drag direction's diagonal (square / circle / proportional shape).
-fn constrain_to_square(sx: f64, sy: f64, ex: f64, ey: f64) -> (f64, f64) {
-    let dx = ex - sx;
-    let dy = ey - sy;
-    let m = dx.abs().max(dy.abs());
-    (sx + m.copysign(dx), sy + m.copysign(dy))
-}
-
-/// Extract the solid fill RGBA from a node (used by the Magic Wand tool).
-fn magic_wand_solid_fill(node: &SceneNode) -> Option<Color> {
-    use photonic_core::style::FillKind;
-    if let SceneNodeKind::Path(pn) = &node.kind {
-        if pn.fill.enabled {
-            if let FillKind::Solid(c) = pn.fill.kind {
-                return Some(c);
-            }
-        }
-    }
-    None
-}
-
-/// Euclidean distance between two RGBA colors in [0, 1] space (Magic Wand helper).
-fn magic_wand_color_dist(a: Color, b: Color) -> f32 {
-    let dr = a.r - b.r;
-    let dg = a.g - b.g;
-    let db = a.b - b.b;
-    let da = a.a - b.a;
-    (dr * dr + dg * dg + db * db + da * da).sqrt()
-}
-
-/// Shared logic for ConvertToSmooth / ConvertToCorner panel actions.
-fn convert_anchor_points_gui(
-    smooth: bool,
-    node_ids: Vec<photonic_core::node::NodeId>,
-    doc: &mut Document,
-    history: &mut photonic_core::history::CommandHistory,
-    doc_modified: &mut bool,
-) {
-    let mut cmds: Vec<Command> = Vec::new();
-    for nid in node_ids {
-        if let Some(node) = doc.nodes.get(&nid).cloned() {
-            if let SceneNodeKind::Path(ref pn) = node.kind {
-                let new_path = if smooth {
-                    pn.path_data.convert_to_smooth()
-                } else {
-                    pn.path_data.convert_to_corner()
-                };
-                let mut new_node = node.clone();
-                if let SceneNodeKind::Path(ref mut np) = new_node.kind {
-                    np.path_data = new_path;
-                }
-                cmds.push(Command::UpdateNode {
-                    old: node,
-                    new: new_node,
-                });
-            }
-        }
-    }
-    if !cmds.is_empty() {
-        let cmd = if cmds.len() == 1 {
-            cmds.remove(0)
+        if let Some(h) = line.strip_prefix("### ") {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(h.trim())
+                    .strong()
+                    .color(Color32::from_rgb(203, 213, 225)),
+            );
+        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            ui.horizontal_top(|ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new("•").color(Color32::from_rgb(96, 165, 250)));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(item.trim()).color(Color32::from_rgb(203, 213, 225)),
+                    )
+                    .wrap(),
+                );
+            });
         } else {
-            Command::Batch(cmds)
-        };
-        history.execute(cmd, doc);
-        *doc_modified = true;
-    }
-}
-
-/// Compute the world-space AABB of a node as (x0, y0, x1, y1), or None if the node
-/// has no computable bounding box (e.g. groups without children).
-fn node_world_aabb_opt(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
-    use photonic_core::node::SceneNodeKind;
-    let local_rect = match &node.kind {
-        SceneNodeKind::Path(pn) => pn.path_data.bounding_box()?,
-        SceneNodeKind::Text(_) => return None,
-        SceneNodeKind::Group(_) => return None,
-    };
-    let tf = node.transform.to_kurbo();
-    let corners = [
-        kurbo::Point::new(local_rect.x0, local_rect.y0),
-        kurbo::Point::new(local_rect.x1, local_rect.y0),
-        kurbo::Point::new(local_rect.x1, local_rect.y1),
-        kurbo::Point::new(local_rect.x0, local_rect.y1),
-    ];
-    let world: Vec<kurbo::Point> = corners.iter().map(|p| tf * *p).collect();
-    let wx0 = world.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-    let wy0 = world.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-    let wx1 = world.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-    let wy1 = world.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-    Some((wx0, wy0, wx1, wy1))
-}
-
-/// Ray-casting point-in-polygon test (Jordan curve theorem).
-fn lasso_point_in_polygon(px: f64, py: f64, poly: &[[f64; 2]]) -> bool {
-    let n = poly.len();
-    if n < 3 {
-        return false;
-    }
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let xi = poly[i][0];
-        let yi = poly[i][1];
-        let xj = poly[j][0];
-        let yj = poly[j][1];
-        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-/// Create a sample 5-axis radar chart at (cx, cy) for the GUI demo button.
-/// Two series: "Alpha" [80, 60, 90, 50, 70] and "Beta" [50, 80, 40, 75, 55].
-fn gui_create_radar_chart_demo(
-    cx: f64,
-    cy: f64,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    use photonic_core::color::Color;
-    use photonic_core::style::{Fill, FillKind};
-
-    let radius = 100.0_f64;
-    let grid_rings = 4_usize;
-    let n_axes = 5_usize;
-    let series_data: &[(&str, &[f64], Color)] = &[
-        (
-            "Alpha",
-            &[80.0, 60.0, 90.0, 50.0, 70.0],
-            Color::from_hex("#4E79A7").unwrap_or(Color::new(0.31, 0.47, 0.65, 1.0)),
-        ),
-        (
-            "Beta",
-            &[50.0, 80.0, 40.0, 75.0, 55.0],
-            Color::from_hex("#F28E2B").unwrap_or(Color::new(0.95, 0.56, 0.17, 1.0)),
-        ),
-    ];
-
-    let axis_angle = |i: usize| -> f64 {
-        -std::f64::consts::FRAC_PI_2 + (i as f64 / n_axes as f64) * std::f64::consts::TAU
-    };
-
-    let layer_id = doc.active_layer_id.unwrap_or(uuid::Uuid::nil());
-    let mut child_ids: Vec<uuid::Uuid> = Vec::new();
-
-    // Grid rings
-    for ring in 1..=grid_rings {
-        let r = radius * (ring as f64 / grid_rings as f64);
-        let mut bez = BezPath::new();
-        for i in 0..n_axes {
-            let angle = axis_angle(i);
-            let pt = Point::new(cx + r * angle.cos(), cy + r * angle.sin());
-            if i == 0 {
-                bez.move_to(pt);
-            } else {
-                bez.line_to(pt);
-            }
-        }
-        bez.close_path();
-        let mut pn = PathNode::new(PathData::from_bez_path(&bez));
-        pn.fill = Fill {
-            kind: FillKind::None,
-            ..Default::default()
-        };
-        pn.stroke = Stroke::solid(Color::new(0.7, 0.7, 0.75, 1.0), 0.75);
-        let node = SceneNode::new(
-            &format!("Grid Ring {ring}"),
-            layer_id,
-            SceneNodeKind::Path(pn),
-        );
-        child_ids.push(node.id);
-        history.execute(
-            Command::AddNode {
-                node,
-                layer_id: Some(layer_id),
-            },
-            doc,
-        );
-    }
-
-    // Axis lines
-    for i in 0..n_axes {
-        let angle = axis_angle(i);
-        let tip = Point::new(cx + radius * angle.cos(), cy + radius * angle.sin());
-        let mut bez = BezPath::new();
-        bez.move_to(Point::new(cx, cy));
-        bez.line_to(tip);
-        let mut pn = PathNode::new(PathData::from_bez_path(&bez));
-        pn.fill = Fill {
-            kind: FillKind::None,
-            ..Default::default()
-        };
-        pn.stroke = Stroke::solid(Color::new(0.7, 0.7, 0.75, 1.0), 0.75);
-        let node = SceneNode::new(
-            &format!("Axis {}", i + 1),
-            layer_id,
-            SceneNodeKind::Path(pn),
-        );
-        child_ids.push(node.id);
-        history.execute(
-            Command::AddNode {
-                node,
-                layer_id: Some(layer_id),
-            },
-            doc,
-        );
-    }
-
-    // Series polygons
-    let axis_max = 100.0_f64; // both series scaled to 0–100
-    for (name, values, color) in series_data {
-        let mut bez = BezPath::new();
-        for (ai, &val) in values.iter().enumerate() {
-            let r = radius * (val / axis_max).clamp(0.0, 1.0);
-            let angle = axis_angle(ai);
-            let pt = Point::new(cx + r * angle.cos(), cy + r * angle.sin());
-            if ai == 0 {
-                bez.move_to(pt);
-            } else {
-                bez.line_to(pt);
-            }
-        }
-        bez.close_path();
-        let mut pn = PathNode::new(PathData::from_bez_path(&bez));
-        pn.fill = Fill {
-            kind: FillKind::Solid(Color::new(color.r, color.g, color.b, 0.2)),
-            ..Default::default()
-        };
-        pn.stroke = Stroke::solid(*color, 1.5);
-        let node = SceneNode::new(*name, layer_id, SceneNodeKind::Path(pn));
-        child_ids.push(node.id);
-        history.execute(
-            Command::AddNode {
-                node,
-                layer_id: Some(layer_id),
-            },
-            doc,
-        );
-    }
-
-    let group = SceneNode::new(
-        "Radar Chart",
-        layer_id,
-        SceneNodeKind::Group(GroupNode::new()),
-    );
-    history.execute(
-        Command::GroupNodes {
-            group,
-            layer_id,
-            insert_index: 0,
-            children: child_ids,
-        },
-        doc,
-    );
-
-    *doc_modified = true;
-}
-
-/// Create a sample 3-series stacked column chart for the GUI demo button.
-fn gui_create_stacked_bar_chart_demo(
-    x: f64,
-    y: f64,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    use kurbo::Shape;
-    use photonic_core::color::Color;
-    use photonic_core::style::{Fill, FillKind};
-
-    let chart_w = 300.0_f64;
-    let chart_h = 200.0_f64;
-    let gap_frac = 0.2_f64;
-    let series_data: &[(&str, &[f64], Color)] = &[
-        (
-            "Alpha",
-            &[40.0, 55.0, 30.0, 65.0],
-            Color::from_hex("#4E79A7").unwrap_or(Color::new(0.31, 0.47, 0.65, 1.0)),
-        ),
-        (
-            "Beta",
-            &[30.0, 25.0, 45.0, 20.0],
-            Color::from_hex("#F28E2B").unwrap_or(Color::new(0.95, 0.56, 0.17, 1.0)),
-        ),
-        (
-            "Gamma",
-            &[20.0, 15.0, 20.0, 10.0],
-            Color::from_hex("#E15759").unwrap_or(Color::new(0.88, 0.34, 0.35, 1.0)),
-        ),
-    ];
-    let n_stacks = 4_usize;
-
-    let max_total = (0..n_stacks)
-        .map(|ci| series_data.iter().map(|(_, vals, _)| vals[ci]).sum::<f64>())
-        .fold(0.0_f64, f64::max);
-    if max_total <= 0.0 {
-        return;
-    }
-
-    let bar_total = chart_w / n_stacks as f64;
-    let bar_w = bar_total * (1.0 - gap_frac);
-    let bar_gap = bar_total * gap_frac;
-
-    let layer_id = doc.active_layer_id.unwrap_or(uuid::Uuid::nil());
-    let mut child_ids: Vec<uuid::Uuid> = Vec::new();
-
-    for ci in 0..n_stacks {
-        let bx = x + (ci as f64 * bar_total) + bar_gap / 2.0;
-        let mut cursor_y = y;
-        for (sname, vals, color) in series_data {
-            let val = vals[ci];
-            if val <= 0.0 {
-                continue;
-            }
-            let seg_h = (val / max_total) * chart_h;
-            let rect = kurbo::Rect::new(bx, cursor_y - seg_h, bx + bar_w, cursor_y);
-            let mut pn = PathNode::new(PathData::from_bez_path(&rect.to_path(0.0)));
-            pn.fill = Fill {
-                kind: FillKind::Solid(*color),
-                ..Default::default()
-            };
-            pn.stroke = Stroke::none();
-            let node = SceneNode::new(
-                format!("{sname} / Bar {}", ci + 1),
-                layer_id,
-                SceneNodeKind::Path(pn),
+            ui.add(
+                egui::Label::new(RichText::new(line).color(Color32::from_rgb(203, 213, 225)))
+                    .wrap(),
             );
-            child_ids.push(node.id);
-            history.execute(
-                Command::AddNode {
-                    node,
-                    layer_id: Some(layer_id),
-                },
-                doc,
-            );
-            cursor_y -= seg_h;
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_select_geometry_tests {
+    use super::*;
+    use kurbo::BezPath;
+
+    fn rect() -> BezPath {
+        // Closed square 0,0 .. 100,100 (M,L,L,L,Z) — four straight corners.
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.line_to((100.0, 0.0));
+        b.line_to((100.0, 100.0));
+        b.line_to((0.0, 100.0));
+        b.close_path();
+        b
+    }
+
+    #[test]
+    fn all_rect_corners_are_roundable() {
+        let m = straight_corners(&rect());
+        // Indices 0..=3 are the four anchors (MoveTo + 3 LineTo).
+        assert_eq!(m.len(), 4, "expected 4 straight corners, got {}", m.len());
+        for i in 0..4 {
+            assert!(m.contains_key(&i), "anchor {i} should be a straight corner");
         }
     }
 
-    let group = SceneNode::new(
-        "Stacked Column Chart",
-        layer_id,
-        SceneNodeKind::Group(GroupNode::new()),
-    );
-    history.execute(
-        Command::GroupNodes {
-            group,
-            layer_id,
-            insert_index: 0,
-            children: child_ids,
-        },
-        doc,
-    );
-
-    *doc_modified = true;
-}
-
-/// Create a parametric shape demo (Lissajous / Superellipse / Rose) at canvas center.
-fn gui_create_parametric_shape_demo(
-    shape_type: &str,
-    cx: f64,
-    cy: f64,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    use std::f64::consts::{PI, TAU};
-
-    let radius = 100.0_f64;
-    let n_pts = 360_usize;
-
-    let (pts, label, fill_color, stroke_color): (Vec<(f64, f64)>, &str, Color, Color) =
-        match shape_type {
-            "lissajous" => {
-                let freq_a = 3.0_f64;
-                let freq_b = 2.0_f64;
-                let delta = PI / 4.0_f64;
-                let pts = (0..n_pts)
-                    .map(|i| {
-                        let t = i as f64 / n_pts as f64 * TAU;
-                        (
-                            radius * (freq_a * t + delta).sin(),
-                            radius * (freq_b * t).sin(),
-                        )
-                    })
-                    .collect();
-                (
-                    pts,
-                    "Lissajous (3:2)",
-                    Color::new(0.27, 0.51, 0.71, 0.63),
-                    Color::new(0.12, 0.31, 0.55, 0.86),
-                )
-            }
-            "superellipse" => {
-                let n = 2.5_f64;
-                let pts = (0..n_pts)
-                    .map(|i| {
-                        let t = i as f64 / n_pts as f64 * TAU;
-                        let cos_t = t.cos();
-                        let sin_t = t.sin();
-                        let x = radius * cos_t.signum() * cos_t.abs().powf(2.0 / n);
-                        let y = radius * sin_t.signum() * sin_t.abs().powf(2.0 / n);
-                        (x, y)
-                    })
-                    .collect();
-                (
-                    pts,
-                    "Superellipse (n=2.5)",
-                    Color::new(0.78, 0.39, 0.24, 0.63),
-                    Color::new(0.63, 0.24, 0.08, 0.86),
-                )
-            }
-            _ => {
-                // "rose" or default
-                let k = 5.0_f64;
-                let t_max = PI; // odd k -> integrate over PI for a closed rose
-                let pts = (0..n_pts)
-                    .map(|i| {
-                        let t = i as f64 / n_pts as f64 * t_max;
-                        let r = radius * (k * t).cos();
-                        (r * t.cos(), r * t.sin())
-                    })
-                    .collect();
-                (
-                    pts,
-                    "Rose Curve (k=5)",
-                    Color::new(0.78, 0.24, 0.47, 0.63),
-                    Color::new(0.63, 0.08, 0.31, 0.86),
-                )
-            }
-        };
-
-    if pts.is_empty() {
-        return;
+    #[test]
+    fn rounding_one_corner_adds_a_quad_and_preserves_others() {
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize].into_iter().collect();
+        let out = round_selected_corners(&bez, &sel, 10.0);
+        // Exactly one quad segment is introduced for the single rounded corner.
+        let quads = out
+            .elements()
+            .iter()
+            .filter(|e| matches!(e, PathEl::QuadTo(_, _)))
+            .count();
+        assert_eq!(quads, 1, "one corner rounded → one quad arc");
+        // Still a closed path.
+        assert!(out
+            .elements()
+            .iter()
+            .any(|e| matches!(e, PathEl::ClosePath)));
     }
 
-    let mut bez = BezPath::new();
-    for (i, (px, py)) in pts.iter().enumerate() {
-        let pt = Point::new(cx + px, cy + py);
-        if i == 0 {
-            bez.move_to(pt);
+    #[test]
+    fn rounding_zero_radius_is_noop() {
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [0, 1, 2, 3].into_iter().collect();
+        let out = round_selected_corners(&bez, &sel, 0.0);
+        assert_eq!(out.elements().len(), bez.elements().len());
+    }
+
+    #[test]
+    fn curve_has_handles_line_does_not() {
+        // M then a single CurveTo: anchor index 1 has an IN handle (c2); its
+        // OUT handle is None (no following curve).
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((10.0, 0.0), (20.0, 10.0), (20.0, 20.0));
+        let els = b.elements();
+        assert!(anchor_handle_point(els, 1, HandleKind::In).is_some());
+        assert!(anchor_handle_point(els, 1, HandleKind::Out).is_none());
+        // A pure rectangle anchor has neither handle.
+        let r = rect();
+        assert!(anchor_handle_point(r.elements(), 1, HandleKind::In).is_none());
+    }
+
+    #[test]
+    fn set_handle_moves_only_target_when_not_mirrored() {
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((10.0, 0.0), (20.0, 10.0), (20.0, 20.0));
+        let out = bez_set_handle(&b, 1, HandleKind::In, Point::new(25.0, 5.0), false);
+        if let PathEl::CurveTo(_, c2, p) = out.elements()[1] {
+            assert_eq!(c2, Point::new(25.0, 5.0));
+            assert_eq!(p, Point::new(20.0, 20.0), "endpoint must not move");
         } else {
-            bez.line_to(pt);
-        }
-    }
-    bez.close_path();
-
-    let mut pn = photonic_core::node::PathNode::new(photonic_core::PathData::from_bez_path(&bez));
-    pn.fill = Fill::solid(fill_color);
-    pn.stroke = Stroke::solid(stroke_color, 1.5);
-
-    let layer_id = doc.active_layer_id.unwrap_or(uuid::Uuid::nil());
-
-    let node = SceneNode::new(label, layer_id, SceneNodeKind::Path(pn));
-    history.execute(
-        Command::AddNode {
-            node,
-            layer_id: Some(layer_id),
-        },
-        doc,
-    );
-
-    *doc_modified = true;
-}
-
-/// Generate a demo Truchet tiling at the given position.
-fn gui_create_truchet_tiling_demo(
-    style: &str,
-    x: f64,
-    y: f64,
-    size: f64,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    doc_modified: &mut bool,
-) {
-    let ts = 32.0_f64;
-    let cols = (size / ts).floor() as usize;
-    let rows = cols;
-    if cols == 0 || rows == 0 {
-        return;
-    }
-
-    let tile_color = Color::new(0.10, 0.10, 0.18, 1.0);
-    let sw = 2.0_f64;
-
-    // Simple LCG for reproducible demo pattern.
-    let mut rng: u64 = 42u64
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    let mut next_bool = move || -> bool {
-        rng = rng
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (rng >> 33) & 1 == 0
-    };
-
-    let layer_id = doc.active_layer_id.unwrap_or(uuid::Uuid::nil());
-    let mut child_ids: Vec<photonic_core::node::NodeId> = Vec::new();
-
-    for row in 0..rows {
-        for col in 0..cols {
-            let tx = x + col as f64 * ts;
-            let ty = y + row as f64 * ts;
-            let flip = next_bool();
-
-            let mut bez = BezPath::new();
-
-            match style {
-                "triangles" => {
-                    if flip {
-                        bez.move_to(Point::new(tx, ty));
-                        bez.line_to(Point::new(tx + ts, ty));
-                        bez.line_to(Point::new(tx, ty + ts));
-                    } else {
-                        bez.move_to(Point::new(tx + ts, ty));
-                        bez.line_to(Point::new(tx + ts, ty + ts));
-                        bez.line_to(Point::new(tx, ty + ts));
-                    }
-                    bez.close_path();
-                }
-                _ => {
-                    // "arcs"
-                    let mid = ts / 2.0;
-                    let k = mid * 0.5523;
-                    if flip {
-                        bez.move_to(Point::new(tx + mid, ty));
-                        bez.curve_to(
-                            Point::new(tx + mid - k, ty),
-                            Point::new(tx, ty + mid - k),
-                            Point::new(tx, ty + mid),
-                        );
-                        bez.move_to(Point::new(tx + mid, ty + ts));
-                        bez.curve_to(
-                            Point::new(tx + mid + k, ty + ts),
-                            Point::new(tx + ts, ty + mid + k),
-                            Point::new(tx + ts, ty + mid),
-                        );
-                    } else {
-                        bez.move_to(Point::new(tx + mid, ty));
-                        bez.curve_to(
-                            Point::new(tx + mid + k, ty),
-                            Point::new(tx + ts, ty + mid - k),
-                            Point::new(tx + ts, ty + mid),
-                        );
-                        bez.move_to(Point::new(tx + mid, ty + ts));
-                        bez.curve_to(
-                            Point::new(tx + mid - k, ty + ts),
-                            Point::new(tx, ty + mid + k),
-                            Point::new(tx, ty + mid),
-                        );
-                    }
-                }
-            }
-
-            let mut pn =
-                photonic_core::node::PathNode::new(photonic_core::PathData::from_bez_path(&bez));
-            if style == "triangles" {
-                pn.fill = Fill::solid(tile_color);
-                pn.stroke = Stroke::none();
-            } else {
-                pn.fill = Fill::none();
-                pn.stroke = Stroke::solid(tile_color, sw);
-            }
-
-            let node = SceneNode::new(&format!("t{row}_{col}"), layer_id, SceneNodeKind::Path(pn));
-            let nid = node.id;
-            history.execute(
-                Command::AddNode {
-                    node,
-                    layer_id: Some(layer_id),
-                },
-                doc,
-            );
-            child_ids.push(nid);
+            panic!("expected CurveTo");
         }
     }
 
-    let label = format!("Truchet {style} {cols}×{rows}");
-    let group = SceneNode::new(&label, layer_id, SceneNodeKind::Group(GroupNode::new()));
-    history.execute(
-        Command::GroupNodes {
-            group,
-            layer_id,
-            insert_index: 0,
-            children: child_ids,
-        },
-        doc,
-    );
+    #[test]
+    fn set_anchor_position_moves_endpoint() {
+        let bez = rect();
+        let out = bez_set_anchor_position(&bez, 1, 130.0, 5.0);
+        // Anchor at element index 1 is the second vertex.
+        if let PathEl::LineTo(p) = out.elements()[1] {
+            assert_eq!(p, Point::new(130.0, 5.0));
+        } else {
+            panic!("expected LineTo at index 1");
+        }
+    }
 
-    *doc_modified = true;
+    // A closed cubic "diamond": MoveTo + 4 CurveTo back to start + ClosePath.
+    // The start point is listed twice (index 0 and the closing CurveTo at 4).
+    fn closed_curve() -> BezPath {
+        let mut b = BezPath::new();
+        b.move_to((50.0, 0.0));
+        b.curve_to((80.0, 20.0), (100.0, 30.0), (100.0, 50.0));
+        b.curve_to((80.0, 80.0), (60.0, 100.0), (50.0, 100.0));
+        b.curve_to((20.0, 80.0), (0.0, 70.0), (0.0, 50.0));
+        b.curve_to((20.0, 20.0), (40.0, 0.0), (50.0, 0.0));
+        b.close_path();
+        b
+    }
+
+    #[test]
+    fn seam_anchor_resolves_both_handles() {
+        let b = closed_curve();
+        // Logical start anchor (index 0): Out handle on element 1's c1, In
+        // handle on the closing curve (element 4) c2 — the seam case.
+        let (in_h, out_h) = anchor_handle_pair(&b, 0);
+        assert!(
+            out_h.is_some(),
+            "start anchor should expose its outgoing handle"
+        );
+        assert!(
+            in_h.is_some(),
+            "start anchor should resolve its incoming handle across the seam"
+        );
+    }
+
+    #[test]
+    fn seam_smooth_mirror_actually_moves_opposite_handle() {
+        let b = closed_curve();
+        // Drag the start anchor's OUT handle with mirror on; the IN handle (which
+        // lives on the closing element) must move to stay collinear.
+        let before = anchor_handle_pair(&b, 0).0.unwrap().1;
+        let out = bez_set_handle(&b, 0, HandleKind::Out, Point::new(70.0, -30.0), true);
+        let after = anchor_handle_pair(&out, 0).0.unwrap().1;
+        assert_ne!(before, after, "seam mirror must update the opposite handle");
+    }
+
+    #[test]
+    fn cusp_is_not_detected_as_smooth() {
+        // Two curves meeting at a 90° cusp (handles not collinear).
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((10.0, 0.0), (20.0, 0.0), (30.0, 0.0)); // arrives along +x
+        b.curve_to((30.0, 10.0), (30.0, 20.0), (30.0, 30.0)); // leaves along +y
+                                                              // Anchor at index 1 (point 30,0) has In handle (20,0) and Out (30,10):
+                                                              // directions are perpendicular → cusp, not smooth.
+        assert!(!is_smooth_anchor(&b, 1), "perpendicular handles are a cusp");
+    }
+
+    #[test]
+    fn collinear_handles_detected_as_smooth() {
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((10.0, 0.0), (20.0, 0.0), (30.0, 0.0)); // in handle at (20,0)
+        b.curve_to((40.0, 0.0), (50.0, 0.0), (60.0, 0.0)); // out handle at (40,0)
+                                                           // At (30,0): in dir →(20,0)-(30,0)=(-1,0), out dir →(40,0)-(30,0)=(+1,0): opposite.
+        assert!(
+            is_smooth_anchor(&b, 1),
+            "collinear opposite handles are smooth"
+        );
+    }
 }

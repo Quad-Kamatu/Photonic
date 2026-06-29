@@ -5,10 +5,12 @@ members = [
     "crates/photonic-gui",
     "crates/photonic-mcp",
     "crates/photonic-app",
+    "crates/photonic-embed",
 ]
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
 license = "MIT"
 
 [workspace.dependencies]
@@ -43,8 +45,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# Image encoding (canvas screenshots)
+# Image encoding (canvas screenshots) and raster pixel buffers
 image = "0.25"
+base64 = "0.22"
 
 # Scripting
 mlua = { version = "0.10", features = ["lua54", "vendored"] }

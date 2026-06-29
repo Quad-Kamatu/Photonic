@@ -1,6 +1,6 @@
 [package]
 name = "photonic-render"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license.workspace = true
 
@@ -21,3 +21,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ico = "0.3"
+# Glyph outline extraction for text-on-path. Pinned to 0.21 so it unifies with
+# the ttf-parser that cosmic-text/rustybuzz (via glyphon) already resolve.
+ttf-parser = "0.21"

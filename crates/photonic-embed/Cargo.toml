@@ -1,0 +1,9 @@
+[package]
+name = "photonic-embed"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+fastembed = "4"
+anyhow = { workspace = true }

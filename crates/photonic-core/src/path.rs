@@ -310,6 +310,59 @@ impl PathData {
         &self.svg
     }
 
+    /// Total arc length of the path (sum over all segments).
+    pub fn arc_length(&self) -> f64 {
+        use kurbo::ParamCurveArclen;
+        const ACCURACY: f64 = 0.05;
+        self.to_bez_path()
+            .segments()
+            .map(|seg| seg.arclen(ACCURACY))
+            .sum()
+    }
+
+    /// Sample the point and tangent angle at arc-length `s` along the path.
+    ///
+    /// Returns `(x, y, angle_radians)` where `angle` is the direction of travel
+    /// along the path (`atan2(dy, dx)`), used to orient glyphs in text-on-path.
+    /// `s` is clamped to `[0, total_length]`. Returns `None` for an empty path.
+    pub fn sample_at_arc_length(&self, s: f64) -> Option<(f64, f64, f64)> {
+        use kurbo::{ParamCurve, ParamCurveArclen, PathSeg};
+        const ACCURACY: f64 = 0.05;
+
+        // Tangent direction at parameter `t` via central finite difference —
+        // works uniformly for line/quad/cubic segments without per-type matching.
+        fn tangent_angle(seg: &PathSeg, t: f64) -> f64 {
+            const EPS: f64 = 1e-4;
+            let p0 = seg.eval((t - EPS).max(0.0));
+            let p1 = seg.eval((t + EPS).min(1.0));
+            (p1.y - p0.y).atan2(p1.x - p0.x)
+        }
+
+        let bez = self.to_bez_path();
+        let mut segs = bez.segments().peekable();
+        segs.peek()?; // empty path → None
+
+        let s = s.max(0.0);
+        let mut acc = 0.0;
+        let mut last_seg = None;
+        for seg in bez.segments() {
+            let len = seg.arclen(ACCURACY);
+            last_seg = Some(seg);
+            if s <= acc + len || len == 0.0 {
+                let local = (s - acc).clamp(0.0, len);
+                let t = seg.inv_arclen(local, ACCURACY);
+                let p = seg.eval(t);
+                return Some((p.x, p.y, tangent_angle(&seg, t)));
+            }
+            acc += len;
+        }
+
+        // `s` is past the end — clamp to the final segment's endpoint.
+        let seg = last_seg?;
+        let p = seg.eval(1.0);
+        Some((p.x, p.y, tangent_angle(&seg, 1.0)))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.svg.is_empty()
     }
@@ -1108,5 +1161,49 @@ fn lerp(a: kurbo::Point, b: kurbo::Point, t: f64) -> kurbo::Point {
 impl PartialEq for PathData {
     fn eq(&self, other: &Self) -> bool {
         self.svg == other.svg
+    }
+}
+
+#[cfg(test)]
+mod arc_length_tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    #[test]
+    fn empty_path_returns_none() {
+        assert!(PathData::new().sample_at_arc_length(0.0).is_none());
+    }
+
+    #[test]
+    fn horizontal_line_length_and_sampling() {
+        // A 100-unit horizontal line from (0,0) to (100,0).
+        let line = PathData::line(0.0, 0.0, 100.0, 0.0);
+        assert!((line.arc_length() - 100.0).abs() < 0.5);
+
+        let (x, y, angle) = line.sample_at_arc_length(25.0).unwrap();
+        assert!((x - 25.0).abs() < 0.5, "x={x}");
+        assert!(y.abs() < 0.5, "y={y}");
+        assert!(angle.abs() < 1e-3, "angle={angle}"); // pointing +x
+    }
+
+    #[test]
+    fn vertical_line_tangent_is_quarter_turn() {
+        let line = PathData::line(0.0, 0.0, 0.0, 50.0);
+        let (_, _, angle) = line.sample_at_arc_length(25.0).unwrap();
+        assert!((angle - PI / 2.0).abs() < 1e-3, "angle={angle}");
+    }
+
+    #[test]
+    fn s_past_end_clamps_to_endpoint() {
+        let line = PathData::line(0.0, 0.0, 10.0, 0.0);
+        let (x, _, _) = line.sample_at_arc_length(999.0).unwrap();
+        assert!((x - 10.0).abs() < 0.5, "x={x}");
+    }
+
+    #[test]
+    fn negative_s_clamps_to_start() {
+        let line = PathData::line(0.0, 0.0, 10.0, 0.0);
+        let (x, _, _) = line.sample_at_arc_length(-5.0).unwrap();
+        assert!(x.abs() < 0.5, "x={x}");
     }
 }

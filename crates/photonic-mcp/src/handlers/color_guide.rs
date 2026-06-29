@@ -29,6 +29,8 @@ pub async fn color_guide(state: &AppState, args: ColorGuideArgs) -> ToolResult {
                     SceneNodeKind::Path(p) => Some(&p.fill),
                     SceneNodeKind::Text(t) => Some(&t.fill),
                     SceneNodeKind::Group(_) => None,
+                    // raster: no vector geometry / fill
+                    SceneNodeKind::Raster(_) => None,
                 };
                 if let Some(fill) = fill_opt {
                     if fill.enabled {

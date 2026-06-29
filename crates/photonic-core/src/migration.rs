@@ -54,11 +54,24 @@ pub trait FormatMigration: Send + Sync {
 }
 
 /// The ordered migration chain. Each entry upgrades version N → N+1.
-///
-/// Empty today (`CURRENT_FORMAT_VERSION == 1`). When the next structural change
-/// lands, bump the version and append a migration here.
 pub fn migrations() -> Vec<Box<dyn FormatMigration>> {
-    vec![]
+    vec![Box::new(V1ToV2)]
+}
+
+/// v1 → v2: the `Raster` node kind was added. The change is purely additive —
+/// existing v1 documents contain no raster nodes — so this only stamps the new
+/// version number; serde defaults supply any missing fields on load.
+struct V1ToV2;
+impl FormatMigration for V1ToV2 {
+    fn from_version(&self) -> u32 {
+        1
+    }
+    fn to_version(&self) -> u32 {
+        2
+    }
+    fn migrate(&self, _value: &mut Value) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Read `format_version` from a raw document value, defaulting to 1 when absent

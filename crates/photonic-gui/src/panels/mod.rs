@@ -306,6 +306,30 @@ pub enum PanelAction {
     },
     /// Round sharp corners with arc fillets.
     RoundCorners { node_ids: Vec<NodeId>, radius: f64 },
+    /// Move a single selected anchor of an edited path to a local position.
+    SetAnchorPosition {
+        node_id: NodeId,
+        index: usize,
+        x: f64,
+        y: f64,
+    },
+    /// Round the selected straight corners of an edited path to `radius`.
+    RoundSelectedCorners {
+        node_id: NodeId,
+        indices: Vec<usize>,
+        radius: f64,
+    },
+    /// Convert the selected anchors of an edited path to smooth or corner.
+    ConvertAnchorType {
+        node_id: NodeId,
+        indices: Vec<usize>,
+        smooth: bool,
+    },
+    /// Delete the selected anchors of an edited path.
+    DeleteAnchors {
+        node_id: NodeId,
+        indices: Vec<usize>,
+    },
     /// Flip node(s) horizontally or vertically.
     FlipNodes {
         node_ids: Vec<NodeId>,
@@ -402,6 +426,8 @@ pub enum PanelAction {
     SaveWidthProfile { stroke_width: f64, name: String },
     /// Delete a named width profile.
     DeleteWidthProfile { name: String },
+    /// Rename an existing width profile (e.g. one shaped with the Width tool).
+    RenameWidthProfile { old_name: String, new_name: String },
     /// Save a graphic style from the selected node.
     SaveGraphicStyle { node_id: NodeId, name: String },
     /// Apply a named graphic style to the selected node.
@@ -738,13 +764,35 @@ pub enum ZOrderOp {
 }
 
 /// Draw the horizontal toolbar (logo, doc name, zoom — no tool buttons).
-pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64, file_status: Option<&str>) {
+pub fn draw_toolbar(
+    ui: &mut Ui,
+    doc_name: &str,
+    zoom: f64,
+    file_status: Option<&str>,
+    logo: Option<&egui::TextureHandle>,
+) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{} Photonic", ph::HEXAGON))
-                .strong()
-                .color(Color32::from_rgb(110, 86, 207)),
-        );
+        // Show the actual Photonic logo when loaded; fall back to a glyph.
+        if let Some(tex) = logo {
+            ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(18.0, 18.0),
+                ))
+                .maintain_aspect_ratio(true),
+            );
+            ui.label(
+                RichText::new("Photonic")
+                    .strong()
+                    .color(Color32::from_rgb(110, 86, 207)),
+            );
+        } else {
+            ui.label(
+                RichText::new(format!("{} Photonic", ph::HEXAGON))
+                    .strong()
+                    .color(Color32::from_rgb(110, 86, 207)),
+            );
+        }
         ui.separator();
         ui.label(doc_name);
 
@@ -752,6 +800,27 @@ pub fn draw_toolbar(ui: &mut Ui, doc_name: &str, zoom: f64, file_status: Option<
         // message. Both are rendered in the *same* right-to-left layout so they
         // stack next to each other instead of overlapping in the top-right.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Quit menu — explicit, discoverable shutdown (the window's close
+            // button works too; this also offers killing every instance).
+            ui.menu_button(format!("Quit {}", ph::CARET_DOWN), |ui| {
+                if ui.button("Quit Photonic").clicked() {
+                    ui.close_menu();
+                    crate::quit::quit_self();
+                }
+                ui.separator();
+                if ui
+                    .button("Quit ALL Photonic processes")
+                    .on_hover_text(
+                        "Closes every Photonic window and any headless MCP server. \
+                         Unsaved changes in other windows will be lost.",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    crate::quit::quit_all();
+                }
+            });
+            ui.separator();
             ui.label(format!("{:.0}%", zoom * 100.0));
             ui.label("Zoom:");
             if let Some(status) = file_status {
@@ -890,7 +959,14 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(2.0);
-    for tool in [Tool::Scissors, Tool::MagicWand, Tool::Lasso, Tool::Pencil] {
+    for tool in [
+        Tool::Scissors,
+        Tool::Knife,
+        Tool::Eraser,
+        Tool::MagicWand,
+        Tool::Lasso,
+        Tool::Pencil,
+    ] {
         let label = format!("{} {}", tool.icon(), tool.label());
         if ui.selectable_label(tool == active, label).clicked() {
             chosen = Some(tool);
@@ -1172,6 +1248,168 @@ struct RecolorSwatchEdit {
     current: [f32; 4],
 }
 
+/// Context-aware inspector shown while the Direct Selection tool is editing a
+/// path. Displays only anchor/vertex properties for the current selection.
+fn draw_vertex_panel(
+    ui: &mut Ui,
+    node: &SceneNode,
+    node_id: NodeId,
+    selected: &[usize],
+    action: &mut Option<PanelAction>,
+) {
+    use kurbo::PathEl;
+
+    ui.label(
+        RichText::new("ANCHOR POINTS")
+            .small()
+            .color(Color32::from_rgb(80, 80, 110)),
+    );
+    ui.add_space(2.0);
+
+    let SceneNodeKind::Path(pn) = &node.kind else {
+        ui.label(
+            RichText::new("Select a path to edit its points.")
+                .weak()
+                .small(),
+        );
+        return;
+    };
+    let bez = pn.path_data.to_bez_path();
+
+    // Local-space endpoint of every anchor, keyed by element index.
+    let anchor_at = |idx: usize| -> Option<kurbo::Point> {
+        bez.elements().get(idx).and_then(|el| match el {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => Some(*p),
+            PathEl::CurveTo(_, _, p) => Some(*p),
+            PathEl::QuadTo(_, p) => Some(*p),
+            PathEl::ClosePath => None,
+        })
+    };
+
+    if selected.is_empty() {
+        ui.label(
+            RichText::new("Editing path — click an anchor to select it.")
+                .weak()
+                .small(),
+        );
+        ui.add_space(6.0);
+        ui.label(RichText::new("Click body → select object").weak().small());
+        ui.label(RichText::new("Click anchor → select point").weak().small());
+        ui.label(
+            RichText::new("Shift+click → add to selection")
+                .weak()
+                .small(),
+        );
+        ui.label(RichText::new("Drag handle → reshape curve").weak().small());
+        ui.label(RichText::new("Drag ◌ widget → round corner").weak().small());
+        ui.label(RichText::new("Esc → exit point edit").weak().small());
+        return;
+    }
+
+    ui.label(
+        RichText::new(if selected.len() == 1 {
+            "1 anchor selected".to_string()
+        } else {
+            format!("{} anchors selected", selected.len())
+        })
+        .strong(),
+    );
+    ui.add_space(4.0);
+
+    // Position — only meaningful for a single anchor.
+    if selected.len() == 1 {
+        if let Some(p) = anchor_at(selected[0]) {
+            let (mut x, mut y) = (p.x, p.y);
+            egui::Grid::new("vtx_pos_grid")
+                .num_columns(4)
+                .spacing([4.0, 2.0])
+                .show(ui, |ui| {
+                    ui.label("X:");
+                    let xr = ui.add(egui::DragValue::new(&mut x).speed(0.5).fixed_decimals(1));
+                    ui.label("Y:");
+                    let yr = ui.add(egui::DragValue::new(&mut y).speed(0.5).fixed_decimals(1));
+                    ui.end_row();
+                    if xr.changed() || yr.changed() {
+                        *action = Some(PanelAction::SetAnchorPosition {
+                            node_id,
+                            index: selected[0],
+                            x,
+                            y,
+                        });
+                    }
+                });
+        }
+    }
+
+    ui.add_space(4.0);
+
+    // Point type — corner vs smooth, applied to the whole selection.
+    ui.label(RichText::new("Point type").weak().small());
+    ui.horizontal(|ui| {
+        if ui
+            .button("Corner")
+            .on_hover_text("Retract this anchor's handles → sharp corner")
+            .clicked()
+        {
+            *action = Some(PanelAction::ConvertAnchorType {
+                node_id,
+                indices: selected.to_vec(),
+                smooth: false,
+            });
+        }
+        if ui
+            .button("Smooth")
+            .on_hover_text("Make this anchor's handles collinear → smooth curve")
+            .clicked()
+        {
+            *action = Some(PanelAction::ConvertAnchorType {
+                node_id,
+                indices: selected.to_vec(),
+                smooth: true,
+            });
+        }
+    });
+
+    ui.add_space(6.0);
+
+    // Corner rounding — numeric counterpart to the canvas Live-Corners widget.
+    ui.label(RichText::new("Round corners").weak().small());
+    ui.label(
+        RichText::new("(applies to straight corners)")
+            .weak()
+            .small()
+            .italics(),
+    );
+    ui.horizontal(|ui| {
+        for r in [4.0_f64, 8.0, 16.0, 32.0] {
+            if ui
+                .button(format!("{r:.0}"))
+                .on_hover_text("Round selected corners by this radius")
+                .clicked()
+            {
+                *action = Some(PanelAction::RoundSelectedCorners {
+                    node_id,
+                    indices: selected.to_vec(),
+                    radius: r,
+                });
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+
+    if ui
+        .button(format!("{}  Remove anchor(s)", ph::TRASH))
+        .on_hover_text("Delete the selected anchor points")
+        .clicked()
+    {
+        *action = Some(PanelAction::DeleteAnchors {
+            node_id,
+            indices: selected.to_vec(),
+        });
+    }
+}
+
 pub fn draw_properties_panel(
     ui: &mut Ui,
     doc: &Document,
@@ -1188,6 +1426,8 @@ pub fn draw_properties_panel(
     selected_id: Option<NodeId>,
     selection_count: usize,
     selected_ids: &[NodeId],
+    point_edit_node: Option<NodeId>,
+    point_selected: &[usize],
     prop_search: &mut String,
     shear_x: &mut f64,
     shear_y: &mut f64,
@@ -1204,6 +1444,7 @@ pub fn draw_properties_panel(
     recolor_palette_input: &mut String,
     magic_wand_attribute: &mut SelectSameAttr,
     magic_wand_tolerance: &mut f64,
+    eraser_radius: &mut f64,
     composition_findings: &[String],
     rhythm_findings: &[String],
     branch_names: &[String],
@@ -1249,7 +1490,11 @@ pub fn draw_properties_panel(
                 .hint_text("Search properties…")
                 .desired_width(ui.available_width() - 24.0),
         );
-        if !prop_search.is_empty() && ui.small_button("✕").on_hover_text("Clear search").clicked()
+        if !prop_search.is_empty()
+            && ui
+                .small_button(ph::X)
+                .on_hover_text("Clear search")
+                .clicked()
         {
             prop_search.clear();
             response.surrender_focus();
@@ -1263,6 +1508,19 @@ pub fn draw_properties_panel(
     let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(&q) };
     // When searching, force every matching header open so the user sees the contents.
     let forced_open: Option<bool> = if q.is_empty() { None } else { Some(true) };
+
+    // ── Context-aware: vertex editing (Direct Selection) ──────────────────────
+    // When a path is in point-edit mode, the panel shows ONLY anchor/vertex
+    // properties — node Transform/Fill/Stroke/Path sections are suppressed so the
+    // inspector reflects exactly what is selected, like Illustrator.
+    if active_tool == Tool::DirectSelect {
+        if let Some(nid) = point_edit_node {
+            if let Some(node) = doc.nodes.get(&nid) {
+                draw_vertex_panel(ui, node, nid, point_selected, &mut action);
+                return action;
+            }
+        }
+    }
 
     // ── Navigator Panel ───────────────────────────────────────────────────────
     if matches("Navigator") {
@@ -2671,7 +2929,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                                 if ui
-                                    .small_button("✕")
+                                    .small_button(ph::X)
                                     .on_hover_text("Delete this character style")
                                     .clicked()
                                 {
@@ -2716,7 +2974,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                                 if ui
-                                    .small_button("✕")
+                                    .small_button(ph::X)
                                     .on_hover_text("Delete this paragraph style")
                                     .clicked()
                                 {
@@ -3078,6 +3336,8 @@ pub fn draw_properties_panel(
                 SceneNodeKind::Path(_) => n_path += 1,
                 SceneNodeKind::Text(_) => n_text += 1,
                 SceneNodeKind::Group(_) => n_group += 1,
+                // raster nodes are not counted in the vector node summary
+                SceneNodeKind::Raster(_) => {}
             }
         }
         let total = n_path + n_text + n_group;
@@ -3339,6 +3599,8 @@ pub fn draw_properties_panel(
                 SceneNodeKind::Path(p) => Some(&p.fill),
                 SceneNodeKind::Text(t) => Some(&t.fill),
                 SceneNodeKind::Group(_) => None,
+                // raster nodes have no vector fill
+                SceneNodeKind::Raster(_) => None,
             };
             if let Some(fill) = fill_opt {
                 if fill.enabled {
@@ -4392,6 +4654,8 @@ pub fn draw_properties_panel(
         Tool::ShapeBuilder => "Shape Builder",
         Tool::DirectSelect => "Direct Select",
         Tool::MagicWand => "Magic Wand Options",
+        Tool::Eraser => "Eraser Options",
+        Tool::Knife => "Knife Options",
         _ => "Tool",
     };
 
@@ -4407,7 +4671,9 @@ pub fn draw_properties_panel(
         | Tool::Select
         | Tool::ShapeBuilder
         | Tool::DirectSelect
-        | Tool::MagicWand => {
+        | Tool::MagicWand
+        | Tool::Eraser
+        | Tool::Knife => {
             if matches(tool_label) {
                 egui::CollapsingHeader::new(tool_label)
                     .default_open(false)
@@ -4486,10 +4752,11 @@ pub fn draw_properties_panel(
                                 ui.label(RichText::new("Alt+click → delete shape").weak().small());
                             }
                             Tool::DirectSelect => {
-                                ui.label(RichText::new("Click shape → enter point edit").weak().small());
-                                ui.label(RichText::new("Click point → select anchor").weak().small());
-                                ui.label(RichText::new("Drag point → move anchor").weak().small());
-                                ui.label(RichText::new("Ctrl+click → multi-select").weak().small());
+                                ui.label(RichText::new("Click body → select object").weak().small());
+                                ui.label(RichText::new("Click anchor → select point").weak().small());
+                                ui.label(RichText::new("Shift+click → multi-select").weak().small());
+                                ui.label(RichText::new("Drag handle → reshape curve").weak().small());
+                                ui.label(RichText::new("Drag ◌ widget → round corner").weak().small());
                                 ui.label(RichText::new("Del → delete selected points").weak().small());
                                 ui.label(RichText::new("Esc → exit point edit").weak().small());
                             }
@@ -4519,6 +4786,19 @@ pub fn draw_properties_panel(
                                     *magic_wand_tolerance = tol as f64;
                                 }
                                 ui.label(RichText::new("Click any object → select all matching").weak().small());
+                            }
+                            Tool::Eraser => {
+                                ui.label("Radius");
+                                let mut r = *eraser_radius as f32;
+                                if ui.add(egui::Slider::new(&mut r, 1.0..=200.0).suffix("px")).changed() {
+                                    *eraser_radius = r as f64;
+                                }
+                                ui.label(RichText::new("Drag across path art → subtract a swept region").weak().small());
+                                ui.label(RichText::new("Cuts every visible, unlocked path it touches").weak().small());
+                            }
+                            Tool::Knife => {
+                                ui.label(RichText::new("Drag a line across filled paths → slice into faces").weak().small());
+                                ui.label(RichText::new("Each cut face becomes its own editable path").weak().small());
                             }
                             _ => {}
                         }
@@ -4556,7 +4836,7 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(format!("{} ({})", profile.name, profile.format));
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text("Remove this profile")
                                 .clicked()
                             {
@@ -4639,7 +4919,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteColorSwatch {
                                     name: swatch.name.clone(),
                                 });
@@ -4731,7 +5011,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteSpotColor {
                                     name: sc.name.clone(),
                                 });
@@ -4779,7 +5059,7 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteGradientSwatch { name: swatch.name.clone() });
                             }
                         });
@@ -4841,7 +5121,7 @@ pub fn draw_properties_panel(
                                 }
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text("Delete this style")
                                 .clicked()
                             {
@@ -4897,8 +5177,9 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "{} (avg {:.1}px)",
+                                    "{} ({} pts, avg {:.1}px)",
                                     wp.name,
+                                    wp.widths.len(),
                                     wp.average_width()
                                 ))
                                 .small(),
@@ -4915,7 +5196,21 @@ pub fn draw_properties_panel(
                                     });
                                 }
                             }
-                            if ui.small_button("✕").clicked() {
+                            let rename = width_profile_name_input.trim();
+                            if ui
+                                .add_enabled(
+                                    !rename.is_empty(),
+                                    egui::Button::new(ph::PENCIL).small(),
+                                )
+                                .on_hover_text("Rename to the text in the name field below")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::RenameWidthProfile {
+                                    old_name: wp.name.clone(),
+                                    new_name: rename.to_string(),
+                                });
+                            }
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteWidthProfile {
                                     name: wp.name.clone(),
                                 });
@@ -5069,7 +5364,7 @@ pub fn draw_properties_panel(
                                 let label = format!("{} axis: {:.1}px", dim.axis, dim.distance());
                                 ui.label(RichText::new(&label).small());
                                 if ui
-                                    .small_button("✕")
+                                    .small_button(ph::X)
                                     .on_hover_text("Remove this dimension")
                                     .clicked()
                                 {
@@ -5143,7 +5438,11 @@ pub fn draw_properties_panel(
                     for (name, rule_type) in grammar_rules {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{} ({})", name, rule_type)).small());
-                            if ui.small_button("✕").on_hover_text("Delete rule").clicked() {
+                            if ui
+                                .small_button(ph::X)
+                                .on_hover_text("Delete rule")
+                                .clicked()
+                            {
                                 action =
                                     Some(PanelAction::DeleteGrammarRule { name: name.clone() });
                             }
@@ -5209,7 +5508,7 @@ pub fn draw_properties_panel(
                 if !grammar_check_results.is_empty() {
                     ui.add_space(4.0);
                     for (rule_name, passed, message) in grammar_check_results {
-                        let icon = if *passed { "✓" } else { "✗" };
+                        let icon = if *passed { ph::CHECK } else { ph::X };
                         let color = if *passed {
                             Color32::from_rgb(60, 160, 60)
                         } else {
@@ -5285,7 +5584,7 @@ pub fn draw_properties_panel(
                                 action = Some(PanelAction::PlayAction { name: name.clone() });
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text(format!("Delete '{}'", name))
                                 .clicked()
                             {
@@ -5390,7 +5689,7 @@ pub fn draw_properties_panel(
                 for (ev, an) in &triggers {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{} → {}", ev, an)).small());
-                        if ui.small_button("✕").clicked() {
+                        if ui.small_button(ph::X).clicked() {
                             action = Some(PanelAction::RemoveEventTrigger {
                                 event: ev.clone(),
                                 action_name: Some(an.clone()),
@@ -5504,7 +5803,7 @@ pub fn draw_properties_panel(
                                 });
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text(format!("Delete workspace '{}'", ws.name))
                                 .clicked()
                             {
@@ -5563,7 +5862,7 @@ pub fn draw_properties_panel(
                                 action = Some(PanelAction::BranchSwitch { name: name.clone() });
                             }
                             if ui
-                                .small_button("✕")
+                                .small_button(ph::X)
                                 .on_hover_text(format!("Delete branch '{}'", name))
                                 .clicked()
                             {
@@ -5593,7 +5892,7 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{} =", var.name)).small().strong());
                             ui.label(RichText::new(&var.value).small());
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteVariable {
                                     name: var.name.clone(),
                                 });
@@ -6122,7 +6421,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     {
                         stop_changed = true;
                     }
-                    if can_remove && ui.small_button("✕").clicked() {
+                    if can_remove && ui.small_button(ph::X).clicked() {
                         remove_idx = Some(i);
                     }
                 });
@@ -6192,7 +6491,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     {
                         pt_changed = true;
                     }
-                    if can_remove && ui.small_button("✕").clicked() {
+                    if can_remove && ui.small_button(ph::X).clicked() {
                         remove_idx = Some(i);
                     }
                 });
@@ -6894,7 +7193,7 @@ pub fn draw_audit_panel(
             ui.horizontal(|ui| {
                 ui.label("Filter:");
                 ui.text_edit_singleline(filter);
-                if ui.small_button("✕").clicked() {
+                if ui.small_button(ph::X).clicked() {
                     filter.clear();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

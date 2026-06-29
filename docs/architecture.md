@@ -35,7 +35,7 @@ Every `SceneNode` carries:
 | `id` | `Uuid` | |
 | `name` | `String` | |
 | `layer_id` | `LayerId` | owning layer |
-| `kind` | `SceneNodeKind` | `Path`, `Group`, or `Text` |
+| `kind` | `SceneNodeKind` | `Path`, `Group`, `Text`, or `Raster` |
 | `transform` | `Transform` | 2-D affine, identity by default |
 | `opacity` | `f32` | 0.0–1.0 |
 | `visible` | `bool` | |
@@ -48,6 +48,7 @@ Every `SceneNode` carries:
 - `Path(PathNode)` — a `PathData` (SVG path string wrapped around a `kurbo::BezPath`) plus `Fill`, `Stroke`, and `is_compound` flag.
 - `Group(GroupNode)` — ordered `children: Vec<NodeId>` and optional `clip_children` flag.
 - `Text(TextNode)` — content string and basic typography properties.
+- `Raster(RasterNode)` — a `RasterImage` (RGBA8 pixel buffer) plus an optional non-destructive layer `mask` and `source_uri`. The Photoshop-grade raster engine lives in `photonic-core::raster` (see [raster-editing.md](raster-editing.md)).
 
 ### Transform
 

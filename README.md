@@ -1,14 +1,20 @@
 # Photonic
 
-A vector graphics editor built in Rust with a native GPU-accelerated GUI and an integrated MCP server for AI-assisted design via Claude.
+A hybrid **vector + raster** graphics editor built in Rust with a native
+GPU-accelerated GUI and an integrated MCP server for AI-assisted design via Claude.
 
 ## Features
 
 - **Native GUI** using egui and wgpu (GPU-accelerated, cross-platform)
-- **MCP server** — Claude can create and edit vector art through a JSON-RPC API
+- **MCP server** — Claude can create and edit art through a JSON-RPC API
 - **Full vector toolset** — shapes, bezier paths, boolean operations, gradients, transforms
+- **Photoshop-grade raster editing** — pixel layers with adjustments (levels,
+  curves, hue/saturation, color balance…), filters (gaussian/box/motion blur,
+  unsharp mask, median, noise, edges…), a brush engine (paint, erase, clone,
+  smudge, dodge/burn), selections and non-destructive layer masks, and the 16
+  CSS/Photoshop blend modes. See [docs/raster-editing.md](docs/raster-editing.md).
 - **Undo/redo history** with named checkpoints for time-travel
-- **SVG / PNG / JPEG export**
+- **SVG / PNG / JPEG / WebP export** (raster layers composite into all formats)
 - **Lua scripting** for automation
 
 ## Quick Start
@@ -63,6 +69,7 @@ photonic/
 | Document | Contents |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Crate breakdown, data model, concurrency model |
+| [docs/raster-editing.md](docs/raster-editing.md) | Raster (pixel) editing subsystem — model, ops, MCP surface, phasing |
 | [docs/mcp-api.md](docs/mcp-api.md) | Every MCP tool with parameters and examples |
 | [docs/file-format.md](docs/file-format.md) | `.photonic` JSON schema reference |
 

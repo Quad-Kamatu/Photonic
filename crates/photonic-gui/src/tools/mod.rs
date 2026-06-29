@@ -21,10 +21,20 @@ pub enum Tool {
     ShapeBuilder,
     Text,
     Scissors,
+    /// Freehand cut: slice filled paths into separate faces along a drawn line.
+    Knife,
+    /// Vector eraser: drag a circular head to boolean-subtract from path art.
+    Eraser,
     MagicWand,
     Lasso,
     Pencil,
     Smooth,
+    /// Shape variable-width strokes by dragging width handles on a path.
+    Width,
+    /// Paint pixels onto the active raster layer.
+    RasterBrush,
+    /// Erase pixels from the active raster layer.
+    RasterEraser,
 }
 
 impl Tool {
@@ -47,10 +57,15 @@ impl Tool {
             Tool::ShapeBuilder => "Shape Builder",
             Tool::Text => "Text",
             Tool::Scissors => "Scissors",
+            Tool::Knife => "Knife",
+            Tool::Eraser => "Vector Eraser",
             Tool::MagicWand => "Magic Wand",
             Tool::Lasso => "Lasso",
             Tool::Pencil => "Pencil",
             Tool::Smooth => "Smooth",
+            Tool::Width => "Width",
+            Tool::RasterBrush => "Brush",
+            Tool::RasterEraser => "Eraser",
         }
     }
 
@@ -73,10 +88,15 @@ impl Tool {
             Tool::ShapeBuilder => ph::UNITE,
             Tool::Text => ph::TEXT_T,
             Tool::Scissors => ph::SCISSORS,
+            Tool::Knife => ph::KNIFE,
+            Tool::Eraser => ph::ERASER,
             Tool::MagicWand => ph::MAGIC_WAND,
             Tool::Lasso => ph::LASSO,
             Tool::Pencil => ph::PENCIL,
             Tool::Smooth => ph::WAVE_SINE,
+            Tool::Width => ph::ARROWS_VERTICAL,
+            Tool::RasterBrush => ph::PAINT_BRUSH,
+            Tool::RasterEraser => ph::ERASER,
         }
     }
 
@@ -101,6 +121,12 @@ impl Tool {
             Tool::ShapeBuilder => "Combine or subtract overlapping shapes",
             Tool::Text => "Add text to the canvas",
             Tool::Scissors => "Cut a path at any point, splitting it into two open paths",
+            Tool::Knife => {
+                "Drag a freehand line across filled paths to slice them into separate faces"
+            }
+            Tool::Eraser => {
+                "Drag a circular eraser head to subtract a swept region from path artwork"
+            }
             Tool::MagicWand => {
                 "Select all objects sharing a similar attribute (fill, stroke, opacity…)"
             }
@@ -109,6 +135,11 @@ impl Tool {
                 "Draw freehand paths by dragging — anchor points auto-generated along the stroke"
             }
             Tool::Smooth => "Drag over a path to smooth its anchor points using corner-cutting",
+            Tool::Width => {
+                "Drag width handles on a stroke to shape a variable-width profile (Alt: one side)"
+            }
+            Tool::RasterBrush => "Paint pixels onto the selected raster layer by dragging",
+            Tool::RasterEraser => "Erase pixels from the selected raster layer by dragging",
         }
     }
 
@@ -122,10 +153,15 @@ impl Tool {
                 | Tool::ShapeBuilder
                 | Tool::Text
                 | Tool::Scissors
+                | Tool::Knife
+                | Tool::Eraser
                 | Tool::MagicWand
                 | Tool::Lasso
                 | Tool::Pencil
                 | Tool::Smooth
+                | Tool::Width
+                | Tool::RasterBrush
+                | Tool::RasterEraser
         )
     }
 

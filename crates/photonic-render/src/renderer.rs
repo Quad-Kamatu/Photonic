@@ -1,8 +1,10 @@
 use crate::{
     canvas::CanvasView,
     pipeline::{
-        create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
-        create_fill_pipeline, BlurParams, CameraUniform, Vertex,
+        coalesce_segments, create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
+        create_fill_pipeline, create_fill_pipeline_with_blend, draw_segments,
+        separable_blend_state, BlurParams, CameraUniform, DrawSegment, Vertex,
+        SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
 };
@@ -14,7 +16,9 @@ use glyphon::{
 use image::{ImageBuffer, Rgba};
 use photonic_core::{
     document::Document,
+    layer::BlendMode,
     node::SceneNodeKind,
+    path::PathData,
     style::{FillKind, StrokeAlign},
 };
 use std::sync::Arc;
@@ -56,6 +60,10 @@ pub struct PhotonicRenderer {
     surface_format: wgpu::TextureFormat,
 
     fill_pipeline: wgpu::RenderPipeline,
+    /// One fill-pipeline variant per separable blend mode (Multiply/Screen/
+    /// Darken/Lighten), built at `MSAA_SAMPLES`. Modes without an entry fall back
+    /// to `fill_pipeline` (normal alpha blending).
+    blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
@@ -72,6 +80,10 @@ pub struct PhotonicRenderer {
     /// Last successfully built geometry — returned as-is when the doc lock is contended.
     cached_vertices: Vec<Vertex>,
     cached_indices: Vec<u32>,
+    /// Per-blend-mode index ranges for the current frame, in draw order. Read by
+    /// `record_document_pass` to issue one draw call per contiguous run.
+    draw_segments: Vec<DrawSegment>,
+    cached_segments: Vec<DrawSegment>,
 
     // ── Text rendering (glyphon) ───────────────────────────────────────────────
     font_system: FontSystem,
@@ -84,6 +96,10 @@ pub struct PhotonicRenderer {
     text_viewport: Viewport,
     /// Text nodes collected during `build_geometry` for the current frame.
     pending_texts: Vec<TextSnapshot>,
+    /// Text-on-path glyph outlines (document space) + RGBA fill colour, built
+    /// during `build_geometry` and tessellated into the fill geometry. Rendered
+    /// as vector fills because glyphon cannot rotate glyphs along a curve.
+    pending_path_text: Vec<(Vec<PathData>, [f32; 4])>,
 
     // ── Gaussian glow blur ────────────────────────────────────────────────────
     fill_pipeline_1spp: wgpu::RenderPipeline, // sample_count=1 for offscreen silhouette
@@ -218,6 +234,24 @@ impl PhotonicRenderer {
 
         let fill_pipeline =
             create_fill_pipeline(&device, surface_format, &camera_bgl, MSAA_SAMPLES);
+        // One pipeline variant per separable blend mode, sharing the fill shader.
+        let blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)> = SEPARABLE_BLEND_MODES
+            .iter()
+            .filter_map(|&mode| {
+                separable_blend_state(mode).map(|blend| {
+                    (
+                        mode,
+                        create_fill_pipeline_with_blend(
+                            &device,
+                            surface_format,
+                            &camera_bgl,
+                            MSAA_SAMPLES,
+                            blend,
+                        ),
+                    )
+                })
+            })
+            .collect();
         let (msaa_texture, msaa_view) = create_msaa_texture(&device, surface_format, width, height);
 
         let blur_bgl = create_blur_bgl(&device);
@@ -262,6 +296,7 @@ impl PhotonicRenderer {
             surface_config,
             surface_format,
             fill_pipeline,
+            blend_pipelines,
             camera_buffer,
             camera_bind_group,
             msaa_texture,
@@ -273,6 +308,8 @@ impl PhotonicRenderer {
             height,
             cached_vertices: Vec::new(),
             cached_indices: Vec::new(),
+            draw_segments: Vec::new(),
+            cached_segments: Vec::new(),
             font_system,
             swash_cache,
             text_glyph_cache,
@@ -280,6 +317,7 @@ impl PhotonicRenderer {
             text_renderer,
             text_viewport,
             pending_texts: Vec::new(),
+            pending_path_text: Vec::new(),
             fill_pipeline_1spp,
             blur_pipeline_h,
             blur_pipeline_v,
@@ -725,19 +763,32 @@ impl PhotonicRenderer {
             is_compound: bool,
             arrowhead_start: photonic_core::style::ArrowheadStyle,
             arrowhead_end: photonic_core::style::ArrowheadStyle,
+            blend_mode: BlendMode,
         }
 
-        let (artboard_w, artboard_h, nodes): (f32, f32, Vec<NodeSnapshot>) = {
+        let (artboard_w, artboard_h, artboards, nodes): (
+            f32,
+            f32,
+            Vec<[f32; 4]>,
+            Vec<NodeSnapshot>,
+        ) = {
             // try_lock — never block; return cached geometry if lock is contended.
             let doc = match self.document.try_lock() {
                 Ok(g) => g,
                 Err(_) => {
                     tracing::debug!("render: doc lock contended — reusing cached geometry");
+                    self.draw_segments = self.cached_segments.clone();
                     return (self.cached_vertices.clone(), self.cached_indices.clone());
                 }
             };
             let w = doc.width as f32;
             let h = doc.height as f32;
+            // Snapshot each artboard rect (x, y, w, h) in document space.
+            let artboards: Vec<[f32; 4]> = doc
+                .artboards
+                .iter()
+                .map(|a| [a.x as f32, a.y as f32, a.width as f32, a.height as f32])
+                .collect();
 
             // Single pass: snapshot text nodes for glyphon and path nodes for
             // tessellation in one traversal, halving scene graph walk cost per frame.
@@ -745,6 +796,7 @@ impl PhotonicRenderer {
             let pan_x = self.view.pan_x;
             let pan_y = self.view.pan_y;
             self.pending_texts.clear();
+            self.pending_path_text.clear();
             let mut nodes: Vec<NodeSnapshot> = Vec::new();
             for node in doc.nodes_in_draw_order() {
                 // Symbol instances render from the *current* master so master
@@ -753,6 +805,43 @@ impl PhotonicRenderer {
                 let node = resolved.as_ref();
                 match &node.kind {
                     SceneNodeKind::Text(text_node) => {
+                        // Text-on-path: render glyph outlines along the spine as
+                        // vector fills instead of flat glyphon text.
+                        if let Some(spine_node) =
+                            text_node.path_spine_id.and_then(|id| doc.get_node(&id))
+                        {
+                            if let SceneNodeKind::Path(spine) = &spine_node.kind {
+                                let mut bez = spine.path_data.to_bez_path();
+                                bez.apply_affine(kurbo::Affine::new(spine_node.transform.matrix));
+                                let spine_doc = PathData::from_bez_path(&bez);
+
+                                let opacity = text_node.fill.opacity * node.opacity;
+                                let rgba = match &text_node.fill.kind {
+                                    FillKind::Solid(c) => [c.r, c.g, c.b, c.a * opacity],
+                                    _ => [0.0, 0.0, 0.0, opacity],
+                                };
+                                let params = crate::text_path::TextOnPathParams {
+                                    content: &text_node.content,
+                                    font_family: &text_node.font_family,
+                                    font_size: text_node.font_size,
+                                    font_weight: text_node.font_weight,
+                                    font_style: text_node.font_style,
+                                    line_height: text_node.line_height,
+                                    letter_spacing: text_node.letter_spacing,
+                                    align: text_node.align,
+                                    path_offset: text_node.path_offset,
+                                };
+                                let glyphs = crate::text_path::layout_text_on_path(
+                                    &mut self.font_system,
+                                    &params,
+                                    &spine_doc,
+                                );
+                                if !glyphs.is_empty() {
+                                    self.pending_path_text.push((glyphs, rgba));
+                                }
+                                continue; // handled — skip flat glyphon text
+                            }
+                        }
                         let (doc_x, doc_y) = node.transform.apply(0.0, 0.0);
                         let screen_x = (doc_x * zoom + pan_x) as f32;
                         let screen_y = (doc_y * zoom + pan_y) as f32;
@@ -811,6 +900,7 @@ impl PhotonicRenderer {
                             is_compound: path_node.is_compound,
                             arrowhead_start: sc.arrowhead_start,
                             arrowhead_end: sc.arrowhead_end,
+                            blend_mode: node.blend_mode,
                             outer_glow: if node.outer_glow.enabled {
                                 let c = &node.outer_glow.color;
                                 Some((
@@ -855,7 +945,7 @@ impl PhotonicRenderer {
                     _ => {} // Group nodes and future kinds: no GPU geometry of their own
                 }
             }
-            (w, h, nodes)
+            (w, h, artboards, nodes)
         }; // doc lock released here
 
         // ── Tessellate phase: all CPU work happens with no locks held ─────────
@@ -863,28 +953,36 @@ impl PhotonicRenderer {
         let mut verts: Vec<Vertex> = Vec::new();
         let mut idxs: Vec<u32> = Vec::new();
 
-        // White artboard rectangle
+        // White artboard rectangles — one per artboard (spatial multi-artboard
+        // model). Falls back to the full document bounds when none are present.
         let white = [1.0f32, 1.0, 1.0, 1.0];
-        let base = verts.len() as u32;
-        verts.extend_from_slice(&[
-            Vertex {
-                position: [0.0, 0.0],
-                color: white,
-            },
-            Vertex {
-                position: [artboard_w, 0.0],
-                color: white,
-            },
-            Vertex {
-                position: [artboard_w, artboard_h],
-                color: white,
-            },
-            Vertex {
-                position: [0.0, artboard_h],
-                color: white,
-            },
-        ]);
-        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let mut boards = artboards;
+        if boards.is_empty() {
+            boards.push([0.0, 0.0, artboard_w, artboard_h]);
+        }
+        for b in &boards {
+            let (x0, y0, x1, y1) = (b[0], b[1], b[0] + b[2], b[1] + b[3]);
+            let base = verts.len() as u32;
+            verts.extend_from_slice(&[
+                Vertex {
+                    position: [x0, y0],
+                    color: white,
+                },
+                Vertex {
+                    position: [x1, y0],
+                    color: white,
+                },
+                Vertex {
+                    position: [x1, y1],
+                    color: white,
+                },
+                Vertex {
+                    position: [x0, y1],
+                    color: white,
+                },
+            ]);
+            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
 
         // Helpers for appending tessellated meshes to the vertex/index buffers.
         // Defined as closures to keep the loop body readable.
@@ -1143,7 +1241,14 @@ impl PhotonicRenderer {
                 Some((start_pt, start_tan, end_pt, end_tan))
             };
 
+        // Per-node index ranges tagged with their blend mode, coalesced into
+        // `draw_segments` after the loop. The artboard rect (already appended
+        // above) blends normally.
+        let mut raw_segments: Vec<(BlendMode, u32, u32)> =
+            vec![(BlendMode::Normal, 0, idxs.len() as u32)];
+
         for node in &nodes {
+            let seg_start = idxs.len() as u32;
             // ── Outer glow: behind fill so fill clips the inward half ─────────
             if let Some((ref og, og_join)) = node.outer_glow {
                 append_glow(
@@ -1295,11 +1400,49 @@ impl PhotonicRenderer {
                     });
                 }
             }
+
+            // Tag this node's fill/stroke/arrowhead geometry with its blend mode.
+            // (Gaussian glow lives in a separate buffer and is unaffected.)
+            raw_segments.push((node.blend_mode, seg_start, idxs.len() as u32));
         }
+
+        // ── Text-on-path glyphs ───────────────────────────────────────────────
+        // Glyph outlines are already in document coordinates, so they are
+        // appended directly (no per-node matrix). Drawn last → on top of shapes,
+        // consistent with how flat text sits above the fill layer.
+        let text_seg_start = idxs.len() as u32;
+        for (glyphs, rgba) in &self.pending_path_text {
+            for glyph in glyphs {
+                let mesh = tessellate_fill(glyph, false);
+                if mesh.is_empty() {
+                    continue;
+                }
+                let base = verts.len() as u32;
+                for pos in &mesh.vertices {
+                    verts.push(Vertex {
+                        position: [pos[0], pos[1]],
+                        color: *rgba,
+                    });
+                }
+                for &i in &mesh.indices {
+                    idxs.push(base + i);
+                }
+            }
+        }
+        // Cover the appended glyph indices with a Normal-blend segment so the
+        // separable-blend segment draw pass actually renders them (untagged
+        // index ranges are skipped). Glyphs blend Normal, on top of everything.
+        if (idxs.len() as u32) > text_seg_start {
+            raw_segments.push((BlendMode::Normal, text_seg_start, idxs.len() as u32));
+        }
+
+        let segments = coalesce_segments(raw_segments);
 
         // Update cache for next frame (used when lock is contended).
         self.cached_vertices = verts.clone();
         self.cached_indices = idxs.clone();
+        self.draw_segments = segments.clone();
+        self.cached_segments = segments;
 
         (verts, idxs)
     }
@@ -1345,11 +1488,16 @@ impl PhotonicRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.fill_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
             pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            draw_segments(
+                &mut pass,
+                &self.draw_segments,
+                &self.blend_pipelines,
+                &self.fill_pipeline,
+                indices.len() as u32,
+            );
         } else {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),

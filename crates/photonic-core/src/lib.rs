@@ -10,31 +10,35 @@ pub mod migration;
 pub mod node;
 pub mod ops;
 pub mod path;
+pub mod raster;
 pub mod selection;
 pub mod style;
 pub mod transform;
+pub mod units;
 
 // Re-export the most commonly used types at the crate root
 pub use annotation::{Annotation, AnnotationId};
 pub use audit::{audit_timestamp, AuditEntry, AuditLog};
 pub use color::Color;
 pub use document::{
-    sample_fill_at, ActionSet, CharacterStyle, ColorSwatch, DimensionAnnotation, Document,
-    DocumentId, DocumentVariable, EventTrigger, ExportProfile, GradientSwatch, GrammarRule,
-    GraphicStyle, Guide, GuideOrientation, Page, ParagraphStyle, SpotColor, Symbol, WidthProfile,
-    Workspace,
+    sample_fill_at, ActionSet, Artboard, ArtboardId, CharacterStyle, ColorSwatch,
+    DimensionAnnotation, Document, DocumentId, DocumentVariable, EventTrigger, ExportProfile,
+    GradientSwatch, GrammarRule, GraphicStyle, Guide, GuideOrientation, Page, ParagraphStyle,
+    SpotColor, Symbol, WidthProfile, Workspace,
 };
 pub use history::{CheckpointInfo, Command, CommandHistory};
 pub use import::{import_svg, ImportError};
 pub use layer::{BlendMode, Layer, LayerId};
 pub use node::{
-    AssetExportSpec, FontStyle, GaussianGlow, GlowEffect, NodeId, PrimitiveKind, SceneNode,
-    SceneNodeKind,
+    AssetExportSpec, FontStyle, GaussianGlow, GlowEffect, NodeId, PrimitiveKind, RasterNode,
+    SceneNode, SceneNodeKind,
 };
 pub use path::PathData;
+pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
     interpolate_stops, ArrowheadStyle, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
     GradientKind, GradientStop, MeshGradient, MeshGradientVertex, Stroke,
 };
 pub use transform::Transform;
+pub use units::{from_px, to_px, DocumentUnit};

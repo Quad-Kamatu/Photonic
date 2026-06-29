@@ -1,6 +1,6 @@
 [package]
 name = "photonic-gui"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license.workspace = true
 
@@ -8,12 +8,14 @@ license.workspace = true
 photonic-core = { path = "../photonic-core" }
 kurbo = { workspace = true }
 photonic-render = { path = "../photonic-render" }
+photonic-embed = { path = "../photonic-embed" }
 egui = { workspace = true }
 egui-phosphor = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
+bytemuck = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -23,3 +25,11 @@ tracing = { workspace = true }
 rfd = "0.15"
 regex = "1"
 pollster = { workspace = true }
+self_update = { version = "0.42", default-features = false, features = [
+    "rustls",
+    "archive-tar",
+    "archive-zip",
+    "compression-flate2",
+    "compression-zip-deflate",
+    "signatures",
+] }

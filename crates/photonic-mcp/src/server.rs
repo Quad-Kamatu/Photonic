@@ -308,6 +308,92 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::create_text(state, a).await,
             ))
         }
+
+        // ── Raster (pixel) image editing ────────────────────────────────────────
+        "place_image" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::place_image(state, a).await,
+            ))
+        }
+        "create_raster_layer" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::create_raster_layer(state, a).await,
+            ))
+        }
+        "apply_adjustment" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::apply_adjustment(state, a).await,
+            ))
+        }
+        "create_adjustment_layer" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::create_adjustment_layer(state, a).await,
+            ))
+        }
+        "apply_filter" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::apply_filter(state, a).await,
+            ))
+        }
+        "brush_stroke" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::brush_stroke(state, a).await,
+            ))
+        }
+        "bucket_fill" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::bucket_fill(state, a).await,
+            ))
+        }
+        "gradient_fill" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::gradient_fill(state, a).await,
+            ))
+        }
+        "transform_image" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::transform_image(state, a).await,
+            ))
+        }
+        "set_layer_mask" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::set_layer_mask(state, a).await,
+            ))
+        }
+        "clear_layer_mask" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::clear_layer_mask(state, a).await,
+            ))
+        }
+        "get_raster_info" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::raster::get_raster_info(state, a).await,
+            ))
+        }
+        "retouch" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::retouch(state, a).await,
+            ))
+        }
+        "liquify" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::liquify(state, a).await,
+            ))
+        }
         "build_shape_from_points" => {
             let a: BuildShapeFromPointsArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -2184,6 +2270,202 @@ pub fn tool_list() -> Value {
                     "tags": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["content","x","y"]
+            }
+        },
+        {
+            "name": "place_image",
+            "description": "Place a raster (pixel) image as a new layer — the Photoshop-style bitmap import. Supply either `path` (a file on disk: PNG/JPEG/WebP/…) or `data_base64` (base64-encoded image bytes). The image becomes a Raster node positioned at (x,y); edit it afterward with apply_adjustment / apply_filter / brush_stroke / transform_image.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to an image file on disk" },
+                    "data_base64": { "type": "string", "description": "Base64-encoded image bytes (alternative to path)" },
+                    "x": { "type": "number", "description": "X position in document space (default 0)" },
+                    "y": { "type": "number", "description": "Y position in document space (default 0)" },
+                    "name": { "type": "string" },
+                    "layer_id": { "type": "string" }
+                }
+            }
+        },
+        {
+            "name": "create_raster_layer",
+            "description": "Create a blank raster (pixel) layer of a given size — a transparent canvas to paint on, or filled with a solid color. Edit with brush_stroke, gradient_fill, apply_filter, etc.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "width": { "type": "integer", "description": "Width in pixels" },
+                    "height": { "type": "integer", "description": "Height in pixels" },
+                    "x": { "type": "number", "description": "X position in document space (default 0)" },
+                    "y": { "type": "number", "description": "Y position in document space (default 0)" },
+                    "fill": { "description": "Optional fill color: hex string (#rrggbb / #rrggbbaa) or [r,g,b,a] (0-255). Default: transparent." },
+                    "name": { "type": "string" },
+                    "layer_id": { "type": "string" }
+                },
+                "required": ["width","height"]
+            }
+        },
+        {
+            "name": "apply_adjustment",
+            "description": "Apply a non-spatial color adjustment to a raster node (Photoshop Image > Adjustments). `adjustment` selects the operation; `params` carries its arguments; optional `selection` confines the edit to a region.\n\nadjustment ∈ {brightness_contrast(brightness,contrast -1..1), levels(in_black,in_white,gamma,out_black,out_white), curves(points:[[x,y],...] 0..1), exposure(stops), hue_saturation(hue deg,saturation -1..1,lightness -1..1), color_balance(shadows/midtones/highlights:[r,g,b] -1..1), vibrance(amount -1..1), desaturate, black_and_white(weights:[r,g,b]), invert, posterize(levels), threshold(level 0..1), photo_filter(color:[r,g,b] 0..1,density 0..1,preserve_luminosity), channel_mixer(red/green/blue:[r,g,b]), gradient_map(stops:[{pos,color}]), selective_color(target:[r,g,b],adjust:[r,g,b],range), shadows_highlights(shadows 0..1,highlights 0..1), gamma(gamma), auto_contrast, auto_levels}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string", "description": "Raster node id or name" },
+                    "adjustment": { "type": "string", "description": "Adjustment name (see description)" },
+                    "params": { "type": "object", "description": "Adjustment-specific parameters" },
+                    "selection": { "type": "object", "description": "Optional selection mask (see make-selection schema in apply_filter)" }
+                },
+                "required": ["node_id","adjustment"]
+            }
+        },
+        {
+            "name": "create_adjustment_layer",
+            "description": "Create a NON-DESTRUCTIVE adjustment layer — a Photoshop adjustment layer. It carries no pixels; its adjustment is re-applied to the composite of every layer beneath it on each render, and the layer `opacity` controls the adjustment strength. `adjustment` and `params` use the exact same vocabulary as `apply_adjustment`. Move/reorder/hide it like any node; delete it to fully revert.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "adjustment": { "type": "string", "description": "Adjustment name (see apply_adjustment)" },
+                    "params": { "type": "object", "description": "Adjustment-specific parameters" },
+                    "opacity": { "type": "number", "description": "Adjustment strength 0..1 (default 1)" },
+                    "name": { "type": "string" },
+                    "layer_id": { "type": "string" }
+                },
+                "required": ["adjustment"]
+            }
+        },
+        {
+            "name": "apply_filter",
+            "description": "Apply a spatial filter to a raster node (Photoshop Filter menu). `filter` selects the operation; `params` carries its arguments; optional `selection` confines the edit.\n\nfilter ∈ {gaussian_blur(radius), box_blur(radius), motion_blur(angle deg,distance px), sharpen(amount), unsharp_mask(radius,amount,threshold 0..255), median(radius), add_noise(amount 0..1,monochrome bool,seed), emboss, find_edges, mosaic(block px), high_pass(radius), surface_blur(radius,threshold), lens_blur(radius), smart_sharpen(amount,radius,threshold), reduce_noise(strength), clarity(amount), vignette(amount,feather), chromatic_aberration(amount)}.\n\nselection (shared by adjustment/filter/brush): {kind:'rect'|'ellipse'|'polygon'|'wand'|'color_range'|'whole', x,y,w,h | points:[[x,y]] | tolerance,color | feather,invert,grow,contract}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "filter": { "type": "string", "description": "Filter name (see description)" },
+                    "params": { "type": "object" },
+                    "selection": { "type": "object" }
+                },
+                "required": ["node_id","filter"]
+            }
+        },
+        {
+            "name": "brush_stroke",
+            "description": "Paint (or erase) a brush stroke along a polyline on a raster node. Points are in the image's local pixel space. mode 'paint' (default) composites `color`; mode 'erase' removes alpha.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "points": { "type": "array", "items": { "type": "array", "items": { "type": "number" } }, "description": "[[x,y],...] in image pixel space" },
+                    "color": { "description": "Brush color: hex or [r,g,b,a]" },
+                    "radius": { "type": "number", "description": "Brush radius in px (default 10)" },
+                    "hardness": { "type": "number", "description": "0 soft .. 1 hard (default 0.8)" },
+                    "flow": { "type": "number", "description": "Per-dab build-up 0..1 (default 1)" },
+                    "opacity": { "type": "number", "description": "Stroke opacity 0..1 (default 1)" },
+                    "mode": { "type": "string", "enum": ["paint","erase"], "description": "Default paint" },
+                    "selection": { "type": "object" }
+                },
+                "required": ["node_id","points"]
+            }
+        },
+        {
+            "name": "bucket_fill",
+            "description": "Flood-fill a contiguous region of a raster node from a seed pixel, by color tolerance (paint bucket).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "color": { "description": "Fill color: hex or [r,g,b,a]" },
+                    "tolerance": { "type": "number", "description": "0..1 color tolerance (default 0)" }
+                },
+                "required": ["node_id","x","y","color"]
+            }
+        },
+        {
+            "name": "gradient_fill",
+            "description": "Fill a raster node with a linear gradient from (x0,y0) to (x1,y1), optionally confined to a selection.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "x0": { "type": "number" }, "y0": { "type": "number" },
+                    "x1": { "type": "number" }, "y1": { "type": "number" },
+                    "color0": { "description": "Start color: hex or [r,g,b,a]" },
+                    "color1": { "description": "End color: hex or [r,g,b,a]" },
+                    "selection": { "type": "object" }
+                },
+                "required": ["node_id","x0","y0","x1","y1","color0","color1"]
+            }
+        },
+        {
+            "name": "transform_image",
+            "description": "Geometric op on a raster node's pixels. op ∈ {crop(x,y,width,height), resize(width,height,filter:'nearest'|'bilinear'|'lanczos3'), resize_canvas(width,height,offset_x,offset_y), rotate90, rotate180, rotate270, flip_h, flip_v, rotate(angle deg)}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "op": { "type": "string", "description": "Operation name (see description)" },
+                    "params": { "type": "object" }
+                },
+                "required": ["node_id","op"]
+            }
+        },
+        {
+            "name": "set_layer_mask",
+            "description": "Attach a non-destructive layer mask to a raster node, built from a selection spec (rect/ellipse/polygon/wand/color_range, with feather/invert/grow/contract). The mask gates the node's compositing without altering its pixels.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "selection": { "type": "object", "description": "Selection spec defining the mask" }
+                },
+                "required": ["node_id","selection"]
+            }
+        },
+        {
+            "name": "clear_layer_mask",
+            "description": "Remove the layer mask from a raster node (fully reveal).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "node_id": { "type": "string" } },
+                "required": ["node_id"]
+            }
+        },
+        {
+            "name": "get_raster_info",
+            "description": "Read-only: report a raster node's dimensions, whether it has a layer mask, its source file, and a 16-bucket luma histogram.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "node_id": { "type": "string" } },
+                "required": ["node_id"]
+            }
+        },
+        {
+            "name": "retouch",
+            "description": "Photoshop retouching tools on a raster node. op ∈ {healing_brush(cx,cy,radius,src_dx,src_dy — frequency-separation seamless clone), spot_healing(cx,cy,radius — auto-heal a blemish from its surroundings), content_aware_fill(requires `selection` — inpaint the selected region from surrounding pixels), red_eye(cx,cy,radius), dust_and_scratches(radius,threshold)}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "op": { "type": "string", "description": "Retouch operation (see description)" },
+                    "params": { "type": "object" },
+                    "selection": { "type": "object", "description": "Required for content_aware_fill" }
+                },
+                "required": ["node_id","op"]
+            }
+        },
+        {
+            "name": "liquify",
+            "description": "Liquify / distortion on a raster node. op ∈ {push(cx,cy,dx,dy,radius,strength — forward warp), twirl(cx,cy,radius,angle), pucker(cx,cy,radius,amount), bloat(cx,cy,radius,amount), pinch(amount), spherize(amount), ripple(amplitude,wavelength), perspective(corners:[[x,y]×4] TL,TR,BR,BL)}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" },
+                    "op": { "type": "string", "description": "Liquify/distort operation (see description)" },
+                    "params": { "type": "object" },
+                    "selection": { "type": "object" }
+                },
+                "required": ["node_id","op"]
             }
         },
         {

@@ -22,7 +22,16 @@ deserializing into `Document`.
 
 ## Versions
 
-### v1 — current
+### v2 — current
+
+Added the `Raster` scene-node kind (`SceneNodeKind::Raster`) for Photoshop-style
+pixel layers — see [`raster-editing.md`](raster-editing.md). The change is purely
+additive: v1 documents contain no raster nodes and load unchanged, so the v1→v2
+migration is a no-op version bump. A raster node serializes its pixels as a
+base64 PNG (`{ width, height, png }`) plus an optional layer `mask` and
+`source_uri`.
+
+### v1
 
 Initial versioned format. Documents that predate the `format_version` field are
 treated as v1.

@@ -1,0 +1,112 @@
+# Build, sign, and publish Photonic release binaries on every version tag.
+#
+# Trigger:  git tag v0.2.0 && git push origin v0.2.0
+# Result:   a GitHub Release with a signed binary archive per platform, which
+#           the in-app self-updater downloads and verifies.
+#
+# Required repo secret:
+#   PHOTONIC_SIGNING_KEY = base64 of release/photonic-signing.priv
+#   (the ed25519 private key; the public key is committed and embedded in the app)
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # needed to create the Release and upload assets
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install zipsign
+        run: cargo install zipsign --locked
+
+      - name: Build
+        run: cargo build --release -p photonic-app --target ${{ matrix.target }}
+
+      - name: Decode signing key
+        env:
+          KEY_B64: ${{ secrets.PHOTONIC_SIGNING_KEY }}
+        run: python -c "import base64,os; open('signing.priv','wb').write(base64.b64decode(os.environ['KEY_B64']))"
+
+      - name: Package + sign (unix)
+        if: runner.os != 'Windows'
+        run: |
+          ASSET="photonic-${{ matrix.target }}.tar.gz"
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" photonic
+          zipsign sign tar "$ASSET" signing.priv
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+
+      - name: Package + sign (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = "photonic-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/photonic.exe" -DestinationPath $asset
+          zipsign sign zip $asset signing.priv
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Clean up signing key
+        if: always()
+        run: rm -f signing.priv
+        shell: bash
+
+      # Extract this tag's CHANGELOG section as the release body. Done once, on
+      # Linux, to avoid relying on awk on the Windows runner; the other matrix
+      # jobs publish without a body and softprops leaves the existing one intact.
+      - name: Extract release notes
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VER" '
+            $0 ~ "^## \\[" ver "\\]" { grab=1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md | sed '/./,$!d' > RELEASE_BODY.md
+          if [ ! -s RELEASE_BODY.md ]; then
+            echo "Photonic $GITHUB_REF_NAME" > RELEASE_BODY.md
+          fi
+          echo "----- release body -----"; cat RELEASE_BODY.md
+
+      - name: Publish to release (with notes)
+        if: runner.os == 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true
+          body_path: RELEASE_BODY.md
+
+      - name: Publish to release
+        if: runner.os != 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true

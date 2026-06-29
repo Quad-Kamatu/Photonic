@@ -2,6 +2,7 @@ use crate::{
     color::Color,
     layer::{BlendMode, LayerId},
     path::PathData,
+    raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask},
     style::{Fill, LineJoin, Stroke},
     transform::Transform,
 };
@@ -228,6 +229,12 @@ impl SceneNode {
                 let height = t.font_size * 1.2 * line_count as f64;
                 Some(kurbo::Rect::new(0.0, 0.0, width, height))
             }
+            SceneNodeKind::Raster(r) => Some(kurbo::Rect::new(
+                0.0,
+                0.0,
+                r.image.width as f64,
+                r.image.height as f64,
+            )),
         }
     }
 }
@@ -239,6 +246,7 @@ pub enum SceneNodeKind {
     Path(PathNode),
     Group(GroupNode),
     Text(TextNode),
+    Raster(RasterNode),
 }
 
 /// A vector path node — the fundamental building block.
@@ -270,6 +278,70 @@ impl PathNode {
     pub fn with_stroke(mut self, stroke: Stroke) -> Self {
         self.stroke = stroke;
         self
+    }
+}
+
+/// A raster (pixel) node — a Photoshop-style bitmap layer.
+///
+/// The image occupies local rect `[0,0,width,height]`; the node `transform`
+/// places, scales, and rotates it in document space exactly like a path's
+/// geometry. An optional non-destructive layer `mask` gates its compositing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RasterNode {
+    /// The pixel buffer (RGBA8, straight alpha).
+    pub image: RasterImage,
+    /// Optional non-destructive layer mask (8-bit coverage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Mask>,
+    /// Original source file path, for relink / re-export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    /// When set, this node is a **non-destructive adjustment layer**: it carries
+    /// no own pixels to composite; instead its `adjustment` is re-applied to the
+    /// composite of everything beneath it (within its `mask`) on every render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<AdjustmentSpec>,
+}
+
+impl RasterNode {
+    /// True if this node is a non-destructive adjustment layer.
+    pub fn is_adjustment_layer(&self) -> bool {
+        self.adjustment.is_some()
+    }
+}
+
+impl RasterNode {
+    pub fn new(image: RasterImage) -> Self {
+        Self {
+            image,
+            mask: None,
+            source_uri: None,
+            adjustment: None,
+        }
+    }
+
+    /// Build a non-destructive adjustment layer (no own pixels; `image` is a 1×1
+    /// placeholder). The `adjustment` is applied to the composite beneath it.
+    pub fn adjustment_layer(spec: AdjustmentSpec) -> Self {
+        Self {
+            image: RasterImage::new(1, 1),
+            mask: None,
+            source_uri: None,
+            adjustment: Some(spec),
+        }
+    }
+
+    pub fn with_source(mut self, uri: impl Into<String>) -> Self {
+        self.source_uri = Some(uri.into());
+        self
+    }
+
+    pub fn width(&self) -> u32 {
+        self.image.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.image.height
     }
 }
 

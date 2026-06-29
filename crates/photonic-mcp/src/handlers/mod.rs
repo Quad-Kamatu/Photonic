@@ -6,4 +6,5 @@ pub mod color_guide;
 pub mod document;
 pub mod layers;
 pub mod nodes;
+pub mod raster;
 pub mod transforms;
