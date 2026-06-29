@@ -13,6 +13,16 @@ pub struct AppPreferences {
     pub snap_to_grid: bool,
     pub grid_color: [f32; 4], // RGBA as f32 (matches egui color picker API)
     pub show_rulers: bool,
+    /// Object-aware snapping: align a dragged node's edges/centers to nearby
+    /// nodes during a move drag (#66). Additive with `snap_to_grid`.
+    #[serde(default = "default_true")]
+    pub snap_to_objects: bool,
+    /// Snap pull radius in screen pixels (converted to canvas units via zoom).
+    #[serde(default = "default_snap_tolerance")]
+    pub snap_tolerance_px: f32,
+    /// Draw the dashed smart-guide lines + distance labels while snapping.
+    #[serde(default = "default_true")]
+    pub snap_show_guides: bool,
 
     // TOOL DEFAULTS
     pub default_fill_color: [f32; 4],
@@ -47,6 +57,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_snap_tolerance() -> f32 {
+    6.0
+}
+
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
@@ -57,6 +71,9 @@ impl Default for AppPreferences {
             snap_to_grid: false,
             grid_color: [0.31, 0.31, 0.47, 0.24], // muted violet, semi-transparent
             show_rulers: false,
+            snap_to_objects: true,
+            snap_tolerance_px: 6.0,
+            snap_show_guides: true,
             default_fill_color: [0.22, 0.47, 0.87, 1.0],
             default_stroke_enabled: false,
             default_stroke_color: [0.0, 0.0, 0.0, 1.0],

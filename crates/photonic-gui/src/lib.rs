@@ -8,6 +8,7 @@ pub mod preferences;
 pub mod quit;
 pub mod radial_wheel;
 pub mod release_notes;
+pub mod snap;
 pub mod theme;
 pub mod tools;
 pub mod viewport;

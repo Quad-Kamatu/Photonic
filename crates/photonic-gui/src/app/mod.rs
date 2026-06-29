@@ -338,6 +338,13 @@ pub struct PhotonicApp {
     /// Selection bounding-box top-left at move start — the point snapped to the
     /// grid as the selection is dragged.
     move_snap_ref: Option<(f64, f64)>,
+    /// Full selection bounding box `(x0, y0, x1, y1)` at move start, in canvas
+    /// space — used as the basis for object-aware snapping (#66).
+    move_snap_bbox: Option<(f64, f64, f64, f64)>,
+    /// Active smart-guide snap from the current move drag, or `None`. Set each
+    /// frame the dragged selection aligns to a nearby node; cleared on release.
+    /// The paint pass reads this to draw guide lines + distance labels.
+    last_snap_result: Option<crate::snap::SnapResult>,
     /// Canvas-space cursor position where the move drag began.
     move_snap_press: Option<(f64, f64)>,
     /// True when the current move drag is duplicating the selection (Alt-drag):
@@ -721,6 +728,8 @@ impl Default for PhotonicApp {
             move_drag_origins: Vec::new(),
             move_snap_origins: Vec::new(),
             move_snap_ref: None,
+            move_snap_bbox: None,
+            last_snap_result: None,
             move_snap_press: None,
             dup_drag: false,
             artboard_drag: None,
@@ -1787,6 +1796,18 @@ impl PhotonicApp {
                                                 ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.grid_color);
                                             });
                                             ui.checkbox(&mut self.prefs.snap_to_grid, "Snap to Grid");
+                                            ui.checkbox(&mut self.prefs.snap_to_objects, "Snap to Objects")
+                                                .on_hover_text("Align edges/centers to nearby objects while dragging (#66).");
+                                            ui.add_enabled_ui(self.prefs.snap_to_objects, |ui| {
+                                                ui.checkbox(&mut self.prefs.snap_show_guides, "Show Smart Guides");
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Snap Tolerance");
+                                                    ui.add(
+                                                        egui::Slider::new(&mut self.prefs.snap_tolerance_px, 1.0..=20.0)
+                                                            .suffix("px"),
+                                                    );
+                                                });
+                                            });
                                         });
                                         ui.checkbox(&mut self.prefs.show_rulers, "Show Rulers");
                                         ui.checkbox(&mut self.outline_mode, "Outline Mode")
@@ -2488,6 +2509,76 @@ impl PhotonicApp {
                                         );
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // ── Smart guides (object snap) overlay ────────────────────────
+                // While a move drag is snapping the selection to nearby nodes,
+                // draw a dashed line across the canvas at each active alignment
+                // plus a small pixel-distance label (#66). Cleared on release.
+                if self.prefs.snap_show_guides {
+                    if let Some(snap) = &self.last_snap_result {
+                        let painter = ui.painter_at(rect);
+                        let color = egui::Color32::from_rgb(255, 64, 160); // magenta
+                        let stroke = egui::Stroke::new(1.0, color);
+                        for guide in &snap.active {
+                            match guide.axis {
+                                crate::snap::SnapAxis::Vertical => {
+                                    let (sx, _) = view.canvas_to_screen(guide.coord, 0.0);
+                                    let sx = sx as f32;
+                                    if sx >= rect.min.x && sx <= rect.max.x {
+                                        painter.extend(egui::Shape::dashed_line(
+                                            &[
+                                                egui::pos2(sx, rect.min.y),
+                                                egui::pos2(sx, rect.max.y),
+                                            ],
+                                            stroke,
+                                            5.0,
+                                            4.0,
+                                        ));
+                                    }
+                                }
+                                crate::snap::SnapAxis::Horizontal => {
+                                    let (_, sy) = view.canvas_to_screen(0.0, guide.coord);
+                                    let sy = sy as f32;
+                                    if sy >= rect.min.y && sy <= rect.max.y {
+                                        painter.extend(egui::Shape::dashed_line(
+                                            &[
+                                                egui::pos2(rect.min.x, sy),
+                                                egui::pos2(rect.max.x, sy),
+                                            ],
+                                            stroke,
+                                            5.0,
+                                            4.0,
+                                        ));
+                                    }
+                                }
+                            }
+                            // Pixel-distance label near the snap, placed at the
+                            // mid-point of the guide on screen.
+                            let dist_px = (guide.distance * view.zoom).round() as i64;
+                            if dist_px > 0 {
+                                let (lx, ly) = match guide.axis {
+                                    crate::snap::SnapAxis::Vertical => {
+                                        let (sx, _) =
+                                            view.canvas_to_screen(guide.coord, 0.0);
+                                        (sx as f32 + 4.0, rect.center().y)
+                                    }
+                                    crate::snap::SnapAxis::Horizontal => {
+                                        let (_, sy) =
+                                            view.canvas_to_screen(0.0, guide.coord);
+                                        (rect.center().x, sy as f32 + 4.0)
+                                    }
+                                };
+                                painter.text(
+                                    egui::pos2(lx, ly),
+                                    egui::Align2::LEFT_TOP,
+                                    format!("{dist_px}px"),
+                                    egui::FontId::proportional(10.0),
+                                    color,
+                                );
                             }
                         }
                     }

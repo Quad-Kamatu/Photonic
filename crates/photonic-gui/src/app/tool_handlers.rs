@@ -605,8 +605,9 @@ impl PhotonicApp {
                                 .map(|n| (*id, n.transform.matrix[4], n.transform.matrix[5]))
                         })
                         .collect();
-                    self.move_snap_ref = selection_canvas_bounds(doc, &ids_to_move, renderer)
-                        .map(|(x0, y0, _, _)| (x0, y0));
+                    let start_bounds = selection_canvas_bounds(doc, &ids_to_move, renderer);
+                    self.move_snap_ref = start_bounds.map(|(x0, y0, _, _)| (x0, y0));
+                    self.move_snap_bbox = start_bounds;
                     self.move_snap_press = ui
                         .input(|i| i.pointer.press_origin())
                         .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
@@ -621,7 +622,8 @@ impl PhotonicApp {
                     // Shift: lock the move to the nearest of 8 directions (takes
                     // precedence over grid snap). Otherwise snap the reference
                     // point's target to the grid (no-op when snap is off).
-                    let (dx, dy) = if ui.input(|i| i.modifiers.shift) {
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let (mut dx, mut dy) = if shift {
                         axis_lock_8(raw_dx, raw_dy)
                     } else {
                         match self.move_snap_ref {
@@ -631,6 +633,29 @@ impl PhotonicApp {
                             None => (raw_dx, raw_dy),
                         }
                     };
+
+                    // Object-aware snapping (#66): refine the grid-snapped delta
+                    // so the dragged selection's edges/centers align to nearby
+                    // nodes. Additive with grid snap; suppressed while Shift
+                    // (axis-lock) is held. Tolerance is in screen px → canvas.
+                    self.last_snap_result = None;
+                    if self.prefs.snap_to_objects && !shift {
+                        if let Some((bx0, by0, bx1, by1)) = self.move_snap_bbox {
+                            let moving: Vec<NodeId> = doc.selection.ids().copied().collect();
+                            let candidates =
+                                crate::snap::collect_snap_candidates(doc, &moving);
+                            let tol =
+                                (self.prefs.snap_tolerance_px as f64) / view.zoom.max(1e-6);
+                            let tentative = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
+                            let snap =
+                                crate::snap::resolve_snap(tentative, &candidates, tol);
+                            dx += snap.corrected.0;
+                            dy += snap.corrected.1;
+                            if !snap.active.is_empty() {
+                                self.last_snap_result = Some(snap);
+                            }
+                        }
+                    }
                     for (id, ox, oy) in &self.move_snap_origins {
                         if let Some(node) = doc.nodes.get_mut(id) {
                             node.transform.matrix[4] = ox + dx;
@@ -694,6 +719,8 @@ impl PhotonicApp {
             self.dup_drag = false;
             self.move_snap_origins.clear();
             self.move_snap_ref = None;
+            self.move_snap_bbox = None;
+            self.last_snap_result = None;
             self.move_snap_press = None;
             self.resizing = None;
             self.resize_origin_bounds = None;
