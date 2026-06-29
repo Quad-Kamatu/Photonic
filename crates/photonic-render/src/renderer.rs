@@ -15,6 +15,7 @@ use image::{ImageBuffer, Rgba};
 use photonic_core::{
     document::Document,
     node::SceneNodeKind,
+    path::PathData,
     style::{FillKind, StrokeAlign},
 };
 use std::sync::Arc;
@@ -84,6 +85,10 @@ pub struct PhotonicRenderer {
     text_viewport: Viewport,
     /// Text nodes collected during `build_geometry` for the current frame.
     pending_texts: Vec<TextSnapshot>,
+    /// Text-on-path glyph outlines (document space) + RGBA fill colour, built
+    /// during `build_geometry` and tessellated into the fill geometry. Rendered
+    /// as vector fills because glyphon cannot rotate glyphs along a curve.
+    pending_path_text: Vec<(Vec<PathData>, [f32; 4])>,
 
     // ── Gaussian glow blur ────────────────────────────────────────────────────
     fill_pipeline_1spp: wgpu::RenderPipeline, // sample_count=1 for offscreen silhouette
@@ -280,6 +285,7 @@ impl PhotonicRenderer {
             text_renderer,
             text_viewport,
             pending_texts: Vec::new(),
+            pending_path_text: Vec::new(),
             fill_pipeline_1spp,
             blur_pipeline_h,
             blur_pipeline_v,
@@ -745,6 +751,7 @@ impl PhotonicRenderer {
             let pan_x = self.view.pan_x;
             let pan_y = self.view.pan_y;
             self.pending_texts.clear();
+            self.pending_path_text.clear();
             let mut nodes: Vec<NodeSnapshot> = Vec::new();
             for node in doc.nodes_in_draw_order() {
                 // Symbol instances render from the *current* master so master
@@ -753,6 +760,43 @@ impl PhotonicRenderer {
                 let node = resolved.as_ref();
                 match &node.kind {
                     SceneNodeKind::Text(text_node) => {
+                        // Text-on-path: render glyph outlines along the spine as
+                        // vector fills instead of flat glyphon text.
+                        if let Some(spine_node) =
+                            text_node.path_spine_id.and_then(|id| doc.get_node(&id))
+                        {
+                            if let SceneNodeKind::Path(spine) = &spine_node.kind {
+                                let mut bez = spine.path_data.to_bez_path();
+                                bez.apply_affine(kurbo::Affine::new(spine_node.transform.matrix));
+                                let spine_doc = PathData::from_bez_path(&bez);
+
+                                let opacity = text_node.fill.opacity * node.opacity;
+                                let rgba = match &text_node.fill.kind {
+                                    FillKind::Solid(c) => [c.r, c.g, c.b, c.a * opacity],
+                                    _ => [0.0, 0.0, 0.0, opacity],
+                                };
+                                let params = crate::text_path::TextOnPathParams {
+                                    content: &text_node.content,
+                                    font_family: &text_node.font_family,
+                                    font_size: text_node.font_size,
+                                    font_weight: text_node.font_weight,
+                                    font_style: text_node.font_style,
+                                    line_height: text_node.line_height,
+                                    letter_spacing: text_node.letter_spacing,
+                                    align: text_node.align,
+                                    path_offset: text_node.path_offset,
+                                };
+                                let glyphs = crate::text_path::layout_text_on_path(
+                                    &mut self.font_system,
+                                    &params,
+                                    &spine_doc,
+                                );
+                                if !glyphs.is_empty() {
+                                    self.pending_path_text.push((glyphs, rgba));
+                                }
+                                continue; // handled — skip flat glyphon text
+                            }
+                        }
                         let (doc_x, doc_y) = node.transform.apply(0.0, 0.0);
                         let screen_x = (doc_x * zoom + pan_x) as f32;
                         let screen_y = (doc_y * zoom + pan_y) as f32;
@@ -1293,6 +1337,29 @@ impl PhotonicRenderer {
                         idxs: mesh.indices,
                         sigma_px,
                     });
+                }
+            }
+        }
+
+        // ── Text-on-path glyphs ───────────────────────────────────────────────
+        // Glyph outlines are already in document coordinates, so they are
+        // appended directly (no per-node matrix). Drawn last → on top of shapes,
+        // consistent with how flat text sits above the fill layer.
+        for (glyphs, rgba) in &self.pending_path_text {
+            for glyph in glyphs {
+                let mesh = tessellate_fill(glyph, false);
+                if mesh.is_empty() {
+                    continue;
+                }
+                let base = verts.len() as u32;
+                for pos in &mesh.vertices {
+                    verts.push(Vertex {
+                        position: [pos[0], pos[1]],
+                        color: *rgba,
+                    });
+                }
+                for &i in &mesh.indices {
+                    idxs.push(base + i);
                 }
             }
         }
