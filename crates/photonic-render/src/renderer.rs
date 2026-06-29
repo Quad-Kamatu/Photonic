@@ -1,10 +1,10 @@
 use crate::{
     canvas::CanvasView,
     pipeline::{
-        coalesce_segments, create_blur_bgl, create_blur_pipeline, create_camera_bind_group_layout,
-        create_fill_pipeline, create_fill_pipeline_with_blend, draw_segments,
-        separable_blend_state, BlurParams, CameraUniform, DrawSegment, Vertex,
-        SEPARABLE_BLEND_MODES,
+        coalesce_segments, create_blur_bgl, create_blur_pipeline, create_blur_pipeline_with_blend,
+        create_camera_bind_group_layout, create_fill_pipeline, create_fill_pipeline_with_blend,
+        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, DrawSegment,
+        Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
 };
@@ -113,6 +113,23 @@ pub struct PhotonicRenderer {
     glow_tex_b_view: wgpu::TextureView,
     /// Gaussian glow jobs built each frame by build_geometry, consumed by render_gaussian_glow_pass.
     pending_gaussian_glows: Vec<GaussianGlowJob>,
+
+    // ── Live-effects (drop shadow / object blur / feather) blur layer ──────────
+    /// Straight-alpha blur/composite pipeline (the effect textures hold
+    /// non-premultiplied colour, unlike the premultiplied glow path). The blur
+    /// ping-pong / layer textures are allocated per frame at the target size so
+    /// the same path serves both the window and offscreen capture.
+    blur_pipeline_alpha: wgpu::RenderPipeline,
+    /// Effect blur jobs built each frame by build_geometry.
+    pending_blur_jobs: Vec<BlurJob>,
+}
+
+/// One blurred live effect for the windowed renderer's effects layer:
+/// pre-transformed document-space geometry + blur radius in document units.
+struct BlurJob {
+    verts: Vec<Vertex>,
+    idxs: Vec<u32>,
+    radius_doc: f64,
 }
 
 /// Screen-space snapshot of one text node, ready for glyphon.
@@ -258,6 +275,12 @@ impl PhotonicRenderer {
         let fill_pipeline_1spp = create_fill_pipeline(&device, surface_format, &camera_bgl, 1);
         let blur_pipeline_h = create_blur_pipeline(&device, surface_format, &blur_bgl, false);
         let blur_pipeline_v = create_blur_pipeline(&device, surface_format, &blur_bgl, true);
+        let blur_pipeline_alpha = create_blur_pipeline_with_blend(
+            &device,
+            surface_format,
+            &blur_bgl,
+            BlurBlend::StraightAlpha,
+        );
         let blur_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blur_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -328,6 +351,8 @@ impl PhotonicRenderer {
             glow_tex_b,
             glow_tex_b_view,
             pending_gaussian_glows: Vec::new(),
+            blur_pipeline_alpha,
+            pending_blur_jobs: Vec::new(),
         }
     }
 
@@ -423,7 +448,15 @@ impl PhotonicRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame_encoder"),
             });
-        self.record_document_pass(&mut encoder, &self.msaa_view, &view, vertices, indices);
+        self.render_scene(
+            &mut encoder,
+            &self.msaa_view,
+            &view,
+            self.width,
+            self.height,
+            vertices,
+            indices,
+        );
         Some(FrameHandle {
             surface_texture,
             view,
@@ -760,6 +793,11 @@ impl PhotonicRenderer {
             outer_glow: Option<([f32; 6], photonic_core::style::LineJoin)>,
             inner_glow: Option<([f32; 6], photonic_core::style::LineJoin)>,
             gaussian_glow: Option<([f32; 4], f32)>, // ([r,g,b,a*opacity], radius_doc)
+            /// ([r,g,b,a], opacity, dx_doc, dy_doc, blur_doc) — None when disabled.
+            drop_shadow: Option<([f32; 4], f32, f32, f32, f32)>,
+            /// ([r,g,b,a], radius_doc) — soft fill-colored edge for object-blur /
+            /// feather on solid fills. None when disabled or non-solid fill.
+            soft_edge: Option<([f32; 4], f32)>,
             is_compound: bool,
             arrowhead_start: photonic_core::style::ArrowheadStyle,
             arrowhead_end: photonic_core::style::ArrowheadStyle,
@@ -940,6 +978,34 @@ impl PhotonicRenderer {
                             } else {
                                 None
                             },
+                            drop_shadow: if node.drop_shadow.enabled {
+                                let s = &node.drop_shadow;
+                                Some((
+                                    [s.color.r, s.color.g, s.color.b, s.color.a],
+                                    s.opacity * node.opacity,
+                                    s.dx,
+                                    s.dy,
+                                    s.blur,
+                                ))
+                            } else {
+                                None
+                            },
+                            soft_edge: {
+                                let radius = if node.object_blur.enabled {
+                                    node.object_blur.radius
+                                } else if node.feather.enabled {
+                                    node.feather.radius
+                                } else {
+                                    0.0
+                                };
+                                match (&path_node.fill.kind, radius) {
+                                    (FillKind::Solid(c), r) if r > 0.0 => {
+                                        let a = c.a * path_node.fill.opacity * node.opacity;
+                                        Some(([c.r, c.g, c.b, a], r))
+                                    }
+                                    _ => None,
+                                }
+                            },
                         });
                     }
                     _ => {} // Group nodes and future kinds: no GPU geometry of their own
@@ -950,6 +1016,7 @@ impl PhotonicRenderer {
 
         // ── Tessellate phase: all CPU work happens with no locks held ─────────
         self.pending_gaussian_glows.clear();
+        let mut blur_jobs: Vec<BlurJob> = Vec::new();
         let mut verts: Vec<Vertex> = Vec::new();
         let mut idxs: Vec<u32> = Vec::new();
 
@@ -988,6 +1055,11 @@ impl PhotonicRenderer {
         // Defined as closures to keep the loop body readable.
         let append_fill = |node: &NodeSnapshot, verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>| {
             if !node.fill_enabled || node.fill_is_none {
+                return;
+            }
+            // Object-blur / feather replace the sharp fill with a blurred copy in
+            // the effects layer — suppress the crisp fill here.
+            if node.soft_edge.is_some() {
                 return;
             }
             let [a, b, c, d, e, f] = node.matrix;
@@ -1247,8 +1319,60 @@ impl PhotonicRenderer {
         let mut raw_segments: Vec<(BlendMode, u32, u32)> =
             vec![(BlendMode::Normal, 0, idxs.len() as u32)];
 
+        // Build a blurred-silhouette effect job: tessellate the fill, transform
+        // by the node matrix (+ offset), flat-colour it, tag with a blur radius.
+        let make_blur_job = |node: &NodeSnapshot,
+                             offset: (f64, f64),
+                             color: [f32; 4],
+                             radius_doc: f64|
+         -> Option<BlurJob> {
+            let mesh = tessellate_fill(&node.path_data, node.is_compound);
+            if mesh.is_empty() {
+                return None;
+            }
+            let [a, b, c, d, e, f] = node.matrix;
+            let (ox, oy) = offset;
+            let mut jverts = Vec::with_capacity(mesh.vertices.len());
+            for pos in &mesh.vertices {
+                let x = a * pos[0] as f64 + c * pos[1] as f64 + e + ox;
+                let y = b * pos[0] as f64 + d * pos[1] as f64 + f + oy;
+                jverts.push(Vertex {
+                    position: [x as f32, y as f32],
+                    color,
+                });
+            }
+            Some(BlurJob {
+                verts: jverts,
+                idxs: mesh.indices,
+                radius_doc,
+            })
+        };
+
         for node in &nodes {
             let seg_start = idxs.len() as u32;
+
+            // ── Drop shadow → blurred offset silhouette in the effects layer ───
+            if let Some(([sr, sg, sb, sa], opacity, dx, dy, blur)) = node.drop_shadow {
+                let alpha = (sa * opacity).min(1.0);
+                if let Some(job) = make_blur_job(
+                    node,
+                    (dx as f64, dy as f64),
+                    [sr, sg, sb, alpha],
+                    blur as f64,
+                ) {
+                    blur_jobs.push(job);
+                }
+            }
+
+            // ── Object blur / feather → blurred fill in the effects layer ──────
+            // The sharp fill is suppressed in append_fill; this blurred copy
+            // replaces it. (Gradient/image interior blur is a follow-up.)
+            if let Some(([r, g, b, a], radius)) = node.soft_edge {
+                if let Some(job) = make_blur_job(node, (0.0, 0.0), [r, g, b, a], radius as f64) {
+                    blur_jobs.push(job);
+                }
+            }
+
             // ── Outer glow: behind fill so fill clips the inward half ─────────
             if let Some((ref og, og_join)) = node.outer_glow {
                 append_glow(
@@ -1437,6 +1561,7 @@ impl PhotonicRenderer {
         }
 
         let segments = coalesce_segments(raw_segments);
+        self.pending_blur_jobs = blur_jobs;
 
         // Update cache for next frame (used when lock is contended).
         self.cached_vertices = verts.clone();
@@ -1458,6 +1583,7 @@ impl PhotonicRenderer {
         resolve_view: &wgpu::TextureView,
         vertices: &[Vertex],
         indices: &[u32],
+        clear: wgpu::Color,
     ) {
         if !vertices.is_empty() {
             let vbuf = self
@@ -1480,7 +1606,7 @@ impl PhotonicRenderer {
                     view: msaa_view,
                     resolve_target: Some(resolve_view),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BG),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Discard,
                     },
                 })],
@@ -1505,7 +1631,7 @@ impl PhotonicRenderer {
                     view: msaa_view,
                     resolve_target: Some(resolve_view),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BG),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Discard,
                     },
                 })],
@@ -1513,6 +1639,297 @@ impl PhotonicRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+        }
+    }
+
+    /// Render the document to `target_view`, inserting the live-effects blur
+    /// layer (drop shadow / object blur / feather) between the artboard
+    /// background and the sharp shapes when any effect is active. With no
+    /// effects this is the original single-pass document render.
+    fn render_scene(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        msaa_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) {
+        if self.pending_blur_jobs.is_empty() {
+            self.record_document_pass(enc, msaa_view, target_view, vertices, indices, BG);
+            return;
+        }
+
+        // The artboard rect is the first 4 verts / 6 indices built by
+        // build_geometry; render the rest (shapes) to a transparent offscreen
+        // texture so the effects layer can sit beneath them.
+        let skip = 6.min(indices.len());
+        let doc_tex = self.make_fx_tex(w, h);
+        let doc_view = doc_tex.create_view(&Default::default());
+        self.record_document_pass(
+            enc,
+            msaa_view,
+            &doc_view,
+            vertices,
+            &indices[skip..],
+            wgpu::Color::TRANSPARENT,
+        );
+
+        let (fx_tex, fx_view) = self.render_effects_layer(enc, w, h);
+
+        // Composite onto the target: background → artboard → effects → shapes.
+        self.composite_effects(
+            enc,
+            target_view,
+            vertices,
+            &indices[..skip],
+            &fx_view,
+            &doc_view,
+        );
+        drop(fx_tex);
+        drop(doc_tex);
+    }
+
+    /// Single-sample colour texture (render target + sampleable) for the
+    /// per-frame effects layer.
+    fn make_fx_tex(&self, w: u32, h: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fx_tex"),
+            size: wgpu::Extent3d {
+                width: w.max(1),
+                height: h.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    }
+
+    /// Bind group for the blur shader: source texture + sampler + params.
+    fn effects_blur_bg(
+        &self,
+        src: &wgpu::TextureView,
+        sigma: f32,
+        horizontal: bool,
+    ) -> wgpu::BindGroup {
+        let params = BlurParams {
+            sigma,
+            horizontal: horizontal as u32,
+            _pad: [0.0; 2],
+        };
+        let buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx_blur_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx_blur_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Render each pending blur job (silhouette → H-blur → V-blur) and
+    /// accumulate them into a single straight-alpha effects texture.
+    fn render_effects_layer(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        w: u32,
+        h: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let fx_a = self.make_fx_tex(w, h);
+        let fx_b = self.make_fx_tex(w, h);
+        let accum = self.make_fx_tex(w, h);
+        let (a_view, b_view, accum_view) = (
+            fx_a.create_view(&Default::default()),
+            fx_b.create_view(&Default::default()),
+            accum.create_view(&Default::default()),
+        );
+
+        let mut accum_cleared = false;
+        for job in &self.pending_blur_jobs {
+            if job.idxs.is_empty() {
+                continue;
+            }
+            let sigma = (job.radius_doc * self.view.zoom).max(0.0) as f32;
+            let vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_vbuf"),
+                    contents: bytemuck::cast_slice(&job.verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_ibuf"),
+                    contents: bytemuck::cast_slice(&job.idxs),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            // Pass A: silhouette → fx_a (cleared transparent).
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_silhouette"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &a_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.fill_pipeline_1spp);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..job.idxs.len() as u32, 0, 0..1);
+            }
+            // Pass B: horizontal blur fx_a → fx_b.
+            {
+                let bg = self.effects_blur_bg(&a_view, sigma, true);
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_blur_h"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &b_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline_alpha);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..6, 0..1);
+            }
+            // Pass C: vertical blur fx_b → accum (accumulate).
+            {
+                let bg = self.effects_blur_bg(&b_view, sigma, false);
+                let load = if accum_cleared {
+                    wgpu::LoadOp::Load
+                } else {
+                    accum_cleared = true;
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                };
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_blur_v"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &accum_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline_alpha);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+        (accum, accum_view)
+    }
+
+    /// Composite the artboard rect, the effects layer, and the sharp shapes onto
+    /// `target` (single-sample) over a cleared background.
+    fn composite_effects(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        vertices: &[Vertex],
+        artboard_indices: &[u32],
+        fx_view: &wgpu::TextureView,
+        doc_view: &wgpu::TextureView,
+    ) {
+        // Pass 1: clear to the canvas background and draw the artboard rect.
+        {
+            let vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_artboard_vbuf"),
+                    contents: bytemuck::cast_slice(vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_artboard_ibuf"),
+                    contents: bytemuck::cast_slice(artboard_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx_composite_artboard"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(BG),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if !artboard_indices.is_empty() {
+                pass.set_pipeline(&self.fill_pipeline_1spp);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..artboard_indices.len() as u32, 0, 0..1);
+            }
+        }
+        // Passes 2 & 3: effects layer, then sharp shapes (both straight-alpha).
+        for layer in [fx_view, doc_view] {
+            let bg = self.effects_blur_bg(layer, 0.0, true);
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx_composite_layer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blur_pipeline_alpha);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..6, 0..1);
         }
     }
 
@@ -1542,9 +1959,17 @@ impl PhotonicRenderer {
         let (capture_msaa_tex, capture_msaa_view) =
             create_msaa_texture(&self.device, self.surface_format, w, h);
 
-        // Draw geometry into the offscreen texture via MSAA
+        // Draw geometry into the offscreen texture via MSAA (with effects layer).
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.record_document_pass(&mut enc, &capture_msaa_view, &tex_view, vertices, indices);
+        self.render_scene(
+            &mut enc,
+            &capture_msaa_view,
+            &tex_view,
+            w,
+            h,
+            vertices,
+            indices,
+        );
 
         // Render text nodes on top (same encoder, loads resolved geometry from tex_view)
         if !self.pending_texts.is_empty() {

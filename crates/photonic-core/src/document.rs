@@ -119,6 +119,17 @@ impl ExportProfile {
             precision: None,
         }
     }
+
+    pub fn new_pdf(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            format: "pdf".to_string(),
+            width: None,
+            height: None,
+            semantic_ids: None,
+            precision: None,
+        }
+    }
 }
 
 // ─── Symbols ─────────────────────────────────────────────────────────────────

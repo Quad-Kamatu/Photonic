@@ -115,8 +115,21 @@ pub async fn create_shape(state: &AppState, args: CreateShapeArgs) -> ToolResult
     };
 
     let mut path_node = PathNode::new(path_data);
+    let has_explicit_fill = args.fill.is_some();
     if let Err(e) = apply_style(&mut path_node, args.fill, args.stroke) {
         return ToolResult::error(e);
+    }
+    // `color` is a convenience shorthand for a solid fill. An explicit `fill`
+    // takes priority; a bad hex string is reported rather than silently ignored.
+    if !has_explicit_fill {
+        if let Some(hex) = &args.color {
+            match photonic_core::color::Color::from_hex(hex) {
+                Some(c) => path_node.fill = photonic_core::style::Fill::solid(c),
+                None => {
+                    return ToolResult::error(format!("Invalid color '{hex}' (expected #rrggbb)"))
+                }
+            }
+        }
     }
 
     let shape_name = args
@@ -664,6 +677,15 @@ pub async fn update_node(state: &AppState, args: UpdateNodeArgs) -> ToolResult {
     }
     if let Some(gg) = args.gaussian_glow {
         new_node.gaussian_glow = gg.into();
+    }
+    if let Some(ds) = args.drop_shadow {
+        new_node.drop_shadow = ds.into();
+    }
+    if let Some(ob) = args.object_blur {
+        new_node.object_blur = ob.into();
+    }
+    if let Some(ft) = args.feather {
+        new_node.feather = ft.into();
     }
     if let Some(t_arg) = args.transform {
         new_node.transform = t_arg.to_transform();
@@ -17191,4 +17213,96 @@ pub async fn copy_appearance(state: &AppState, args: CopyAppearanceArgs) -> Tool
         args.source_id, updated
     ))
     .with_data(serde_json::json!({ "updated": updated }))
+}
+
+#[cfg(test)]
+mod create_shape_color_tests {
+    use super::*;
+    use crate::server::{AppState, McpServerConfig};
+    use photonic_core::style::FillKind;
+    use photonic_core::{AuditLog, Document};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("t", 100.0, 100.0))),
+            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    async fn only_fill(state: &AppState) -> photonic_core::style::Fill {
+        let doc = state.document.lock().await;
+        let node = doc
+            .nodes
+            .values()
+            .find(|n| matches!(n.kind, SceneNodeKind::Path(_)))
+            .expect("a path node");
+        match &node.kind {
+            SceneNodeKind::Path(p) => p.fill.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn color_shorthand_sets_solid_fill() {
+        let state = test_state();
+        let args = serde_json::from_value(json!({
+            "shape_type": "rectangle", "x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0,
+            "color": "#2277ff"
+        }))
+        .unwrap();
+        create_shape(&state, args).await;
+
+        let fill = only_fill(&state).await;
+        match fill.kind {
+            FillKind::Solid(c) => {
+                assert!((c.r - 0.133).abs() < 0.02, "r={}", c.r);
+                assert!((c.g - 0.467).abs() < 0.02, "g={}", c.g);
+                assert!((c.b - 1.0).abs() < 0.02, "b={}", c.b);
+            }
+            other => panic!("expected solid fill, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_fill_wins_over_color() {
+        let state = test_state();
+        let args = serde_json::from_value(json!({
+            "shape_type": "rectangle", "x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0,
+            "color": "#2277ff",
+            "fill": { "type": "solid", "color": "#ff0000" }
+        }))
+        .unwrap();
+        create_shape(&state, args).await;
+
+        let fill = only_fill(&state).await;
+        match fill.kind {
+            FillKind::Solid(c) => {
+                assert!(
+                    c.r > 0.9 && c.g < 0.1 && c.b < 0.1,
+                    "expected red, got {c:?}"
+                );
+            }
+            other => panic!("expected solid fill, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_color_is_an_error() {
+        let state = test_state();
+        let args = serde_json::from_value(json!({
+            "shape_type": "rectangle", "x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0,
+            "color": "not-a-color"
+        }))
+        .unwrap();
+        let result = create_shape(&state, args).await;
+        assert_eq!(result.is_error, Some(true), "invalid color should error");
+    }
 }
