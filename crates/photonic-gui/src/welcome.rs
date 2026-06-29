@@ -704,7 +704,10 @@ impl WelcomeState {
                     egui::Layout::top_down(egui::Align::Center),
                     |ui| {
                         let btn = egui::Button::new(
-                            RichText::new(label).size(13.5).color(Color32::WHITE).strong(),
+                            RichText::new(label)
+                                .size(13.5)
+                                .color(Color32::WHITE)
+                                .strong(),
                         )
                         .fill(ACCENT)
                         .stroke(Stroke::new(1.0, ACCENT_BRIGHT))
@@ -792,8 +795,8 @@ impl WelcomeState {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(9.0, 9.0);
                         for (label, pw, ph_) in filtered {
-                            let selected = (self.width - pw).abs() < 0.5
-                                && (self.height - ph_).abs() < 0.5;
+                            let selected =
+                                (self.width - pw).abs() < 0.5 && (self.height - ph_).abs() < 0.5;
                             if aspect_tile(ui, ctx, label, pw, ph_, selected) {
                                 pick = Some((pw, ph_));
                             }
@@ -1003,7 +1006,12 @@ impl WelcomeState {
                     ) {
                         self.open_tab = OpenTab::Recent;
                     }
-                    if open_tab_btn(ui, ph::FOLDER_OPEN, "On disk", self.open_tab == OpenTab::Disk) {
+                    if open_tab_btn(
+                        ui,
+                        ph::FOLDER_OPEN,
+                        "On disk",
+                        self.open_tab == OpenTab::Disk,
+                    ) {
                         self.open_tab = OpenTab::Disk;
                     }
                 });
@@ -1283,12 +1291,7 @@ fn panel_chrome(
             *next_view = Some(WelcomeView::Hub);
         }
         ui.add_space(2.0);
-        ui.label(
-            RichText::new("PHOTONIC")
-                .size(13.0)
-                .color(ACCENT)
-                .strong(),
-        );
+        ui.label(RichText::new("PHOTONIC").size(13.0).color(ACCENT).strong());
         ui.add_space(10.0);
         ui.label(RichText::new("/").size(13.0).color(BORDER));
         ui.add_space(10.0);
@@ -1308,11 +1311,11 @@ fn panel_chrome(
 
 /// A compact pill toggle used for unit / DPI / bleed quick-picks.
 fn mini_toggle(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
-    let btn = egui::Button::new(
-        RichText::new(label)
-            .size(11.0)
-            .color(if selected { Color32::WHITE } else { TEXT_MUTED }),
-    )
+    let btn = egui::Button::new(RichText::new(label).size(11.0).color(if selected {
+        Color32::WHITE
+    } else {
+        TEXT_MUTED
+    }))
     .fill(if selected { ACCENT } else { BG_ELEVATED })
     .stroke(Stroke::new(
         1.0,
@@ -1329,7 +1332,10 @@ fn mini_toggle(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
 /// repaints every frame) and center it with a leading spacer.
 fn centered_row(ui: &mut egui::Ui, salt: &str, content: impl FnOnce(&mut egui::Ui)) {
     let id = ui.id().with(("centered_row", salt));
-    let measured: f32 = ui.ctx().memory(|m| m.data.get_temp::<f32>(id)).unwrap_or(0.0);
+    let measured: f32 = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<f32>(id))
+        .unwrap_or(0.0);
     let lead = ((ui.available_width() - measured) * 0.5).max(0.0);
     let mut content_w = measured;
     ui.horizontal(|ui| {
@@ -1352,7 +1358,10 @@ fn open_tab_btn(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> b
             .color(if selected { Color32::WHITE } else { TEXT_MUTED }),
     )
     .fill(if selected { ACCENT } else { BG_ELEVATED })
-    .stroke(Stroke::new(1.0, if selected { ACCENT_BRIGHT } else { BORDER }))
+    .stroke(Stroke::new(
+        1.0,
+        if selected { ACCENT_BRIGHT } else { BORDER },
+    ))
     .rounding(Rounding::same(6.0))
     .min_size(Vec2::new(132.0, 32.0));
     ui.add(btn).clicked()
@@ -1454,7 +1463,10 @@ fn trim_num(x: f64) -> String {
     if r.fract().abs() < 1e-9 {
         format!("{}", r as i64)
     } else {
-        format!("{r:.2}").trim_end_matches('0').trim_end_matches('.').to_string()
+        format!("{r:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -1664,7 +1676,12 @@ fn recent_card(
         draw.left_top() + Vec2::new(pad, pad),
         Pos2::new(draw.right() - pad, draw.top() + size.y - 42.0),
     );
-    p.rect(well, Rounding::same(6.0), Color32::from_rgb(15, 15, 24), Stroke::NONE);
+    p.rect(
+        well,
+        Rounding::same(6.0),
+        Color32::from_rgb(15, 15, 24),
+        Stroke::NONE,
+    );
 
     let file_name = entry
         .path
@@ -1791,7 +1808,12 @@ fn fade(c: Color32, a: f32) -> Color32 {
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
-    Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
+    Color32::from_rgba_unmultiplied(
+        l(a.r(), b.r()),
+        l(a.g(), b.g()),
+        l(a.b(), b.b()),
+        l(a.a(), b.a()),
+    )
 }
 
 fn elide(s: &str, max: usize) -> String {

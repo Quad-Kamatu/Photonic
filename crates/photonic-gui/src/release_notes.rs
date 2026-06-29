@@ -93,10 +93,7 @@ fn parse_heading(s: &str) -> Option<(String, Option<String>)> {
 /// Lenient semver → (major, minor, patch). Ignores any pre-release/build suffix.
 fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
     let core = v.trim().trim_start_matches('v');
-    let core = core
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(core);
+    let core = core.split(['-', '+']).next().unwrap_or(core);
     let mut it = core.split('.');
     let major = it.next()?.parse().ok()?;
     let minor = it.next().unwrap_or("0").parse().ok()?;

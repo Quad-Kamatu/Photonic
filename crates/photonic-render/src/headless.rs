@@ -5,11 +5,17 @@
 
 use crate::{
     canvas::CanvasView,
-    pipeline::{create_camera_bind_group_layout, create_fill_pipeline, CameraUniform, Vertex},
+    pipeline::{
+        coalesce_segments, create_camera_bind_group_layout, create_fill_pipeline,
+        create_fill_pipeline_with_blend, draw_segments, separable_blend_state, CameraUniform,
+        DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
+    },
     tessellator::{tessellate_fill, tessellate_stroke},
 };
 use image::{ImageBuffer, Rgba};
-use photonic_core::{node::SceneNodeKind, raster::blend::blend_rgb, style::FillKind, Document};
+use photonic_core::{
+    layer::BlendMode, node::SceneNodeKind, raster::blend::blend_rgb, style::FillKind, Document,
+};
 use wgpu::util::DeviceExt;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -68,6 +74,9 @@ pub struct HeadlessRenderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     fill_pipeline: wgpu::RenderPipeline,
+    /// One fill-pipeline variant per separable blend mode (matches the windowed
+    /// renderer so headless export agrees with the on-canvas result).
+    blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)>,
 }
 
 impl HeadlessRenderer {
@@ -116,6 +125,23 @@ impl HeadlessRenderer {
         });
 
         let fill_pipeline = create_fill_pipeline(&device, FORMAT, &camera_bgl, MSAA_SAMPLES);
+        let blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)> = SEPARABLE_BLEND_MODES
+            .iter()
+            .filter_map(|&mode| {
+                separable_blend_state(mode).map(|blend| {
+                    (
+                        mode,
+                        create_fill_pipeline_with_blend(
+                            &device,
+                            FORMAT,
+                            &camera_bgl,
+                            MSAA_SAMPLES,
+                            blend,
+                        ),
+                    )
+                })
+            })
+            .collect();
 
         Self {
             device,
@@ -123,6 +149,7 @@ impl HeadlessRenderer {
             camera_buffer,
             camera_bind_group,
             fill_pipeline,
+            blend_pipelines,
         }
     }
 
@@ -152,7 +179,7 @@ impl HeadlessRenderer {
         let h = h.max(1);
 
         let include_artboard_bg = opts.background == ExportBackground::Artboard;
-        let (verts, idxs) = build_geometry(document, include_artboard_bg);
+        let (verts, idxs, segments) = build_geometry(document, include_artboard_bg);
 
         // Camera: an explicit region (per-artboard export) wins; otherwise fit
         // the content bounding box or the full document to the output size.
@@ -209,7 +236,8 @@ impl HeadlessRenderer {
             // White artboard rectangle (matches the GPU path's artboard quad).
             if include_artboard_bg {
                 let (rx, ry, rw, rh) =
-                    opts.region.unwrap_or((0.0, 0.0, document.width, document.height));
+                    opts.region
+                        .unwrap_or((0.0, 0.0, document.width, document.height));
                 let (ax0, ay0) = view.canvas_to_screen(rx, ry);
                 let (ax1, ay1) = view.canvas_to_screen(rx + rw, ry + rh);
                 let x0 = (ax0.min(ax1).floor() as i64).max(0);
@@ -267,7 +295,9 @@ impl HeadlessRenderer {
         let msaa_view = msaa_tex.create_view(&Default::default());
 
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.record_pass(&mut enc, &msaa_view, &tex_view, &verts, &idxs, clear);
+        self.record_pass(
+            &mut enc, &msaa_view, &tex_view, &verts, &idxs, &segments, clear,
+        );
         drop(msaa_tex); // keep alive until submit
         self.queue.submit([enc.finish()]);
 
@@ -466,6 +496,7 @@ impl HeadlessRenderer {
         resolve_view: &wgpu::TextureView,
         vertices: &[Vertex],
         indices: &[u32],
+        segments: &[DrawSegment],
         clear: wgpu::Color,
     ) {
         if !vertices.is_empty() {
@@ -497,11 +528,16 @@ impl HeadlessRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.fill_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
             pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            draw_segments(
+                &mut pass,
+                segments,
+                &self.blend_pipelines,
+                &self.fill_pipeline,
+                indices.len() as u32,
+            );
         } else {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hl_clear"),
@@ -560,9 +596,12 @@ fn content_bounds(
 /// any ancestor group is hidden). Photoshop propagates group opacity/visibility
 /// down to children; `nodes_in_draw_order` flattens groups to leaves and drops
 /// that context, so we recover it here and fold it into the rendered alpha.
-fn group_opacity_map(doc: &Document) -> std::collections::HashMap<photonic_core::node::NodeId, f32> {
+fn group_opacity_map(
+    doc: &Document,
+) -> std::collections::HashMap<photonic_core::node::NodeId, f32> {
     use std::collections::HashMap;
-    let mut parent: HashMap<photonic_core::node::NodeId, photonic_core::node::NodeId> = HashMap::new();
+    let mut parent: HashMap<photonic_core::node::NodeId, photonic_core::node::NodeId> =
+        HashMap::new();
     for n in doc.nodes.values() {
         if let SceneNodeKind::Group(g) = &n.kind {
             for c in &g.children {
@@ -593,10 +632,15 @@ fn group_opacity_map(doc: &Document) -> std::collections::HashMap<photonic_core:
     out
 }
 
-fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Vec<u32>) {
+fn build_geometry(
+    doc: &Document,
+    include_artboard_bg: bool,
+) -> (Vec<Vertex>, Vec<u32>, Vec<DrawSegment>) {
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
     let eff = group_opacity_map(doc);
+    // Per-node index ranges tagged with their blend mode, coalesced at the end.
+    let mut raw_segments: Vec<(BlendMode, u32, u32)> = Vec::new();
 
     // Optional white artboard rectangle (always first 4 vertices when present).
     if include_artboard_bg {
@@ -622,6 +666,7 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
             },
         ]);
         idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        raw_segments.push((BlendMode::Normal, 0, idxs.len() as u32));
     }
 
     for node in doc.nodes_in_draw_order() {
@@ -637,6 +682,7 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
         if gop <= 0.0 {
             continue;
         }
+        let seg_start = idxs.len() as u32;
         let [a, b, c, d, e, f] = node.transform.matrix;
 
         // ── Fill ─────────────────────────────────────────────────────────────
@@ -688,9 +734,12 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
                 }
             }
         }
+
+        raw_segments.push((node.blend_mode, seg_start, idxs.len() as u32));
     }
 
-    (verts, idxs)
+    let segments = coalesce_segments(raw_segments);
+    (verts, idxs, segments)
 }
 
 fn align256(n: u32) -> u32 {
@@ -741,7 +790,8 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
                         if doc.width > 0.0 && doc.height > 0.0 {
                             let mx = cx / doc.width * m.width as f64;
                             let my = cy / doc.height * m.height as f64;
-                            if mx < 0.0 || my < 0.0 || mx >= m.width as f64 || my >= m.height as f64 {
+                            if mx < 0.0 || my < 0.0 || mx >= m.width as f64 || my >= m.height as f64
+                            {
                                 amt = 0.0;
                             } else {
                                 amt *= m.coverage(mx as u32, my as u32);
@@ -795,7 +845,8 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
             for px in x0..x1 {
                 let (dx, dy) = view.screen_to_canvas(px as f64 + 0.5, py as f64 + 0.5);
                 let lp = inv * kurbo::Point::new(dx, dy);
-                if lp.x < 0.0 || lp.y < 0.0 || lp.x >= img.width as f64 || lp.y >= img.height as f64 {
+                if lp.x < 0.0 || lp.y < 0.0 || lp.x >= img.width as f64 || lp.y >= img.height as f64
+                {
                     continue;
                 }
                 let s = img.sample_bilinear(lp.x as f32 - 0.5, lp.y as f32 - 0.5);
@@ -814,7 +865,11 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
                     pixels[idx + 2] as f32 / 255.0,
                 ];
                 let ba = pixels[idx + 3] as f32 / 255.0;
-                let cs = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+                let cs = [
+                    s[0] as f32 / 255.0,
+                    s[1] as f32 / 255.0,
+                    s[2] as f32 / 255.0,
+                ];
 
                 let blended = blend_rgb(node.blend_mode, b, cs);
                 let mixed = [
@@ -831,6 +886,144 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
                 }
                 pixels[idx + 3] = (oa * 255.0).round().clamp(0.0, 255.0) as u8;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+    use photonic_core::{
+        color::Color,
+        node::{PathNode, SceneNode, SceneNodeKind},
+        path::PathData,
+        style::Fill,
+        Document,
+    };
+
+    /// sRGB (0–1) → linear, matching the hardware decode for an `Rgba8UnormSrgb`
+    /// render target so we can compare read-back bytes against linear blend math.
+    fn srgb_to_linear(c: f32) -> f32 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Returns Some(renderer) if a GPU adapter is available, else None so the
+    /// test can skip on headless CI without a GPU.
+    fn try_renderer() -> Option<HeadlessRenderer> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        Some(pollster::block_on(HeadlessRenderer::new()))
+    }
+
+    // Backdrop and source fills chosen so every separable mode yields a distinct
+    // colour (avoids primaries where Multiply==Darken etc.). Values are linear.
+    const BACKDROP: [f32; 3] = [0.8, 0.4, 0.2];
+    const SOURCE: [f32; 3] = [0.3, 0.6, 0.9];
+
+    /// Build a 100×100 doc: full-artboard backdrop rect (Normal) + a centred
+    /// 50×50 source rect with `mode`, and read back the centre overlap pixel as
+    /// linear RGB.
+    fn render_center_pixel(r: &HeadlessRenderer, mode: BlendMode) -> [f32; 3] {
+        let mut doc = Document::new("blend-test", 100.0, 100.0);
+
+        let backdrop = SceneNode::new(
+            "backdrop",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 100.0, 100.0)).with_fill(Fill::solid(
+                    Color::new(BACKDROP[0], BACKDROP[1], BACKDROP[2], 1.0),
+                )),
+            ),
+        );
+        doc.add_node(backdrop, None);
+
+        let mut source = SceneNode::new(
+            "source",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(25.0, 25.0, 50.0, 50.0)).with_fill(Fill::solid(
+                    Color::new(SOURCE[0], SOURCE[1], SOURCE[2], 1.0),
+                )),
+            ),
+        );
+        source.blend_mode = mode;
+        doc.add_node(source, None);
+
+        let png = r.render_png_at_size(&doc, 100, 100);
+        let img = image::load_from_memory(&png)
+            .expect("decode png")
+            .to_rgba8();
+        let px = img.get_pixel(50, 50).0;
+        [
+            srgb_to_linear(px[0] as f32 / 255.0),
+            srgb_to_linear(px[1] as f32 / 255.0),
+            srgb_to_linear(px[2] as f32 / 255.0),
+        ]
+    }
+
+    fn expected(mode: BlendMode) -> [f32; 3] {
+        let mut out = [0.0; 3];
+        for i in 0..3 {
+            let (b, s) = (BACKDROP[i], SOURCE[i]);
+            out[i] = match mode {
+                BlendMode::Multiply => s * b,
+                BlendMode::Screen => s + b - s * b,
+                BlendMode::Darken => s.min(b),
+                BlendMode::Lighten => s.max(b),
+                _ => unreachable!("only separable modes tested"),
+            };
+        }
+        out
+    }
+
+    #[test]
+    fn separable_blend_modes_match_reference() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping blend-mode golden test");
+            return;
+        };
+        // Generous tolerance absorbs 8-bit quantisation and the sRGB round-trip.
+        const TOL: f32 = 0.03;
+        for mode in SEPARABLE_BLEND_MODES {
+            let got = render_center_pixel(&r, mode);
+            let want = expected(mode);
+            for i in 0..3 {
+                assert!(
+                    (got[i] - want[i]).abs() < TOL,
+                    "{mode:?} channel {i}: got {:.3}, want {:.3}",
+                    got[i],
+                    want[i],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normal_mode_shows_source_unblended() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping normal-mode test");
+            return;
+        };
+        // Normal mode: opaque source fully replaces the backdrop at the overlap.
+        let got = render_center_pixel(&r, BlendMode::Normal);
+        for i in 0..3 {
+            assert!(
+                (got[i] - SOURCE[i]).abs() < 0.03,
+                "Normal channel {i}: got {:.3}, want {:.3}",
+                got[i],
+                SOURCE[i],
+            );
         }
     }
 }

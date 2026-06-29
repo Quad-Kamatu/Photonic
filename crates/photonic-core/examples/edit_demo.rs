@@ -47,7 +47,16 @@ fn synth_scene() -> RasterImage {
                 g = 240;
                 b = 180;
             }
-            img.set_pixel(x, y, [r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8, 255]);
+            img.set_pixel(
+                x,
+                y,
+                [
+                    r.clamp(0, 255) as u8,
+                    g.clamp(0, 255) as u8,
+                    b.clamp(0, 255) as u8,
+                    255,
+                ],
+            );
         }
     }
     img
@@ -64,7 +73,14 @@ fn main() {
     // 1. Tonal grade: lift contrast, warm it, boost vibrance.
     let mut img = original.clone();
     adjust::brightness_contrast(&mut img, 0.05, 0.2, None);
-    adjust::curves(&mut img, &[(0.0, 0.02), (0.5, 0.55), (1.0, 0.98)], &[], &[], &[], None);
+    adjust::curves(
+        &mut img,
+        &[(0.0, 0.02), (0.5, 0.55), (1.0, 0.98)],
+        &[],
+        &[],
+        &[],
+        None,
+    );
     adjust::color_balance(
         &mut img,
         [0.1, 0.0, -0.1],
@@ -94,7 +110,12 @@ fn main() {
     // 4. Paint: a soft brush highlight + a hard pencil signature line.
     let mut soft = brush::Brush::new(18.0, [255, 250, 230, 120]);
     soft.hardness = 0.2;
-    brush::stroke(&mut img, &[(60.0, 200.0), (90.0, 190.0), (120.0, 205.0)], &soft, None);
+    brush::stroke(
+        &mut img,
+        &[(60.0, 200.0), (90.0, 190.0), (120.0, 205.0)],
+        &soft,
+        None,
+    );
     let pencil = brush::Brush::pencil(2.0, [20, 20, 30, 255]);
     brush::stroke(
         &mut img,

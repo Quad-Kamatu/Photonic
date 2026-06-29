@@ -127,7 +127,13 @@ pub fn crop(img: &RasterImage, x: i64, y: i64, w: u32, h: u32) -> RasterImage {
 
 /// Resize the canvas without resampling content (Image > Canvas Size). Content is
 /// placed at `(offset_x, offset_y)`; new area is transparent.
-pub fn resize_canvas(img: &RasterImage, new_w: u32, new_h: u32, offset_x: i64, offset_y: i64) -> RasterImage {
+pub fn resize_canvas(
+    img: &RasterImage,
+    new_w: u32,
+    new_h: u32,
+    offset_x: i64,
+    offset_y: i64,
+) -> RasterImage {
     let mut out = RasterImage::new(new_w.clamp(1, DIM_MAX), new_h.clamp(1, DIM_MAX));
     for y in 0..img.height {
         for x in 0..img.width {
@@ -205,8 +211,12 @@ pub fn rotate_arbitrary(img: &RasterImage, angle_deg: f32) -> RasterImage {
     let w = img.width as f32;
     let h = img.height as f32;
     // new bounding box, clamped so an absurd source can't overflow allocation
-    let new_w = (w * cos.abs() + h * sin.abs()).ceil().clamp(1.0, DIM_MAX as f32);
-    let new_h = (w * sin.abs() + h * cos.abs()).ceil().clamp(1.0, DIM_MAX as f32);
+    let new_w = (w * cos.abs() + h * sin.abs())
+        .ceil()
+        .clamp(1.0, DIM_MAX as f32);
+    let new_h = (w * sin.abs() + h * cos.abs())
+        .ceil()
+        .clamp(1.0, DIM_MAX as f32);
     let mut out = RasterImage::new(new_w as u32, new_h as u32);
     // Sample in premultiplied alpha so transparent borders don't darken edges.
     let src = premultiplied(img);
@@ -311,7 +321,10 @@ mod tests {
                 assert!(
                     (0..4).all(|c| (a[c] as i32 - b[c] as i32).abs() <= 2),
                     "rotate 0° changed pixel at {},{}: {:?} vs {:?}",
-                    x, y, a, b
+                    x,
+                    y,
+                    a,
+                    b
                 );
             }
         }
@@ -331,7 +344,13 @@ mod tests {
         let img = ramp(8, 6);
         // rotate_arbitrary handles every non-finite / huge angle without panic and
         // keeps its expanded canvas within bounds.
-        for &v in &[f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0e30f32, -1.0e30f32] {
+        for &v in &[
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1.0e30f32,
+            -1.0e30f32,
+        ] {
             let r = rotate_arbitrary(&img, v);
             assert!(r.width >= 1 && r.width <= DIM_MAX);
             assert!(r.height >= 1 && r.height <= DIM_MAX);

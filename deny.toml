@@ -38,6 +38,21 @@ license-files = [{ path = "LICENSE", hash = 0xdb1c553a }]
 crate = "epaint_default_fonts"
 allow = ["LicenseRef-UFL-1.0"]
 
+# option-ext is MPL-2.0 (file-level copyleft). It is an unmodified *transitive*
+# dependency (dirs → dirs-sys → option-ext) pulled in via fastembed's on-device
+# embedding model in photonic-embed. Redistributing it unmodified is compatible
+# with shipping the app under MIT, so allow MPL-2.0 for this crate only.
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
+# webpki-roots ships Mozilla's CA certificate set under CDLA-Permissive-2.0, a
+# permissive (non-copyleft) data license. It is a transitive dependency of the
+# TLS/networking stack; redistributing the cert bundle unmodified is fine.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 # Warn on multiple versions of the same crate (size/audit hygiene, not blocking).
 multiple-versions = "warn"
@@ -51,6 +66,7 @@ yanked = "deny"
 ignore = [
     "RUSTSEC-2025-0057", # fxhash — unmaintained (pulled in transitively)
     "RUSTSEC-2024-0436", # paste — unmaintained (pulled in transitively)
+    "RUSTSEC-2025-0119", # number_prefix — unmaintained (transitive via indicatif/hf-hub)
 ]
 
 [sources]

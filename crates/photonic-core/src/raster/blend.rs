@@ -44,10 +44,7 @@ pub fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
         BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
         // Non-separable modes are handled in `blend_rgb`; per-channel falls back
         // to normal so callers that only do separable work stay correct.
-        BlendMode::Hue
-        | BlendMode::Saturation
-        | BlendMode::Color
-        | BlendMode::Luminosity => cs,
+        BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => cs,
     }
 }
 
@@ -193,8 +190,16 @@ pub fn composite(
             }
             let b = base.pixel(bx as u32, by as u32);
             let ba = b[3] as f32 / 255.0;
-            let cb = [b[0] as f32 / 255.0, b[1] as f32 / 255.0, b[2] as f32 / 255.0];
-            let cs = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+            let cb = [
+                b[0] as f32 / 255.0,
+                b[1] as f32 / 255.0,
+                b[2] as f32 / 255.0,
+            ];
+            let cs = [
+                s[0] as f32 / 255.0,
+                s[1] as f32 / 255.0,
+                s[2] as f32 / 255.0,
+            ];
 
             // Blended source color, then mixed with raw source by backdrop alpha
             // (spec: Cs = (1 - ab)·Cs + ab·B(Cb,Cs)).

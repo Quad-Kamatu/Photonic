@@ -208,7 +208,11 @@ impl Mask {
         let seed = img.pixel(seed_x, seed_y);
         // Non-finite tolerance → treat as 0 (exact match) rather than letting NaN
         // propagate into the `diff > tol` comparison.
-        let tolerance = if tolerance.is_finite() { tolerance } else { 0.0 };
+        let tolerance = if tolerance.is_finite() {
+            tolerance
+        } else {
+            0.0
+        };
         let tol = (tolerance.clamp(0.0, 1.0) * 255.0) * 3.0; // sum over RGB
         let mut stack = vec![(seed_x, seed_y)];
         while let Some((x, y)) = stack.pop() {
@@ -247,7 +251,11 @@ impl Mask {
     /// not contiguous).
     pub fn color_range(img: &RasterImage, target: [u8; 4], tolerance: f32) -> Self {
         let mut m = Mask::empty(img.width, img.height);
-        let tolerance = if tolerance.is_finite() { tolerance } else { 0.0 };
+        let tolerance = if tolerance.is_finite() {
+            tolerance
+        } else {
+            0.0
+        };
         let tol = (tolerance.clamp(0.0, 1.0) * 255.0) * 3.0;
         for y in 0..img.height {
             for x in 0..img.width {
@@ -272,7 +280,11 @@ impl Mask {
         for y in 0..img.height {
             for x in 0..img.width {
                 let p = img.pixel(x, y);
-                let l = luma([p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]);
+                let l = luma([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ]);
                 m.set(x, y, (l * 255.0).round() as u8);
             }
         }
@@ -328,7 +340,8 @@ impl Mask {
             return;
         }
         let radius = radius.min(Self::MAX_FEATHER_RADIUS);
-        let blurred = super::filter::gaussian_blur_gray(&self.data, self.width, self.height, radius);
+        let blurred =
+            super::filter::gaussian_blur_gray(&self.data, self.width, self.height, radius);
         self.data = blurred;
     }
 
@@ -354,7 +367,10 @@ impl Mask {
                 for x in 0..self.width {
                     let mut acc = src[self.index(x, y)];
                     let consider = |xx: i64, yy: i64, acc: &mut u8| {
-                        if xx >= 0 && yy >= 0 && (xx as u32) < self.width && (yy as u32) < self.height
+                        if xx >= 0
+                            && yy >= 0
+                            && (xx as u32) < self.width
+                            && (yy as u32) < self.height
                         {
                             let v = src[(yy as usize) * (self.width as usize) + xx as usize];
                             if dilate {
@@ -630,10 +646,7 @@ mod tests {
         // A larger ellipse must have boundary pixels with partial coverage rather
         // than a hard 0/255 edge.
         let m = Mask::ellipse(16, 16, 2.0, 2.0, 12.0, 12.0);
-        assert!(
-            !m.is_empty_selection(),
-            "ellipse should select something"
-        );
+        assert!(!m.is_empty_selection(), "ellipse should select something");
         assert!(
             m.data.iter().any(|&v| v == 255),
             "interior should be fully saturated somewhere"

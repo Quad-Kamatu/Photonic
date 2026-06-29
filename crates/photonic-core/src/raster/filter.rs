@@ -141,7 +141,9 @@ fn gaussian_kernel(sigma: f32) -> Vec<f32> {
     } else {
         0.0
     };
-    let radius = ((sigma * 3.0).ceil() as i64).max(1).min(4 * MAX_RADIUS as i64);
+    let radius = ((sigma * 3.0).ceil() as i64)
+        .max(1)
+        .min(4 * MAX_RADIUS as i64);
     let two_sigma2 = 2.0 * sigma * sigma;
     // Degenerate sigma (≈0) would divide by zero → NaN; fall back to a 1-tap
     // identity kernel so we never emit NaN weights.
@@ -344,11 +346,7 @@ pub fn sharpen(img: &mut RasterImage, amount: f32, sel: Option<&Mask>) {
         return;
     }
     let a = amount;
-    let kernel = [
-        [0.0, -a, 0.0],
-        [-a, 1.0 + 4.0 * a, -a],
-        [0.0, -a, 0.0],
-    ];
+    let kernel = [[0.0, -a, 0.0], [-a, 1.0 + 4.0 * a, -a], [0.0, -a, 0.0]];
     let result = conv3x3_rgb(img, kernel);
     blend_result(img, &result, sel);
 }
@@ -497,11 +495,7 @@ pub fn add_noise(
 /// (R = G = B); alpha is preserved.
 pub fn emboss(img: &mut RasterImage, sel: Option<&Mask>) {
     // Sum-zero emboss kernel so flat regions land exactly on the 128 bias.
-    const K: [[f32; 3]; 3] = [
-        [-1.0, -1.0, 0.0],
-        [-1.0, 0.0, 1.0],
-        [0.0, 1.0, 1.0],
-    ];
+    const K: [[f32; 3]; 3] = [[-1.0, -1.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 1.0, 1.0]];
     let mut result = img.clone();
     for y in 0..img.height as i64 {
         for x in 0..img.width as i64 {
@@ -528,16 +522,8 @@ pub fn emboss(img: &mut RasterImage, sel: Option<&Mask>) {
 /// Find Edges — Sobel gradient magnitude over luma. Flat regions go black,
 /// edges go bright. Output is gray (R = G = B); alpha is preserved.
 pub fn find_edges(img: &mut RasterImage, sel: Option<&Mask>) {
-    const GX: [[f32; 3]; 3] = [
-        [-1.0, 0.0, 1.0],
-        [-2.0, 0.0, 2.0],
-        [-1.0, 0.0, 1.0],
-    ];
-    const GY: [[f32; 3]; 3] = [
-        [-1.0, -2.0, -1.0],
-        [0.0, 0.0, 0.0],
-        [1.0, 2.0, 1.0],
-    ];
+    const GX: [[f32; 3]; 3] = [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]];
+    const GY: [[f32; 3]; 3] = [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]];
     let mut result = img.clone();
     for y in 0..img.height as i64 {
         for x in 0..img.width as i64 {

@@ -41,7 +41,11 @@ pub fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
 /// Apply a **point operation** (per-pixel color transform) to `img`, honoring an
 /// optional selection `mask` — where coverage < 255 the result is blended back
 /// toward the original, exactly like editing inside a Photoshop selection.
-pub fn apply_point(img: &mut RasterImage, mask: Option<&Mask>, mut f: impl FnMut([u8; 4]) -> [u8; 4]) {
+pub fn apply_point(
+    img: &mut RasterImage,
+    mask: Option<&Mask>,
+    mut f: impl FnMut([u8; 4]) -> [u8; 4],
+) {
     for y in 0..img.height {
         for x in 0..img.width {
             let old = img.pixel(x, y);
@@ -93,6 +97,9 @@ mod tests {
 
     #[test]
     fn lerp_midpoint() {
-        assert_eq!(lerp_rgba([0, 0, 0, 0], [100, 100, 100, 100], 0.5), [50, 50, 50, 50]);
+        assert_eq!(
+            lerp_rgba([0, 0, 0, 0], [100, 100, 100, 100], 0.5),
+            [50, 50, 50, 50]
+        );
     }
 }

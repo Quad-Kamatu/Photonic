@@ -34,7 +34,14 @@ fn full_editing_session_runs_and_changes_pixels() {
 
     // ── Tonal adjustments ────────────────────────────────────────────────────
     adjust::levels(&mut img, 0.05, 0.95, 1.1, 0.0, 1.0, None);
-    adjust::curves(&mut img, &[(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)], &[], &[], &[], None);
+    adjust::curves(
+        &mut img,
+        &[(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)],
+        &[],
+        &[],
+        &[],
+        None,
+    );
     adjust::hue_saturation(&mut img, 20.0, 0.15, 0.0, None);
     adjust::vibrance(&mut img, 0.3, None);
     assert_eq!((img.width, img.height), (64, 64));

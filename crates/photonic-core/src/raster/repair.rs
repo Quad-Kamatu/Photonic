@@ -594,7 +594,14 @@ fn diffuse_fill(work: &mut RasterImage, known: &mut [bool]) {
 /// comes from the source, while the smooth color and lighting come from the
 /// destination, so the seam disappears. A circular falloff at the radius edge
 /// feathers the patch into its surroundings. Alpha at the destination is kept.
-pub fn healing_brush(img: &mut RasterImage, cx: f32, cy: f32, radius: f32, src_dx: i64, src_dy: i64) {
+pub fn healing_brush(
+    img: &mut RasterImage,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    src_dx: i64,
+    src_dy: i64,
+) {
     let (cx, cy, radius) = match sanitize_disc(cx, cy, radius) {
         Some(v) => v,
         None => return,
@@ -1113,7 +1120,10 @@ mod tests {
         assert_eq!(img.width, 384);
         assert_eq!(img.height, 384);
         let (_, var, _, _) = region_stats(&img, 180, 180, 204, 204);
-        assert!(var > 1000.0, "filled hole must carry real texture, var={var}");
+        assert!(
+            var > 1000.0,
+            "filled hole must carry real texture, var={var}"
+        );
     }
 
     #[test]
@@ -1357,7 +1367,11 @@ mod tests {
         // Center pixel changed (texture introduced) but is still in the bright range.
         let p = img.pixel(15, 4);
         assert_ne!(p, before.pixel(15, 4));
-        assert!(p[0] > 150, "should retain destination brightness, got {:?}", p);
+        assert!(
+            p[0] > 150,
+            "should retain destination brightness, got {:?}",
+            p
+        );
         assert_eq!(img.width, 20);
         assert_eq!(img.height, 8);
     }
@@ -1404,7 +1418,10 @@ mod tests {
         red_eye(&mut img, 2.0, 2.0, inf);
         red_eye(&mut img, 2.0, 2.0, nan);
 
-        assert_eq!(img, before, "non-finite / non-positive inputs must be a no-op");
+        assert_eq!(
+            img, before,
+            "non-finite / non-positive inputs must be a no-op"
+        );
     }
 
     #[test]

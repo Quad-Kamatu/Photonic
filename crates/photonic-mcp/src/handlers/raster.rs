@@ -25,10 +25,16 @@ use serde_json::{json, Value};
 // ─── Shared param helpers ───────────────────────────────────────────────────────
 
 fn pf(v: &Value, key: &str, default: f32) -> f32 {
-    v.get(key).and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(default)
+    v.get(key)
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .unwrap_or(default)
 }
 fn pu(v: &Value, key: &str, default: u32) -> u32 {
-    v.get(key).and_then(|x| x.as_u64()).map(|x| x as u32).unwrap_or(default)
+    v.get(key)
+        .and_then(|x| x.as_u64())
+        .map(|x| x as u32)
+        .unwrap_or(default)
 }
 fn pbool(v: &Value, key: &str, default: bool) -> bool {
     v.get(key).and_then(|x| x.as_bool()).unwrap_or(default)
@@ -53,8 +59,18 @@ fn parse_color_value(v: &Value, default: [u8; 4]) -> [u8; 4] {
     match v {
         Value::String(s) => parse_hex(s).unwrap_or(default),
         Value::Array(a) if a.len() >= 3 => {
-            let g = |i: usize, d: u8| a.get(i).and_then(|x| x.as_u64()).map(|x| x as u8).unwrap_or(d);
-            [g(0, default[0]), g(1, default[1]), g(2, default[2]), g(3, 255)]
+            let g = |i: usize, d: u8| {
+                a.get(i)
+                    .and_then(|x| x.as_u64())
+                    .map(|x| x as u8)
+                    .unwrap_or(d)
+            };
+            [
+                g(0, default[0]),
+                g(1, default[1]),
+                g(2, default[2]),
+                g(3, 255),
+            ]
         }
         _ => default,
     }
@@ -164,8 +180,12 @@ fn build_selection(img: &RasterImage, spec: &SelectionSpec) -> Option<Mask> {
 }
 
 /// Fetch a clone of a raster node by id/name, or an error result.
-fn get_raster(doc: &photonic_core::Document, id_or_name: &str) -> Result<(NodeId, SceneNode), String> {
-    let nid = resolve_node_id(doc, id_or_name).ok_or_else(|| format!("Node '{}' not found", id_or_name))?;
+fn get_raster(
+    doc: &photonic_core::Document,
+    id_or_name: &str,
+) -> Result<(NodeId, SceneNode), String> {
+    let nid = resolve_node_id(doc, id_or_name)
+        .ok_or_else(|| format!("Node '{}' not found", id_or_name))?;
     let node = doc.nodes.get(&nid).cloned().ok_or("node vanished")?;
     if !matches!(node.kind, SceneNodeKind::Raster(_)) {
         return Err(format!("Node '{}' is not a raster node", id_or_name));
@@ -234,8 +254,11 @@ pub async fn place_image(state: &AppState, args: PlaceImageArgs) -> ToolResult {
         &mut doc,
     );
 
-    ToolResult::text(format!("Placed image '{}' ({}×{}, id: {})", name, w, h, node_id))
-        .with_data(json!({ "node_id": node_id, "width": w, "height": h }))
+    ToolResult::text(format!(
+        "Placed image '{}' ({}×{}, id: {})",
+        name, w, h, node_id
+    ))
+    .with_data(json!({ "node_id": node_id, "width": w, "height": h }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,7 +287,11 @@ pub async fn create_raster_layer(state: &AppState, args: CreateRasterLayerArgs) 
         None => RasterImage::new(args.width, args.height),
     };
     let name = args.name.unwrap_or_else(|| "Raster Layer".to_string());
-    let mut node = SceneNode::new(&name, uuid::Uuid::nil(), SceneNodeKind::Raster(RasterNode::new(image)));
+    let mut node = SceneNode::new(
+        &name,
+        uuid::Uuid::nil(),
+        SceneNodeKind::Raster(RasterNode::new(image)),
+    );
     node.transform = photonic_core::Transform::translate(args.x, args.y);
     let node_id = node.id;
 
@@ -308,7 +335,10 @@ pub async fn apply_adjustment(state: &AppState, args: ApplyAdjustmentArgs) -> To
         return ToolResult::error("not a raster node");
     };
     let img = &mut rn.image;
-    let sel = args.selection.as_ref().and_then(|s| build_selection(img, s));
+    let sel = args
+        .selection
+        .as_ref()
+        .and_then(|s| build_selection(img, s));
     let sel = sel.as_ref();
 
     let spec = match build_adjustment_spec(&args.adjustment, &args.params) {
@@ -454,7 +484,10 @@ pub struct CreateAdjustmentLayerArgs {
     pub layer_id: Option<NodeId>,
 }
 
-pub async fn create_adjustment_layer(state: &AppState, args: CreateAdjustmentLayerArgs) -> ToolResult {
+pub async fn create_adjustment_layer(
+    state: &AppState,
+    args: CreateAdjustmentLayerArgs,
+) -> ToolResult {
     let spec = match build_adjustment_spec(&args.adjustment, &args.params) {
         Ok(s) => s,
         Err(e) => return ToolResult::error(e),
@@ -511,7 +544,10 @@ pub async fn apply_filter(state: &AppState, args: ApplyFilterArgs) -> ToolResult
         return ToolResult::error("not a raster node");
     };
     let img = &mut rn.image;
-    let sel = args.selection.as_ref().and_then(|s| build_selection(img, s));
+    let sel = args
+        .selection
+        .as_ref()
+        .and_then(|s| build_selection(img, s));
     let sel = sel.as_ref();
     let p = &args.params;
 
@@ -540,7 +576,9 @@ pub async fn apply_filter(state: &AppState, args: ApplyFilterArgs) -> ToolResult
         "mosaic" => filter::mosaic(img, pu(p, "block", 8), sel),
         "high_pass" => filter::high_pass(img, pf(p, "radius", 2.0), sel),
         // ── Advanced filters ─────────────────────────────────────────────────
-        "surface_blur" => advanced::surface_blur(img, pu(p, "radius", 5), pf(p, "threshold", 0.1), sel),
+        "surface_blur" => {
+            advanced::surface_blur(img, pu(p, "radius", 5), pf(p, "threshold", 0.1), sel)
+        }
         "lens_blur" => advanced::lens_blur(img, pf(p, "radius", 6.0), sel),
         "smart_sharpen" => advanced::smart_sharpen(
             img,
@@ -600,7 +638,10 @@ pub async fn brush_stroke(state: &AppState, args: BrushStrokeArgs) -> ToolResult
         return ToolResult::error("not a raster node");
     };
     let img = &mut rn.image;
-    let sel = args.selection.as_ref().and_then(|s| build_selection(img, s));
+    let sel = args
+        .selection
+        .as_ref()
+        .and_then(|s| build_selection(img, s));
     let sel = sel.as_ref();
 
     let color = args
@@ -618,7 +659,11 @@ pub async fn brush_stroke(state: &AppState, args: BrushStrokeArgs) -> ToolResult
     if let Some(o) = args.opacity {
         b.opacity = o.clamp(0.0, 1.0);
     }
-    let pts: Vec<(f32, f32)> = args.points.iter().map(|p| (p[0] as f32, p[1] as f32)).collect();
+    let pts: Vec<(f32, f32)> = args
+        .points
+        .iter()
+        .map(|p| (p[0] as f32, p[1] as f32))
+        .collect();
 
     match args.mode.as_deref() {
         Some("erase") => brush::erase(img, &pts, &b, sel),
@@ -656,8 +701,11 @@ pub async fn bucket_fill(state: &AppState, args: BucketFillArgs) -> ToolResult {
 
     let mut history = state.history.lock().await;
     history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
-    ToolResult::text(format!("Filled region at ({},{}) on {}", args.x, args.y, nid))
-        .with_data(json!({ "node_id": nid }))
+    ToolResult::text(format!(
+        "Filled region at ({},{}) on {}",
+        args.x, args.y, nid
+    ))
+    .with_data(json!({ "node_id": nid }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,10 +732,22 @@ pub async fn gradient_fill(state: &AppState, args: GradientFillArgs) -> ToolResu
         return ToolResult::error("not a raster node");
     };
     let img = &mut rn.image;
-    let sel = args.selection.as_ref().and_then(|s| build_selection(img, s));
+    let sel = args
+        .selection
+        .as_ref()
+        .and_then(|s| build_selection(img, s));
     let c0 = parse_color_value(&args.color0, [0, 0, 0, 255]);
     let c1 = parse_color_value(&args.color1, [255, 255, 255, 255]);
-    brush::gradient_fill(img, args.x0, args.y0, args.x1, args.y1, c0, c1, sel.as_ref());
+    brush::gradient_fill(
+        img,
+        args.x0,
+        args.y0,
+        args.x1,
+        args.y1,
+        c0,
+        c1,
+        sel.as_ref(),
+    );
 
     let mut history = state.history.lock().await;
     history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
@@ -720,14 +780,25 @@ pub async fn transform_image(state: &AppState, args: TransformImageArgs) -> Tool
     let p = &args.params;
 
     let new_img = match args.op.as_str() {
-        "crop" => geometry::crop(img, pi(p, "x", 0), pi(p, "y", 0), pu(p, "width", img.width), pu(p, "height", img.height)),
+        "crop" => geometry::crop(
+            img,
+            pi(p, "x", 0),
+            pi(p, "y", 0),
+            pu(p, "width", img.width),
+            pu(p, "height", img.height),
+        ),
         "resize" => {
             let filter = match p.get("filter").and_then(|x| x.as_str()) {
                 Some("nearest") => geometry::Resample::Nearest,
                 Some("bilinear") => geometry::Resample::Bilinear,
                 _ => geometry::Resample::Lanczos3,
             };
-            geometry::resize(img, pu(p, "width", img.width), pu(p, "height", img.height), filter)
+            geometry::resize(
+                img,
+                pu(p, "width", img.width),
+                pu(p, "height", img.height),
+                filter,
+            )
         }
         "resize_canvas" => geometry::resize_canvas(
             img,
@@ -747,7 +818,12 @@ pub async fn transform_image(state: &AppState, args: TransformImageArgs) -> Tool
     let (w, h) = (new_img.width, new_img.height);
     rn.image = new_img;
     // A resized buffer invalidates a same-size layer mask.
-    if rn.mask.as_ref().map(|m| m.width != w || m.height != h).unwrap_or(false) {
+    if rn
+        .mask
+        .as_ref()
+        .map(|m| m.width != w || m.height != h)
+        .unwrap_or(false)
+    {
         rn.mask = None;
     }
 
@@ -840,20 +916,29 @@ pub async fn get_raster_info(state: &AppState, args: GetRasterInfoArgs) -> ToolR
     // 16-bucket luma histogram.
     let mut hist = [0u32; 16];
     for px in img.pixels.chunks_exact(4) {
-        let l = photonic_core::raster::luma([px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0]);
+        let l = photonic_core::raster::luma([
+            px[0] as f32 / 255.0,
+            px[1] as f32 / 255.0,
+            px[2] as f32 / 255.0,
+        ]);
         let b = ((l * 16.0) as usize).min(15);
         hist[b] += 1;
     }
 
-    ToolResult::text(format!("{}×{} raster, mask: {}", img.width, img.height, rn.mask.is_some()))
-        .with_data(json!({
-            "node_id": nid,
-            "width": img.width,
-            "height": img.height,
-            "has_mask": rn.mask.is_some(),
-            "source_uri": rn.source_uri,
-            "luma_histogram": hist,
-        }))
+    ToolResult::text(format!(
+        "{}×{} raster, mask: {}",
+        img.width,
+        img.height,
+        rn.mask.is_some()
+    ))
+    .with_data(json!({
+        "node_id": nid,
+        "width": img.width,
+        "height": img.height,
+        "has_mask": rn.mask.is_some(),
+        "source_uri": rn.source_uri,
+        "luma_histogram": hist,
+    }))
 }
 
 // ─── retouch (healing / content-aware / red-eye) ────────────────────────────────
@@ -882,7 +967,10 @@ pub async fn retouch(state: &AppState, args: RetouchArgs) -> ToolResult {
     };
     let img = &mut rn.image;
     let p = &args.params;
-    let sel = args.selection.as_ref().and_then(|s| build_selection(img, s));
+    let sel = args
+        .selection
+        .as_ref()
+        .and_then(|s| build_selection(img, s));
 
     match args.op.as_str() {
         "healing_brush" => repair::healing_brush(
@@ -893,16 +981,24 @@ pub async fn retouch(state: &AppState, args: RetouchArgs) -> ToolResult {
             pi(p, "src_dx", 0),
             pi(p, "src_dy", 0),
         ),
-        "spot_healing" => {
-            repair::spot_healing(img, pf(p, "cx", 0.0), pf(p, "cy", 0.0), pf(p, "radius", 10.0))
-        }
+        "spot_healing" => repair::spot_healing(
+            img,
+            pf(p, "cx", 0.0),
+            pf(p, "cy", 0.0),
+            pf(p, "radius", 10.0),
+        ),
         "content_aware_fill" => {
             let Some(mask) = &sel else {
                 return ToolResult::error("content_aware_fill requires a `selection`");
             };
             repair::content_aware_fill(img, mask);
         }
-        "red_eye" => repair::red_eye(img, pf(p, "cx", 0.0), pf(p, "cy", 0.0), pf(p, "radius", 10.0)),
+        "red_eye" => repair::red_eye(
+            img,
+            pf(p, "cx", 0.0),
+            pf(p, "cy", 0.0),
+            pf(p, "radius", 10.0),
+        ),
         "dust_and_scratches" => repair::dust_and_scratches(
             img,
             pu(p, "radius", 2),
@@ -942,7 +1038,10 @@ pub async fn liquify(state: &AppState, args: LiquifyArgs) -> ToolResult {
     };
     let img = &mut rn.image;
     let p = &args.params;
-    let sel = args.selection.as_ref().and_then(|s| build_selection(img, s));
+    let sel = args
+        .selection
+        .as_ref()
+        .and_then(|s| build_selection(img, s));
     let sel = sel.as_ref();
 
     match args.op.as_str() {
@@ -986,7 +1085,9 @@ pub async fn liquify(state: &AppState, args: LiquifyArgs) -> ToolResult {
         "perspective" => {
             let corners = p.get("corners").and_then(|x| x.as_array());
             let Some(c) = corners.filter(|a| a.len() == 4) else {
-                return ToolResult::error("perspective requires `corners`: [[x,y]×4] (TL,TR,BR,BL)");
+                return ToolResult::error(
+                    "perspective requires `corners`: [[x,y]×4] (TL,TR,BR,BL)",
+                );
             };
             let mut dst = [(0.0f32, 0.0f32); 4];
             for (i, pt) in c.iter().enumerate() {

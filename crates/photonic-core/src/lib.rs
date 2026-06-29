@@ -14,6 +14,7 @@ pub mod raster;
 pub mod selection;
 pub mod style;
 pub mod transform;
+pub mod units;
 
 // Re-export the most commonly used types at the crate root
 pub use annotation::{Annotation, AnnotationId};
@@ -40,3 +41,4 @@ pub use style::{
     GradientKind, GradientStop, MeshGradient, MeshGradientVertex, Stroke,
 };
 pub use transform::Transform;
+pub use units::{from_px, to_px, DocumentUnit};

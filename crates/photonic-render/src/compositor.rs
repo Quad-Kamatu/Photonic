@@ -32,12 +32,7 @@ use photonic_core::{
 };
 
 /// 4× supersample offsets (a rotated-ish 2×2 grid) used for edge coverage.
-const SUBSAMPLES: [(f64, f64); 4] = [
-    (0.25, 0.25),
-    (0.75, 0.25),
-    (0.25, 0.75),
-    (0.75, 0.75),
-];
+const SUBSAMPLES: [(f64, f64); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
 const SUB_WEIGHT: f32 = 0.25;
 
 /// Composite every visible node of `doc` onto the pre-filled `base` buffer
@@ -77,7 +72,18 @@ pub fn composite_document(base: &mut [u8], w: u32, h: u32, doc: &Document, view:
 
         match &node.kind {
             SceneNodeKind::Path(pn) => {
-                render_path_node(base, w, h, view, &mut cov, &node.transform, node.opacity, gop, node.blend_mode, pn);
+                render_path_node(
+                    base,
+                    w,
+                    h,
+                    view,
+                    &mut cov,
+                    &node.transform,
+                    node.opacity,
+                    gop,
+                    node.blend_mode,
+                    pn,
+                );
             }
             SceneNodeKind::Raster(_) => {
                 render_raster_node(base, w, h, doc, view, node, gop);
@@ -264,9 +270,7 @@ fn rasterize_mesh(
 
         dirty = Some(match dirty {
             None => (x0, y0, x1, y1),
-            Some((dx0, dy0, dx1, dy1)) => {
-                (dx0.min(x0), dy0.min(y0), dx1.max(x1), dy1.max(y1))
-            }
+            Some((dx0, dy0, dx1, dy1)) => (dx0.min(x0), dy0.min(y0), dx1.max(x1), dy1.max(y1)),
         });
     }
 
@@ -382,9 +386,11 @@ fn render_raster_node(
 
     // ── Non-destructive adjustment layer ──────────────────────────────────────
     if let Some(spec) = &rn.adjustment {
-        let Ok(mut buf) =
-            photonic_core::raster::image::RasterImage::from_rgba(w, h, base[..(w as usize * h as usize * 4)].to_vec())
-        else {
+        let Ok(mut buf) = photonic_core::raster::image::RasterImage::from_rgba(
+            w,
+            h,
+            base[..(w as usize * h as usize * 4)].to_vec(),
+        ) else {
             return;
         };
         spec.apply(&mut buf, None);
@@ -467,7 +473,11 @@ fn render_raster_node(
                 continue;
             }
             let idx = ((py as u32 * w + px as u32) * 4) as usize;
-            let cs = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+            let cs = [
+                s[0] as f32 / 255.0,
+                s[1] as f32 / 255.0,
+                s[2] as f32 / 255.0,
+            ];
             composite_pixel(base, idx, cs, sa, node.blend_mode);
         }
     }
@@ -507,7 +517,11 @@ mod tests {
         // (bottom) full-canvas RED raster.
         let red = solid_raster(W as u32, H as u32, [255, 0, 0, 255]);
         doc.add_node(
-            SceneNode::new("red", Default::default(), SceneNodeKind::Raster(RasterNode::new(red))),
+            SceneNode::new(
+                "red",
+                Default::default(),
+                SceneNodeKind::Raster(RasterNode::new(red)),
+            ),
             None,
         );
 
@@ -522,8 +536,12 @@ mod tests {
         // (top) small GREEN raster over the top-left corner (canvas 0..10).
         let green = solid_raster(10, 10, [0, 255, 0, 255]);
         doc.add_node(
-            SceneNode::new("green", Default::default(), SceneNodeKind::Raster(RasterNode::new(green)))
-                .with_transform(Transform::translate(0.0, 0.0)),
+            SceneNode::new(
+                "green",
+                Default::default(),
+                SceneNodeKind::Raster(RasterNode::new(green)),
+            )
+            .with_transform(Transform::translate(0.0, 0.0)),
             None,
         );
 
@@ -595,7 +613,11 @@ mod tests {
         // A tiny raster.
         let r = solid_raster(1, 1, [10, 20, 30, 255]);
         doc.add_node(
-            SceneNode::new("r", Default::default(), SceneNodeKind::Raster(RasterNode::new(r))),
+            SceneNode::new(
+                "r",
+                Default::default(),
+                SceneNodeKind::Raster(RasterNode::new(r)),
+            ),
             None,
         );
 

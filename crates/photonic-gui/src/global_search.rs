@@ -52,6 +52,8 @@ const TOOLS: &[Tool] = &[
     Tool::ShapeBuilder,
     Tool::Text,
     Tool::Scissors,
+    Tool::Knife,
+    Tool::Eraser,
     Tool::MagicWand,
     Tool::Lasso,
     Tool::Pencil,
@@ -79,10 +81,19 @@ fn tool_keywords(t: Tool) -> &'static [&'static str] {
         Tool::ShapeBuilder => &["merge", "combine", "boolean", "union"],
         Tool::Text => &["type", "label", "font", "write"],
         Tool::Scissors => &["cut", "split", "snip"],
+        Tool::Knife => &["slice", "cut", "divide", "freehand cut"],
+        Tool::Eraser => &["erase", "subtract", "rubber", "vector erase"],
         Tool::MagicWand => &["select color", "wand", "fill select"],
         Tool::Lasso => &["freehand select", "loop"],
         Tool::Pencil => &["freehand", "sketch", "draw"],
         Tool::Smooth => &["simplify", "relax", "clean"],
+        Tool::Width => &[
+            "width",
+            "variable width",
+            "stroke width",
+            "taper",
+            "profile",
+        ],
         Tool::RasterBrush => &["paint", "pixel", "draw", "raster"],
         Tool::RasterEraser => &["erase", "rubber", "raster", "delete pixels"],
     }
@@ -101,26 +112,95 @@ pub fn items() -> Vec<SearchItem> {
         })
         .collect();
 
-    let cmd =
-        |title: &str, icon: &'static str, description: &str, keywords: &'static [&'static str], action: SearchAction| SearchItem {
-            title: title.to_string(),
-            icon,
-            description: description.to_string(),
-            keywords,
-            action,
-        };
+    let cmd = |title: &str,
+               icon: &'static str,
+               description: &str,
+               keywords: &'static [&'static str],
+               action: SearchAction| SearchItem {
+        title: title.to_string(),
+        icon,
+        description: description.to_string(),
+        keywords,
+        action,
+    };
     v.extend([
-        cmd("Toggle Grid", ph::GRID_FOUR, "Show or hide the canvas grid overlay", &["snap", "layout", "squares"], SearchAction::ToggleGrid),
-        cmd("Toggle Guides", ph::RULER, "Show or hide ruler guides on the canvas", &["rulers", "alignment", "lines"], SearchAction::ToggleGuides),
-        cmd("Audit Log", ph::MAGNIFYING_GLASS, "Open the MCP audit log of recent AI tool calls", &["mcp", "history", "tool calls", "log"], SearchAction::ToggleAudit),
-        cmd("File Menu", ph::FILE, "New, open, save, and export documents", &["new", "open", "save", "export"], SearchAction::FileMenu),
-        cmd("Preferences", ph::GEAR, "Edit application settings, theme, and options", &["settings", "edit", "options", "theme"], SearchAction::EditMenu),
-        cmd("Tools Menu", ph::SQUARES_FOUR, "Browse all tools and pin them to the sidebar", &["pin", "toolbar", "all tools"], SearchAction::ToolsMenu),
-        cmd("Undo", ph::ARROW_COUNTER_CLOCKWISE, "Undo the last action", &["back", "revert", "ctrl z"], SearchAction::Undo),
-        cmd("Redo", ph::ARROW_CLOCKWISE, "Redo the last undone action", &["forward", "ctrl y"], SearchAction::Redo),
-        cmd("Fit to View", ph::FRAME_CORNERS, "Zoom and center the artboards in the viewport", &["zoom", "frame", "center", "fit artboard"], SearchAction::FitView),
-        cmd("Outline Mode", ph::SQUARES_FOUR, "Toggle wireframe outline preview of all shapes", &["wireframe", "skeleton", "preview"], SearchAction::OutlineMode),
-        cmd("Check for Updates", ph::ARROW_CLOCKWISE, "Download and install the latest Photonic release", &["upgrade", "version", "download", "new"], SearchAction::CheckUpdates),
+        cmd(
+            "Toggle Grid",
+            ph::GRID_FOUR,
+            "Show or hide the canvas grid overlay",
+            &["snap", "layout", "squares"],
+            SearchAction::ToggleGrid,
+        ),
+        cmd(
+            "Toggle Guides",
+            ph::RULER,
+            "Show or hide ruler guides on the canvas",
+            &["rulers", "alignment", "lines"],
+            SearchAction::ToggleGuides,
+        ),
+        cmd(
+            "Audit Log",
+            ph::MAGNIFYING_GLASS,
+            "Open the MCP audit log of recent AI tool calls",
+            &["mcp", "history", "tool calls", "log"],
+            SearchAction::ToggleAudit,
+        ),
+        cmd(
+            "File Menu",
+            ph::FILE,
+            "New, open, save, and export documents",
+            &["new", "open", "save", "export"],
+            SearchAction::FileMenu,
+        ),
+        cmd(
+            "Preferences",
+            ph::GEAR,
+            "Edit application settings, theme, and options",
+            &["settings", "edit", "options", "theme"],
+            SearchAction::EditMenu,
+        ),
+        cmd(
+            "Tools Menu",
+            ph::SQUARES_FOUR,
+            "Browse all tools and pin them to the sidebar",
+            &["pin", "toolbar", "all tools"],
+            SearchAction::ToolsMenu,
+        ),
+        cmd(
+            "Undo",
+            ph::ARROW_COUNTER_CLOCKWISE,
+            "Undo the last action",
+            &["back", "revert", "ctrl z"],
+            SearchAction::Undo,
+        ),
+        cmd(
+            "Redo",
+            ph::ARROW_CLOCKWISE,
+            "Redo the last undone action",
+            &["forward", "ctrl y"],
+            SearchAction::Redo,
+        ),
+        cmd(
+            "Fit to View",
+            ph::FRAME_CORNERS,
+            "Zoom and center the artboards in the viewport",
+            &["zoom", "frame", "center", "fit artboard"],
+            SearchAction::FitView,
+        ),
+        cmd(
+            "Outline Mode",
+            ph::SQUARES_FOUR,
+            "Toggle wireframe outline preview of all shapes",
+            &["wireframe", "skeleton", "preview"],
+            SearchAction::OutlineMode,
+        ),
+        cmd(
+            "Check for Updates",
+            ph::ARROW_CLOCKWISE,
+            "Download and install the latest Photonic release",
+            &["upgrade", "version", "download", "new"],
+            SearchAction::CheckUpdates,
+        ),
     ]);
     v
 }

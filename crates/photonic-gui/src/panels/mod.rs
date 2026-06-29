@@ -426,6 +426,8 @@ pub enum PanelAction {
     SaveWidthProfile { stroke_width: f64, name: String },
     /// Delete a named width profile.
     DeleteWidthProfile { name: String },
+    /// Rename an existing width profile (e.g. one shaped with the Width tool).
+    RenameWidthProfile { old_name: String, new_name: String },
     /// Save a graphic style from the selected node.
     SaveGraphicStyle { node_id: NodeId, name: String },
     /// Apply a named graphic style to the selected node.
@@ -773,8 +775,11 @@ pub fn draw_toolbar(
         // Show the actual Photonic logo when loaded; fall back to a glyph.
         if let Some(tex) = logo {
             ui.add(
-                egui::Image::new(egui::load::SizedTexture::new(tex.id(), egui::vec2(18.0, 18.0)))
-                    .maintain_aspect_ratio(true),
+                egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(18.0, 18.0),
+                ))
+                .maintain_aspect_ratio(true),
             );
             ui.label(
                 RichText::new("Photonic")
@@ -954,7 +959,14 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(2.0);
-    for tool in [Tool::Scissors, Tool::MagicWand, Tool::Lasso, Tool::Pencil] {
+    for tool in [
+        Tool::Scissors,
+        Tool::Knife,
+        Tool::Eraser,
+        Tool::MagicWand,
+        Tool::Lasso,
+        Tool::Pencil,
+    ] {
         let label = format!("{} {}", tool.icon(), tool.label());
         if ui.selectable_label(tool == active, label).clicked() {
             chosen = Some(tool);
@@ -1247,11 +1259,19 @@ fn draw_vertex_panel(
 ) {
     use kurbo::PathEl;
 
-    ui.label(RichText::new("ANCHOR POINTS").small().color(Color32::from_rgb(80, 80, 110)));
+    ui.label(
+        RichText::new("ANCHOR POINTS")
+            .small()
+            .color(Color32::from_rgb(80, 80, 110)),
+    );
     ui.add_space(2.0);
 
     let SceneNodeKind::Path(pn) = &node.kind else {
-        ui.label(RichText::new("Select a path to edit its points.").weak().small());
+        ui.label(
+            RichText::new("Select a path to edit its points.")
+                .weak()
+                .small(),
+        );
         return;
     };
     let bez = pn.path_data.to_bez_path();
@@ -1275,7 +1295,11 @@ fn draw_vertex_panel(
         ui.add_space(6.0);
         ui.label(RichText::new("Click body → select object").weak().small());
         ui.label(RichText::new("Click anchor → select point").weak().small());
-        ui.label(RichText::new("Shift+click → add to selection").weak().small());
+        ui.label(
+            RichText::new("Shift+click → add to selection")
+                .weak()
+                .small(),
+        );
         ui.label(RichText::new("Drag handle → reshape curve").weak().small());
         ui.label(RichText::new("Drag ◌ widget → round corner").weak().small());
         ui.label(RichText::new("Esc → exit point edit").weak().small());
@@ -1358,7 +1382,11 @@ fn draw_vertex_panel(
     );
     ui.horizontal(|ui| {
         for r in [4.0_f64, 8.0, 16.0, 32.0] {
-            if ui.button(format!("{r:.0}")).on_hover_text("Round selected corners by this radius").clicked() {
+            if ui
+                .button(format!("{r:.0}"))
+                .on_hover_text("Round selected corners by this radius")
+                .clicked()
+            {
                 *action = Some(PanelAction::RoundSelectedCorners {
                     node_id,
                     indices: selected.to_vec(),
@@ -1416,6 +1444,7 @@ pub fn draw_properties_panel(
     recolor_palette_input: &mut String,
     magic_wand_attribute: &mut SelectSameAttr,
     magic_wand_tolerance: &mut f64,
+    eraser_radius: &mut f64,
     composition_findings: &[String],
     rhythm_findings: &[String],
     branch_names: &[String],
@@ -1461,7 +1490,11 @@ pub fn draw_properties_panel(
                 .hint_text("Search properties…")
                 .desired_width(ui.available_width() - 24.0),
         );
-        if !prop_search.is_empty() && ui.small_button(ph::X).on_hover_text("Clear search").clicked()
+        if !prop_search.is_empty()
+            && ui
+                .small_button(ph::X)
+                .on_hover_text("Clear search")
+                .clicked()
         {
             prop_search.clear();
             response.surrender_focus();
@@ -4621,6 +4654,8 @@ pub fn draw_properties_panel(
         Tool::ShapeBuilder => "Shape Builder",
         Tool::DirectSelect => "Direct Select",
         Tool::MagicWand => "Magic Wand Options",
+        Tool::Eraser => "Eraser Options",
+        Tool::Knife => "Knife Options",
         _ => "Tool",
     };
 
@@ -4636,7 +4671,9 @@ pub fn draw_properties_panel(
         | Tool::Select
         | Tool::ShapeBuilder
         | Tool::DirectSelect
-        | Tool::MagicWand => {
+        | Tool::MagicWand
+        | Tool::Eraser
+        | Tool::Knife => {
             if matches(tool_label) {
                 egui::CollapsingHeader::new(tool_label)
                     .default_open(false)
@@ -4749,6 +4786,19 @@ pub fn draw_properties_panel(
                                     *magic_wand_tolerance = tol as f64;
                                 }
                                 ui.label(RichText::new("Click any object → select all matching").weak().small());
+                            }
+                            Tool::Eraser => {
+                                ui.label("Radius");
+                                let mut r = *eraser_radius as f32;
+                                if ui.add(egui::Slider::new(&mut r, 1.0..=200.0).suffix("px")).changed() {
+                                    *eraser_radius = r as f64;
+                                }
+                                ui.label(RichText::new("Drag across path art → subtract a swept region").weak().small());
+                                ui.label(RichText::new("Cuts every visible, unlocked path it touches").weak().small());
+                            }
+                            Tool::Knife => {
+                                ui.label(RichText::new("Drag a line across filled paths → slice into faces").weak().small());
+                                ui.label(RichText::new("Each cut face becomes its own editable path").weak().small());
                             }
                             _ => {}
                         }
@@ -5127,8 +5177,9 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "{} (avg {:.1}px)",
+                                    "{} ({} pts, avg {:.1}px)",
                                     wp.name,
+                                    wp.widths.len(),
                                     wp.average_width()
                                 ))
                                 .small(),
@@ -5144,6 +5195,20 @@ pub fn draw_properties_panel(
                                         profile_name: wp.name.clone(),
                                     });
                                 }
+                            }
+                            let rename = width_profile_name_input.trim();
+                            if ui
+                                .add_enabled(
+                                    !rename.is_empty(),
+                                    egui::Button::new(ph::PENCIL).small(),
+                                )
+                                .on_hover_text("Rename to the text in the name field below")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::RenameWidthProfile {
+                                    old_name: wp.name.clone(),
+                                    new_name: rename.to_string(),
+                                });
                             }
                             if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteWidthProfile {
@@ -5373,7 +5438,11 @@ pub fn draw_properties_panel(
                     for (name, rule_type) in grammar_rules {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{} ({})", name, rule_type)).small());
-                            if ui.small_button(ph::X).on_hover_text("Delete rule").clicked() {
+                            if ui
+                                .small_button(ph::X)
+                                .on_hover_text("Delete rule")
+                                .clicked()
+                            {
                                 action =
                                     Some(PanelAction::DeleteGrammarRule { name: name.clone() });
                             }
