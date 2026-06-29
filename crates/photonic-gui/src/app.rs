@@ -322,6 +322,8 @@ pub struct PhotonicApp {
     global_search: String,
     /// On-device semantic index for the global search (background embedder).
     semantic: crate::global_search::SemanticIndex,
+    /// In-flight self-update check (result polled each frame).
+    update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateStatus>>,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -657,6 +659,7 @@ impl Default for PhotonicApp {
                     .map(crate::global_search::corpus_text)
                     .collect(),
             ),
+            update_rx: None,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -1150,6 +1153,23 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // ── Poll an in-flight self-update check ───────────────────────────────
+        if let Some(rx) = &self.update_rx {
+            if let Ok(status) = rx.try_recv() {
+                use crate::update::UpdateStatus;
+                self.file_status = Some(match status {
+                    UpdateStatus::UpToDate(v) => format!("Photonic is up to date (v{v})"),
+                    UpdateStatus::Updated(v) => {
+                        format!("Updated to v{v} — restart Photonic to apply")
+                    }
+                    UpdateStatus::Error(e) => format!("Update check failed: {e}"),
+                });
+                self.update_rx = None;
+            } else {
+                ctx.request_repaint(); // keep polling until the check returns
+            }
+        }
 
         // ── Apply theme ───────────────────────────────────────────────────────
         if self.prefs.dark_mode {
@@ -10324,6 +10344,15 @@ impl PhotonicApp {
             }
             A::FitView => self.fit_pending = true,
             A::OutlineMode => self.outline_mode = !self.outline_mode,
+            A::CheckUpdates => {
+                if self.update_rx.is_none() {
+                    self.update_rx = Some(crate::update::check_and_update());
+                    self.file_status = Some(format!(
+                        "Checking for updates… (current {})",
+                        crate::update::CURRENT_VERSION
+                    ));
+                }
+            }
         }
     }
 

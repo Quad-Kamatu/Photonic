@@ -22,6 +22,7 @@ pub enum SearchAction {
     Redo,
     FitView,
     OutlineMode,
+    CheckUpdates,
 }
 
 pub struct SearchItem {
@@ -119,6 +120,7 @@ pub fn items() -> Vec<SearchItem> {
         cmd("Redo", ph::ARROW_CLOCKWISE, "Redo the last undone action", &["forward", "ctrl y"], SearchAction::Redo),
         cmd("Fit to View", ph::FRAME_CORNERS, "Zoom and center the artboards in the viewport", &["zoom", "frame", "center", "fit artboard"], SearchAction::FitView),
         cmd("Outline Mode", ph::SQUARES_FOUR, "Toggle wireframe outline preview of all shapes", &["wireframe", "skeleton", "preview"], SearchAction::OutlineMode),
+        cmd("Check for Updates", ph::ARROW_CLOCKWISE, "Download and install the latest Photonic release", &["upgrade", "version", "download", "new"], SearchAction::CheckUpdates),
     ]);
     v
 }
