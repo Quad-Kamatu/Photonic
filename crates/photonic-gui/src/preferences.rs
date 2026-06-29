@@ -23,6 +23,9 @@ pub struct AppPreferences {
     /// Draw the dashed smart-guide lines + distance labels while snapping.
     #[serde(default = "default_true")]
     pub snap_show_guides: bool,
+    /// Measurement unit used for ruler labels and the live cursor readout.
+    #[serde(default)]
+    pub document_units: photonic_core::DocumentUnit,
 
     // TOOL DEFAULTS
     pub default_fill_color: [f32; 4],
@@ -74,6 +77,7 @@ impl Default for AppPreferences {
             snap_to_objects: true,
             snap_tolerance_px: 6.0,
             snap_show_guides: true,
+            document_units: photonic_core::DocumentUnit::Px,
             default_fill_color: [0.22, 0.47, 0.87, 1.0],
             default_stroke_enabled: false,
             default_stroke_color: [0.0, 0.0, 0.0, 1.0],

@@ -9,6 +9,8 @@ mod tool_handlers;
 mod layer_ops;
 mod erase_tools;
 mod width_tool;
+mod rulers;
+pub(crate) use rulers::GuideEditPopup;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -494,6 +496,21 @@ pub struct PhotonicApp {
     // ── Guides ────────────────────────────────────────────────────────────────
     /// When true, ruler guides are rendered on the canvas (toggle with Ctrl+;).
     pub guides_visible: bool,
+    /// Active drag originating from a ruler strip to create a new guide.
+    /// `Horizontal` = dragged out of the top ruler; `Vertical` = left ruler.
+    /// `None` when no ruler-create drag is in progress.
+    pub ruler_drag: Option<photonic_core::GuideOrientation>,
+    /// Live canvas-space position of the guide being created from a ruler drag
+    /// (Y for horizontal, X for vertical). Used for the floating drag label.
+    pub ruler_drag_pos: f64,
+    /// Index into `doc.guides` of the guide currently being moved by a drag.
+    /// `None` when no existing guide is being dragged.
+    pub guide_dragging: Option<usize>,
+    /// Snapshot of `doc.guides` captured at the start of a guide move/create
+    /// drag, used as the `old` state for the undoable `Command::SetGuides`.
+    pub guide_drag_old: Option<Vec<photonic_core::Guide>>,
+    /// Open exact-position editor popup for a guide (double-click to open).
+    pub(crate) guide_edit_popup: Option<GuideEditPopup>,
 
     // ── Isolation Mode ───────────────────────────────────────────────────────
     /// When set, only children of this group are selectable/editable.
@@ -846,6 +863,11 @@ impl Default for PhotonicApp {
             window_scale_factor: 1.0,
             outline_mode: false,
             guides_visible: true,
+            ruler_drag: None,
+            ruler_drag_pos: 0.0,
+            guide_dragging: None,
+            guide_drag_old: None,
+            guide_edit_popup: None,
             isolated_group: None,
             pencil_points: Vec::new(),
             lasso_points: Vec::new(),
@@ -2424,7 +2446,7 @@ impl PhotonicApp {
                             painter.text(
                                 egui::pos2(sx + 2.0, rect.min.y + 2.0),
                                 egui::Align2::LEFT_TOP,
-                                format!("{}", c as i64),
+                                self.format_ruler_value(c),
                                 egui::FontId::proportional(9.0),
                                 tick_col,
                             );
@@ -2446,10 +2468,20 @@ impl PhotonicApp {
                                 ],
                                 egui::Stroke::new(1.0, tick_col),
                             );
+                            painter.text(
+                                egui::pos2(rect.min.x + 1.0, sy + 1.0),
+                                egui::Align2::LEFT_TOP,
+                                self.format_ruler_value(c),
+                                egui::FontId::proportional(8.0),
+                                tick_col,
+                            );
                         }
                         c += tick;
                     }
                 }
+
+                // ── Ruler interaction (guides, readout, unit selector) ───────
+                self.handle_ruler_interaction(ui, rect, view, doc, history);
 
                 // ── Guide overlay ─────────────────────────────────────────────
                 // Render horizontal/vertical guide lines across the canvas.
