@@ -330,6 +330,12 @@ pub struct PhotonicApp {
     update_available: Option<String>,
     /// Whether the once-per-launch update check has been kicked off yet.
     update_checked_startup: bool,
+    /// Release notes to show in the "What's New" popup (versions newly skipped).
+    whats_new_notes: Vec<crate::release_notes::ReleaseNote>,
+    /// Whether the "What's New" popup is currently open.
+    show_whats_new: bool,
+    /// Whether the once-per-launch "did the version change?" check has run.
+    whats_new_checked: bool,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -669,6 +675,9 @@ impl Default for PhotonicApp {
             update_check_rx: None,
             update_available: None,
             update_checked_startup: false,
+            whats_new_notes: Vec::new(),
+            show_whats_new: false,
+            whats_new_checked: false,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -1253,6 +1262,30 @@ impl PhotonicApp {
             } else if dismiss {
                 self.update_available = None;
             }
+        }
+
+        // ── "What's New" after an update ──────────────────────────────────────
+        // Once per launch, compare the running build to the last version this
+        // user actually ran. If it moved forward, queue the notes for the gap.
+        if !self.whats_new_checked {
+            self.whats_new_checked = true;
+            let cur = crate::update::CURRENT_VERSION;
+            if self.prefs.last_seen_version.is_empty() {
+                // Fresh install — record silently, never nag on first run.
+                self.prefs.last_seen_version = cur.to_string();
+                self.prefs.save();
+            } else if self.prefs.last_seen_version != cur {
+                let notes = crate::release_notes::since(&self.prefs.last_seen_version);
+                self.prefs.last_seen_version = cur.to_string();
+                self.prefs.save();
+                if !notes.is_empty() {
+                    self.whats_new_notes = notes;
+                    self.show_whats_new = true;
+                }
+            }
+        }
+        if self.show_whats_new {
+            self.draw_whats_new(ctx);
         }
 
         // ── Apply theme ───────────────────────────────────────────────────────
@@ -13785,6 +13818,78 @@ impl PhotonicApp {
         });
     }
 
+    // ── "What's New" popup ─────────────────────────────────────────────────────
+
+    /// Centered modal listing release notes for versions the user just skipped.
+    /// Dimming scrim behind, single "Got it" button to dismiss.
+    fn draw_whats_new(&mut self, ctx: &egui::Context) {
+        // Dim the rest of the app.
+        egui::Area::new(egui::Id::new("whats_new_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter()
+                    .rect_filled(screen, 0.0, Color32::from_black_alpha(160));
+                // Swallow clicks on the backdrop.
+                ui.allocate_rect(screen, egui::Sense::click());
+            });
+
+        let mut open = true;
+        let cur = crate::update::CURRENT_VERSION;
+        egui::Window::new(RichText::new(format!("{}  What's New", ph::SPARKLE)).size(17.0))
+            .id(egui::Id::new("whats_new_window"))
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(
+                    RichText::new(format!("Photonic updated to v{cur}"))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for note in &self.whats_new_notes {
+                            let title = match &note.date {
+                                Some(d) => format!("v{}  ·  {}", note.version, d),
+                                None => format!("v{}", note.version),
+                            };
+                            ui.label(
+                                RichText::new(title)
+                                    .strong()
+                                    .size(15.0)
+                                    .color(Color32::from_rgb(96, 165, 250)),
+                            );
+                            ui.add_space(2.0);
+                            render_changelog_body(ui, &note.body);
+                            ui.add_space(10.0);
+                        }
+                    });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(RichText::new("Got it").color(Color32::WHITE))
+                        .clicked()
+                    {
+                        open = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.show_whats_new = false;
+            self.whats_new_notes.clear();
+        }
+    }
+
     // ── Export modal ─────────────────────────────────────────────────────────
 
     fn draw_export_modal(&mut self, ctx: &egui::Context, doc: &Document) {
@@ -15063,4 +15168,41 @@ fn gui_create_truchet_tiling_demo(
     );
 
     *doc_modified = true;
+}
+
+/// Render a Keep-a-Changelog section body with light formatting: `### Foo`
+/// becomes a small heading, `- item` / `* item` become bullets, everything
+/// else is a wrapped paragraph. (We don't pull in a full markdown renderer.)
+fn render_changelog_body(ui: &mut egui::Ui, body: &str) {
+    for raw in body.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() {
+            ui.add_space(3.0);
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("### ") {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(h.trim())
+                    .strong()
+                    .color(Color32::from_rgb(203, 213, 225)),
+            );
+        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            ui.horizontal_top(|ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new("•").color(Color32::from_rgb(96, 165, 250)));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(item.trim()).color(Color32::from_rgb(203, 213, 225)),
+                    )
+                    .wrap(),
+                );
+            });
+        } else {
+            ui.add(
+                egui::Label::new(RichText::new(line).color(Color32::from_rgb(203, 213, 225)))
+                    .wrap(),
+            );
+        }
+    }
 }

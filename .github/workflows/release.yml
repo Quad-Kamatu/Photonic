@@ -78,7 +78,34 @@ jobs:
         run: rm -f signing.priv
         shell: bash
 
+      # Extract this tag's CHANGELOG section as the release body. Done once, on
+      # Linux, to avoid relying on awk on the Windows runner; the other matrix
+      # jobs publish without a body and softprops leaves the existing one intact.
+      - name: Extract release notes
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VER" '
+            $0 ~ "^## \\[" ver "\\]" { grab=1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md | sed '/./,$!d' > RELEASE_BODY.md
+          if [ ! -s RELEASE_BODY.md ]; then
+            echo "Photonic $GITHUB_REF_NAME" > RELEASE_BODY.md
+          fi
+          echo "----- release body -----"; cat RELEASE_BODY.md
+
+      - name: Publish to release (with notes)
+        if: runner.os == 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true
+          body_path: RELEASE_BODY.md
+
       - name: Publish to release
+        if: runner.os != 'Linux'
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET }}

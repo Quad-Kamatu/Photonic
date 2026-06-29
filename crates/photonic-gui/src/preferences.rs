@@ -28,6 +28,11 @@ pub struct AppPreferences {
     /// Check GitHub for a newer release once on launch and prompt if available.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    /// Last app version this user actually ran. Drives the "What's New" popup:
+    /// when it differs from the current build, show notes for the gap. Empty on
+    /// a fresh install (no popup the very first time).
+    #[serde(default)]
+    pub last_seen_version: String,
 
     // HOTBAR — tools pinned to the sidebar by the user
     #[serde(default)]
@@ -59,6 +64,7 @@ impl Default for AppPreferences {
             console_open_on_start: false,
             nudge_distance: 1.0,
             auto_check_updates: true,
+            last_seen_version: String::new(),
             pinned_tools: Vec::new(),
         }
     }
