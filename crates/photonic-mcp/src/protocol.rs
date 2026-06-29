@@ -148,6 +148,15 @@ pub struct ExportSvgArgs {
     pub precision: Option<u8>,
 }
 
+/// Arguments for the `export_pdf` tool.
+#[derive(Debug, Deserialize, Default)]
+pub struct ExportPdfArgs {
+    /// Optional page background colour (`#rrggbb`). Omit for an unpainted
+    /// (white-in-viewers) page.
+    #[serde(default)]
+    pub background: Option<String>,
+}
+
 /// Arguments for `export_selection_as_svg` tool
 #[derive(Debug, Deserialize, Default)]
 pub struct ExportSelectionArgs {
