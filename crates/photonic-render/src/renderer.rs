@@ -722,6 +722,8 @@ impl PhotonicRenderer {
             outer_glow: Option<([f32; 6], photonic_core::style::LineJoin)>,
             inner_glow: Option<([f32; 6], photonic_core::style::LineJoin)>,
             gaussian_glow: Option<([f32; 4], f32)>, // ([r,g,b,a*opacity], radius_doc)
+            /// ([r,g,b,a], opacity, dx_doc, dy_doc, blur_doc) — None when disabled.
+            drop_shadow: Option<([f32; 4], f32, f32, f32, f32)>,
             is_compound: bool,
             arrowhead_start: photonic_core::style::ArrowheadStyle,
             arrowhead_end: photonic_core::style::ArrowheadStyle,
@@ -847,6 +849,18 @@ impl PhotonicRenderer {
                                 let c = &node.gaussian_glow.color;
                                 let a = c.a * node.gaussian_glow.opacity * node.opacity;
                                 Some(([c.r, c.g, c.b, a], node.gaussian_glow.radius))
+                            } else {
+                                None
+                            },
+                            drop_shadow: if node.drop_shadow.enabled {
+                                let s = &node.drop_shadow;
+                                Some((
+                                    [s.color.r, s.color.g, s.color.b, s.color.a],
+                                    s.opacity * node.opacity,
+                                    s.dx,
+                                    s.dy,
+                                    s.blur,
+                                ))
                             } else {
                                 None
                             },
@@ -1144,6 +1158,43 @@ impl PhotonicRenderer {
             };
 
         for node in &nodes {
+            // ── Drop shadow: offset, soft-edged silhouette beneath everything ──
+            // Rendered as geometry (filled offset silhouette + gaussian-falloff
+            // soft edge) so it composites under the node within the MSAA fill
+            // pass. A true separable-blur shadow layer is a follow-up.
+            if let Some(([sr, sg, sb, sa], opacity, dx, dy, blur)) = node.drop_shadow {
+                let [a, b, c, d, e, f] = node.matrix;
+                let fill_alpha = (sa * opacity).min(1.0);
+                let mesh = tessellate_fill(&node.path_data, node.is_compound);
+                if !mesh.is_empty() {
+                    let base = verts.len() as u32;
+                    for pos in &mesh.vertices {
+                        let x = a * pos[0] as f64 + c * pos[1] as f64 + (e + dx as f64);
+                        let y = b * pos[0] as f64 + d * pos[1] as f64 + (f + dy as f64);
+                        verts.push(Vertex {
+                            position: [x as f32, y as f32],
+                            color: [sr, sg, sb, fill_alpha],
+                        });
+                    }
+                    for &idx in &mesh.indices {
+                        idxs.push(base + idx);
+                    }
+                }
+                // Soft edge via the same gaussian-falloff expansion used by glows.
+                if blur > 0.0 {
+                    // Offset is in document units → fold into the translation column.
+                    let shifted = [a, b, c, d, e + dx as f64, f + dy as f64];
+                    append_glow(
+                        &node.path_data,
+                        &shifted,
+                        &[sr, sg, sb, sa, opacity, blur],
+                        photonic_core::style::LineJoin::Round,
+                        &mut verts,
+                        &mut idxs,
+                    );
+                }
+            }
+
             // ── Outer glow: behind fill so fill clips the inward half ─────────
             if let Some((ref og, og_join)) = node.outer_glow {
                 append_glow(

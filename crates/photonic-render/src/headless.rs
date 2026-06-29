@@ -534,6 +534,63 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
         };
         let [a, b, c, d, e, f] = node.transform.matrix;
 
+        // ── Drop shadow ──────────────────────────────────────────────────────
+        // Offset, soft-edged silhouette beneath the node (matches the windowed
+        // renderer so export agrees with the on-canvas result).
+        if node.drop_shadow.enabled {
+            let s = &node.drop_shadow;
+            let (sr, sg, sb) = (s.color.r, s.color.g, s.color.b);
+            let opacity = s.opacity * node.opacity;
+            let (ox, oy) = (s.dx as f64, s.dy as f64);
+            let mesh = tessellate_fill(&path_node.path_data, false);
+            if !mesh.is_empty() {
+                let base = verts.len() as u32;
+                let fill_alpha = (s.color.a * opacity).min(1.0);
+                for pos in &mesh.vertices {
+                    let x = a * pos[0] as f64 + c * pos[1] as f64 + e + ox;
+                    let y = b * pos[0] as f64 + d * pos[1] as f64 + f + oy;
+                    verts.push(Vertex {
+                        position: [x as f32, y as f32],
+                        color: [sr, sg, sb, fill_alpha],
+                    });
+                }
+                for &i in &mesh.indices {
+                    idxs.push(base + i);
+                }
+            }
+            // Soft edge via gaussian-falloff stroke expansion (mirrors append_glow).
+            if s.blur > 0.0 {
+                const STEPS: usize = 10;
+                for i in (0..STEPS).rev() {
+                    let t = (i + 1) as f32 / STEPS as f32;
+                    let width = 2.0 * s.blur * t;
+                    let step_alpha = (opacity * (-4.5 * t * t).exp() * s.color.a).min(1.0);
+                    let smesh = tessellate_stroke(
+                        &path_node.path_data,
+                        width,
+                        photonic_core::style::LineCap::Round,
+                        photonic_core::style::LineJoin::Round,
+                        4.0,
+                    );
+                    if smesh.is_empty() {
+                        continue;
+                    }
+                    let base = verts.len() as u32;
+                    for pos in &smesh.vertices {
+                        let x = a * pos[0] as f64 + c * pos[1] as f64 + e + ox;
+                        let y = b * pos[0] as f64 + d * pos[1] as f64 + f + oy;
+                        verts.push(Vertex {
+                            position: [x as f32, y as f32],
+                            color: [sr, sg, sb, step_alpha],
+                        });
+                    }
+                    for &idx in &smesh.indices {
+                        idxs.push(base + idx);
+                    }
+                }
+            }
+        }
+
         // ── Fill ─────────────────────────────────────────────────────────────
         if path_node.fill.enabled && !matches!(&path_node.fill.kind, FillKind::None) {
             let opacity = path_node.fill.opacity * node.opacity;
@@ -590,4 +647,77 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
 
 fn align256(n: u32) -> u32 {
     (n + 255) & !255
+}
+
+#[cfg(test)]
+mod drop_shadow_tests {
+    use super::*;
+    use photonic_core::{
+        color::Color,
+        node::{PathNode, SceneNode, SceneNodeKind},
+        path::PathData,
+        style::Fill,
+        Document,
+    };
+
+    fn try_renderer() -> Option<HeadlessRenderer> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        Some(pollster::block_on(HeadlessRenderer::new()))
+    }
+
+    fn luma(px: [u8; 4]) -> f32 {
+        (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) / 255.0
+    }
+
+    #[test]
+    fn hard_drop_shadow_appears_offset_and_darkens_backdrop() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping drop-shadow test");
+            return;
+        };
+        let mut doc = Document::new("ds", 100.0, 100.0);
+        // White square at (30,30)-(70,70).
+        let mut node = SceneNode::new(
+            "sq",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(30.0, 30.0, 40.0, 40.0))
+                    .with_fill(Fill::solid(Color::WHITE)),
+            ),
+        );
+        // Hard black shadow offset down-right by (20,20).
+        node.drop_shadow.enabled = true;
+        node.drop_shadow.color = Color::new(0.0, 0.0, 0.0, 1.0);
+        node.drop_shadow.opacity = 0.5;
+        node.drop_shadow.dx = 20.0;
+        node.drop_shadow.dy = 20.0;
+        node.drop_shadow.blur = 0.0;
+        doc.add_node(node, None);
+
+        let png = r.render_png_at_size(&doc, 100, 100);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        let at = |x, y| luma(img.get_pixel(x, y).0);
+
+        // (80,80): inside shadow square (50-90) but outside fill (30-70) → darkened.
+        let shadow = at(80, 80);
+        // (50,50): inside the white fill → stays bright (fill drawn over shadow).
+        let fill = at(50, 50);
+        // (10,10): untouched white artboard.
+        let bg = at(10, 10);
+
+        assert!(bg > 0.9, "artboard should be white, got {bg}");
+        assert!(fill > 0.9, "fill should be white, got {fill}");
+        assert!(
+            shadow < 0.8 && shadow > 0.2,
+            "shadow region should be a mid-gray (got {shadow})",
+        );
+    }
 }
