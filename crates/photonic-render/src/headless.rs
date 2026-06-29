@@ -6,9 +6,10 @@
 use crate::{
     canvas::CanvasView,
     pipeline::{
-        coalesce_segments, create_camera_bind_group_layout, create_fill_pipeline,
-        create_fill_pipeline_with_blend, draw_segments, separable_blend_state, CameraUniform,
-        DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
+        coalesce_segments, create_blur_bgl, create_blur_pipeline_with_blend,
+        create_camera_bind_group_layout, create_fill_pipeline, create_fill_pipeline_with_blend,
+        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, DrawSegment,
+        Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke},
 };
@@ -77,6 +78,15 @@ pub struct HeadlessRenderer {
     /// One fill-pipeline variant per separable blend mode (matches the windowed
     /// renderer so headless export agrees with the on-canvas result).
     blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)>,
+    // ── Live-effects blur layer ───────────────────────────────────────────────
+    /// 1-sample fill pipeline for rendering effect silhouettes to an offscreen
+    /// texture (the blur ping-pong textures are single-sample).
+    fill_pipeline_1spp: wgpu::RenderPipeline,
+    blur_bgl: wgpu::BindGroupLayout,
+    /// Separable blur pass (alpha-composited). Also used with sigma≈0 as a
+    /// texture-passthrough compositor.
+    blur_pipeline: wgpu::RenderPipeline,
+    blur_sampler: wgpu::Sampler,
 }
 
 impl HeadlessRenderer {
@@ -142,6 +152,18 @@ impl HeadlessRenderer {
                 })
             })
             .collect();
+        let fill_pipeline_1spp = create_fill_pipeline(&device, FORMAT, &camera_bgl, 1);
+        let blur_bgl = create_blur_bgl(&device);
+        let blur_pipeline =
+            create_blur_pipeline_with_blend(&device, FORMAT, &blur_bgl, BlurBlend::StraightAlpha);
+        let blur_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("headless_blur_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         Self {
             device,
@@ -150,6 +172,10 @@ impl HeadlessRenderer {
             camera_bind_group,
             fill_pipeline,
             blend_pipelines,
+            fill_pipeline_1spp,
+            blur_bgl,
+            blur_pipeline,
+            blur_sampler,
         }
     }
 
@@ -179,7 +205,7 @@ impl HeadlessRenderer {
         let h = h.max(1);
 
         let include_artboard_bg = opts.background == ExportBackground::Artboard;
-        let (verts, idxs, segments) = build_geometry(document, include_artboard_bg);
+        let (verts, idxs, segments, blur_jobs) = build_geometry(document, include_artboard_bg);
 
         // Camera: an explicit region (per-artboard export) wins; otherwise fit
         // the content bounding box or the full document to the output size.
@@ -260,44 +286,88 @@ impl HeadlessRenderer {
             return png;
         }
 
-        // Resolve target: single-sample, read back as PNG
-        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("headless_tex"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+        // Final readback target: single-sample, COPY_SRC.
+        let tex = self.make_color_tex(
+            w,
+            h,
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
         let tex_view = tex.create_view(&Default::default());
 
-        // MSAA render target (4×), resolved into tex_view
-        let msaa_tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("headless_msaa_tex"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: MSAA_SAMPLES,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        // MSAA render target for the sharp document geometry.
+        let msaa_tex =
+            self.make_color_tex(w, h, MSAA_SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
         let msaa_view = msaa_tex.create_view(&Default::default());
 
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.record_pass(
-            &mut enc, &msaa_view, &tex_view, &verts, &idxs, &segments, clear,
-        );
+
+        if blur_jobs.is_empty() {
+            // Fast path: render the document straight into the readback target.
+            self.record_pass(
+                &mut enc, &msaa_view, &tex_view, &verts, &idxs, &segments, clear,
+            );
+        } else {
+            // Layered path: the live-effects blur layer must sit *between* the
+            // artboard background and the sharp shapes. So render the shapes
+            // (minus the artboard rect) to a transparent offscreen texture, blur
+            // the effect silhouettes into a separate layer, then composite
+            //   background → effects → shapes
+            // into the readback target.
+            let doc_tex = self.make_color_tex(
+                w,
+                h,
+                1,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            );
+            let doc_view = doc_tex.create_view(&Default::default());
+
+            // The artboard rect is the first 4 verts / 6 indices when present;
+            // skip it here and reproduce it via the composite clear colour.
+            let skip = if include_artboard_bg { 6 } else { 0 } as u32;
+            // Re-base the blend segments onto the sliced index buffer: drop the
+            // artboard segment and shift the rest down by `skip` so the
+            // separable-blend draw still covers exactly the shape geometry.
+            let fx_segments: Vec<DrawSegment> = segments
+                .iter()
+                .filter_map(|s| {
+                    let end = s.start + s.count;
+                    if end <= skip {
+                        None
+                    } else {
+                        let new_start = s.start.saturating_sub(skip);
+                        Some(DrawSegment {
+                            mode: s.mode,
+                            start: new_start,
+                            count: end - skip - new_start,
+                        })
+                    }
+                })
+                .collect();
+            let transparent = wgpu::Color::TRANSPARENT;
+            self.record_pass(
+                &mut enc,
+                &msaa_view,
+                &doc_view,
+                &verts,
+                &idxs[skip as usize..],
+                &fx_segments,
+                transparent,
+            );
+
+            let (fx_tex, fx_view) =
+                self.render_effects_layer(&mut enc, &blur_jobs, view.zoom, w, h);
+
+            // Composite: clear to the artboard/background, then effects, then shapes.
+            let comp_clear = if include_artboard_bg {
+                wgpu::Color::WHITE
+            } else {
+                clear
+            };
+            self.composite_layers(&mut enc, &tex_view, &[&fx_view, &doc_view], comp_clear);
+            drop(fx_tex);
+            drop(doc_tex);
+        }
         drop(msaa_tex); // keep alive until submit
         self.queue.submit([enc.finish()]);
 
@@ -555,6 +625,225 @@ impl HeadlessRenderer {
             });
         }
     }
+
+    /// Create a colour texture of the given size and sample count.
+    fn make_color_tex(
+        &self,
+        w: u32,
+        h: u32,
+        sample_count: u32,
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("headless_fx_tex"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage,
+            view_formats: &[],
+        })
+    }
+
+    /// Bind group for the blur shader: source texture + sampler + params.
+    fn blur_bind_group(
+        &self,
+        src: &wgpu::TextureView,
+        sigma: f32,
+        horizontal: bool,
+    ) -> wgpu::BindGroup {
+        let params = BlurParams {
+            sigma,
+            horizontal: horizontal as u32,
+            _pad: [0.0; 2],
+        };
+        let buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("headless_blur_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("headless_blur_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Render each blur job (silhouette → H-blur → V-blur) and accumulate them
+    /// into a single-sample effects texture (straight-alpha "over"). Returns the
+    /// accumulation texture and its view.
+    fn render_effects_layer(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        jobs: &[BlurJob],
+        zoom: f64,
+        w: u32,
+        h: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let fx_a = self.make_color_tex(w, h, 1, usage);
+        let fx_b = self.make_color_tex(w, h, 1, usage);
+        let fx_accum = self.make_color_tex(w, h, 1, usage);
+        let (a_view, b_view, accum_view) = (
+            fx_a.create_view(&Default::default()),
+            fx_b.create_view(&Default::default()),
+            fx_accum.create_view(&Default::default()),
+        );
+
+        // Clear the accumulator once; jobs composite into it with Load below.
+        let mut accum_cleared = false;
+        for job in jobs {
+            if job.idxs.is_empty() {
+                continue;
+            }
+            let sigma = (job.radius_doc * zoom).max(0.0) as f32;
+
+            // Pass A: silhouette → fx_a (cleared transparent).
+            let vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_vbuf"),
+                    contents: bytemuck::cast_slice(&job.verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_ibuf"),
+                    contents: bytemuck::cast_slice(&job.idxs),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_silhouette"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &a_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.fill_pipeline_1spp);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..job.idxs.len() as u32, 0, 0..1);
+            }
+
+            // Pass B: horizontal blur fx_a → fx_b.
+            {
+                let bg = self.blur_bind_group(&a_view, sigma, true);
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_blur_h"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &b_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..6, 0..1);
+            }
+
+            // Pass C: vertical blur fx_b → fx_accum (accumulate).
+            {
+                let bg = self.blur_bind_group(&b_view, sigma, false);
+                let load = if accum_cleared {
+                    wgpu::LoadOp::Load
+                } else {
+                    accum_cleared = true;
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                };
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_blur_v"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &accum_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+
+        (fx_accum, accum_view)
+    }
+
+    /// Composite `layers` (bottom-first) onto `target` over a cleared background,
+    /// using the blur shader at sigma≈0 as a straight-alpha texture passthrough.
+    fn composite_layers(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        layers: &[&wgpu::TextureView],
+        clear: wgpu::Color,
+    ) {
+        for (i, layer) in layers.iter().enumerate() {
+            let bg = self.blur_bind_group(layer, 0.0, true);
+            let load = if i == 0 {
+                wgpu::LoadOp::Clear(clear)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx_composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blur_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..6, 0..1);
+        }
+    }
 }
 
 // ─── Shared geometry builder ──────────────────────────────────────────────────
@@ -632,15 +921,56 @@ fn group_opacity_map(
     out
 }
 
+/// One blurred effect to render into the offscreen effects layer (composited
+/// beneath the sharp document): geometry already transformed into document
+/// space, plus the blur radius in document units (scaled by zoom at render time).
+struct BlurJob {
+    verts: Vec<Vertex>,
+    idxs: Vec<u32>,
+    radius_doc: f64,
+}
+
+/// Tessellate `path`'s fill, transform it by `m` (+ `offset`), flat-color it,
+/// and package it as a [`BlurJob`]. Returns `None` for empty geometry.
+fn silhouette_job(
+    path: &photonic_core::path::PathData,
+    m: &[f64; 6],
+    offset: (f64, f64),
+    color: [f32; 4],
+    radius_doc: f64,
+) -> Option<BlurJob> {
+    let mesh = tessellate_fill(path, false);
+    if mesh.is_empty() {
+        return None;
+    }
+    let [a, b, c, d, e, f] = *m;
+    let (ox, oy) = offset;
+    let mut verts = Vec::with_capacity(mesh.vertices.len());
+    for pos in &mesh.vertices {
+        let x = a * pos[0] as f64 + c * pos[1] as f64 + e + ox;
+        let y = b * pos[0] as f64 + d * pos[1] as f64 + f + oy;
+        verts.push(Vertex {
+            position: [x as f32, y as f32],
+            color,
+        });
+    }
+    Some(BlurJob {
+        verts,
+        idxs: mesh.indices,
+        radius_doc,
+    })
+}
+
 fn build_geometry(
     doc: &Document,
     include_artboard_bg: bool,
-) -> (Vec<Vertex>, Vec<u32>, Vec<DrawSegment>) {
+) -> (Vec<Vertex>, Vec<u32>, Vec<DrawSegment>, Vec<BlurJob>) {
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
     let eff = group_opacity_map(doc);
     // Per-node index ranges tagged with their blend mode, coalesced at the end.
     let mut raw_segments: Vec<(BlendMode, u32, u32)> = Vec::new();
+    let mut blur_jobs: Vec<BlurJob> = Vec::new();
 
     // Optional white artboard rectangle (always first 4 vertices when present).
     if include_artboard_bg {
@@ -685,8 +1015,53 @@ fn build_geometry(
         let seg_start = idxs.len() as u32;
         let [a, b, c, d, e, f] = node.transform.matrix;
 
-        // ── Fill ─────────────────────────────────────────────────────────────
-        if path_node.fill.enabled && !matches!(&path_node.fill.kind, FillKind::None) {
+        // ── Drop shadow → blurred offset silhouette in the effects layer ───────
+        if node.drop_shadow.enabled {
+            let s = &node.drop_shadow;
+            let alpha = (s.color.a * s.opacity * node.opacity * gop).min(1.0);
+            if let Some(job) = silhouette_job(
+                &path_node.path_data,
+                &node.transform.matrix,
+                (s.dx as f64, s.dy as f64),
+                [s.color.r, s.color.g, s.color.b, alpha],
+                s.blur as f64,
+            ) {
+                blur_jobs.push(job);
+            }
+        }
+
+        // ── Object blur / feather → blurred fill in the effects layer ──────────
+        // For solid fills the sharp fill is suppressed and replaced by a true
+        // Gaussian-blurred copy. Gradient/image interior blur is a follow-up.
+        let blur_radius = if node.object_blur.enabled {
+            node.object_blur.radius
+        } else if node.feather.enabled {
+            node.feather.radius
+        } else {
+            0.0
+        };
+        let mut fill_blurred = false;
+        if blur_radius > 0.0 {
+            if let FillKind::Solid(col) = &path_node.fill.kind {
+                let alpha = col.a * path_node.fill.opacity * node.opacity * gop;
+                if let Some(job) = silhouette_job(
+                    &path_node.path_data,
+                    &node.transform.matrix,
+                    (0.0, 0.0),
+                    [col.r, col.g, col.b, alpha],
+                    blur_radius as f64,
+                ) {
+                    blur_jobs.push(job);
+                    fill_blurred = true;
+                }
+            }
+        }
+
+        // ── Fill (skipped when replaced by a blurred copy) ─────────────────────
+        if !fill_blurred
+            && path_node.fill.enabled
+            && !matches!(&path_node.fill.kind, FillKind::None)
+        {
             let opacity = path_node.fill.opacity * node.opacity * gop;
             let mesh = tessellate_fill(&path_node.path_data, false);
             if !mesh.is_empty() {
@@ -739,7 +1114,7 @@ fn build_geometry(
     }
 
     let segments = coalesce_segments(raw_segments);
-    (verts, idxs, segments)
+    (verts, idxs, segments, blur_jobs)
 }
 
 fn align256(n: u32) -> u32 {
@@ -1025,5 +1400,138 @@ mod blend_tests {
                 SOURCE[i],
             );
         }
+    }
+
+    fn luma(px: [u8; 4]) -> f32 {
+        (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) / 255.0
+    }
+
+    #[test]
+    fn hard_drop_shadow_appears_offset_and_darkens_backdrop() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping drop-shadow test");
+            return;
+        };
+        let mut doc = Document::new("ds", 100.0, 100.0);
+        // White square at (30,30)-(70,70).
+        let mut node = SceneNode::new(
+            "sq",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(30.0, 30.0, 40.0, 40.0))
+                    .with_fill(Fill::solid(Color::WHITE)),
+            ),
+        );
+        // Hard black shadow offset down-right by (20,20).
+        node.drop_shadow.enabled = true;
+        node.drop_shadow.color = Color::new(0.0, 0.0, 0.0, 1.0);
+        node.drop_shadow.opacity = 0.5;
+        node.drop_shadow.dx = 20.0;
+        node.drop_shadow.dy = 20.0;
+        node.drop_shadow.blur = 0.0;
+        doc.add_node(node, None);
+
+        let png = r.render_png_at_size(&doc, 100, 100);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        let at = |x, y| luma(img.get_pixel(x, y).0);
+
+        // (80,80): inside shadow square (50-90) but outside fill (30-70) → darkened.
+        let shadow = at(80, 80);
+        // (50,50): inside the white fill → stays bright (fill drawn over shadow).
+        let fill = at(50, 50);
+        // (10,10): untouched white artboard.
+        let bg = at(10, 10);
+
+        assert!(bg > 0.9, "artboard should be white, got {bg}");
+        assert!(fill > 0.9, "fill should be white, got {fill}");
+        assert!(
+            shadow < 0.8 && shadow > 0.2,
+            "shadow region should be a mid-gray (got {shadow})",
+        );
+    }
+
+    #[test]
+    fn object_blur_softens_the_edge() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping object-blur test");
+            return;
+        };
+        let mut doc = Document::new("blur", 100.0, 100.0);
+        let mut node = SceneNode::new(
+            "sq",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(30.0, 30.0, 40.0, 40.0))
+                    .with_fill(Fill::solid(Color::WHITE)),
+            ),
+        );
+        node.object_blur.enabled = true;
+        node.object_blur.radius = 8.0;
+        doc.add_node(node, None);
+
+        // Transparent background so the soft halo shows as partial coverage.
+        let opts = ExportOptions {
+            background: ExportBackground::Transparent,
+            ..Default::default()
+        };
+        let png = r.render_png_with_opts(&doc, 100, 100, &opts);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        // Square spans 30–70; just outside the right edge a hard fill would be
+        // fully transparent — a soft edge gives partial coverage there.
+        let halo = img.get_pixel(72, 50).0[3] as f32 / 255.0; // alpha, ~2px out
+        let far = img.get_pixel(95, 50).0[3] as f32 / 255.0;
+        let inside = img.get_pixel(50, 50).0[3] as f32 / 255.0;
+
+        assert!(inside > 0.9, "fill interior should be opaque, got {inside}");
+        assert!(
+            halo > 0.03 && halo < 0.95,
+            "edge should be partially covered (soft), got {halo}",
+        );
+        assert!(far < 0.05, "far outside should stay transparent, got {far}");
+    }
+
+    #[test]
+    fn soft_drop_shadow_falls_off_gradually() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping soft-shadow falloff test");
+            return;
+        };
+        let mut doc = Document::new("soft", 100.0, 100.0);
+        let mut node = SceneNode::new(
+            "sq",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(20.0, 20.0, 30.0, 30.0))
+                    .with_fill(Fill::solid(Color::WHITE)),
+            ),
+        );
+        node.drop_shadow.enabled = true;
+        node.drop_shadow.color = Color::new(0.0, 0.0, 0.0, 1.0);
+        node.drop_shadow.opacity = 1.0;
+        node.drop_shadow.dx = 0.0;
+        node.drop_shadow.dy = 0.0;
+        node.drop_shadow.blur = 10.0; // true gaussian
+        doc.add_node(node, None);
+
+        let opts = ExportOptions {
+            background: ExportBackground::Transparent,
+            ..Default::default()
+        };
+        let png = r.render_png_with_opts(&doc, 100, 100, &opts);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        // Shadow alpha just outside the right edge (x=50), increasing distance.
+        let a = |x: u32| img.get_pixel(x, 35).0[3] as f32 / 255.0;
+        let near = a(53); // 3px out
+        let mid = a(60); // 10px out
+        let outer = a(66); // 16px out
+
+        // A true Gaussian blur decays monotonically with distance; a hard edge
+        // would jump to ~0 immediately.
+        assert!(near > mid, "near ({near}) should exceed mid ({mid})");
+        assert!(mid > outer, "mid ({mid}) should exceed outer ({outer})");
+        assert!(
+            near > 0.1,
+            "shadow should be visible near the edge, got {near}"
+        );
     }
 }

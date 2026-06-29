@@ -100,6 +100,92 @@ fn gaussian_glow_disabled(g: &GaussianGlow) -> bool {
     !g.enabled
 }
 
+// ── DropShadow ────────────────────────────────────────────────────────────────
+
+/// A drop shadow: an offset, Gaussian-blurred silhouette composited *beneath*
+/// the object. Reuses the separable-blur pass that powers `GaussianGlow`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DropShadow {
+    pub color: Color,
+    pub opacity: f32,
+    /// Horizontal offset in document units (positive = right).
+    pub dx: f32,
+    /// Vertical offset in document units (positive = down).
+    pub dy: f32,
+    /// Blur radius (sigma) in document units. 0 = hard-edged shadow.
+    pub blur: f32,
+    pub enabled: bool,
+}
+
+impl Default for DropShadow {
+    fn default() -> Self {
+        Self {
+            color: Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.5,
+            dx: 4.0,
+            dy: 4.0,
+            blur: 6.0,
+            enabled: false,
+        }
+    }
+}
+
+fn drop_shadow_disabled(s: &DropShadow) -> bool {
+    !s.enabled
+}
+
+// ── ObjectBlur ────────────────────────────────────────────────────────────────
+
+/// A standalone Gaussian blur applied to the object itself (as opposed to a glow
+/// halo). For solid fills this softens the whole silhouette edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectBlur {
+    /// Blur radius (sigma) in document units.
+    pub radius: f32,
+    pub enabled: bool,
+}
+
+impl Default for ObjectBlur {
+    fn default() -> Self {
+        Self {
+            radius: 4.0,
+            enabled: false,
+        }
+    }
+}
+
+fn object_blur_disabled(b: &ObjectBlur) -> bool {
+    !b.enabled
+}
+
+// ── Feather ───────────────────────────────────────────────────────────────────
+
+/// Feather: soft-fade the object's alpha boundary by a given radius.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Feather {
+    /// Feather radius in document units.
+    pub radius: f32,
+    pub enabled: bool,
+}
+
+impl Default for Feather {
+    fn default() -> Self {
+        Self {
+            radius: 4.0,
+            enabled: false,
+        }
+    }
+}
+
+fn feather_disabled(f: &Feather) -> bool {
+    !f.enabled
+}
+
 // ── serde skip helpers ────────────────────────────────────────────────────────
 
 fn is_one_f32(v: &f32) -> bool {
@@ -157,6 +243,12 @@ pub struct SceneNode {
     pub inner_glow: GlowEffect,
     #[serde(default, skip_serializing_if = "gaussian_glow_disabled")]
     pub gaussian_glow: GaussianGlow,
+    #[serde(default, skip_serializing_if = "drop_shadow_disabled")]
+    pub drop_shadow: DropShadow,
+    #[serde(default, skip_serializing_if = "object_blur_disabled")]
+    pub object_blur: ObjectBlur,
+    #[serde(default, skip_serializing_if = "feather_disabled")]
+    pub feather: Feather,
     /// Optional per-asset export specification (Asset Export panel equivalent).
     #[serde(default, skip_serializing_if = "is_none_export_spec")]
     pub export_spec: Option<AssetExportSpec>,
@@ -188,6 +280,9 @@ impl SceneNode {
             outer_glow: GlowEffect::default(),
             inner_glow: GlowEffect::default(),
             gaussian_glow: GaussianGlow::default(),
+            drop_shadow: DropShadow::default(),
+            object_blur: ObjectBlur::default(),
+            feather: Feather::default(),
             export_spec: None,
             symbol_ref: None,
             symbol_fill_override: None,

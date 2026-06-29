@@ -417,11 +417,42 @@ pub fn create_blur_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+/// How a blur/composite pass blends its output into the target.
+#[derive(Copy, Clone, Debug)]
+pub enum BlurBlend {
+    /// Premultiplied-alpha "over" — the glow halo default.
+    Premultiplied,
+    /// Additive (`src*srcAlpha + dst`) — brighten without erasing.
+    Additive,
+    /// Straight-alpha "over" — correct for compositing straight-color layers
+    /// (the live-effects layer, whose textures hold non-premultiplied color).
+    StraightAlpha,
+}
+
 pub fn create_blur_pipeline(
     device: &wgpu::Device,
     output_format: wgpu::TextureFormat,
     blur_bgl: &wgpu::BindGroupLayout,
     additive: bool,
+) -> wgpu::RenderPipeline {
+    create_blur_pipeline_with_blend(
+        device,
+        output_format,
+        blur_bgl,
+        if additive {
+            BlurBlend::Additive
+        } else {
+            BlurBlend::Premultiplied
+        },
+    )
+}
+
+/// Like [`create_blur_pipeline`] but with an explicit blend mode.
+pub fn create_blur_pipeline_with_blend(
+    device: &wgpu::Device,
+    output_format: wgpu::TextureFormat,
+    blur_bgl: &wgpu::BindGroupLayout,
+    blend_mode: BlurBlend,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("blur_shader"),
@@ -432,8 +463,8 @@ pub fn create_blur_pipeline(
         bind_group_layouts: &[blur_bgl],
         push_constant_ranges: &[],
     });
-    let blend = if additive {
-        Some(wgpu::BlendState {
+    let blend = Some(match blend_mode {
+        BlurBlend::Additive => wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::SrcAlpha,
                 dst_factor: wgpu::BlendFactor::One,
@@ -444,10 +475,10 @@ pub fn create_blur_pipeline(
                 dst_factor: wgpu::BlendFactor::One,
                 operation: wgpu::BlendOperation::Add,
             },
-        })
-    } else {
-        Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING)
-    };
+        },
+        BlurBlend::Premultiplied => wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        BlurBlend::StraightAlpha => wgpu::BlendState::ALPHA_BLENDING,
+    });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("blur_pipeline"),
         layout: Some(&layout),

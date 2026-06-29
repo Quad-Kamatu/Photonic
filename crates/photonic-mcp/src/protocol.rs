@@ -1,6 +1,6 @@
 use photonic_core::{
-    color::Color, layer::BlendMode, ops::boolean::BooleanOp, style::LineJoin, GaussianGlow,
-    GlowEffect,
+    color::Color, layer::BlendMode, ops::boolean::BooleanOp, style::LineJoin, DropShadow, Feather,
+    GaussianGlow, GlowEffect, ObjectBlur,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1367,6 +1367,71 @@ impl From<GaussianGlowArg> for GaussianGlow {
     }
 }
 
+/// Drop-shadow effect argument for `update_node`.
+#[derive(Debug, Deserialize)]
+pub struct DropShadowArg {
+    pub enabled: bool,
+    pub color: [f32; 4],
+    pub opacity: f32,
+    /// Offset in document units (positive dx = right, dy = down).
+    pub dx: f32,
+    pub dy: f32,
+    /// Blur radius (sigma) in document units. 0 = hard-edged.
+    pub blur: f32,
+}
+
+impl From<DropShadowArg> for DropShadow {
+    fn from(a: DropShadowArg) -> Self {
+        Self {
+            enabled: a.enabled,
+            color: Color {
+                r: a.color[0],
+                g: a.color[1],
+                b: a.color[2],
+                a: a.color[3],
+            },
+            opacity: a.opacity,
+            dx: a.dx,
+            dy: a.dy,
+            blur: a.blur,
+        }
+    }
+}
+
+/// Object-blur effect argument for `update_node`.
+#[derive(Debug, Deserialize)]
+pub struct ObjectBlurArg {
+    pub enabled: bool,
+    /// Blur radius (sigma) in document units.
+    pub radius: f32,
+}
+
+impl From<ObjectBlurArg> for ObjectBlur {
+    fn from(a: ObjectBlurArg) -> Self {
+        Self {
+            enabled: a.enabled,
+            radius: a.radius,
+        }
+    }
+}
+
+/// Feather effect argument for `update_node`.
+#[derive(Debug, Deserialize)]
+pub struct FeatherArg {
+    pub enabled: bool,
+    /// Feather radius in document units.
+    pub radius: f32,
+}
+
+impl From<FeatherArg> for Feather {
+    fn from(a: FeatherArg) -> Self {
+        Self {
+            enabled: a.enabled,
+            radius: a.radius,
+        }
+    }
+}
+
 /// Arguments for `update_node` tool
 #[derive(Debug, Deserialize)]
 pub struct UpdateNodeArgs {
@@ -1407,6 +1472,12 @@ pub struct UpdateNodeArgs {
     pub inner_glow: Option<GlowEffectArg>,
     #[serde(default)]
     pub gaussian_glow: Option<GaussianGlowArg>,
+    #[serde(default)]
+    pub drop_shadow: Option<DropShadowArg>,
+    #[serde(default)]
+    pub object_blur: Option<ObjectBlurArg>,
+    #[serde(default)]
+    pub feather: Option<FeatherArg>,
 }
 
 /// Arguments for `apply_transform` tool

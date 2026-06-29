@@ -331,17 +331,20 @@ fn emit_node_inner(
         String::new()
     };
 
+    let filter = filter_attrs(node, defs);
+
     match &node.kind {
         SceneNodeKind::Path(p) => {
             let fill = fill_attrs(&p.fill, defs, grad_counter);
             let stroke = stroke_attrs(&p.stroke);
             body.push_str(&format!(
-                "{}<path{}{}{}{}{}{} d=\"{}\"/>\n",
+                "{}<path{}{}{}{}{}{}{} d=\"{}\"/>\n",
                 pad,
                 id_attr,
                 transform,
                 opacity,
                 blend,
+                filter,
                 fill,
                 stroke,
                 p.path_data.as_svg(),
@@ -349,8 +352,8 @@ fn emit_node_inner(
         }
         SceneNodeKind::Group(g) => {
             body.push_str(&format!(
-                "{}<g{}{}{}{}>\n",
-                pad, id_attr, transform, opacity, blend
+                "{}<g{}{}{}{}{}>\n",
+                pad, id_attr, transform, opacity, blend, filter
             ));
             for child_id in &g.children {
                 if let Some(child) = doc.nodes.get(child_id) {
@@ -431,6 +434,57 @@ fn transform_attr(t: &Transform) -> String {
         return String::new();
     }
     format!(" transform=\"matrix({a},{b},{c},{d},{e},{f})\"")
+}
+
+/// Emit an SVG `<filter>` for the node's live effects (drop shadow, object blur,
+/// feather) into `defs` and return the ` filter="url(#…)"` attribute, or an
+/// empty string when no effects are enabled. Effects chain in order: blur the
+/// source first, then the drop shadow.
+fn filter_attrs(node: &SceneNode, defs: &mut String) -> String {
+    let ds = &node.drop_shadow;
+    let ob = &node.object_blur;
+    let ft = &node.feather;
+    if !ds.enabled && !ob.enabled && !ft.enabled {
+        return String::new();
+    }
+    let id = format!("fx{}", node.id.simple());
+    let mut prims = String::new();
+    // Object blur / feather both soften the graphic; object blur wins if both set.
+    if ob.enabled {
+        prims.push_str(&format!(
+            "    <feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{:.3}\"/>\n",
+            ob.radius
+        ));
+    } else if ft.enabled {
+        prims.push_str(&format!(
+            "    <feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{:.3}\"/>\n",
+            ft.radius
+        ));
+    }
+    if ds.enabled {
+        let c = &ds.color;
+        let hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8
+        );
+        prims.push_str(&format!(
+            "    <feDropShadow dx=\"{:.3}\" dy=\"{:.3}\" stdDeviation=\"{:.3}\" \
+             flood-color=\"{}\" flood-opacity=\"{:.3}\"/>\n",
+            ds.dx,
+            ds.dy,
+            ds.blur,
+            hex,
+            (c.a * ds.opacity).clamp(0.0, 1.0),
+        ));
+    }
+    // Generous region so blurs/shadows are not clipped.
+    defs.push_str(&format!(
+        "    <filter id=\"{}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">\n{}    </filter>\n",
+        id, prims
+    ));
+    format!(" filter=\"url(#{})\"", id)
 }
 
 fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
@@ -967,5 +1021,57 @@ mod tests {
             text.contains("0 1 0 rg"),
             "expected first-stop green fill:\n{text}"
         );
+    }
+
+    #[test]
+    fn live_effects_export_svg_filters() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        node.drop_shadow.enabled = true;
+        node.drop_shadow.dx = 5.0;
+        node.drop_shadow.dy = 6.0;
+        node.drop_shadow.blur = 3.0;
+        node.object_blur.enabled = true;
+        node.object_blur.radius = 2.5;
+        doc.add_node(node, None);
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(svg.contains("<filter"), "expected a filter def:\n{svg}");
+        assert!(
+            svg.contains("<feDropShadow"),
+            "expected feDropShadow:\n{svg}"
+        );
+        assert!(svg.contains("dx=\"5.000\""), "expected shadow dx:\n{svg}");
+        assert!(
+            svg.contains("<feGaussianBlur"),
+            "expected feGaussianBlur:\n{svg}"
+        );
+        assert!(
+            svg.contains("filter=\"url(#fx"),
+            "path should reference the filter:\n{svg}"
+        );
+    }
+
+    #[test]
+    fn no_filter_emitted_without_effects() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        doc.add_node(node, None);
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(!svg.contains("<filter"), "no effects → no filter:\n{svg}");
     }
 }

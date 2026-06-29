@@ -30,8 +30,8 @@ pub use history::{CheckpointInfo, Command, CommandHistory};
 pub use import::{import_svg, ImportError};
 pub use layer::{BlendMode, Layer, LayerId};
 pub use node::{
-    AssetExportSpec, FontStyle, GaussianGlow, GlowEffect, NodeId, PrimitiveKind, RasterNode,
-    SceneNode, SceneNodeKind,
+    AssetExportSpec, DropShadow, Feather, FontStyle, GaussianGlow, GlowEffect, NodeId, ObjectBlur,
+    PrimitiveKind, RasterNode, SceneNode, SceneNodeKind,
 };
 pub use path::PathData;
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
