@@ -29,6 +29,8 @@ pub enum Tool {
     Lasso,
     Pencil,
     Smooth,
+    /// Shape variable-width strokes by dragging width handles on a path.
+    Width,
     /// Paint pixels onto the active raster layer.
     RasterBrush,
     /// Erase pixels from the active raster layer.
@@ -61,6 +63,7 @@ impl Tool {
             Tool::Lasso => "Lasso",
             Tool::Pencil => "Pencil",
             Tool::Smooth => "Smooth",
+            Tool::Width => "Width",
             Tool::RasterBrush => "Brush",
             Tool::RasterEraser => "Eraser",
         }
@@ -91,6 +94,7 @@ impl Tool {
             Tool::Lasso => ph::LASSO,
             Tool::Pencil => ph::PENCIL,
             Tool::Smooth => ph::WAVE_SINE,
+            Tool::Width => ph::ARROWS_VERTICAL,
             Tool::RasterBrush => ph::PAINT_BRUSH,
             Tool::RasterEraser => ph::ERASER,
         }
@@ -131,6 +135,9 @@ impl Tool {
                 "Draw freehand paths by dragging — anchor points auto-generated along the stroke"
             }
             Tool::Smooth => "Drag over a path to smooth its anchor points using corner-cutting",
+            Tool::Width => {
+                "Drag width handles on a stroke to shape a variable-width profile (Alt: one side)"
+            }
             Tool::RasterBrush => "Paint pixels onto the selected raster layer by dragging",
             Tool::RasterEraser => "Erase pixels from the selected raster layer by dragging",
         }
@@ -152,6 +159,7 @@ impl Tool {
                 | Tool::Lasso
                 | Tool::Pencil
                 | Tool::Smooth
+                | Tool::Width
                 | Tool::RasterBrush
                 | Tool::RasterEraser
         )

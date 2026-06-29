@@ -426,6 +426,8 @@ pub enum PanelAction {
     SaveWidthProfile { stroke_width: f64, name: String },
     /// Delete a named width profile.
     DeleteWidthProfile { name: String },
+    /// Rename an existing width profile (e.g. one shaped with the Width tool).
+    RenameWidthProfile { old_name: String, new_name: String },
     /// Save a graphic style from the selected node.
     SaveGraphicStyle { node_id: NodeId, name: String },
     /// Apply a named graphic style to the selected node.
@@ -5145,8 +5147,9 @@ pub fn draw_properties_panel(
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "{} (avg {:.1}px)",
+                                    "{} ({} pts, avg {:.1}px)",
                                     wp.name,
+                                    wp.widths.len(),
                                     wp.average_width()
                                 ))
                                 .small(),
@@ -5162,6 +5165,17 @@ pub fn draw_properties_panel(
                                         profile_name: wp.name.clone(),
                                     });
                                 }
+                            }
+                            let rename = width_profile_name_input.trim();
+                            if ui
+                                .add_enabled(!rename.is_empty(), egui::Button::new(ph::PENCIL).small())
+                                .on_hover_text("Rename to the text in the name field below")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::RenameWidthProfile {
+                                    old_name: wp.name.clone(),
+                                    new_name: rename.to_string(),
+                                });
                             }
                             if ui.small_button(ph::X).clicked() {
                                 action = Some(PanelAction::DeleteWidthProfile {

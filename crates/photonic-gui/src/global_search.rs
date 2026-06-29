@@ -87,6 +87,7 @@ fn tool_keywords(t: Tool) -> &'static [&'static str] {
         Tool::Lasso => &["freehand select", "loop"],
         Tool::Pencil => &["freehand", "sketch", "draw"],
         Tool::Smooth => &["simplify", "relax", "clean"],
+        Tool::Width => &["width", "variable width", "stroke width", "taper", "profile"],
         Tool::RasterBrush => &["paint", "pixel", "draw", "raster"],
         Tool::RasterEraser => &["erase", "rubber", "raster", "delete pixels"],
     }

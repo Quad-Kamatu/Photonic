@@ -1,5 +1,5 @@
 use crate::{
-    document::{Document, Guide},
+    document::{Document, Guide, WidthProfile},
     layer::{Layer, LayerId},
     node::{NodeId, SceneNode},
 };
@@ -602,6 +602,14 @@ pub enum Command {
         new: Vec<crate::Artboard>,
     },
 
+    /// Replace the entire variable-width profile list (used by the Width tool
+    /// when editing a profile's samples on canvas). Profiles are small, so the
+    /// whole list is snapshotted for self-contained undo.
+    SetWidthProfiles {
+        old: Vec<WidthProfile>,
+        new: Vec<WidthProfile>,
+    },
+
     /// Resize the document canvas.
     ResizeCanvas {
         old_width: f64,
@@ -630,6 +638,7 @@ impl Command {
             Command::MoveNodeToLayer { .. } => "Move node to layer".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
             Command::SetArtboards { .. } => "Update artboards".to_string(),
+            Command::SetWidthProfiles { .. } => "Edit width profile".to_string(),
             Command::ResizeCanvas {
                 new_width,
                 new_height,
@@ -788,6 +797,10 @@ impl Command {
                 }
             }
 
+            Command::SetWidthProfiles { new, .. } => {
+                doc.width_profiles = new.clone();
+            }
+
             Command::ResizeCanvas {
                 new_width,
                 new_height,
@@ -926,6 +939,11 @@ impl Command {
             }),
 
             Command::SetArtboards { old, new } => Some(Command::SetArtboards {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+
+            Command::SetWidthProfiles { old, new } => Some(Command::SetWidthProfiles {
                 old: new.clone(),
                 new: old.clone(),
             }),

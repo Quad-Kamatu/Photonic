@@ -252,26 +252,78 @@ impl GraphicStyle {
 
 // ─── Variable Width Profiles ─────────────────────────────────────────────────
 
-/// A named variable-width stroke profile. Width values are sampled at uniform
-/// t intervals along the path (t=0 at start, t=1 at end). When applied, the
-/// average width is used for uniform rendering; the profile is stored for
-/// future variable-width rendering support.
+/// A named variable-width stroke profile. Width values are sampled along the
+/// path (t=0 at start, t=1 at end). When applied, the average width is used for
+/// uniform rendering; the profile is stored for future variable-width rendering
+/// support.
+///
+/// Each width in [`widths`](Self::widths) has an explicit normalized
+/// arc-length position in [`positions`](Self::positions). For documents written
+/// before positions existed, `positions` deserializes empty and the samples are
+/// treated as evenly spaced (see [`effective_positions`](Self::effective_positions)).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WidthProfile {
     pub id: Uuid,
     /// Unique display name.
     pub name: String,
-    /// Width samples at even t intervals along the path (in document units).
-    /// Must have at least 2 values.
+    /// Width samples along the path (in document units). Must have at least 2
+    /// values. Paired index-for-index with [`positions`](Self::positions).
     pub widths: Vec<f64>,
+    /// Normalized arc-length position `[0, 1]` of each width sample. When empty
+    /// (legacy files), samples are treated as evenly spaced.
+    #[serde(default)]
+    pub positions: Vec<f64>,
+    /// Optional per-sample width for the right side of the stroke, enabling
+    /// asymmetric profiles. `None` means the profile is symmetric and
+    /// [`widths`](Self::widths) applies to both sides.
+    #[serde(default)]
+    pub widths_right: Option<Vec<f64>>,
 }
 
 impl WidthProfile {
+    /// Create a symmetric profile with evenly spaced sample positions.
     pub fn new(name: impl Into<String>, widths: Vec<f64>) -> Self {
+        let positions = Self::uniform_positions(widths.len());
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
             widths,
+            positions,
+            widths_right: None,
+        }
+    }
+
+    /// Create a profile with explicit sample positions.
+    pub fn with_positions(
+        name: impl Into<String>,
+        positions: Vec<f64>,
+        widths: Vec<f64>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            widths,
+            positions,
+            widths_right: None,
+        }
+    }
+
+    /// Evenly spaced positions for `count` samples: `[0, …, 1]`.
+    pub fn uniform_positions(count: usize) -> Vec<f64> {
+        match count {
+            0 => Vec::new(),
+            1 => vec![0.0],
+            n => (0..n).map(|i| i as f64 / (n - 1) as f64).collect(),
+        }
+    }
+
+    /// Positions to use for interpolation: the stored [`positions`](Self::positions)
+    /// when they match the sample count, otherwise evenly spaced fallbacks.
+    pub fn effective_positions(&self) -> Vec<f64> {
+        if self.positions.len() == self.widths.len() {
+            self.positions.clone()
+        } else {
+            Self::uniform_positions(self.widths.len())
         }
     }
 
@@ -1290,6 +1342,31 @@ mod tests {
             "blue channel should be 1.0"
         );
         assert!((sampled[0]).abs() < 1e-6, "red channel should be 0.0");
+    }
+
+    #[test]
+    fn width_profile_new_seeds_uniform_positions() {
+        let wp = WidthProfile::new("taper", vec![2.0, 6.0, 10.0]);
+        assert_eq!(wp.positions, vec![0.0, 0.5, 1.0]);
+        assert!(wp.widths_right.is_none());
+        assert!((wp.average_width() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn width_profile_legacy_json_defaults_positions_empty_then_falls_back() {
+        // A document written before `positions`/`widths_right` existed.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"old","widths":[1.0,3.0]}"#;
+        let wp: WidthProfile = serde_json::from_str(json).unwrap();
+        assert!(wp.positions.is_empty(), "legacy files have no positions");
+        assert!(wp.widths_right.is_none());
+        // Fallback fills evenly spaced positions matching the sample count.
+        assert_eq!(wp.effective_positions(), vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn width_profile_with_explicit_positions_preserved() {
+        let wp = WidthProfile::with_positions("t", vec![0.0, 0.3, 1.0], vec![1.0, 5.0, 2.0]);
+        assert_eq!(wp.effective_positions(), vec![0.0, 0.3, 1.0]);
     }
 }
 

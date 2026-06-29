@@ -8,6 +8,7 @@ mod direct_select;
 mod tool_handlers;
 mod layer_ops;
 mod erase_tools;
+mod width_tool;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -537,6 +538,21 @@ pub struct PhotonicApp {
     pub graphic_style_name_input: String,
     /// Text input for naming a new width profile in the Width Profiles panel.
     pub width_profile_name_input: String,
+    // ── Width tool (interactive variable-width stroke editing) ──────────────
+    /// Path node the Width-tool cursor is currently hovering, if any.
+    pub width_tool_hovered_node: Option<NodeId>,
+    /// Normalized arc-length position `[0, 1]` on the hovered path under the cursor.
+    pub width_tool_hovered_t: f64,
+    /// Index (into the active profile's samples) of the width handle being edited.
+    pub width_tool_selected_point: Option<usize>,
+    /// Which side handle is being dragged: `true` = right/bottom, `false` = left/top.
+    pub width_tool_drag_right: bool,
+    /// Canvas-space `y` recorded when a width-handle drag began (for delta math).
+    pub width_tool_drag_origin_y: Option<f64>,
+    /// Snapshot of `doc.width_profiles` taken at drag start, for a single undo step.
+    pub width_tool_profiles_before: Option<Vec<photonic_core::WidthProfile>>,
+    /// Text input for naming the profile saved from the Width tool.
+    pub width_tool_save_name: String,
     /// Cached grammar rule list: (name, rule_type).
     pub grammar_rules: Vec<(String, String)>,
     /// Text input for the new grammar rule name.
@@ -779,6 +795,13 @@ impl Default for PhotonicApp {
             swatch_library_selected: String::new(),
             graphic_style_name_input: String::new(),
             width_profile_name_input: String::new(),
+            width_tool_hovered_node: None,
+            width_tool_hovered_t: 0.0,
+            width_tool_selected_point: None,
+            width_tool_drag_right: false,
+            width_tool_drag_origin_y: None,
+            width_tool_profiles_before: None,
+            width_tool_save_name: String::new(),
             grammar_rules: Vec::new(),
             grammar_rule_name_input: String::new(),
             grammar_rule_type_selected: String::new(),
@@ -1839,7 +1862,7 @@ impl PhotonicApp {
                                 ("Selection & Navigation", &[Tool::Select, Tool::DirectSelect, Tool::Pan]),
                                 ("Shapes", &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Arc, Tool::Polygon, Tool::Star, Tool::Line, Tool::Grid, Tool::PolarGrid]),
                                 ("Drawing & Text", &[Tool::Pen, Tool::ShapeBuilder, Tool::Text]),
-                                ("Path Editing", &[Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth]),
+                                ("Path Editing", &[Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth, Tool::Width]),
                                 ("Raster", &[Tool::RasterBrush, Tool::RasterEraser]),
                             ];
 
@@ -4029,6 +4052,19 @@ impl PhotonicApp {
                     if response.dragged_by(egui::PointerButton::Primary) {
                         return;
                     }
+                }
+
+                // ── Width tool (interactive variable-width stroke editing) ────
+                if self.active_tool == Tool::Width {
+                    self.handle_width_tool(
+                        ui,
+                        &response,
+                        doc,
+                        view,
+                        &mut doc_modified,
+                        history,
+                    );
+                    return;
                 }
 
                 // ── Text tool ─────────────────────────────────────────────────
@@ -7588,6 +7624,31 @@ impl PhotonicApp {
                 PanelAction::DeleteWidthProfile { name } => {
                     doc.width_profiles.retain(|p| p.name != name);
                     doc_modified = true;
+                }
+
+                PanelAction::RenameWidthProfile { old_name, new_name } => {
+                    let new_name = new_name.trim().to_string();
+                    let exists = doc.width_profiles.iter().any(|p| p.name == old_name);
+                    let clashes = doc
+                        .width_profiles
+                        .iter()
+                        .any(|p| p.name == new_name && p.name != old_name);
+                    if exists && !new_name.is_empty() && !clashes {
+                        let before = doc.width_profiles.clone();
+                        let mut after = before.clone();
+                        if let Some(p) = after.iter_mut().find(|p| p.name == old_name) {
+                            p.name = new_name;
+                        }
+                        history.execute(
+                            Command::SetWidthProfiles {
+                                old: before,
+                                new: after,
+                            },
+                            doc,
+                        );
+                        self.width_profile_name_input.clear();
+                        doc_modified = true;
+                    }
                 }
 
                 PanelAction::SaveGraphicStyle { node_id, name } => {
