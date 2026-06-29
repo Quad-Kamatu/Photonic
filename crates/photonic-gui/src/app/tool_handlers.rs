@@ -112,13 +112,14 @@ impl PhotonicApp {
                 self.do_group_selected(doc, history, doc_modified);
             }
 
-            // Ctrl+Y: toggle Outline Mode
-            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+            // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
+            // a user remap takes effect (#140).
+            if self.binding_pressed(ui.ctx(), "view.outline_mode") {
                 self.outline_mode = !self.outline_mode;
             }
 
-            // Ctrl+;: toggle guide visibility
-            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Semicolon)) {
+            // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
+            if self.binding_pressed(ui.ctx(), "view.toggle_guides") {
                 self.guides_visible = !self.guides_visible;
             }
 
@@ -173,105 +174,48 @@ impl PhotonicApp {
                 }
             }
 
-            // Ctrl+Shift+H: flip horizontal / Ctrl+Shift+V: flip vertical
-            if ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::H)) {
-                let sel: Vec<NodeId> = doc.selection.node_ids.iter().copied().collect();
-                for nid in &sel {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        if let SceneNodeKind::Path(pn) = &node.kind {
-                            use kurbo::Shape;
-                            let bez = pn.path_data.to_bez_path();
-                            let bbox = bez.bounding_box();
-                            let cx = bbox.x0 + bbox.width() / 2.0;
-                            let mut new_bez = BezPath::new();
-                            for el in bez.elements() {
-                                let flip = |p: kurbo::Point| kurbo::Point::new(2.0 * cx - p.x, p.y);
-                                match *el {
-                                    PathEl::MoveTo(p) => new_bez.move_to(flip(p)),
-                                    PathEl::LineTo(p) => new_bez.line_to(flip(p)),
-                                    PathEl::CurveTo(c1, c2, p) => {
-                                        new_bez.curve_to(flip(c1), flip(c2), flip(p))
-                                    }
-                                    PathEl::QuadTo(c, p) => new_bez.quad_to(flip(c), flip(p)),
-                                    PathEl::ClosePath => new_bez.close_path(),
-                                }
-                            }
-                            let mut new_node = node.clone();
-                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
-                                np.path_data = PathData::from_bez_path(&new_bez);
-                            }
-                            history.execute(
-                                Command::UpdateNode {
-                                    old: node.clone(),
-                                    new: new_node,
-                                },
-                                doc,
-                            );
-                            *doc_modified = true;
-                        }
-                    }
-                }
+            // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
+            // — keymap-resolved and routed through the shared flip helper (#140).
+            if self.binding_pressed(ui.ctx(), "object.flip_horizontal")
+                && self.flip_selection(doc, history, true)
+            {
+                *doc_modified = true;
             }
-            if ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::J)) {
-                let sel: Vec<NodeId> = doc.selection.node_ids.iter().copied().collect();
-                for nid in &sel {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        if let SceneNodeKind::Path(pn) = &node.kind {
-                            use kurbo::Shape;
-                            let bez = pn.path_data.to_bez_path();
-                            let bbox = bez.bounding_box();
-                            let cy = bbox.y0 + bbox.height() / 2.0;
-                            let mut new_bez = BezPath::new();
-                            for el in bez.elements() {
-                                let flip = |p: kurbo::Point| kurbo::Point::new(p.x, 2.0 * cy - p.y);
-                                match *el {
-                                    PathEl::MoveTo(p) => new_bez.move_to(flip(p)),
-                                    PathEl::LineTo(p) => new_bez.line_to(flip(p)),
-                                    PathEl::CurveTo(c1, c2, p) => {
-                                        new_bez.curve_to(flip(c1), flip(c2), flip(p))
-                                    }
-                                    PathEl::QuadTo(c, p) => new_bez.quad_to(flip(c), flip(p)),
-                                    PathEl::ClosePath => new_bez.close_path(),
-                                }
-                            }
-                            let mut new_node = node.clone();
-                            if let SceneNodeKind::Path(ref mut np) = new_node.kind {
-                                np.path_data = PathData::from_bez_path(&new_bez);
-                            }
-                            history.execute(
-                                Command::UpdateNode {
-                                    old: node.clone(),
-                                    new: new_node,
-                                },
-                                doc,
-                            );
-                            *doc_modified = true;
-                        }
-                    }
-                }
+            if self.binding_pressed(ui.ctx(), "object.flip_vertical")
+                && self.flip_selection(doc, history, false)
+            {
+                *doc_modified = true;
             }
 
-            // Ctrl+Z: undo / Ctrl+R: redo
-
-            let (ctrl_z, ctrl_r) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                    i.modifiers.ctrl && i.key_pressed(egui::Key::R),
-                )
-            });
-            if ctrl_z {
-                if history.undo(doc) {
-                    self.selected_id = doc.selection.ids().next().copied();
-                    self.invalidate_point_edit(doc);
-                    *doc_modified = true;
-                }
+            // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
+            if self.binding_pressed(ui.ctx(), "edit.undo")
+                && self.dispatch_command("edit.undo", doc, history)
+            {
+                *doc_modified = true;
             }
-            if ctrl_r {
-                if history.redo(doc) {
-                    self.selected_id = doc.selection.ids().next().copied();
-                    self.invalidate_point_edit(doc);
-                    *doc_modified = true;
-                }
+            if self.binding_pressed(ui.ctx(), "edit.redo")
+                && self.dispatch_command("edit.redo", doc, history)
+            {
+                *doc_modified = true;
+            }
+
+            // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
+            // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
+            // remap actually fire on the canvas (#140).
+            if self.binding_pressed(ui.ctx(), "selection.select_all")
+                && self.dispatch_command("selection.select_all", doc, history)
+            {
+                *doc_modified = true;
+            }
+            if self.binding_pressed(ui.ctx(), "selection.deselect")
+                && self.dispatch_command("selection.deselect", doc, history)
+            {
+                *doc_modified = true;
+            }
+            if self.binding_pressed(ui.ctx(), "edit.duplicate")
+                && self.dispatch_command("edit.duplicate", doc, history)
+            {
+                *doc_modified = true;
             }
         } // end viewport_kb
 

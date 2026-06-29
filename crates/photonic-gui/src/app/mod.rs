@@ -10,6 +10,7 @@ mod layer_ops;
 mod erase_tools;
 mod width_tool;
 mod rulers;
+mod command_center;
 pub(crate) use rulers::GuideEditPopup;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
@@ -118,7 +119,8 @@ pub enum DiffCategory {
 }
 
 const FILE_OPTIONS: &[&str] = &["Document", "Save", "Export"];
-const EDIT_OPTIONS: &[&str] = &["Appearance", "Canvas", "Tool Defaults", "Behavior"];
+const EDIT_OPTIONS: &[&str] =
+    &["Appearance", "Canvas", "Tool Defaults", "Behavior", "Keyboard Shortcuts"];
 
 // ─── Export dialog ────────────────────────────────────────────────────────────
 
@@ -370,6 +372,14 @@ pub struct PhotonicApp {
     global_search: String,
     /// On-device semantic index for the global search (background embedder).
     semantic: crate::global_search::SemanticIndex,
+    /// Ctrl/Cmd+K command palette (#140): open state, query, and selection.
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_sel: usize,
+    /// Request focus for the palette input on the frame it opens.
+    command_palette_focus: bool,
+    /// Command id currently capturing a new key in the Keyboard Shortcuts page.
+    shortcut_capture: Option<String>,
     /// In-flight self-update check (result polled each frame).
     update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateStatus>>,
     /// In-flight launch-time "is a newer release available?" check (no download).
@@ -762,6 +772,11 @@ impl Default for PhotonicApp {
                     .map(crate::global_search::corpus_text)
                     .collect(),
             ),
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_sel: 0,
+            command_palette_focus: false,
+            shortcut_capture: None,
             update_rx: None,
             update_check_rx: None,
             update_available: None,
@@ -1278,6 +1293,12 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // ── Command palette (Ctrl/Cmd+K) — drawn on top of everything ─────────
+        // Handled before tool dispatch so a chosen command runs this frame.
+        if self.command_palette(ctx, doc, history) {
+            doc_modified = true;
+        }
 
         // ── Poll an in-flight self-update check ───────────────────────────────
         if let Some(rx) = &self.update_rx {
@@ -1885,6 +1906,125 @@ impl PhotonicApp {
                                                 .fixed_decimals(1))
                                                 .on_hover_text("Distance moved per arrow key press (Shift×10)");
                                         });
+                                    }
+                                    Some(4) => {
+                                        ui.label(RichText::new("Keyboard Shortcuts").strong());
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{}  Press Ctrl/Cmd+K anywhere to open the command palette.",
+                                                ph::COMMAND
+                                            ))
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(6.0);
+
+                                        // While capturing, the next non-modifier key press becomes the
+                                        // new binding. Escape cancels.
+                                        if let Some(cap_id) = self.shortcut_capture.clone() {
+                                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                                self.shortcut_capture = None;
+                                            } else if let Some((k, m)) = ui.input(|i| {
+                                                egui::Key::ALL
+                                                    .iter()
+                                                    .copied()
+                                                    .find(|k| {
+                                                        *k != egui::Key::Escape && i.key_pressed(*k)
+                                                    })
+                                                    .map(|k| (k, i.modifiers))
+                                            }) {
+                                                let b = crate::commands::KeyBinding {
+                                                    key: k,
+                                                    ctrl: m.ctrl || m.command || m.mac_cmd,
+                                                    shift: m.shift,
+                                                    alt: m.alt,
+                                                    command: false,
+                                                };
+                                                self.prefs.keymap.insert(cap_id, b);
+                                                self.prefs.save();
+                                                self.shortcut_capture = None;
+                                            }
+                                        }
+
+                                        let mut begin: Option<String> = None;
+                                        let mut reset: Option<String> = None;
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("shortcuts_scroll")
+                                            .max_height((content_height - 70.0).max(120.0))
+                                            .show(ui, |ui| {
+                                                egui::Grid::new("shortcuts_grid")
+                                                    .num_columns(3)
+                                                    .striped(true)
+                                                    .spacing([12.0, 6.0])
+                                                    .show(ui, |ui| {
+                                                        for def in crate::commands::REGISTRY {
+                                                            ui.label(def.label);
+                                                            let binding =
+                                                                self.prefs.resolve_binding(def.id);
+                                                            let capturing = self
+                                                                .shortcut_capture
+                                                                .as_deref()
+                                                                == Some(def.id);
+                                                            let btn_text = if capturing {
+                                                                "Press a key…".to_string()
+                                                            } else {
+                                                                binding
+                                                                    .map(|b| b.display())
+                                                                    .unwrap_or_else(|| "—".to_string())
+                                                            };
+                                                            if ui
+                                                                .add_sized(
+                                                                    [140.0, 20.0],
+                                                                    egui::Button::new(btn_text),
+                                                                )
+                                                                .on_hover_text(
+                                                                    "Click, then press the new shortcut (Esc cancels)",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                begin = Some(def.id.to_string());
+                                                            }
+                                                            ui.horizontal(|ui| {
+                                                                if let Some(b) = binding {
+                                                                    if let Some(other) = self
+                                                                        .prefs
+                                                                        .binding_conflict(def.id, b)
+                                                                    {
+                                                                        ui.colored_label(
+                                                                            Color32::from_rgb(
+                                                                                220, 150, 60,
+                                                                            ),
+                                                                            format!(
+                                                                                "{} conflicts with {}",
+                                                                                ph::WARNING, other
+                                                                            ),
+                                                                        );
+                                                                    }
+                                                                }
+                                                                if self
+                                                                    .prefs
+                                                                    .keymap
+                                                                    .contains_key(def.id)
+                                                                    && ui
+                                                                        .small_button("Reset")
+                                                                        .clicked()
+                                                                {
+                                                                    reset =
+                                                                        Some(def.id.to_string());
+                                                                }
+                                                            });
+                                                            ui.end_row();
+                                                        }
+                                                    });
+                                            });
+                                        if let Some(id) = begin {
+                                            self.shortcut_capture = Some(id);
+                                        }
+                                        if let Some(id) = reset {
+                                            self.prefs.keymap.remove(&id);
+                                            self.prefs.save();
+                                        }
                                     }
                                     _ => {}
                                 },

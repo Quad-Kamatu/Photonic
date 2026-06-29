@@ -1,5 +1,7 @@
+use crate::commands::KeyBinding;
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPreferences {
@@ -50,6 +52,12 @@ pub struct AppPreferences {
     // HOTBAR — tools pinned to the sidebar by the user
     #[serde(default)]
     pub pinned_tools: Vec<Tool>,
+
+    // KEYBOARD — user shortcut overrides, keyed by `commands::CommandId`.
+    // Empty by default (every command uses its registry default). User remaps in
+    // the Keyboard Shortcuts settings page populate this and persist to disk.
+    #[serde(default)]
+    pub keymap: HashMap<String, KeyBinding>,
 }
 
 fn default_nudge_distance() -> f64 {
@@ -87,11 +95,35 @@ impl Default for AppPreferences {
             auto_check_updates: true,
             last_seen_version: String::new(),
             pinned_tools: Vec::new(),
+            keymap: HashMap::new(),
         }
     }
 }
 
 impl AppPreferences {
+    /// The active binding for a command: the user override if present, otherwise
+    /// the registry default. `None` means the command has no shortcut.
+    pub fn resolve_binding(&self, id: &str) -> Option<KeyBinding> {
+        if let Some(b) = self.keymap.get(id) {
+            return Some(*b);
+        }
+        crate::commands::default_binding(id)
+    }
+
+    /// Any other command whose *resolved* binding equals `binding`, excluding
+    /// `for_id`. Used for conflict warnings in the Keyboard Shortcuts UI.
+    pub fn binding_conflict(&self, for_id: &str, binding: KeyBinding) -> Option<String> {
+        for def in crate::commands::REGISTRY {
+            if def.id == for_id {
+                continue;
+            }
+            if self.resolve_binding(def.id) == Some(binding) {
+                return Some(def.label.to_string());
+            }
+        }
+        None
+    }
+
     fn prefs_path() -> Option<std::path::PathBuf> {
         let appdata = std::env::var("APPDATA").ok()?;
         Some(
