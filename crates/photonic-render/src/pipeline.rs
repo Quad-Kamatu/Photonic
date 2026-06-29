@@ -1,4 +1,132 @@
 use bytemuck::{Pod, Zeroable};
+use photonic_core::layer::BlendMode;
+
+/// The four separable blend modes implementable with fixed-function GPU blending.
+///
+/// Backdrop-read modes (Overlay, SoftLight, ColorDodge, ColorBurn) and the
+/// non-separable HSL modes (Hue, Saturation, Color, Luminosity) cannot be
+/// expressed as a `wgpu::BlendState` and require an offscreen-composite shader
+/// pass — they are a documented follow-up (issue #17) and currently fall back to
+/// normal alpha blending.
+pub const SEPARABLE_BLEND_MODES: [BlendMode; 4] = [
+    BlendMode::Multiply,
+    BlendMode::Screen,
+    BlendMode::Darken,
+    BlendMode::Lighten,
+];
+
+/// Returns the fixed-function `BlendState` implementing `mode`, or `None` when
+/// the mode is not expressible as fixed-function blending (Normal, or a
+/// backdrop-read / HSL mode that needs a shader pass).
+///
+/// The colour-channel mappings are exact for opaque fills (alpha = 1) over an
+/// opaque backdrop, which is the common case. Partial-alpha blended fills are
+/// approximated; full Porter-Duff alpha compositing is a documented follow-up.
+pub fn separable_blend_state(mode: BlendMode) -> Option<wgpu::BlendState> {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+
+    // Preserve the backdrop's alpha so a blended shape never punches a hole in
+    // the coverage of whatever is underneath it.
+    let keep_dst_alpha = BlendComponent {
+        src_factor: BlendFactor::Zero,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    };
+    let color = match mode {
+        // Cs * Cb
+        BlendMode::Multiply => BlendComponent {
+            src_factor: BlendFactor::Dst,
+            dst_factor: BlendFactor::Zero,
+            operation: BlendOperation::Add,
+        },
+        // Cs + Cb - Cs*Cb  ==  Cs*(1 - Cb) + Cb
+        BlendMode::Screen => BlendComponent {
+            src_factor: BlendFactor::OneMinusDst,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+        // min(Cs, Cb) — factors are ignored for Min/Max operations.
+        BlendMode::Darken => BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Min,
+        },
+        // max(Cs, Cb)
+        BlendMode::Lighten => BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Max,
+        },
+        _ => return None,
+    };
+    Some(BlendState {
+        color,
+        alpha: keep_dst_alpha,
+    })
+}
+
+/// A contiguous run of indices that share one blend mode, drawn in a single
+/// `draw_indexed` call with the matching pipeline.
+#[derive(Clone)]
+pub(crate) struct DrawSegment {
+    pub mode: BlendMode,
+    /// Offset into the index buffer.
+    pub start: u32,
+    /// Number of indices in the run.
+    pub count: u32,
+}
+
+/// Coalesce per-node `(mode, start, end)` index ranges (in draw order) into
+/// contiguous draw runs, merging adjacent runs that share a mode. The common
+/// all-`Normal` scene collapses to a single segment.
+pub(crate) fn coalesce_segments(raw: Vec<(BlendMode, u32, u32)>) -> Vec<DrawSegment> {
+    let mut segments: Vec<DrawSegment> = Vec::new();
+    for (mode, start, end) in raw {
+        if end == start {
+            continue;
+        }
+        if let Some(last) = segments.last_mut() {
+            if last.mode == mode && last.start + last.count == start {
+                last.count += end - start;
+                continue;
+            }
+        }
+        segments.push(DrawSegment {
+            mode,
+            start,
+            count: end - start,
+        });
+    }
+    segments
+}
+
+/// Issue one `draw_indexed` per blend-mode run, selecting the matching blend
+/// pipeline and falling back to `fill_pipeline` for modes without one. Runs are
+/// in draw order, so fixed-function blends composite against the correct
+/// backdrop. With no segments (e.g. first frame), draws all indices once with
+/// `fill_pipeline`, preserving the original single-draw behaviour.
+pub(crate) fn draw_segments<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    segments: &[DrawSegment],
+    blend_pipelines: &'a [(BlendMode, wgpu::RenderPipeline)],
+    fill_pipeline: &'a wgpu::RenderPipeline,
+    index_count: u32,
+) {
+    if segments.is_empty() {
+        pass.set_pipeline(fill_pipeline);
+        pass.draw_indexed(0..index_count, 0, 0..1);
+        return;
+    }
+    for seg in segments {
+        let pipeline = blend_pipelines
+            .iter()
+            .find(|(m, _)| *m == seg.mode)
+            .map(|(_, p)| p)
+            .unwrap_or(fill_pipeline);
+        pass.set_pipeline(pipeline);
+        pass.draw_indexed(seg.start..seg.start + seg.count, 0, 0..1);
+    }
+}
 
 /// A single vertex: 2D position + RGBA colour.
 #[repr(C)]
@@ -119,6 +247,24 @@ pub fn create_fill_pipeline(
     camera_bgl: &wgpu::BindGroupLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
+    create_fill_pipeline_with_blend(
+        device,
+        surface_format,
+        camera_bgl,
+        sample_count,
+        wgpu::BlendState::ALPHA_BLENDING,
+    )
+}
+
+/// Like [`create_fill_pipeline`] but with a caller-supplied `blend` state, used
+/// to build one pipeline variant per separable blend mode.
+pub fn create_fill_pipeline_with_blend(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    camera_bgl: &wgpu::BindGroupLayout,
+    sample_count: u32,
+    blend: wgpu::BlendState,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("fill_shader"),
         source: wgpu::ShaderSource::Wgsl(FILL_SHADER.into()),
@@ -144,7 +290,7 @@ pub fn create_fill_pipeline(
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(blend),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -327,4 +473,70 @@ pub fn create_blur_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::{BlendFactor, BlendOperation};
+
+    #[test]
+    fn separable_modes_have_blend_states() {
+        for mode in SEPARABLE_BLEND_MODES {
+            assert!(
+                separable_blend_state(mode).is_some(),
+                "{mode:?} should map to a fixed-function blend state",
+            );
+        }
+    }
+
+    #[test]
+    fn non_separable_modes_fall_back() {
+        // Normal and shader-only modes have no fixed-function blend state.
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Overlay,
+            BlendMode::ColorDodge,
+            BlendMode::Hue,
+            BlendMode::Luminosity,
+        ] {
+            assert!(separable_blend_state(mode).is_none(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn multiply_is_src_times_dst() {
+        let bs = separable_blend_state(BlendMode::Multiply).unwrap();
+        assert_eq!(bs.color.src_factor, BlendFactor::Dst);
+        assert_eq!(bs.color.dst_factor, BlendFactor::Zero);
+        assert_eq!(bs.color.operation, BlendOperation::Add);
+    }
+
+    #[test]
+    fn darken_and_lighten_use_min_max() {
+        assert_eq!(
+            separable_blend_state(BlendMode::Darken)
+                .unwrap()
+                .color
+                .operation,
+            BlendOperation::Min,
+        );
+        assert_eq!(
+            separable_blend_state(BlendMode::Lighten)
+                .unwrap()
+                .color
+                .operation,
+            BlendOperation::Max,
+        );
+    }
+
+    #[test]
+    fn alpha_channel_preserves_backdrop() {
+        // Every separable mode must keep the backdrop's alpha (src*0 + dst*1).
+        for mode in SEPARABLE_BLEND_MODES {
+            let bs = separable_blend_state(mode).unwrap();
+            assert_eq!(bs.alpha.src_factor, BlendFactor::Zero, "{mode:?}");
+            assert_eq!(bs.alpha.dst_factor, BlendFactor::One, "{mode:?}");
+        }
+    }
 }
