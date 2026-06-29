@@ -58,6 +58,12 @@ pub struct PhotonicRenderer {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     surface_format: wgpu::TextureFormat,
+    /// Encoding of the document fill/blend render target. When the adapter
+    /// supports an sRGB view of the swapchain texture this is
+    /// `surface_format.add_srgb_suffix()` (so the document pass blends in linear
+    /// space, matching headless export — issue #145); otherwise it falls back to
+    /// `surface_format` and the document pass blends in non-sRGB space as before.
+    scene_format: wgpu::TextureFormat,
 
     fill_pipeline: wgpu::RenderPipeline,
     /// One fill-pipeline variant per separable blend mode (Multiply/Screen/
@@ -197,6 +203,25 @@ impl PhotonicRenderer {
             .copied()
             .unwrap_or(caps.formats[0]);
 
+        // Document fill/blend target encoding (issue #145). egui/text/glow must
+        // keep drawing into the non-sRGB swapchain view (they expect linear
+        // bytes), but the document pass should blend in linear space to match
+        // headless export. We achieve both from one swapchain texture by
+        // exposing an additional sRGB *view format*: the document pass resolves
+        // into the sRGB view, every other pass uses the default non-sRGB view.
+        let srgb_view_format = surface_format.add_srgb_suffix();
+        let srgb_view_supported = srgb_view_format.is_srgb() && srgb_view_format != surface_format;
+        let (scene_format, surface_view_formats) = if srgb_view_supported {
+            (srgb_view_format, vec![srgb_view_format])
+        } else {
+            tracing::warn!(
+                "render: sRGB swapchain view format unavailable (surface_format={:?}); \
+                 document pass will blend in non-sRGB space — windowed/headless parity disabled",
+                surface_format,
+            );
+            (surface_format, vec![])
+        };
+
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -204,7 +229,7 @@ impl PhotonicRenderer {
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
+            view_formats: surface_view_formats,
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
@@ -232,8 +257,9 @@ impl PhotonicRenderer {
             tracing::error!("wgpu uncaptured error: {:?}", e);
         }));
 
-        let fill_pipeline =
-            create_fill_pipeline(&device, surface_format, &camera_bgl, MSAA_SAMPLES);
+        // The document fill/blend pipelines and their MSAA target use
+        // `scene_format` so blending runs in the same space as headless export.
+        let fill_pipeline = create_fill_pipeline(&device, scene_format, &camera_bgl, MSAA_SAMPLES);
         // One pipeline variant per separable blend mode, sharing the fill shader.
         let blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)> = SEPARABLE_BLEND_MODES
             .iter()
@@ -243,7 +269,7 @@ impl PhotonicRenderer {
                         mode,
                         create_fill_pipeline_with_blend(
                             &device,
-                            surface_format,
+                            scene_format,
                             &camera_bgl,
                             MSAA_SAMPLES,
                             blend,
@@ -252,7 +278,7 @@ impl PhotonicRenderer {
                 })
             })
             .collect();
-        let (msaa_texture, msaa_view) = create_msaa_texture(&device, surface_format, width, height);
+        let (msaa_texture, msaa_view) = create_msaa_texture(&device, scene_format, width, height);
 
         let blur_bgl = create_blur_bgl(&device);
         let fill_pipeline_1spp = create_fill_pipeline(&device, surface_format, &camera_bgl, 1);
@@ -295,6 +321,7 @@ impl PhotonicRenderer {
             queue,
             surface_config,
             surface_format,
+            scene_format,
             fill_pipeline,
             blend_pipelines,
             camera_buffer,
@@ -380,7 +407,7 @@ impl PhotonicRenderer {
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
         let (msaa_texture, msaa_view) =
-            create_msaa_texture(&self.device, self.surface_format, width, height);
+            create_msaa_texture(&self.device, self.scene_format, width, height);
         self.msaa_texture = msaa_texture;
         self.msaa_view = msaa_view;
         let (glow_tex_a, glow_tex_a_view, glow_tex_b, glow_tex_b_view) =
@@ -417,13 +444,37 @@ impl PhotonicRenderer {
                 return None;
             }
         };
+        // Non-sRGB view for the text / glow / egui passes (they expect linear
+        // bytes — unchanged behaviour).
         let view = surface_texture.texture.create_view(&Default::default());
+        // sRGB view of the *same* swapchain texture for the document pass's
+        // resolve target, so the MSAA(scene_format) → swapchain resolve writes
+        // correctly sRGB-encoded bytes and the fill/blend runs in linear space
+        // (issue #145). Falls back to the non-sRGB view when the sRGB view
+        // format is unsupported (see `new`).
+        let scene_resolve_view = if self.scene_format != self.surface_format {
+            surface_texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("scene_srgb_view"),
+                    format: Some(self.scene_format),
+                    ..Default::default()
+                })
+        } else {
+            surface_texture.texture.create_view(&Default::default())
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame_encoder"),
             });
-        self.record_document_pass(&mut encoder, &self.msaa_view, &view, vertices, indices);
+        self.record_document_pass(
+            &mut encoder,
+            &self.msaa_view,
+            &scene_resolve_view,
+            vertices,
+            indices,
+        );
         Some(FrameHandle {
             surface_texture,
             view,
@@ -1521,6 +1572,19 @@ impl PhotonicRenderer {
         let w = self.width;
         let h = self.height;
 
+        // The capture target mirrors the swapchain layout (issue #145): its
+        // base format is the non-sRGB `surface_format` (so the text pass and the
+        // byte read-back below see the same encoding the window does), with an
+        // additional sRGB view format the document pass resolves into. This
+        // makes the document fill/blend run in linear space exactly like
+        // headless export, so screenshot/clipboard output matches the exporter.
+        let scene_differs = self.scene_format != self.surface_format;
+        let capture_view_formats: &[wgpu::TextureFormat] = if scene_differs {
+            std::slice::from_ref(&self.scene_format)
+        } else {
+            &[]
+        };
+
         // Offscreen resolve target (single-sample, read back as PNG)
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture_tex"),
@@ -1534,17 +1598,35 @@ impl PhotonicRenderer {
             dimension: wgpu::TextureDimension::D2,
             format: self.surface_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats: capture_view_formats,
         });
+        // Non-sRGB view: used by the text pass and as the copy source encoding.
         let tex_view = tex.create_view(&Default::default());
+        // sRGB view: the document pass resolve target (linear-space blending).
+        let scene_resolve_view = if scene_differs {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("capture_scene_srgb_view"),
+                format: Some(self.scene_format),
+                ..Default::default()
+            })
+        } else {
+            tex.create_view(&Default::default())
+        };
 
-        // MSAA render target for the capture (resolved into tex_view)
+        // MSAA render target for the capture, in the document scene format so it
+        // resolves into the sRGB view above.
         let (capture_msaa_tex, capture_msaa_view) =
-            create_msaa_texture(&self.device, self.surface_format, w, h);
+            create_msaa_texture(&self.device, self.scene_format, w, h);
 
         // Draw geometry into the offscreen texture via MSAA
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.record_document_pass(&mut enc, &capture_msaa_view, &tex_view, vertices, indices);
+        self.record_document_pass(
+            &mut enc,
+            &capture_msaa_view,
+            &scene_resolve_view,
+            vertices,
+            indices,
+        );
 
         // Render text nodes on top (same encoder, loads resolved geometry from tex_view)
         if !self.pending_texts.is_empty() {
