@@ -1147,6 +1147,10 @@ pub struct CreateShapeArgs {
     pub arc_open: Option<bool>,
     #[serde(default)]
     pub fill: Option<FillArg>,
+    /// Convenience shorthand for a solid fill colour (`#rrggbb`). Ignored when
+    /// `fill` is also provided.
+    #[serde(default)]
+    pub color: Option<String>,
     #[serde(default)]
     pub stroke: Option<StrokeArg>,
     #[serde(default)]

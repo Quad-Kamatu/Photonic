@@ -2018,6 +2018,7 @@ pub fn tool_list() -> Value {
                     "sides": { "type": "integer", "description": "Sides (polygon/star)" },
                     "inner_radius": { "type": "number", "description": "Inner radius ratio (star, 0–1)" },
                     "fill": { "type": "object", "description": "Fill — solid: {\"type\":\"solid\",\"color\":\"#rrggbb\"} | none: {\"type\":\"none\"} | linear: {\"type\":\"gradient\",\"gradient_type\":\"linear\",\"colors\":[\"#hex1\",\"#hex2\"],\"coords\":[x0,y0,x1,y1]} | radial: {\"type\":\"gradient\",\"gradient_type\":\"radial\",\"colors\":[\"#hex1\",\"#hex2\"],\"coords\":[cx,cy,r]} | fluid: {\"type\":\"fluid_gradient\",\"points\":[{\"x\":100,\"y\":50,\"color\":\"#ff0000\"},...],\"power\":2.0} | mesh: {\"type\":\"mesh_gradient\",\"rows\":2,\"cols\":2,\"vertices\":[{\"x\":0,\"y\":0,\"color\":\"#ff0000\"},...]}" },
+                    "color": { "type": "string", "description": "Shorthand for a solid fill colour, e.g. \"#2277ff\". Ignored when \"fill\" is also provided." },
                     "stroke": { "type": "object", "description": "Stroke outline. Fields: color (#RRGGBB), width (number), enabled (bool), opacity (0-1), line_cap (butt|round|square), line_join (miter|round|bevel), align (center|inside|outside), dash_array ([dash,gap,...] up to 6 values), dash_offset (number). Example: {\"color\":\"#000000\",\"width\":2,\"enabled\":true,\"dash_array\":[8,4]}" },
                     "layer_id": { "type": "string" },
                     "name": { "type": "string" },

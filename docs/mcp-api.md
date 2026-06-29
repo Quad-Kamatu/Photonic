@@ -921,6 +921,7 @@ Create a primitive shape (rectangle, rounded_rect, ellipse, arc, polygon, star, 
 | `arc_end_angle` | number | no | Arc end angle in degrees. Default: 270 (¾ circle). |
 | `arc_open` | boolean | no | If true, draw open arc stroke only. If false (default), close back to center (pie sector). |
 | `arc_start_angle` | number | no | Arc start angle in degrees (0=3 o'clock, 90=6 o'clock). Default: 0. |
+| `color` | string | no | Shorthand for a solid fill colour, e.g. "#2277ff". Ignored when "fill" is also provided. |
 | `corner_radius` | number | no | Corner radius for rounded_rect shapes in document units (default: 10.0). Clamped to half the shortest side. |
 | `fill` | object | no | Fill — solid: {"type":"solid","color":"#rrggbb"} \| none: {"type":"none"} \| linear: {"type":"gradient","gradient_type":"linear","colors":["#hex1","#hex2"],"coords":[x0,y0,x1,y1]} \| radial: {"type":"gradient","gradient_type":"radial","colors":["#hex1","#hex2"],"coords":[cx,cy,r]} \| fluid: {"type":"fluid_gradient","points":[{"x":100,"y":50,"color":"#ff0000"},...],"power":2.0} \| mesh: {"type":"mesh_gradient","rows":2,"cols":2,"vertices":[{"x":0,"y":0,"color":"#ff0000"},...]} |
 | `inner_radius` | number | no | Inner radius ratio (star, 0–1) |
