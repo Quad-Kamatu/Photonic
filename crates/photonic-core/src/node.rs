@@ -249,6 +249,25 @@ pub enum SceneNodeKind {
     Raster(RasterNode),
 }
 
+/// One operand of a live [`CompoundSpec`]: a sub-path (in the compound's local
+/// coordinate space) and the boolean mode used to fold it into the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompoundOperand {
+    pub path_data: PathData,
+    /// Combine mode. Ignored for the first operand (the base).
+    pub op: crate::ops::boolean::BooleanOp,
+}
+
+/// Non-destructive (live) boolean state stored on a [`PathNode`]. The operands
+/// stay editable; `PathNode::path_data` holds the baked result (recomputed via
+/// [`crate::ops::boolean::eval_compound`] whenever the operands change), so every
+/// existing consumer of `path_data` works unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompoundSpec {
+    /// Ordered operands; the first is the base, each subsequent one is folded in.
+    pub operands: Vec<CompoundOperand>,
+}
+
 /// A vector path node — the fundamental building block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathNode {
@@ -258,6 +277,11 @@ pub struct PathNode {
     /// If true, this is a compound path (multiple subpaths treated as one shape)
     #[serde(default)]
     pub is_compound: bool,
+    /// When set, this is a live boolean / compound shape: `path_data` is the
+    /// baked result of folding these operands, which remain editable. `None` for
+    /// an ordinary path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound: Option<CompoundSpec>,
 }
 
 impl PathNode {
@@ -267,6 +291,7 @@ impl PathNode {
             fill: Fill::solid(crate::color::Color::BLACK),
             stroke: Stroke::none(),
             is_compound: false,
+            compound: None,
         }
     }
 
@@ -278,6 +303,23 @@ impl PathNode {
     pub fn with_stroke(mut self, stroke: Stroke) -> Self {
         self.stroke = stroke;
         self
+    }
+
+    /// Create a live compound (boolean) path: `path_data` is the baked result of
+    /// folding `spec`'s operands, which are retained for non-destructive editing.
+    pub fn from_compound(spec: CompoundSpec) -> Self {
+        let mut p = Self::new(crate::ops::boolean::eval_compound(&spec));
+        p.is_compound = true;
+        p.compound = Some(spec);
+        p
+    }
+
+    /// Recompute `path_data` from the current compound operands. No-op for an
+    /// ordinary (non-compound) path.
+    pub fn rebake_compound(&mut self) {
+        if let Some(spec) = &self.compound {
+            self.path_data = crate::ops::boolean::eval_compound(spec);
+        }
     }
 }
 

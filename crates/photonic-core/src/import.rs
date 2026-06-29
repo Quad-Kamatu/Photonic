@@ -495,6 +495,7 @@ fn import_element(
                         fill,
                         stroke,
                         is_compound: false,
+                        compound: None,
                     }),
                     transform: local_transform,
                     opacity: style.opacity,
