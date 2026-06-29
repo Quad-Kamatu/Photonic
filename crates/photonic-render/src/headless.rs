@@ -591,6 +591,48 @@ fn build_geometry(doc: &Document, include_artboard_bg: bool) -> (Vec<Vertex>, Ve
             }
         }
 
+        // ── Object blur / feather: soft fill-colored edge (solid fills) ───────
+        {
+            let radius = if node.object_blur.enabled {
+                node.object_blur.radius
+            } else if node.feather.enabled {
+                node.feather.radius
+            } else {
+                0.0
+            };
+            if let (FillKind::Solid(col), true) = (&path_node.fill.kind, radius > 0.0) {
+                let alpha = col.a * path_node.fill.opacity * node.opacity;
+                const STEPS: usize = 10;
+                for i in (0..STEPS).rev() {
+                    let t = (i + 1) as f32 / STEPS as f32;
+                    let width = 2.0 * radius * t;
+                    let step_alpha = (alpha * (-4.5 * t * t).exp()).min(1.0);
+                    let smesh = tessellate_stroke(
+                        &path_node.path_data,
+                        width,
+                        photonic_core::style::LineCap::Round,
+                        photonic_core::style::LineJoin::Round,
+                        4.0,
+                    );
+                    if smesh.is_empty() {
+                        continue;
+                    }
+                    let base = verts.len() as u32;
+                    for pos in &smesh.vertices {
+                        let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
+                        let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                        verts.push(Vertex {
+                            position: [x as f32, y as f32],
+                            color: [col.r, col.g, col.b, step_alpha],
+                        });
+                    }
+                    for &idx in &smesh.indices {
+                        idxs.push(base + idx);
+                    }
+                }
+            }
+        }
+
         // ── Fill ─────────────────────────────────────────────────────────────
         if path_node.fill.enabled && !matches!(&path_node.fill.kind, FillKind::None) {
             let opacity = path_node.fill.opacity * node.opacity;
@@ -719,5 +761,45 @@ mod drop_shadow_tests {
             shadow < 0.8 && shadow > 0.2,
             "shadow region should be a mid-gray (got {shadow})",
         );
+    }
+
+    #[test]
+    fn object_blur_softens_the_edge() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping object-blur test");
+            return;
+        };
+        let mut doc = Document::new("blur", 100.0, 100.0);
+        let mut node = SceneNode::new(
+            "sq",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(30.0, 30.0, 40.0, 40.0))
+                    .with_fill(Fill::solid(Color::WHITE)),
+            ),
+        );
+        node.object_blur.enabled = true;
+        node.object_blur.radius = 8.0;
+        doc.add_node(node, None);
+
+        // Transparent background so the soft halo shows as partial coverage.
+        let opts = ExportOptions {
+            background: ExportBackground::Transparent,
+            ..Default::default()
+        };
+        let png = r.render_png_with_opts(&doc, 100, 100, &opts);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        // Square spans 30–70; just outside the right edge a hard fill would be
+        // fully transparent — a soft edge gives partial coverage there.
+        let halo = img.get_pixel(72, 50).0[3] as f32 / 255.0; // alpha, ~2px out
+        let far = img.get_pixel(95, 50).0[3] as f32 / 255.0;
+        let inside = img.get_pixel(50, 50).0[3] as f32 / 255.0;
+
+        assert!(inside > 0.9, "fill interior should be opaque, got {inside}");
+        assert!(
+            halo > 0.03 && halo < 0.95,
+            "edge should be partially covered (soft), got {halo}",
+        );
+        assert!(far < 0.05, "far outside should stay transparent, got {far}");
     }
 }

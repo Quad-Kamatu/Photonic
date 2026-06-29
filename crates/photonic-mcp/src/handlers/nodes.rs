@@ -665,6 +665,15 @@ pub async fn update_node(state: &AppState, args: UpdateNodeArgs) -> ToolResult {
     if let Some(gg) = args.gaussian_glow {
         new_node.gaussian_glow = gg.into();
     }
+    if let Some(ds) = args.drop_shadow {
+        new_node.drop_shadow = ds.into();
+    }
+    if let Some(ob) = args.object_blur {
+        new_node.object_blur = ob.into();
+    }
+    if let Some(ft) = args.feather {
+        new_node.feather = ft.into();
+    }
     if let Some(t_arg) = args.transform {
         new_node.transform = t_arg.to_transform();
     }

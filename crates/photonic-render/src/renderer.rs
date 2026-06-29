@@ -724,6 +724,9 @@ impl PhotonicRenderer {
             gaussian_glow: Option<([f32; 4], f32)>, // ([r,g,b,a*opacity], radius_doc)
             /// ([r,g,b,a], opacity, dx_doc, dy_doc, blur_doc) — None when disabled.
             drop_shadow: Option<([f32; 4], f32, f32, f32, f32)>,
+            /// ([r,g,b,a], radius_doc) — soft fill-colored edge for object-blur /
+            /// feather on solid fills. None when disabled or non-solid fill.
+            soft_edge: Option<([f32; 4], f32)>,
             is_compound: bool,
             arrowhead_start: photonic_core::style::ArrowheadStyle,
             arrowhead_end: photonic_core::style::ArrowheadStyle,
@@ -863,6 +866,22 @@ impl PhotonicRenderer {
                                 ))
                             } else {
                                 None
+                            },
+                            soft_edge: {
+                                let radius = if node.object_blur.enabled {
+                                    node.object_blur.radius
+                                } else if node.feather.enabled {
+                                    node.feather.radius
+                                } else {
+                                    0.0
+                                };
+                                match (&path_node.fill.kind, radius) {
+                                    (FillKind::Solid(c), r) if r > 0.0 => {
+                                        let a = c.a * path_node.fill.opacity * node.opacity;
+                                        Some(([c.r, c.g, c.b, a], r))
+                                    }
+                                    _ => None,
+                                }
                             },
                         });
                     }
@@ -1193,6 +1212,21 @@ impl PhotonicRenderer {
                         &mut idxs,
                     );
                 }
+            }
+
+            // ── Object blur / feather: soft fill-colored edge beneath the fill ─
+            // For solid fills this reads as a blurred/feathered boundary. True
+            // interior blur of gradient/image fills is a follow-up (needs the
+            // offscreen separable-blur layer).
+            if let Some(([r, g, b, a], radius)) = node.soft_edge {
+                append_glow(
+                    &node.path_data,
+                    &node.matrix,
+                    &[r, g, b, a, 1.0, radius],
+                    photonic_core::style::LineJoin::Round,
+                    &mut verts,
+                    &mut idxs,
+                );
             }
 
             // ── Outer glow: behind fill so fill clips the inward half ─────────
