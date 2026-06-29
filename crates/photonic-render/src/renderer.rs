@@ -1323,6 +1323,31 @@ impl PhotonicRenderer {
                 }
             }
 
+            // ── Pattern foreground ─────────────────────────────────────────────
+            // The base fill (above) painted the optional background colour via
+            // sample_at; emit the clipped pattern geometry on top.
+            if let FillKind::Pattern(pf) = &node.fill_kind {
+                let opacity = node.fill_opacity * node.node_opacity;
+                let fg = photonic_core::pattern_foreground(&node.path_data, pf);
+                let mesh = tessellate_fill(&fg, true);
+                if !mesh.is_empty() {
+                    let [a, b, c, d, e, f] = node.matrix;
+                    let col = [pf.color.r, pf.color.g, pf.color.b, pf.color.a * opacity];
+                    let base = verts.len() as u32;
+                    for pos in &mesh.vertices {
+                        let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
+                        let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                        verts.push(Vertex {
+                            position: [x as f32, y as f32],
+                            color: col,
+                        });
+                    }
+                    for &idx in &mesh.indices {
+                        idxs.push(base + idx);
+                    }
+                }
+            }
+
             // ── Arrowheads ────────────────────────────────────────────────────
             if node.stroke_enabled
                 && (node.arrowhead_start != photonic_core::style::ArrowheadStyle::None

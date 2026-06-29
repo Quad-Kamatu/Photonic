@@ -2553,6 +2553,7 @@ pub async fn get_canvas_overview(state: &AppState, args: GetCanvasOverviewArgs) 
                 FillKind::Gradient(_) => "#gradient".to_string(),
                 FillKind::FluidGradient(_) => "#fluid".to_string(),
                 FillKind::MeshGradient(_) => "#mesh".to_string(),
+                FillKind::Pattern(_) => "#pattern".to_string(),
                 FillKind::None => "#none".to_string(),
             },
             SceneNodeKind::Text(tn) => match &tn.fill.kind {

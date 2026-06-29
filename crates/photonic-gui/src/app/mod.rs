@@ -6171,6 +6171,12 @@ impl PhotonicApp {
                                                 v.color = v.color.invert();
                                             }
                                         }
+                                        FillKind::Pattern(p) => {
+                                            p.color = p.color.invert();
+                                            if let Some(b) = p.background.as_mut() {
+                                                *b = b.invert();
+                                            }
+                                        }
                                         FillKind::None => {}
                                     }
                                     if np.stroke.enabled {
@@ -6218,6 +6224,12 @@ impl PhotonicApp {
                                         FillKind::MeshGradient(mg) => {
                                             for v in &mut mg.vertices {
                                                 v.color = v.color.to_grayscale();
+                                            }
+                                        }
+                                        FillKind::Pattern(p) => {
+                                            p.color = p.color.to_grayscale();
+                                            if let Some(b) = p.background.as_mut() {
+                                                *b = b.to_grayscale();
                                             }
                                         }
                                         FillKind::None => {}
@@ -6281,6 +6293,12 @@ impl PhotonicApp {
                                         FillKind::MeshGradient(mg) => {
                                             for v in &mut mg.vertices {
                                                 v.color = shift(v.color);
+                                            }
+                                        }
+                                        FillKind::Pattern(p) => {
+                                            p.color = shift(p.color);
+                                            if let Some(b) = p.background.as_mut() {
+                                                *b = shift(*b);
                                             }
                                         }
                                         FillKind::None => {}

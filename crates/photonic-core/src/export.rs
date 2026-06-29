@@ -433,6 +433,60 @@ fn transform_attr(t: &Transform) -> String {
     format!(" transform=\"matrix({a},{b},{c},{d},{e},{f})\"")
 }
 
+/// Emit an SVG `<pattern>` for a [`crate::style::PatternFill`] into `defs` and
+/// return the `fill="url(#…)"` attribute.
+fn pattern_fill_attr(
+    pf: &crate::style::PatternFill,
+    defs: &mut String,
+    counter: &mut usize,
+) -> String {
+    use crate::style::PatternKind;
+    let id = format!("pat-{}", *counter);
+    *counter += 1;
+    let s = pf.spacing.max(1.0);
+    let fg = pf.color.to_hex();
+    let tile = if pf.kind == PatternKind::Checkerboard {
+        s * 2.0
+    } else {
+        s
+    };
+
+    let mut content = String::new();
+    if let Some(bg) = pf.background {
+        content.push_str(&format!(
+            "      <rect width=\"{tile}\" height=\"{tile}\" fill=\"{}\"/>\n",
+            bg.to_hex()
+        ));
+    }
+    match pf.kind {
+        PatternKind::Dots => content.push_str(&format!(
+            "      <circle cx=\"{cx}\" cy=\"{cx}\" r=\"{r}\" fill=\"{fg}\"/>\n",
+            cx = s / 2.0,
+            r = s * 0.25,
+        )),
+        PatternKind::Stripes => content.push_str(&format!(
+            "      <rect width=\"{w}\" height=\"{s}\" fill=\"{fg}\"/>\n",
+            w = s * 0.5,
+        )),
+        PatternKind::Grid => {
+            let t = (s * 0.1).max(0.5);
+            content.push_str(&format!(
+                "      <rect width=\"{s}\" height=\"{t}\" fill=\"{fg}\"/>\n\
+                 \x20     <rect width=\"{t}\" height=\"{s}\" fill=\"{fg}\"/>\n"
+            ));
+        }
+        PatternKind::Checkerboard => content.push_str(&format!(
+            "      <rect x=\"0\" y=\"0\" width=\"{s}\" height=\"{s}\" fill=\"{fg}\"/>\n\
+             \x20     <rect x=\"{s}\" y=\"{s}\" width=\"{s}\" height=\"{s}\" fill=\"{fg}\"/>\n"
+        )),
+    }
+
+    defs.push_str(&format!(
+        "    <pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{tile}\" height=\"{tile}\">\n{content}    </pattern>\n"
+    ));
+    format!(" fill=\"url(#{id})\"")
+}
+
 fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
     if !fill.enabled {
         return " fill=\"none\"".to_string();
@@ -440,6 +494,7 @@ fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
     match &fill.kind {
         FillKind::None => " fill=\"none\"".to_string(),
         FillKind::Solid(c) => solid_fill_attr(c, fill.opacity),
+        FillKind::Pattern(pf) => pattern_fill_attr(pf, defs, counter),
         FillKind::FluidGradient(fg) => {
             // Export as a radial gradient approximation: first point = center,
             // remaining points as stops at increasing radii (best-effort SVG).
@@ -692,6 +747,39 @@ mod tests {
         assert!(
             modes.contains(&BlendMode::Multiply),
             "blend mode lost on re-import; modes = {modes:?}"
+        );
+    }
+
+    #[test]
+    fn pattern_fill_emits_svg_pattern() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::{Fill, FillKind, PatternFill, PatternKind};
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut p = PathNode::new(PathData::rect(0.0, 0.0, 50.0, 50.0));
+        p.fill = Fill {
+            kind: FillKind::Pattern(PatternFill {
+                kind: PatternKind::Dots,
+                color: Color::new(1.0, 0.0, 0.0, 1.0),
+                background: Some(Color::WHITE),
+                spacing: 10.0,
+            }),
+            opacity: 1.0,
+            enabled: true,
+        };
+        let node = SceneNode::new("p", doc.active_layer_id.unwrap(), SceneNodeKind::Path(p));
+        doc.add_node(node, None);
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(svg.contains("<pattern"), "expected <pattern> def:\n{svg}");
+        assert!(
+            svg.contains("<circle"),
+            "dots pattern should emit a circle:\n{svg}"
+        );
+        assert!(
+            svg.contains("fill=\"url(#pat-"),
+            "shape should reference the pattern:\n{svg}"
         );
     }
 }
