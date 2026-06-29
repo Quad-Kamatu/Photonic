@@ -1365,45 +1365,6 @@ impl PhotonicApp {
                 });
             });
 
-        // ── Drawer pull tabs ─────────────────────────────────────────────────
-        // Persistent thin strip below the toolbar — one small clickable tab per
-        // drawer. Tabs stay visible whether the drawer is open or closed so the
-        // user always has a direct affordance to expand or collapse each drawer.
-        let tab_strip_resp = egui::TopBottomPanel::top("drawer_pull_tabs")
-            .frame(
-                egui::Frame::side_top_panel(&ctx.style())
-                    .inner_margin(egui::Margin::symmetric(6.0, 2.0)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for &kind in &[DrawerKind::File, DrawerKind::Edit, DrawerKind::Tools] {
-                        let is_open = self.active_drawer == Some(kind);
-                        let name = match kind {
-                            DrawerKind::File => "File",
-                            DrawerKind::Edit => "Edit",
-                            DrawerKind::Tools => "Tools",
-                        };
-                        let arrow = if is_open { ph::CARET_UP } else { ph::CARET_DOWN };
-                        let label = format!("{arrow} {name}");
-                        if ui
-                            .selectable_label(is_open, RichText::new(label).small())
-                            .on_hover_text(if is_open {
-                                format!("Close {name} drawer")
-                            } else {
-                                format!("Open {name} drawer")
-                            })
-                            .clicked()
-                        {
-                            if is_open && kind == DrawerKind::Edit {
-                                self.prefs.save();
-                            }
-                            self.active_drawer = if is_open { None } else { Some(kind) };
-                            self.selected_drawer_option = None;
-                        }
-                    }
-                });
-            });
-
         // Close drawer on Escape
         if viewport_kb(ctx) && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.active_drawer == Some(DrawerKind::Edit) {
@@ -1416,8 +1377,8 @@ impl PhotonicApp {
         // ── Menu drawer (floating overlay) ────────────────────────────────────
         if let Some(drawer_kind) = self.active_drawer {
             let screen = ctx.screen_rect();
-            // Open the drawer below the pull-tab strip so the tabs remain visible.
-            let toolbar_bottom = tab_strip_resp.response.rect.bottom();
+            // Open the drawer just below the top toolbar.
+            let toolbar_bottom = toolbar_resp.response.rect.bottom();
             let drawer_height = (screen.height() * 0.6).max(300.0);
             let content_height = drawer_height - 24.0; // subtract Frame::popup inner_margin (12 * 2)
             let drawer_width = screen.width();
@@ -1797,7 +1758,6 @@ impl PhotonicApp {
                     .map(|pos| {
                         drawer_resp.response.rect.contains(pos)
                             || toolbar_resp.response.rect.contains(pos)
-                            || tab_strip_resp.response.rect.contains(pos)
                     })
                     .unwrap_or(false);
                 if !clicked_inside {
