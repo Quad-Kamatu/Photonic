@@ -2013,6 +2013,21 @@ pub enum FillArg {
         cols: u32,
         vertices: Vec<MeshVertexArg>,
     },
+    /// Built-in geometric pattern fill.
+    ///
+    /// Example: `{"type":"pattern","pattern":"dots","color":"#000000","background":"#ffffff","spacing":12}`
+    Pattern {
+        /// "dots" | "stripes" | "grid" | "checkerboard".
+        pattern: String,
+        /// Foreground colour (`#rrggbb`).
+        color: String,
+        /// Optional background colour (`#rrggbb`).
+        #[serde(default)]
+        background: Option<String>,
+        /// Tile size / spacing in document units (default 12).
+        #[serde(default)]
+        spacing: Option<f64>,
+    },
 }
 
 impl FillArg {
@@ -2102,6 +2117,43 @@ impl FillArg {
                     })
                     .collect();
                 Ok(Fill::mesh_gradient(MeshGradient::new(*rows, *cols, verts?)))
+            }
+            FillArg::Pattern {
+                pattern,
+                color,
+                background,
+                spacing,
+            } => {
+                use photonic_core::style::{FillKind, PatternFill, PatternKind};
+                let kind = match pattern.as_str() {
+                    "dots" => PatternKind::Dots,
+                    "stripes" => PatternKind::Stripes,
+                    "grid" => PatternKind::Grid,
+                    "checkerboard" => PatternKind::Checkerboard,
+                    other => {
+                        return Err(format!(
+                            "Unknown pattern '{other}' (use dots|stripes|grid|checkerboard)"
+                        ))
+                    }
+                };
+                let fg =
+                    Color::from_hex(color).ok_or_else(|| format!("Invalid color: {}", color))?;
+                let bg = match background {
+                    Some(h) => Some(
+                        Color::from_hex(h).ok_or_else(|| format!("Invalid background: {}", h))?,
+                    ),
+                    None => None,
+                };
+                Ok(Fill {
+                    kind: FillKind::Pattern(PatternFill {
+                        kind,
+                        color: fg,
+                        background: bg,
+                        spacing: spacing.unwrap_or(12.0).max(1.0),
+                    }),
+                    opacity: 1.0,
+                    enabled: true,
+                })
             }
         }
     }

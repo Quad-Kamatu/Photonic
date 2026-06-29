@@ -66,6 +66,47 @@ pub enum FillKind {
     Gradient(Gradient),
     FluidGradient(FluidGradient),
     MeshGradient(MeshGradient),
+    Pattern(PatternFill),
+}
+
+/// A built-in geometric pattern type for [`PatternFill`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternKind {
+    /// Filled circles on a square grid.
+    #[default]
+    Dots,
+    /// Vertical bars.
+    Stripes,
+    /// Thin horizontal + vertical lines.
+    Grid,
+    /// Alternating filled squares.
+    Checkerboard,
+}
+
+/// A repeating geometric pattern fill. The shape is painted with `background`
+/// (if any), then the pattern foreground (clipped to the shape) in `color`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatternFill {
+    pub kind: PatternKind,
+    /// Foreground colour (dots, stripes, lines, filled cells).
+    pub color: Color,
+    /// Optional background colour painted behind the pattern.
+    #[serde(default)]
+    pub background: Option<Color>,
+    /// Tile size / spacing in document units.
+    pub spacing: f64,
+}
+
+impl Default for PatternFill {
+    fn default() -> Self {
+        Self {
+            kind: PatternKind::Dots,
+            color: Color::BLACK,
+            background: None,
+            spacing: 12.0,
+        }
+    }
 }
 
 impl FillKind {
@@ -87,8 +128,97 @@ impl FillKind {
                 let [r, g2, b, a] = mg.sample_at(x, y);
                 [r, g2, b, a * opacity]
             }
+            // The base fill paints the background; the foreground pattern is
+            // emitted as separate clipped geometry (see `pattern_foreground`).
+            FillKind::Pattern(p) => match p.background {
+                Some(c) => [c.r, c.g, c.b, c.a * opacity],
+                None => [0.0; 4],
+            },
         }
     }
+}
+
+/// Generate the foreground geometry of a [`PatternFill`], clipped to `shape`.
+///
+/// Pattern elements (dots, stripes, grid lines, checkerboard cells) are built
+/// across the shape's bounding box, unioned into one compound path, and
+/// intersected with the shape so the result never overflows the outline. Returns
+/// an empty path for a degenerate shape or spacing.
+pub fn pattern_foreground(
+    shape: &crate::path::PathData,
+    pf: &PatternFill,
+) -> crate::path::PathData {
+    use crate::path::PathData;
+    use kurbo::{BezPath, Rect, Shape};
+
+    let empty = PathData::new();
+    let Some(bbox) = shape.bounding_box() else {
+        return empty;
+    };
+    let s = pf.spacing.max(1.0);
+    // Bound the element count so very fine patterns on large shapes stay cheap.
+    let cols = ((bbox.width() / s).ceil() as i64 + 2).clamp(1, 400);
+    let rows = ((bbox.height() / s).ceil() as i64 + 2).clamp(1, 400);
+    let x0 = bbox.x0 - s;
+    let y0 = bbox.y0 - s;
+
+    let mut elems = BezPath::new();
+    match pf.kind {
+        PatternKind::Dots => {
+            let r = s * 0.25;
+            for j in 0..rows {
+                for i in 0..cols {
+                    let cx = x0 + (i as f64 + 0.5) * s;
+                    let cy = y0 + (j as f64 + 0.5) * s;
+                    elems.extend(kurbo::Circle::new((cx, cy), r).path_elements(0.2));
+                }
+            }
+        }
+        PatternKind::Stripes => {
+            let w = s * 0.5;
+            let h = (rows as f64 + 2.0) * s;
+            for i in 0..cols {
+                let sx = x0 + i as f64 * s;
+                elems.extend(Rect::new(sx, y0, sx + w, y0 + h).path_elements(0.2));
+            }
+        }
+        PatternKind::Grid => {
+            let t = (s * 0.1).max(0.5);
+            let w = (cols as f64 + 2.0) * s;
+            let h = (rows as f64 + 2.0) * s;
+            for j in 0..=rows {
+                let ly = y0 + j as f64 * s;
+                elems.extend(Rect::new(x0, ly, x0 + w, ly + t).path_elements(0.2));
+            }
+            for i in 0..=cols {
+                let lx = x0 + i as f64 * s;
+                elems.extend(Rect::new(lx, y0, lx + t, y0 + h).path_elements(0.2));
+            }
+        }
+        PatternKind::Checkerboard => {
+            for j in 0..rows {
+                for i in 0..cols {
+                    if (i + j) % 2 != 0 {
+                        continue;
+                    }
+                    let sx = x0 + i as f64 * s;
+                    let sy = y0 + j as f64 * s;
+                    elems.extend(Rect::new(sx, sy, sx + s, sy + s).path_elements(0.2));
+                }
+            }
+        }
+    }
+
+    if elems.is_empty() {
+        return empty;
+    }
+    let elems_path = PathData::from_bez_path(&elems);
+    crate::ops::boolean::boolean_op(
+        &elems_path,
+        shape,
+        crate::ops::boolean::BooleanOp::Intersect,
+    )
+    .unwrap_or(empty)
 }
 
 /// Where the stroke is painted relative to the path edge.
@@ -538,4 +668,75 @@ pub fn interpolate_stops(stops: &[GradientStop], t: f32) -> [f32; 4] {
 
     let s = &stops[stops.len() - 1];
     [s.color.r, s.color.g, s.color.b, s.color.a]
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+    use crate::path::PathData;
+
+    fn rect_shape() -> PathData {
+        PathData::rect(0.0, 0.0, 100.0, 100.0)
+    }
+
+    #[test]
+    fn dots_foreground_is_nonempty_and_clipped() {
+        let shape = rect_shape();
+        let pf = PatternFill {
+            kind: PatternKind::Dots,
+            color: Color::BLACK,
+            background: None,
+            spacing: 20.0,
+        };
+        let fg = pattern_foreground(&shape, &pf);
+        assert!(!fg.is_empty(), "dots foreground should be non-empty");
+        let bb = fg.bounding_box().expect("has geometry");
+        // Clipped to the shape (allow a hair of boolean-op slack).
+        assert!(bb.x0 >= -0.5 && bb.y0 >= -0.5, "bbox underflow: {bb:?}");
+        assert!(bb.x1 <= 100.5 && bb.y1 <= 100.5, "bbox overflow: {bb:?}");
+    }
+
+    #[test]
+    fn each_pattern_kind_produces_geometry() {
+        let shape = rect_shape();
+        for kind in [
+            PatternKind::Dots,
+            PatternKind::Stripes,
+            PatternKind::Grid,
+            PatternKind::Checkerboard,
+        ] {
+            let pf = PatternFill {
+                kind,
+                color: Color::BLACK,
+                background: None,
+                spacing: 25.0,
+            };
+            assert!(
+                !pattern_foreground(&shape, &pf).is_empty(),
+                "{kind:?} should produce geometry"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_shape_yields_empty_foreground() {
+        let pf = PatternFill::default();
+        assert!(pattern_foreground(&PathData::new(), &pf).is_empty());
+    }
+
+    #[test]
+    fn pattern_sample_at_returns_background() {
+        let kind = FillKind::Pattern(PatternFill {
+            kind: PatternKind::Dots,
+            color: Color::BLACK,
+            background: Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+            spacing: 10.0,
+        });
+        let c = kind.sample_at(5.0, 5.0, 1.0);
+        assert_eq!(
+            c,
+            [1.0, 0.0, 0.0, 1.0],
+            "should sample the background colour"
+        );
+    }
 }

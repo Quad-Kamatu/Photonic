@@ -6174,6 +6174,8 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
         },
         FillKind::FluidGradient(_) => FillType::Fluid,
         FillKind::MeshGradient(_) => FillType::Mesh,
+        // Pattern fills are not yet editable in the GUI; treat as solid here.
+        FillKind::Pattern(_) => FillType::Solid,
     };
 
     let mut chosen_type = current_type;
@@ -6207,6 +6209,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             FillKind::MeshGradient(mg) => {
                 mg.vertices.first().map(|v| v.color).unwrap_or(Color::BLACK)
             }
+            FillKind::Pattern(p) => p.color,
             FillKind::None => Color::BLACK,
         };
         let white = Color {
@@ -6536,6 +6539,9 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             }
         }
 
+        FillKind::Pattern(_) => {
+            ui.label(RichText::new("Pattern fill (edit via MCP)").small().weak());
+        }
         FillKind::MeshGradient(mg) => {
             let mut new_mg = mg.clone();
             let mut mg_changed = false;

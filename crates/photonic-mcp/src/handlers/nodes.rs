@@ -3323,6 +3323,7 @@ fn generate_name(node: &SceneNode) -> String {
                     FillKind::Gradient(_)
                     | FillKind::FluidGradient(_)
                     | FillKind::MeshGradient(_) => "gradient".to_string(),
+                    FillKind::Pattern(_) => "pattern".to_string(),
                     FillKind::None => "outline".to_string(),
                 }
             };
@@ -3564,6 +3565,19 @@ pub async fn get_css_preview(state: &AppState, args: GetCssPreviewArgs) -> ToolR
                             .to_string(),
                     );
                 }
+            }
+            FillKind::Pattern(p) => {
+                // Approximate with the pattern's background (or foreground) colour.
+                let c = p.background.unwrap_or(p.color);
+                let a = c.a * opacity;
+                lines.push(format!(
+                    "background-color: {}; /* approximated from pattern fill */",
+                    color_css(c.r, c.g, c.b, a)
+                ));
+                notes.push(
+                    "Pattern fill has no direct CSS equivalent — shown as an approximated solid colour."
+                        .to_string(),
+                );
             }
         }
     }
@@ -10295,6 +10309,12 @@ pub async fn invert_colors(state: &AppState, args: InvertColorsArgs) -> ToolResu
                             v.color = v.color.invert();
                         }
                     }
+                    FillKind::Pattern(p) => {
+                        p.color = p.color.invert();
+                        if let Some(b) = p.background.as_mut() {
+                            *b = b.invert();
+                        }
+                    }
                     FillKind::None => {}
                 }
                 if path.stroke.enabled {
@@ -10395,6 +10415,12 @@ pub async fn adjust_colors(state: &AppState, args: AdjustColorsArgs) -> ToolResu
                         v.color = shift_color(v.color);
                     }
                 }
+                FillKind::Pattern(p) => {
+                    p.color = shift_color(p.color);
+                    if let Some(b) = p.background.as_mut() {
+                        *b = shift_color(*b);
+                    }
+                }
                 FillKind::None => {}
             }
             if path.stroke.enabled {
@@ -10474,6 +10500,12 @@ pub async fn convert_to_grayscale(state: &AppState, args: ConvertToGrayscaleArgs
                     FillKind::MeshGradient(mg) => {
                         for v in &mut mg.vertices {
                             v.color = v.color.to_grayscale();
+                        }
+                    }
+                    FillKind::Pattern(p) => {
+                        p.color = p.color.to_grayscale();
+                        if let Some(b) = p.background.as_mut() {
+                            *b = b.to_grayscale();
                         }
                     }
                     FillKind::None => {}
@@ -11683,6 +11715,7 @@ pub async fn pathfinder_outline(state: &AppState, args: PathfinderOutlineArgs) -
                 .map(|p| p.color)
                 .unwrap_or(photonic_core::color::Color::BLACK),
             FillKind::MeshGradient(_) => photonic_core::color::Color::BLACK,
+            FillKind::Pattern(p) => p.color,
             FillKind::None => photonic_core::color::Color::BLACK,
         };
 

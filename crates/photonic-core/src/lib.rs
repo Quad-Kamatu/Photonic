@@ -37,8 +37,9 @@ pub use path::PathData;
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
-    interpolate_stops, ArrowheadStyle, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
-    GradientKind, GradientStop, MeshGradient, MeshGradientVertex, Stroke,
+    interpolate_stops, pattern_foreground, ArrowheadStyle, Fill, FillKind, FluidGradient,
+    FluidGradientPoint, Gradient, GradientKind, GradientStop, MeshGradient, MeshGradientVertex,
+    PatternFill, PatternKind, Stroke,
 };
 pub use transform::Transform;
 pub use units::{from_px, to_px, DocumentUnit};

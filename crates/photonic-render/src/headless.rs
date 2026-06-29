@@ -706,6 +706,32 @@ fn build_geometry(
             }
         }
 
+        // ── Pattern foreground ─────────────────────────────────────────────────
+        // The base fill above paints the (optional) background; emit the clipped
+        // pattern geometry on top in the foreground colour.
+        if let FillKind::Pattern(pf) = &path_node.fill.kind {
+            if path_node.fill.enabled {
+                let opacity = path_node.fill.opacity * node.opacity * gop;
+                let fg = photonic_core::pattern_foreground(&path_node.path_data, pf);
+                let mesh = tessellate_fill(&fg, true);
+                if !mesh.is_empty() {
+                    let col = [pf.color.r, pf.color.g, pf.color.b, pf.color.a * opacity];
+                    let base = verts.len() as u32;
+                    for pos in &mesh.vertices {
+                        let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
+                        let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                        verts.push(Vertex {
+                            position: [x as f32, y as f32],
+                            color: col,
+                        });
+                    }
+                    for &i in &mesh.indices {
+                        idxs.push(base + i);
+                    }
+                }
+            }
+        }
+
         // ── Stroke ───────────────────────────────────────────────────────────
         if path_node.stroke.enabled && path_node.stroke.width > 0.0 {
             let sc = &path_node.stroke;
@@ -1025,5 +1051,81 @@ mod blend_tests {
                 SOURCE[i],
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+    use photonic_core::{
+        color::Color,
+        node::{PathNode, SceneNode, SceneNodeKind},
+        path::PathData,
+        style::{Fill, FillKind, PatternFill, PatternKind},
+        Document,
+    };
+
+    fn try_renderer() -> Option<HeadlessRenderer> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        Some(pollster::block_on(HeadlessRenderer::new()))
+    }
+
+    #[test]
+    fn dots_pattern_renders_foreground_and_background() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping pattern test");
+            return;
+        };
+        let mut doc = Document::new("pat", 100.0, 100.0);
+        let mut p = PathNode::new(PathData::rect(10.0, 10.0, 80.0, 80.0));
+        p.fill = Fill {
+            kind: FillKind::Pattern(PatternFill {
+                kind: PatternKind::Dots,
+                color: Color::new(1.0, 0.0, 0.0, 1.0),
+                background: Some(Color::new(0.0, 0.0, 1.0, 1.0)),
+                spacing: 16.0,
+            }),
+            opacity: 1.0,
+            enabled: true,
+        };
+        let node = SceneNode::new("p", doc.active_layer_id.unwrap(), SceneNodeKind::Path(p));
+        doc.add_node(node, None);
+
+        let opts = ExportOptions {
+            background: ExportBackground::Transparent,
+            ..Default::default()
+        };
+        let png = r.render_png_with_opts(&doc, 100, 100, &opts);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+
+        let mut red = 0;
+        let mut blue = 0;
+        for y in (15..85).step_by(2) {
+            for x in (15..85).step_by(2) {
+                let px = img.get_pixel(x, y).0;
+                if px[0] > 150 && px[1] < 90 && px[2] < 90 {
+                    red += 1;
+                } else if px[2] > 150 && px[0] < 90 && px[1] < 90 {
+                    blue += 1;
+                }
+            }
+        }
+        assert!(red > 5, "expected red dots in the pattern, got {red}");
+        assert!(
+            blue > 5,
+            "expected blue background showing through, got {blue}"
+        );
+        assert!(
+            img.get_pixel(2, 2).0[3] < 20,
+            "outside should be transparent"
+        );
     }
 }
