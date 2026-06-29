@@ -17,6 +17,11 @@ const REPO_OWNER: &str = "Quad-Kamatu";
 const REPO_NAME: &str = "Photonic";
 const BIN_NAME: &str = "photonic";
 
+/// ed25519 public key (zipsign) that release archives are signed with. The
+/// matching private key is a GitHub Actions secret; CI signs every release, and
+/// an update is only applied if its archive verifies against this key.
+const SIGNING_PUBKEY: &[u8; 32] = include_bytes!("../../../release/photonic-signing.pub");
+
 #[derive(Clone, Debug)]
 pub enum UpdateStatus {
     UpToDate(String),
@@ -44,7 +49,9 @@ fn run() -> UpdateStatus {
         .bin_name(BIN_NAME)
         .current_version(CURRENT_VERSION)
         .show_download_progress(false)
-        .no_confirm(true);
+        .no_confirm(true)
+        // Only apply updates whose archive is signed by our release key.
+        .verifying_keys([*SIGNING_PUBKEY]);
     // Use a token for private repos / to avoid the 60/hr anonymous API limit.
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         if !token.is_empty() {

@@ -5,3 +5,6 @@
 
 # Local embedding model cache (downloaded at runtime, not source)
 .fastembed_cache/
+
+# Release signing private key — never commit; store as a GitHub Actions secret
+release/*.priv

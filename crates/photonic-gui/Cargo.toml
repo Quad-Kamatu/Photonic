@@ -1,6 +1,6 @@
 [package]
 name = "photonic-gui"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license.workspace = true
 
@@ -31,4 +31,5 @@ self_update = { version = "0.42", default-features = false, features = [
     "archive-zip",
     "compression-flate2",
     "compression-zip-deflate",
+    "signatures",
 ] }
