@@ -310,6 +310,8 @@ pub struct PhotonicApp {
     artboard_resize: Option<(photonic_core::ArtboardId, u8, f64, f64, f64, f64)>,
     /// Inline-renaming an artboard: (id, edit buffer).
     artboard_rename: Option<(photonic_core::ArtboardId, String)>,
+    /// Request focus for the rename field on the next frame it draws.
+    artboard_rename_focus: bool,
     /// Set on new/open to fit all artboards to the viewport on the next frame
     /// (once the actual viewport rect is known).
     fit_pending: bool,
@@ -645,6 +647,7 @@ impl Default for PhotonicApp {
             artboard_drag: None,
             artboard_resize: None,
             artboard_rename: None,
+            artboard_rename_focus: false,
             fit_pending: false,
             artboard_pre: None,
             global_search: String::new(),
@@ -823,6 +826,68 @@ fn search_result_row(
         egui::Color32::from_gray(130),
     );
     resp.clicked()
+}
+
+/// Draw a horizontal distance measurement between two boards' facing edges
+/// (left board's right edge → right board's left edge), with end ticks and a px
+/// label, at their vertical-overlap midline. Rects are `(x, y, w, h)` in canvas.
+fn draw_h_gap(
+    p: &egui::Painter,
+    view: &CanvasView,
+    l: (f64, f64, f64, f64),
+    r: (f64, f64, f64, f64),
+    color: egui::Color32,
+) {
+    let lx = l.0 + l.2;
+    let rx = r.0;
+    if rx <= lx {
+        return;
+    }
+    let ym = (l.1.max(r.1) + (l.1 + l.3).min(r.1 + r.3)) * 0.5;
+    let (sx1, sy) = view.canvas_to_screen(lx, ym);
+    let (sx2, _) = view.canvas_to_screen(rx, ym);
+    let (sx1, sy, sx2) = (sx1 as f32, sy as f32, sx2 as f32);
+    let stroke = egui::Stroke::new(1.0, color);
+    p.line_segment([egui::pos2(sx1, sy), egui::pos2(sx2, sy)], stroke);
+    p.line_segment([egui::pos2(sx1, sy - 4.0), egui::pos2(sx1, sy + 4.0)], stroke);
+    p.line_segment([egui::pos2(sx2, sy - 4.0), egui::pos2(sx2, sy + 4.0)], stroke);
+    gap_label(p, egui::pos2((sx1 + sx2) * 0.5, sy - 9.0), rx - lx, color);
+}
+
+/// Vertical distance measurement (top board's bottom → bottom board's top).
+fn draw_v_gap(
+    p: &egui::Painter,
+    view: &CanvasView,
+    t: (f64, f64, f64, f64),
+    b: (f64, f64, f64, f64),
+    color: egui::Color32,
+) {
+    let ty = t.1 + t.3;
+    let by = b.1;
+    if by <= ty {
+        return;
+    }
+    let xm = (t.0.max(b.0) + (t.0 + t.2).min(b.0 + b.2)) * 0.5;
+    let (sx, sy1) = view.canvas_to_screen(xm, ty);
+    let (_, sy2) = view.canvas_to_screen(xm, by);
+    let (sx, sy1, sy2) = (sx as f32, sy1 as f32, sy2 as f32);
+    let stroke = egui::Stroke::new(1.0, color);
+    p.line_segment([egui::pos2(sx, sy1), egui::pos2(sx, sy2)], stroke);
+    p.line_segment([egui::pos2(sx - 4.0, sy1), egui::pos2(sx + 4.0, sy1)], stroke);
+    p.line_segment([egui::pos2(sx - 4.0, sy2), egui::pos2(sx + 4.0, sy2)], stroke);
+    gap_label(p, egui::pos2(sx + 14.0, (sy1 + sy2) * 0.5), by - ty, color);
+}
+
+/// A small filled px label for a distance measurement.
+fn gap_label(p: &egui::Painter, center: egui::Pos2, value: f64, color: egui::Color32) {
+    let galley = p.layout_no_wrap(
+        format!("{:.0}", value),
+        egui::FontId::proportional(10.0),
+        egui::Color32::WHITE,
+    );
+    let rect = egui::Rect::from_center_size(center, galley.size() + egui::vec2(6.0, 3.0));
+    p.rect_filled(rect, 2.0, color);
+    p.galley(rect.center() - galley.size() * 0.5, galley, egui::Color32::WHITE);
 }
 
 fn fit_artboard_to_rect(view: &mut CanvasView, rect: egui::Rect, bounds: (f64, f64, f64, f64)) {
@@ -2343,9 +2408,9 @@ impl PhotonicApp {
                     let mut select: Option<photonic_core::ArtboardId> = None;
                     let mut start_rename: Option<(photonic_core::ArtboardId, String)> = None;
 
-                    // Labels + handles only matter with multiple boards;
-                    // a lone artboard keeps the classic clean canvas.
-                    if boards.len() > 1 {
+                    // Show the name + handles for every artboard, including a
+                    // lone one (the name is always visible / editable).
+                    if !boards.is_empty() {
                         let painter = ui.painter_at(rect);
                         for (i, (id, name, x, y, w, h)) in boards.iter().enumerate() {
                             let (sx0, sy0) = view.canvas_to_screen(*x, *y);
@@ -2391,10 +2456,9 @@ impl PhotonicApp {
                                     ctx.set_cursor_icon(egui::CursorIcon::Text);
                                     over_artboard_label = true;
                                 }
-                                if nresp.double_clicked() {
-                                    start_rename = Some((*id, name.clone()));
-                                } else if nresp.clicked() {
+                                if nresp.clicked() || nresp.double_clicked() {
                                     select = Some(*id);
+                                    start_rename = Some((*id, name.clone()));
                                 }
 
                                 // Drag handle → move the board and its artwork.
@@ -2566,6 +2630,145 @@ impl PhotonicApp {
                                     ny += ddy;
                                 }
 
+                                // Equal-distance (distribution) snapping: if the
+                                // gap to a neighbour matches an existing gap
+                                // between boards, lock to it (only when edge
+                                // alignment didn't already claim that axis).
+                                let others: Vec<(f64, f64, f64, f64)> = boards
+                                    .iter()
+                                    .filter(|b| b.0 != d.id)
+                                    .map(|b| (b.2, b.3, b.4, b.5))
+                                    .collect();
+                                let ov_y = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+                                    a.1 < b.1 + b.3 && a.1 + a.3 > b.1
+                                };
+                                let ov_x = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+                                    a.0 < b.0 + b.2 && a.0 + a.2 > b.0
+                                };
+                                let mut dist_x: Vec<((f64, f64, f64, f64), (f64, f64, f64, f64))> =
+                                    Vec::new();
+                                let mut dist_y: Vec<((f64, f64, f64, f64), (f64, f64, f64, f64))> =
+                                    Vec::new();
+
+                                if best_dx.is_none() {
+                                    let mut gaps: Vec<f64> = Vec::new();
+                                    for i in 0..others.len() {
+                                        for j in 0..others.len() {
+                                            if i != j && ov_y(others[i], others[j]) {
+                                                let g = others[j].0 - (others[i].0 + others[i].2);
+                                                if g > 1.0 {
+                                                    gaps.push(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut best_adj: Option<f64> = None;
+                                    let mut snap_g: Option<f64> = None;
+                                    for &o in &others {
+                                        if !ov_y((nx, ny, bw, bh), o) {
+                                            continue;
+                                        }
+                                        for &g in &gaps {
+                                            for t in [o.0 + o.2 + g, o.0 - g - bw] {
+                                                let a = t - nx;
+                                                if a.abs() < thresh
+                                                    && best_adj
+                                                        .map_or(true, |b: f64| a.abs() < b.abs())
+                                                {
+                                                    best_adj = Some(a);
+                                                    snap_g = Some(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if let Some(adj) = best_adj {
+                                        nx += adj;
+                                    }
+                                    if let Some(g) = snap_g {
+                                        let dn = (nx, ny, bw, bh);
+                                        for &o in &others {
+                                            if ov_y(dn, o) {
+                                                if ((dn.0 - (o.0 + o.2)) - g).abs() < 0.6 {
+                                                    dist_x.push((o, dn));
+                                                }
+                                                if ((o.0 - (dn.0 + dn.2)) - g).abs() < 0.6 {
+                                                    dist_x.push((dn, o));
+                                                }
+                                            }
+                                        }
+                                        for i in 0..others.len() {
+                                            for j in 0..others.len() {
+                                                if i != j && ov_y(others[i], others[j]) {
+                                                    let gg =
+                                                        others[j].0 - (others[i].0 + others[i].2);
+                                                    if (gg - g).abs() < 0.6 {
+                                                        dist_x.push((others[i], others[j]));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if best_dy.is_none() {
+                                    let mut gaps: Vec<f64> = Vec::new();
+                                    for i in 0..others.len() {
+                                        for j in 0..others.len() {
+                                            if i != j && ov_x(others[i], others[j]) {
+                                                let g = others[j].1 - (others[i].1 + others[i].3);
+                                                if g > 1.0 {
+                                                    gaps.push(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut best_adj: Option<f64> = None;
+                                    let mut snap_g: Option<f64> = None;
+                                    for &o in &others {
+                                        if !ov_x((nx, ny, bw, bh), o) {
+                                            continue;
+                                        }
+                                        for &g in &gaps {
+                                            for t in [o.1 + o.3 + g, o.1 - g - bh] {
+                                                let a = t - ny;
+                                                if a.abs() < thresh
+                                                    && best_adj
+                                                        .map_or(true, |b: f64| a.abs() < b.abs())
+                                                {
+                                                    best_adj = Some(a);
+                                                    snap_g = Some(g);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if let Some(adj) = best_adj {
+                                        ny += adj;
+                                    }
+                                    if let Some(g) = snap_g {
+                                        let dn = (nx, ny, bw, bh);
+                                        for &o in &others {
+                                            if ov_x(dn, o) {
+                                                if ((dn.1 - (o.1 + o.3)) - g).abs() < 0.6 {
+                                                    dist_y.push((o, dn));
+                                                }
+                                                if ((o.1 - (dn.1 + dn.3)) - g).abs() < 0.6 {
+                                                    dist_y.push((dn, o));
+                                                }
+                                            }
+                                        }
+                                        for i in 0..others.len() {
+                                            for j in 0..others.len() {
+                                                if i != j && ov_x(others[i], others[j]) {
+                                                    let gg =
+                                                        others[j].1 - (others[i].1 + others[i].3);
+                                                    if (gg - g).abs() < 0.6 {
+                                                        dist_y.push((others[i], others[j]));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 let dx = nx - d.orig_x;
                                 let dy = ny - d.orig_y;
                                 if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == d.id) {
@@ -2603,6 +2806,13 @@ impl PhotonicApp {
                                         ],
                                         egui::Stroke::new(1.0, guide),
                                     );
+                                }
+                                // Equal-distance measurements between matching boards.
+                                for (l, r) in &dist_x {
+                                    draw_h_gap(&gp, view, *l, *r, guide);
+                                }
+                                for (t, b) in &dist_y {
+                                    draw_v_gap(&gp, view, *t, *b, guide);
                                 }
                             }
                         } else {
@@ -2697,6 +2907,7 @@ impl PhotonicApp {
                     if let Some(r) = start_rename {
                         self.artboard_pre = Some(doc.artboards.clone());
                         self.artboard_rename = Some(r);
+                        self.artboard_rename_focus = true;
                     }
 
                     // ── Inline rename popup ─────────────────────────────────────
@@ -2716,12 +2927,19 @@ impl PhotonicApp {
                                                 egui::TextEdit::singleline(buf)
                                                     .desired_width(140.0),
                                             );
-                                            r.request_focus();
-                                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                                close = Some(true);
+                                            // Focus once when opened (not every
+                                            // frame) so clicking away can commit.
+                                            if self.artboard_rename_focus {
+                                                r.request_focus();
+                                                self.artboard_rename_focus = false;
                                             }
-                                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                            // Commit on focus loss (Enter or click
+                                            // away); Escape cancels.
+                                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                            if esc {
                                                 close = Some(false);
+                                            } else if r.lost_focus() {
+                                                close = Some(true);
                                             }
                                         }
                                     });
