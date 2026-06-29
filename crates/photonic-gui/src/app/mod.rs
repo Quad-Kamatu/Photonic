@@ -7,6 +7,7 @@ use hit_test::*;
 mod direct_select;
 mod tool_handlers;
 mod layer_ops;
+mod erase_tools;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -499,6 +500,14 @@ pub struct PhotonicApp {
     /// Screen-space points collected during an active lasso drag.
     lasso_points: Vec<egui::Pos2>,
 
+    // ── Knife / Eraser (destructive path edit) tool state ─────────────────────
+    /// Canvas-space points collected during an active Eraser drag.
+    eraser_points: Vec<(f64, f64)>,
+    /// Eraser head radius in canvas units (scales with zoom). Default ~10px.
+    pub eraser_radius: f64,
+    /// Canvas-space points collected during an active Knife drag.
+    knife_points: Vec<(f64, f64)>,
+
     // ── Magic Wand tool options ───────────────────────────────────────────────
     /// Which attribute the Magic Wand matches when clicked.
     pub magic_wand_attribute: SelectSameAttr,
@@ -808,6 +817,9 @@ impl Default for PhotonicApp {
             isolated_group: None,
             pencil_points: Vec::new(),
             lasso_points: Vec::new(),
+            eraser_points: Vec::new(),
+            eraser_radius: 10.0,
+            knife_points: Vec::new(),
             magic_wand_attribute: SelectSameAttr::FillColor,
             magic_wand_tolerance: 0.05,
             gui_clipboard: Vec::new(),
@@ -1827,7 +1839,7 @@ impl PhotonicApp {
                                 ("Selection & Navigation", &[Tool::Select, Tool::DirectSelect, Tool::Pan]),
                                 ("Shapes", &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Arc, Tool::Polygon, Tool::Star, Tool::Line, Tool::Grid, Tool::PolarGrid]),
                                 ("Drawing & Text", &[Tool::Pen, Tool::ShapeBuilder, Tool::Text]),
-                                ("Path Editing", &[Tool::Scissors, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth]),
+                                ("Path Editing", &[Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth]),
                                 ("Raster", &[Tool::RasterBrush, Tool::RasterEraser]),
                             ];
 
@@ -2070,6 +2082,7 @@ impl PhotonicApp {
                         &mut self.recolor_palette_input,
                         &mut self.magic_wand_attribute,
                         &mut self.magic_wand_tolerance,
+                        &mut self.eraser_radius,
                         &self.composition_findings,
                         &self.rhythm_findings,
                         &self.branch_names.clone(),
@@ -3716,6 +3729,18 @@ impl PhotonicApp {
                             }
                         }
                     }
+                    return;
+                }
+
+                // ── Knife tool (freehand slice) ───────────────────────────────
+                if self.active_tool == Tool::Knife {
+                    self.handle_knife_tool(ui, &response, doc, view, &mut doc_modified, history);
+                    return;
+                }
+
+                // ── Eraser tool (vector boolean subtract) ─────────────────────
+                if self.active_tool == Tool::Eraser {
+                    self.handle_eraser_tool(ui, &response, doc, view, &mut doc_modified, history);
                     return;
                 }
 

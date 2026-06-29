@@ -954,7 +954,7 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(2.0);
-    for tool in [Tool::Scissors, Tool::MagicWand, Tool::Lasso, Tool::Pencil] {
+    for tool in [Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil] {
         let label = format!("{} {}", tool.icon(), tool.label());
         if ui.selectable_label(tool == active, label).clicked() {
             chosen = Some(tool);
@@ -1416,6 +1416,7 @@ pub fn draw_properties_panel(
     recolor_palette_input: &mut String,
     magic_wand_attribute: &mut SelectSameAttr,
     magic_wand_tolerance: &mut f64,
+    eraser_radius: &mut f64,
     composition_findings: &[String],
     rhythm_findings: &[String],
     branch_names: &[String],
@@ -4621,6 +4622,8 @@ pub fn draw_properties_panel(
         Tool::ShapeBuilder => "Shape Builder",
         Tool::DirectSelect => "Direct Select",
         Tool::MagicWand => "Magic Wand Options",
+        Tool::Eraser => "Eraser Options",
+        Tool::Knife => "Knife Options",
         _ => "Tool",
     };
 
@@ -4636,7 +4639,9 @@ pub fn draw_properties_panel(
         | Tool::Select
         | Tool::ShapeBuilder
         | Tool::DirectSelect
-        | Tool::MagicWand => {
+        | Tool::MagicWand
+        | Tool::Eraser
+        | Tool::Knife => {
             if matches(tool_label) {
                 egui::CollapsingHeader::new(tool_label)
                     .default_open(false)
@@ -4749,6 +4754,19 @@ pub fn draw_properties_panel(
                                     *magic_wand_tolerance = tol as f64;
                                 }
                                 ui.label(RichText::new("Click any object → select all matching").weak().small());
+                            }
+                            Tool::Eraser => {
+                                ui.label("Radius");
+                                let mut r = *eraser_radius as f32;
+                                if ui.add(egui::Slider::new(&mut r, 1.0..=200.0).suffix("px")).changed() {
+                                    *eraser_radius = r as f64;
+                                }
+                                ui.label(RichText::new("Drag across path art → subtract a swept region").weak().small());
+                                ui.label(RichText::new("Cuts every visible, unlocked path it touches").weak().small());
+                            }
+                            Tool::Knife => {
+                                ui.label(RichText::new("Drag a line across filled paths → slice into faces").weak().small());
+                                ui.label(RichText::new("Each cut face becomes its own editable path").weak().small());
                             }
                             _ => {}
                         }
