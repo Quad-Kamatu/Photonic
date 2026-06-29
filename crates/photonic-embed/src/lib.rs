@@ -6,9 +6,23 @@
 
 use anyhow::Result;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::path::PathBuf;
 
 pub struct Embedder {
     model: TextEmbedding,
+}
+
+/// Stable per-user cache directory for the model, so it isn't recreated in the
+/// process working directory: `$XDG_CACHE_HOME/Photonic/models`,
+/// `%APPDATA%\Photonic\models`, or `~/.cache/Photonic/models`.
+fn model_cache_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("APPDATA").ok().map(PathBuf::from))
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("Photonic").join("models")
 }
 
 impl Embedder {
@@ -16,7 +30,9 @@ impl Embedder {
     /// the UI thread.
     pub fn new() -> Result<Self> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir(model_cache_dir())
+                .with_show_download_progress(false),
         )?;
         Ok(Self { model })
     }
