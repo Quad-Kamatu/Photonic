@@ -150,6 +150,106 @@ pub async fn create_shape(state: &AppState, args: CreateShapeArgs) -> ToolResult
     .with_data(serde_json::json!({ "node_id": node_id }))
 }
 
+/// Combine existing path nodes into a live (non-destructive) compound shape.
+/// The operand geometry is captured into the compound and the original nodes are
+/// removed; the compound's `path_data` is the baked boolean result and stays
+/// re-editable via its operands.
+pub async fn create_compound_shape(
+    state: &AppState,
+    args: crate::protocol::CreateCompoundShapeArgs,
+) -> ToolResult {
+    use photonic_core::node::{CompoundOperand, CompoundSpec, PathNode};
+    use photonic_core::ops::boolean::BooleanOp;
+    use photonic_core::PathData;
+
+    let op = match args.op.as_deref().unwrap_or("union") {
+        "union" => BooleanOp::Union,
+        "intersect" => BooleanOp::Intersect,
+        "subtract" => BooleanOp::Subtract,
+        "exclude" => BooleanOp::Exclude,
+        other => {
+            return ToolResult::error(format!(
+                "Unknown boolean op '{other}' (use union|intersect|subtract|exclude)"
+            ))
+        }
+    };
+    if args.node_ids.len() < 2 {
+        return ToolResult::error("create_compound_shape needs at least 2 path nodes");
+    }
+
+    let mut doc = state.document.lock().await;
+
+    // Capture each operand's geometry in document space.
+    let mut operands: Vec<CompoundOperand> = Vec::new();
+    let mut base_fill = None;
+    for (i, nid) in args.node_ids.iter().enumerate() {
+        let Some(node) = doc.nodes.get(nid) else {
+            return ToolResult::error(format!("Node {nid} not found"));
+        };
+        let SceneNodeKind::Path(p) = &node.kind else {
+            return ToolResult::error(format!("Node {nid} is not a path"));
+        };
+        let mut bez = p.path_data.to_bez_path();
+        bez.apply_affine(node.transform.to_kurbo());
+        operands.push(CompoundOperand {
+            path_data: PathData::from_bez_path(&bez),
+            op: if i == 0 { BooleanOp::Union } else { op },
+        });
+        if i == 0 {
+            base_fill = Some(p.fill.clone());
+        }
+    }
+
+    let mut path_node = PathNode::from_compound(CompoundSpec { operands });
+    if let Some(fill) = base_fill {
+        path_node.fill = fill;
+    }
+    let name = args.name.unwrap_or_else(|| "Compound".to_string());
+    let node = SceneNode::new(&name, uuid::Uuid::nil(), SceneNodeKind::Path(path_node));
+    let node_id = node.id;
+
+    let mut history = state.history.lock().await;
+    // Remove the operands, then add the compound.
+    for nid in &args.node_ids {
+        history.execute(Command::RemoveNode { node_id: *nid }, &mut doc);
+    }
+    history.execute(
+        Command::AddNode {
+            node,
+            layer_id: args.layer_id,
+        },
+        &mut doc,
+    );
+
+    ToolResult::text(format!(
+        "Created compound '{name}' from {} operands (id: {node_id})",
+        args.node_ids.len()
+    ))
+    .with_data(serde_json::json!({ "node_id": node_id }))
+}
+
+/// Expand a live compound into a plain path: drop the operands, keep the baked
+/// geometry. No-op (success) for a node that is not a compound.
+pub async fn expand_compound(
+    state: &AppState,
+    args: crate::protocol::ExpandCompoundArgs,
+) -> ToolResult {
+    let mut doc = state.document.lock().await;
+    let Some(old) = doc.nodes.get(&args.node_id).cloned() else {
+        return ToolResult::error(format!("Node {} not found", args.node_id));
+    };
+    let mut new_node = old.clone();
+    match &mut new_node.kind {
+        SceneNodeKind::Path(p) if p.compound.is_some() => {
+            p.compound = None;
+        }
+        _ => return ToolResult::text("Node is not a compound shape — nothing to expand"),
+    }
+    let mut history = state.history.lock().await;
+    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    ToolResult::text(format!("Expanded compound {}", args.node_id))
+}
+
 pub async fn create_path(state: &AppState, args: CreatePathArgs) -> ToolResult {
     tracing::debug!("tool: create_path (data len={})", args.path_data.len());
     let path_data = match PathData::from_svg(&args.path_data) {

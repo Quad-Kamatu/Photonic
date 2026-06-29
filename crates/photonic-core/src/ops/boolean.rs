@@ -17,6 +17,25 @@ pub enum BooleanOp {
     Divide,
 }
 
+/// Evaluate a live [`crate::node::CompoundSpec`] into a single path by folding
+/// its operands left-to-right through [`boolean_op`]. The first operand is the
+/// base; each subsequent one is combined with its boolean mode. A failed
+/// operation keeps the accumulated result. Returns an empty path with no operands.
+pub fn eval_compound(spec: &crate::node::CompoundSpec) -> PathData {
+    let mut iter = spec.operands.iter();
+    let mut acc = match iter.next() {
+        Some(first) => first.path_data.clone(),
+        None => return PathData::new(),
+    };
+    for operand in iter {
+        acc = match boolean_op(&acc, &operand.path_data, operand.op) {
+            Ok(result) => result,
+            Err(_) => acc,
+        };
+    }
+    acc
+}
+
 /// Compute a boolean operation on two paths.
 /// Returns the resulting path, or an error string if the operation fails.
 pub fn boolean_op(a: &PathData, b: &PathData, op: BooleanOp) -> Result<PathData, String> {
@@ -165,4 +184,68 @@ fn add_ring_to_bez(bez: &mut BezPath, ring: &LineString<f64>) {
         bez.line_to((coord.x, coord.y));
     }
     bez.close_path();
+}
+
+#[cfg(test)]
+mod compound_tests {
+    use super::*;
+    use crate::node::{CompoundOperand, CompoundSpec, PathNode};
+
+    fn op(x: f64, y: f64, w: f64, h: f64, mode: BooleanOp) -> CompoundOperand {
+        CompoundOperand {
+            path_data: PathData::rect(x, y, w, h),
+            op: mode,
+        }
+    }
+
+    #[test]
+    fn eval_union_spans_both_operands() {
+        // Two overlapping 40×40 squares offset by 20 → union bbox is 0..60.
+        let spec = CompoundSpec {
+            operands: vec![
+                op(0.0, 0.0, 40.0, 40.0, BooleanOp::Union),
+                op(20.0, 20.0, 40.0, 40.0, BooleanOp::Union),
+            ],
+        };
+        let result = eval_compound(&spec);
+        let bb = result.bounding_box().expect("union has geometry");
+        assert!(bb.x0 <= 0.5 && bb.y0 <= 0.5, "min {bb:?}");
+        assert!(bb.x1 >= 59.5 && bb.y1 >= 59.5, "max {bb:?}");
+    }
+
+    #[test]
+    fn eval_subtract_removes_overlap() {
+        // Base 0..40 minus a square covering its right half → width shrinks.
+        let spec = CompoundSpec {
+            operands: vec![
+                op(0.0, 0.0, 40.0, 40.0, BooleanOp::Union),
+                op(20.0, 0.0, 40.0, 40.0, BooleanOp::Subtract),
+            ],
+        };
+        let bb = eval_compound(&spec).bounding_box().expect("geometry");
+        assert!(bb.x1 <= 21.0, "right edge should be cut back, got {bb:?}");
+    }
+
+    #[test]
+    fn empty_spec_is_empty() {
+        assert!(eval_compound(&CompoundSpec { operands: vec![] }).is_empty());
+    }
+
+    #[test]
+    fn from_compound_bakes_and_rebakes() {
+        let spec = CompoundSpec {
+            operands: vec![
+                op(0.0, 0.0, 40.0, 40.0, BooleanOp::Union),
+                op(20.0, 20.0, 40.0, 40.0, BooleanOp::Union),
+            ],
+        };
+        let mut node = PathNode::from_compound(spec);
+        assert!(node.compound.is_some() && node.is_compound);
+        assert!(!node.path_data.is_empty(), "path_data should be baked");
+
+        // Editing an operand + rebaking updates path_data.
+        node.path_data = PathData::new();
+        node.rebake_compound();
+        assert!(!node.path_data.is_empty(), "rebake should restore geometry");
+    }
 }

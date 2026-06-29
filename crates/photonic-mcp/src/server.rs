@@ -271,6 +271,19 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::create_shape(state, a).await,
             ))
         }
+        "create_compound_shape" => {
+            let a: CreateCompoundShapeArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::nodes::create_compound_shape(state, a).await,
+            ))
+        }
+        "expand_compound" => {
+            let a: ExpandCompoundArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::nodes::expand_compound(state, a).await,
+            ))
+        }
         "create_path" => {
             let a: CreatePathArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(
@@ -2085,6 +2098,31 @@ pub(crate) async fn dispatch_tool_inner(
 /// `docs/mcp-api.md`) can read the canonical schema without standing up a server.
 pub fn tool_list() -> Value {
     json!([
+        {
+            "name": "create_compound_shape",
+            "description": "Combine two or more existing path nodes into a live (non-destructive) compound shape via a boolean op (union/intersect/subtract/exclude). The operand geometry is captured into the compound and the originals are removed; the compound's path is the baked boolean result and stays re-editable (expand it with expand_compound).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Path node IDs to combine (≥2). The first is the base." },
+                    "op": { "type": "string", "enum": ["union","intersect","subtract","exclude"], "description": "Boolean mode (default: union)." },
+                    "name": { "type": "string" },
+                    "layer_id": { "type": "string" }
+                },
+                "required": ["node_ids"]
+            }
+        },
+        {
+            "name": "expand_compound",
+            "description": "Expand a live compound shape into a plain path: drops the operands but keeps the baked geometry. No-op for a non-compound node.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string" }
+                },
+                "required": ["node_id"]
+            }
+        },
         {
             "name": "create_shape",
             "description": "Create a primitive shape (rectangle, rounded_rect, ellipse, arc, polygon, star, line). For arc: x,y,width,height define the bounding box; arc_start_angle and arc_end_angle set the sweep in degrees (0=3 o'clock); arc_open=true for open arc, false for closed pie sector.",

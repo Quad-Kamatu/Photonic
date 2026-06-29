@@ -1245,6 +1245,27 @@ pub struct CreateGridArgs {
     pub name: Option<String>,
 }
 
+/// Arguments for the `create_compound_shape` tool.
+#[derive(Debug, Deserialize)]
+pub struct CreateCompoundShapeArgs {
+    /// Path nodes to combine. The first is the base; each subsequent one is
+    /// folded in with `op`. At least two required.
+    pub node_ids: Vec<Uuid>,
+    /// Boolean mode: "union" (default), "intersect", "subtract", or "exclude".
+    #[serde(default)]
+    pub op: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub layer_id: Option<Uuid>,
+}
+
+/// Arguments for the `expand_compound` tool.
+#[derive(Debug, Deserialize)]
+pub struct ExpandCompoundArgs {
+    pub node_id: Uuid,
+}
+
 /// Arguments for `create_path` tool
 #[derive(Debug, Deserialize)]
 pub struct CreatePathArgs {
