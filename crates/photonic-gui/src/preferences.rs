@@ -25,6 +25,9 @@ pub struct AppPreferences {
     /// Arrow-key nudge distance in document pixels (Shift multiplies by 10).
     #[serde(default = "default_nudge_distance")]
     pub nudge_distance: f64,
+    /// Check GitHub for a newer release once on launch and prompt if available.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 
     // HOTBAR — tools pinned to the sidebar by the user
     #[serde(default)]
@@ -33,6 +36,10 @@ pub struct AppPreferences {
 
 fn default_nudge_distance() -> f64 {
     1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppPreferences {
@@ -51,6 +58,7 @@ impl Default for AppPreferences {
             default_stroke_width: 1.0,
             console_open_on_start: false,
             nudge_distance: 1.0,
+            auto_check_updates: true,
             pinned_tools: Vec::new(),
         }
     }

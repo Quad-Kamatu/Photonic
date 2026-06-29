@@ -324,6 +324,12 @@ pub struct PhotonicApp {
     semantic: crate::global_search::SemanticIndex,
     /// In-flight self-update check (result polled each frame).
     update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateStatus>>,
+    /// In-flight launch-time "is a newer release available?" check (no download).
+    update_check_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateCheck>>,
+    /// Newer version found by the launch check; drives the update prompt banner.
+    update_available: Option<String>,
+    /// Whether the once-per-launch update check has been kicked off yet.
+    update_checked_startup: bool,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -660,6 +666,9 @@ impl Default for PhotonicApp {
                     .collect(),
             ),
             update_rx: None,
+            update_check_rx: None,
+            update_available: None,
+            update_checked_startup: false,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -1171,6 +1180,81 @@ impl PhotonicApp {
             }
         }
 
+        // ── Auto-check for a newer release, once per launch ───────────────────
+        // Lightweight (no download): just asks GitHub for the latest version.
+        // If a newer one exists, `update_available` drives a dismissable banner.
+        if !self.update_checked_startup
+            && self.prefs.auto_check_updates
+            && self.update_rx.is_none()
+        {
+            self.update_checked_startup = true;
+            self.update_check_rx = Some(crate::update::check_latest());
+        }
+        if let Some(rx) = &self.update_check_rx {
+            if let Ok(check) = rx.try_recv() {
+                use crate::update::UpdateCheck;
+                if let UpdateCheck::Available(v) = check {
+                    self.update_available = Some(v);
+                }
+                self.update_check_rx = None;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+
+        // ── Update-available banner (dismissable, floats top-center) ──────────
+        if let Some(ver) = self.update_available.clone() {
+            let mut dismiss = false;
+            let mut do_update = false;
+            egui::Area::new(egui::Id::new("update_available_banner"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style())
+                        .fill(Color32::from_rgb(30, 41, 59))
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(59, 130, 246)))
+                        .rounding(10.0)
+                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(ph::ARROW_CIRCLE_UP)
+                                        .size(18.0)
+                                        .color(Color32::from_rgb(96, 165, 250)),
+                                );
+                                ui.label(
+                                    RichText::new(format!("Photonic v{ver} is available"))
+                                        .strong()
+                                        .color(Color32::from_rgb(226, 232, 240)),
+                                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .button(
+                                        RichText::new(format!("{} Update now", ph::DOWNLOAD_SIMPLE))
+                                            .color(Color32::WHITE),
+                                    )
+                                    .clicked()
+                                {
+                                    do_update = true;
+                                }
+                                if ui.button("Later").clicked() {
+                                    dismiss = true;
+                                }
+                            });
+                        });
+                });
+            if do_update {
+                if self.update_rx.is_none() {
+                    self.update_rx = Some(crate::update::check_and_update());
+                    self.file_status =
+                        Some(format!("Downloading Photonic v{ver}… (current {})", crate::update::CURRENT_VERSION));
+                }
+                self.update_available = None;
+            } else if dismiss {
+                self.update_available = None;
+            }
+        }
+
         // ── Apply theme ───────────────────────────────────────────────────────
         if self.prefs.dark_mode {
             ctx.set_visuals(crate::theme::build_dark_theme());
@@ -1637,6 +1721,9 @@ impl PhotonicApp {
                                         ui.label(RichText::new("Behavior").strong());
                                         ui.add_space(4.0);
                                         ui.checkbox(&mut self.prefs.console_open_on_start, "Open Console on Start");
+                                        ui.add_space(4.0);
+                                        ui.checkbox(&mut self.prefs.auto_check_updates, "Check for updates on launch")
+                                            .on_hover_text("Once per launch, ask GitHub for a newer release and show a banner if one exists. No automatic download.");
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Arrow nudge (px):");

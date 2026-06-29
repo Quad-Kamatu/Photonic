@@ -29,6 +29,53 @@ pub enum UpdateStatus {
     Error(String),
 }
 
+/// Result of a lightweight check (no download/install).
+#[derive(Clone, Debug)]
+pub enum UpdateCheck {
+    UpToDate,
+    Available(String),
+    Error(String),
+}
+
+/// Check (off-thread) whether a newer release exists, without downloading it.
+pub fn check_latest() -> Receiver<UpdateCheck> {
+    let (tx, rx) = channel();
+    std::thread::Builder::new()
+        .name("photonic-update-check".into())
+        .spawn(move || {
+            let _ = tx.send(check());
+        })
+        .ok();
+    rx
+}
+
+fn check() -> UpdateCheck {
+    let mut builder = self_update::backends::github::Update::configure();
+    builder
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(BIN_NAME)
+        .current_version(CURRENT_VERSION);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        if !token.is_empty() {
+            builder.auth_token(&token);
+        }
+    }
+    let updater = match builder.build() {
+        Ok(u) => u,
+        Err(e) => return UpdateCheck::Error(e.to_string()),
+    };
+    let release = match updater.get_latest_release() {
+        Ok(r) => r,
+        Err(e) => return UpdateCheck::Error(e.to_string()),
+    };
+    match self_update::version::bump_is_greater(CURRENT_VERSION, &release.version) {
+        Ok(true) => UpdateCheck::Available(release.version),
+        Ok(false) => UpdateCheck::UpToDate,
+        Err(e) => UpdateCheck::Error(e.to_string()),
+    }
+}
+
 /// Start a check-and-update on a background thread; poll the receiver each frame.
 pub fn check_and_update() -> Receiver<UpdateStatus> {
     let (tx, rx) = channel();
