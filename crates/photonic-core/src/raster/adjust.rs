@@ -170,7 +170,12 @@ fn map_point(img: &mut RasterImage, sel: Option<&Mask>, mut f: impl FnMut([f32; 
 
 /// Brightness/Contrast. `brightness` and `contrast` are both -1..1. Brightness
 /// is an additive offset; contrast scales each channel around the 0.5 midpoint.
-pub fn brightness_contrast(img: &mut RasterImage, brightness: f32, contrast: f32, sel: Option<&Mask>) {
+pub fn brightness_contrast(
+    img: &mut RasterImage,
+    brightness: f32,
+    contrast: f32,
+    sel: Option<&Mask>,
+) {
     let (brightness, contrast) = match (san(brightness, -1.0, 1.0), san(contrast, -1.0, 1.0)) {
         (Some(b), Some(c)) => (b, c),
         _ => return, // non-finite input → no-op
@@ -431,7 +436,13 @@ pub fn color_balance(
     if !(finite3(shadows) && finite3(midtones) && finite3(highlights)) {
         return; // non-finite input → no-op
     }
-    let clamp3 = |a: [f32; 3]| [a[0].clamp(-1.0, 1.0), a[1].clamp(-1.0, 1.0), a[2].clamp(-1.0, 1.0)];
+    let clamp3 = |a: [f32; 3]| {
+        [
+            a[0].clamp(-1.0, 1.0),
+            a[1].clamp(-1.0, 1.0),
+            a[2].clamp(-1.0, 1.0),
+        ]
+    };
     let shadows = clamp3(shadows);
     let midtones = clamp3(midtones);
     let highlights = clamp3(highlights);
@@ -603,7 +614,11 @@ pub fn gradient_map(img: &mut RasterImage, stops: &[(f32, [u8; 3])], sel: Option
         .map(|(p, c)| {
             (
                 clamp01(*p),
-                [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0],
+                [
+                    c[0] as f32 / 255.0,
+                    c[1] as f32 / 255.0,
+                    c[2] as f32 / 255.0,
+                ],
             )
         })
         .collect();
@@ -707,7 +722,10 @@ pub fn shadows_highlights(
     radius: f32,
     sel: Option<&Mask>,
 ) {
-    let (sa, ha) = match (san(shadows_amount, 0.0, 1.0), san(highlights_amount, 0.0, 1.0)) {
+    let (sa, ha) = match (
+        san(shadows_amount, 0.0, 1.0),
+        san(highlights_amount, 0.0, 1.0),
+    ) {
         (Some(s), Some(h)) => (s, h),
         _ => return, // non-finite amount → no-op
     };
@@ -899,34 +917,77 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AdjustmentSpec {
-    BrightnessContrast { brightness: f32, contrast: f32 },
-    Levels { in_black: f32, in_white: f32, gamma: f32, out_black: f32, out_white: f32 },
+    BrightnessContrast {
+        brightness: f32,
+        contrast: f32,
+    },
+    Levels {
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+    },
     Curves {
         rgb: Vec<(f32, f32)>,
         red: Vec<(f32, f32)>,
         green: Vec<(f32, f32)>,
         blue: Vec<(f32, f32)>,
     },
-    Exposure { stops: f32 },
-    HueSaturation { hue: f32, saturation: f32, lightness: f32 },
+    Exposure {
+        stops: f32,
+    },
+    HueSaturation {
+        hue: f32,
+        saturation: f32,
+        lightness: f32,
+    },
     ColorBalance {
         shadows: [f32; 3],
         midtones: [f32; 3],
         highlights: [f32; 3],
         preserve_luminosity: bool,
     },
-    Vibrance { amount: f32 },
+    Vibrance {
+        amount: f32,
+    },
     Desaturate,
-    BlackAndWhite { weights: [f32; 3] },
+    BlackAndWhite {
+        weights: [f32; 3],
+    },
     Invert,
-    Posterize { levels: u32 },
-    Threshold { level: f32 },
-    PhotoFilter { color: [f32; 3], density: f32, preserve_luminosity: bool },
-    ChannelMixer { red: [f32; 3], green: [f32; 3], blue: [f32; 3] },
-    GradientMap { stops: Vec<(f32, [u8; 3])> },
-    SelectiveColor { target: [f32; 3], adjust: [f32; 3], range: f32 },
-    ShadowsHighlights { shadows: f32, highlights: f32, radius: f32 },
-    Gamma { gamma: f32 },
+    Posterize {
+        levels: u32,
+    },
+    Threshold {
+        level: f32,
+    },
+    PhotoFilter {
+        color: [f32; 3],
+        density: f32,
+        preserve_luminosity: bool,
+    },
+    ChannelMixer {
+        red: [f32; 3],
+        green: [f32; 3],
+        blue: [f32; 3],
+    },
+    GradientMap {
+        stops: Vec<(f32, [u8; 3])>,
+    },
+    SelectiveColor {
+        target: [f32; 3],
+        adjust: [f32; 3],
+        range: f32,
+    },
+    ShadowsHighlights {
+        shadows: f32,
+        highlights: f32,
+        radius: f32,
+    },
+    Gamma {
+        gamma: f32,
+    },
     AutoContrast,
     AutoLevels,
 }
@@ -935,41 +996,69 @@ impl AdjustmentSpec {
     /// Apply this adjustment to `img`, confined to an optional selection `mask`.
     pub fn apply(&self, img: &mut RasterImage, mask: Option<&Mask>) {
         match self {
-            AdjustmentSpec::BrightnessContrast { brightness, contrast } => {
-                brightness_contrast(img, *brightness, *contrast, mask)
-            }
-            AdjustmentSpec::Levels { in_black, in_white, gamma, out_black, out_white } => {
-                levels(img, *in_black, *in_white, *gamma, *out_black, *out_white, mask)
-            }
-            AdjustmentSpec::Curves { rgb, red, green, blue } => {
-                curves(img, rgb, red, green, blue, mask)
-            }
+            AdjustmentSpec::BrightnessContrast {
+                brightness,
+                contrast,
+            } => brightness_contrast(img, *brightness, *contrast, mask),
+            AdjustmentSpec::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+            } => levels(
+                img, *in_black, *in_white, *gamma, *out_black, *out_white, mask,
+            ),
+            AdjustmentSpec::Curves {
+                rgb,
+                red,
+                green,
+                blue,
+            } => curves(img, rgb, red, green, blue, mask),
             AdjustmentSpec::Exposure { stops } => exposure(img, *stops, mask),
-            AdjustmentSpec::HueSaturation { hue, saturation, lightness } => {
-                hue_saturation(img, *hue, *saturation, *lightness, mask)
-            }
-            AdjustmentSpec::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => {
-                color_balance(img, *shadows, *midtones, *highlights, *preserve_luminosity, mask)
-            }
+            AdjustmentSpec::HueSaturation {
+                hue,
+                saturation,
+                lightness,
+            } => hue_saturation(img, *hue, *saturation, *lightness, mask),
+            AdjustmentSpec::ColorBalance {
+                shadows,
+                midtones,
+                highlights,
+                preserve_luminosity,
+            } => color_balance(
+                img,
+                *shadows,
+                *midtones,
+                *highlights,
+                *preserve_luminosity,
+                mask,
+            ),
             AdjustmentSpec::Vibrance { amount } => vibrance(img, *amount, mask),
             AdjustmentSpec::Desaturate => desaturate(img, mask),
             AdjustmentSpec::BlackAndWhite { weights } => black_and_white(img, *weights, mask),
             AdjustmentSpec::Invert => invert(img, mask),
             AdjustmentSpec::Posterize { levels } => posterize(img, *levels, mask),
             AdjustmentSpec::Threshold { level } => threshold(img, *level, mask),
-            AdjustmentSpec::PhotoFilter { color, density, preserve_luminosity } => {
-                photo_filter(img, *color, *density, *preserve_luminosity, mask)
-            }
+            AdjustmentSpec::PhotoFilter {
+                color,
+                density,
+                preserve_luminosity,
+            } => photo_filter(img, *color, *density, *preserve_luminosity, mask),
             AdjustmentSpec::ChannelMixer { red, green, blue } => {
                 channel_mixer(img, *red, *green, *blue, mask)
             }
             AdjustmentSpec::GradientMap { stops } => gradient_map(img, stops, mask),
-            AdjustmentSpec::SelectiveColor { target, adjust, range } => {
-                selective_color(img, *target, *adjust, *range, mask)
-            }
-            AdjustmentSpec::ShadowsHighlights { shadows, highlights, radius } => {
-                shadows_highlights(img, *shadows, *highlights, *radius, mask)
-            }
+            AdjustmentSpec::SelectiveColor {
+                target,
+                adjust,
+                range,
+            } => selective_color(img, *target, *adjust, *range, mask),
+            AdjustmentSpec::ShadowsHighlights {
+                shadows,
+                highlights,
+                radius,
+            } => shadows_highlights(img, *shadows, *highlights, *radius, mask),
             AdjustmentSpec::Gamma { gamma: g } => gamma(img, *g, mask),
             AdjustmentSpec::AutoContrast => auto_contrast(img, mask),
             AdjustmentSpec::AutoLevels => auto_levels(img, mask),
@@ -1082,9 +1171,13 @@ mod tests {
         assert!((a.pixel(0, 0)[0] as i32 - 100).abs() <= 1);
         let mut b = solid([100, 100, 100, 255]);
         exposure(&mut b, 1.0, None); // +1 stop in linear light
-        // +1 stop on 100 in linear light lands ≈138 (NOT the naive ×2 = 200).
+                                     // +1 stop on 100 in linear light lands ≈138 (NOT the naive ×2 = 200).
         let v = b.pixel(0, 0)[0] as i32;
-        assert!((130..=150).contains(&v), "expected linear-light ~138, got {}", v);
+        assert!(
+            (130..=150).contains(&v),
+            "expected linear-light ~138, got {}",
+            v
+        );
         assert!(v < 200, "must not be the naive gamma-space doubling");
     }
 
@@ -1129,7 +1222,12 @@ mod tests {
             p[1] as f32 / 255.0,
             p[2] as f32 / 255.0,
         ]);
-        assert!((new - orig).abs() < 0.02, "luma drifted: {} vs {}", new, orig);
+        assert!(
+            (new - orig).abs() < 0.02,
+            "luma drifted: {} vs {}",
+            new,
+            orig
+        );
         assert!(p[0] > p[1], "red should still be pushed relative to green");
     }
 
@@ -1139,7 +1237,11 @@ mod tests {
         let before = rgb_to_hsl([150.0 / 255.0, 120.0 / 255.0, 110.0 / 255.0])[1];
         vibrance(&mut img, 0.8, None);
         let p = img.pixel(0, 0);
-        let after = rgb_to_hsl([p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])[1];
+        let after = rgb_to_hsl([
+            p[0] as f32 / 255.0,
+            p[1] as f32 / 255.0,
+            p[2] as f32 / 255.0,
+        ])[1];
         assert!(after > before, "{} !> {}", after, before);
     }
 
@@ -1160,7 +1262,11 @@ mod tests {
         let mut img = solid([255, 0, 0, 255]);
         desaturate(&mut img, None);
         let p = img.pixel(0, 0);
-        assert!((p[0] as i32 - 127).abs() <= 1, "expected ~127, got {}", p[0]);
+        assert!(
+            (p[0] as i32 - 127).abs() <= 1,
+            "expected ~127, got {}",
+            p[0]
+        );
         assert_eq!(p[0], p[1]);
         assert_eq!(p[1], p[2]);
     }
@@ -1240,7 +1346,13 @@ mod tests {
     fn channel_mixer_swaps_red_and_blue() {
         let mut img = solid([255, 0, 0, 255]);
         // out_r = blue, out_g = green, out_b = red.
-        channel_mixer(&mut img, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], None);
+        channel_mixer(
+            &mut img,
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            None,
+        );
         let p = img.pixel(0, 0);
         assert_eq!(p[0], 0);
         assert_eq!(p[2], 255);
@@ -1336,7 +1448,11 @@ mod tests {
             lifted_white
         );
         // And it must genuinely have been lifted above its original value.
-        assert!(lifted_black > 128, "black-surround patch lifted, got {}", lifted_black);
+        assert!(
+            lifted_black > 128,
+            "black-surround patch lifted, got {}",
+            lifted_black
+        );
     }
 
     #[test]
@@ -1459,7 +1575,14 @@ mod tests {
         assert_eq!(f.pixel(0, 0), orig, "hue_saturation NaN");
 
         let mut g = solid(orig);
-        color_balance(&mut g, [f32::NAN, 0.0, 0.0], [0.0; 3], [0.0; 3], false, None);
+        color_balance(
+            &mut g,
+            [f32::NAN, 0.0, 0.0],
+            [0.0; 3],
+            [0.0; 3],
+            false,
+            None,
+        );
         assert_eq!(g.pixel(0, 0), orig, "color_balance NaN");
 
         let mut h = solid(orig);
@@ -1478,7 +1601,11 @@ mod tests {
     #[test]
     fn hsl_roundtrip_is_stable() {
         for &c in &[[200, 100, 50], [10, 220, 130], [0, 0, 0], [255, 255, 255]] {
-            let rgb = [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0];
+            let rgb = [
+                c[0] as f32 / 255.0,
+                c[1] as f32 / 255.0,
+                c[2] as f32 / 255.0,
+            ];
             let back = hsl_to_rgb(rgb_to_hsl(rgb));
             for i in 0..3 {
                 assert!((back[i] - rgb[i]).abs() < 0.01, "{:?} -> {:?}", rgb, back);

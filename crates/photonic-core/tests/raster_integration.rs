@@ -27,7 +27,9 @@ fn raster_node_survives_v2_json_roundtrip() {
     assert!(json.contains("\"type\": \"raster\"") || json.contains("\"type\":\"raster\""));
 
     let back = Document::from_json(&json).unwrap();
-    let n = back.get_node(&id).expect("raster node present after reload");
+    let n = back
+        .get_node(&id)
+        .expect("raster node present after reload");
     match &n.kind {
         SceneNodeKind::Raster(r) => {
             assert_eq!((r.image.width, r.image.height), (8, 8));
@@ -135,7 +137,11 @@ fn svg_export_skips_adjustment_layers_no_placeholder() {
     let img = SceneNode::new(
         "photo",
         layer,
-        SceneNodeKind::Raster(RasterNode::new(RasterImage::filled(8, 8, [10, 20, 30, 255]))),
+        SceneNodeKind::Raster(RasterNode::new(RasterImage::filled(
+            8,
+            8,
+            [10, 20, 30, 255],
+        ))),
     );
     doc.add_node(img, None);
     let svg2 = export_svg(&doc, &SvgExportOptions::default());

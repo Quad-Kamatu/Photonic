@@ -586,13 +586,10 @@ impl PhotonicApp {
                     if self.prefs.snap_to_objects && !shift {
                         if let Some((bx0, by0, bx1, by1)) = self.move_snap_bbox {
                             let moving: Vec<NodeId> = doc.selection.ids().copied().collect();
-                            let candidates =
-                                crate::snap::collect_snap_candidates(doc, &moving);
-                            let tol =
-                                (self.prefs.snap_tolerance_px as f64) / view.zoom.max(1e-6);
+                            let candidates = crate::snap::collect_snap_candidates(doc, &moving);
+                            let tol = (self.prefs.snap_tolerance_px as f64) / view.zoom.max(1e-6);
                             let tentative = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
-                            let snap =
-                                crate::snap::resolve_snap(tentative, &candidates, tol);
+                            let snap = crate::snap::resolve_snap(tentative, &candidates, tol);
                             dx += snap.corrected.0;
                             dy += snap.corrected.1;
                             if !snap.active.is_empty() {
@@ -621,11 +618,12 @@ impl PhotonicApp {
                     // Alt-duplicate: the copies are already live in the doc. Remove
                     // them and re-add through history so the whole duplication is a
                     // single undoable step (undo deletes the copies).
-                    let ids: Vec<NodeId> =
-                        self.move_drag_origins.iter().map(|n| n.id).collect();
+                    let ids: Vec<NodeId> = self.move_drag_origins.iter().map(|n| n.id).collect();
                     self.move_drag_origins.clear();
-                    let finals: Vec<SceneNode> =
-                        ids.iter().filter_map(|id| doc.nodes.get(id).cloned()).collect();
+                    let finals: Vec<SceneNode> = ids
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).cloned())
+                        .collect();
                     for id in &ids {
                         doc.remove_node(id);
                     }
@@ -1290,7 +1288,11 @@ impl PhotonicApp {
                 if ui.small_button(ph::X).clicked() {
                     self.lua_console.visible = false;
                 }
-                let expand_icon = if self.lua_console.expanded { ph::CARET_DOWN } else { ph::CARET_UP };
+                let expand_icon = if self.lua_console.expanded {
+                    ph::CARET_DOWN
+                } else {
+                    ph::CARET_UP
+                };
                 if ui
                     .small_button(expand_icon)
                     .on_hover_text(if self.lua_console.expanded {

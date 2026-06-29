@@ -32,15 +32,33 @@ pub struct KeyBinding {
 impl KeyBinding {
     /// A primary-modifier (Ctrl/Cmd) + key binding, e.g. Ctrl+Z.
     pub const fn ctrl(key: egui::Key) -> Self {
-        Self { key, ctrl: true, shift: false, alt: false, command: false }
+        Self {
+            key,
+            ctrl: true,
+            shift: false,
+            alt: false,
+            command: false,
+        }
     }
     /// Ctrl/Cmd + Shift + key, e.g. Ctrl+Shift+G.
     pub const fn ctrl_shift(key: egui::Key) -> Self {
-        Self { key, ctrl: true, shift: true, alt: false, command: false }
+        Self {
+            key,
+            ctrl: true,
+            shift: true,
+            alt: false,
+            command: false,
+        }
     }
     /// A bare key with no modifiers, e.g. Delete.
     pub const fn plain(key: egui::Key) -> Self {
-        Self { key, ctrl: false, shift: false, alt: false, command: false }
+        Self {
+            key,
+            ctrl: false,
+            shift: false,
+            alt: false,
+            command: false,
+        }
     }
 
     /// True if this binding fires for the given live modifier state. Ctrl and Cmd
@@ -92,7 +110,13 @@ impl KeyBinding {
                 }
             }
         }
-        Some(Self { key: key?, ctrl, shift, alt, command: false })
+        Some(Self {
+            key: key?,
+            ctrl,
+            shift,
+            alt,
+            command: false,
+        })
     }
 
     /// Human-readable label for the UI, e.g. `"Ctrl+Shift+["`.
@@ -156,10 +180,26 @@ use egui::Key;
 /// Every shortcut-bearing editor action. Ids are stable and used as keymap keys.
 pub static REGISTRY: &[CommandDef] = &[
     // ── Edit ──────────────────────────────────────────────────────────────
-    CommandDef { id: "edit.undo", label: "Undo", default: Some(KeyBinding::ctrl(Key::Z)) },
-    CommandDef { id: "edit.redo", label: "Redo", default: Some(KeyBinding::ctrl(Key::R)) },
-    CommandDef { id: "edit.copy", label: "Copy", default: Some(KeyBinding::ctrl(Key::C)) },
-    CommandDef { id: "edit.paste", label: "Paste", default: Some(KeyBinding::ctrl(Key::V)) },
+    CommandDef {
+        id: "edit.undo",
+        label: "Undo",
+        default: Some(KeyBinding::ctrl(Key::Z)),
+    },
+    CommandDef {
+        id: "edit.redo",
+        label: "Redo",
+        default: Some(KeyBinding::ctrl(Key::R)),
+    },
+    CommandDef {
+        id: "edit.copy",
+        label: "Copy",
+        default: Some(KeyBinding::ctrl(Key::C)),
+    },
+    CommandDef {
+        id: "edit.paste",
+        label: "Paste",
+        default: Some(KeyBinding::ctrl(Key::V)),
+    },
     CommandDef {
         id: "edit.paste_in_place",
         label: "Paste in Place",
@@ -187,7 +227,11 @@ pub static REGISTRY: &[CommandDef] = &[
         default: Some(KeyBinding::ctrl_shift(Key::A)),
     },
     // ── Object / arrange ──────────────────────────────────────────────────
-    CommandDef { id: "object.group", label: "Group", default: Some(KeyBinding::ctrl(Key::G)) },
+    CommandDef {
+        id: "object.group",
+        label: "Group",
+        default: Some(KeyBinding::ctrl(Key::G)),
+    },
     CommandDef {
         id: "object.ungroup",
         label: "Ungroup",
@@ -234,9 +278,21 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Toggle Guides",
         default: Some(KeyBinding::ctrl(Key::Semicolon)),
     },
-    CommandDef { id: "view.toggle_grid", label: "Toggle Grid", default: None },
-    CommandDef { id: "view.fit", label: "Fit to View", default: None },
-    CommandDef { id: "view.toggle_audit", label: "Toggle Audit Log", default: None },
+    CommandDef {
+        id: "view.toggle_grid",
+        label: "Toggle Grid",
+        default: None,
+    },
+    CommandDef {
+        id: "view.fit",
+        label: "Fit to View",
+        default: None,
+    },
+    CommandDef {
+        id: "view.toggle_audit",
+        label: "Toggle Audit Log",
+        default: None,
+    },
     // ── Palette ───────────────────────────────────────────────────────────
     CommandDef {
         id: "palette.open",
@@ -286,10 +342,7 @@ pub fn tool_for_command(id: &str) -> Option<Tool> {
 
 /// The registry default binding for a command (ignores user overrides).
 pub fn default_binding(id: &str) -> Option<KeyBinding> {
-    REGISTRY
-        .iter()
-        .find(|d| d.id == id)
-        .and_then(|d| d.default)
+    REGISTRY.iter().find(|d| d.id == id).and_then(|d| d.default)
 }
 
 /// A flattened command for the palette + settings list (core + tool commands).
@@ -305,10 +358,18 @@ pub struct CommandEntry {
 pub fn all_commands() -> Vec<CommandEntry> {
     let mut v: Vec<CommandEntry> = REGISTRY
         .iter()
-        .map(|d| CommandEntry { id: d.id, label: d.label.to_string(), is_tool: false })
+        .map(|d| CommandEntry {
+            id: d.id,
+            label: d.label.to_string(),
+            is_tool: false,
+        })
         .collect();
     for (id, t) in TOOL_COMMANDS {
-        v.push(CommandEntry { id, label: format!("Tool: {}", t.label()), is_tool: true });
+        v.push(CommandEntry {
+            id,
+            label: format!("Tool: {}", t.label()),
+            is_tool: true,
+        });
     }
     v
 }
@@ -336,7 +397,10 @@ mod tests {
 
     #[test]
     fn storage_string_is_lowercase_plus_joined() {
-        assert_eq!(KeyBinding::ctrl_shift(Key::G).to_storage_string(), "ctrl+shift+g");
+        assert_eq!(
+            KeyBinding::ctrl_shift(Key::G).to_storage_string(),
+            "ctrl+shift+g"
+        );
         assert_eq!(KeyBinding::plain(Key::Delete).to_storage_string(), "delete");
     }
 
@@ -362,8 +426,15 @@ mod tests {
     #[test]
     fn matches_distinguishes_shift() {
         let z = KeyBinding::ctrl(Key::Z);
-        let plain = egui::Modifiers { ctrl: true, ..Default::default() };
-        let with_shift = egui::Modifiers { ctrl: true, shift: true, ..Default::default() };
+        let plain = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let with_shift = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
         assert!(z.matches(plain));
         assert!(!z.matches(with_shift));
     }

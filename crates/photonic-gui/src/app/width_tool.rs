@@ -394,8 +394,7 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
-        let (Some(nid), Some(idx)) =
-            (self.width_tool_hovered_node, self.width_tool_selected_point)
+        let (Some(nid), Some(idx)) = (self.width_tool_hovered_node, self.width_tool_selected_point)
         else {
             return;
         };
@@ -552,7 +551,10 @@ fn insert_width_sample(prof: &mut WidthProfile, t: f64) -> usize {
         .as_ref()
         .map(|r| sample_profile(&positions, r, t));
 
-    let idx = positions.iter().position(|&p| p > t).unwrap_or(positions.len());
+    let idx = positions
+        .iter()
+        .position(|&p| p > t)
+        .unwrap_or(positions.len());
     prof.positions.insert(idx, t);
     prof.widths.insert(idx, w);
     if let (Some(rights), Some(rv)) = (prof.widths_right.as_mut(), right) {

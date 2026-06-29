@@ -308,12 +308,12 @@ impl ApplicationHandler for PhotonicWinitApp {
             egui_wgpu::Renderer::new(renderer.device(), renderer.surface_format(), None, 1, false);
         // Install the Lightfall background shader pipeline so the welcome screens
         // can render it via an egui paint callback.
-        egui_renderer.callback_resources.insert(
-            photonic_gui::lightfall::LightfallResources::new(
+        egui_renderer
+            .callback_resources
+            .insert(photonic_gui::lightfall::LightfallResources::new(
                 renderer.device(),
                 renderer.surface_format(),
-            ),
-        );
+            ));
 
         write_mcp_config();
         info!("GPU renderer + egui initialized — window open");

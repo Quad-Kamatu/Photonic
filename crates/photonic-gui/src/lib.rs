@@ -3,7 +3,6 @@ pub mod commands;
 pub mod disk_search;
 pub mod global_search;
 pub mod lightfall;
-pub mod update;
 pub mod panels;
 pub mod preferences;
 pub mod quit;
@@ -12,6 +11,7 @@ pub mod release_notes;
 pub mod snap;
 pub mod theme;
 pub mod tools;
+pub mod update;
 pub mod viewport;
 pub mod welcome;
 

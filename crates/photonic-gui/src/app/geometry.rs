@@ -237,7 +237,11 @@ pub(crate) fn nearest_anchor_screen(
 
 /// Invert a node's affine transform to map a canvas-space point into the node's
 /// local path space.
-pub(crate) fn canvas_to_local(transform: &photonic_core::transform::Transform, cx: f64, cy: f64) -> (f64, f64) {
+pub(crate) fn canvas_to_local(
+    transform: &photonic_core::transform::Transform,
+    cx: f64,
+    cy: f64,
+) -> (f64, f64) {
     let [a, b, c, d, e, f] = transform.matrix;
     let det = a * d - b * c;
     if det.abs() < 1e-12 {
@@ -504,8 +508,11 @@ pub(crate) fn anchor_handle_pair(
     let els = bez.elements();
     let (in_l, out_l) = logical_handles(bez, i);
     (
-        in_l.and_then(|l| handle_loc_point(els, l)).map(|p| (HandleKind::In, p)),
-        out_l.and_then(|l| handle_loc_point(els, l)).map(|p| (HandleKind::Out, p)),
+        in_l.and_then(|l| handle_loc_point(els, l))
+            .map(|p| (HandleKind::In, p)),
+        out_l
+            .and_then(|l| handle_loc_point(els, l))
+            .map(|p| (HandleKind::Out, p)),
     )
 }
 
@@ -513,7 +520,10 @@ pub(crate) fn anchor_handle_pair(
 /// (opposite directions through the anchor) — a smooth point, not a cusp.
 /// Used to decide whether dragging one handle should mirror the other.
 pub(crate) fn is_smooth_anchor(bez: &BezPath, i: usize) -> bool {
-    let anchor = match path_anchor_points(bez).into_iter().find(|(idx, _)| *idx == i) {
+    let anchor = match path_anchor_points(bez)
+        .into_iter()
+        .find(|(idx, _)| *idx == i)
+    {
         Some((_, p)) => p,
         None => return false,
     };
@@ -543,7 +553,10 @@ pub(crate) fn bez_set_handle(
     mirror: bool,
 ) -> BezPath {
     let mut els: Vec<PathEl> = bez.elements().to_vec();
-    let anchor = match path_anchor_points(bez).into_iter().find(|(idx, _)| *idx == i) {
+    let anchor = match path_anchor_points(bez)
+        .into_iter()
+        .find(|(idx, _)| *idx == i)
+    {
         Some((_, p)) => p,
         None => return bez.clone(),
     };
@@ -586,7 +599,10 @@ pub(crate) fn bez_set_handle(
 /// Move the single anchor at element index `i` so its endpoint sits at local
 /// `(x, y)`, dragging its attached handles along with it.
 pub(crate) fn bez_set_anchor_position(bez: &BezPath, i: usize, x: f64, y: f64) -> BezPath {
-    match path_anchor_points(bez).into_iter().find(|(idx, _)| *idx == i) {
+    match path_anchor_points(bez)
+        .into_iter()
+        .find(|(idx, _)| *idx == i)
+    {
         Some((_, p)) => bez_move_anchors(bez, &[i], x - p.x, y - p.y),
         None => bez.clone(),
     }
@@ -647,7 +663,9 @@ pub(crate) fn corner_subpaths(bez: &BezPath) -> Vec<CornerSub> {
 /// segments are straight lines and the turn is significant — to its
 /// `(prev, corner, next)` local-space points. These are the only anchors that
 /// get a Live-Corners widget.
-pub(crate) fn straight_corners(bez: &BezPath) -> std::collections::HashMap<usize, (Point, Point, Point)> {
+pub(crate) fn straight_corners(
+    bez: &BezPath,
+) -> std::collections::HashMap<usize, (Point, Point, Point)> {
     let mut out = std::collections::HashMap::new();
     for s in corner_subpaths(bez) {
         let n = s.verts.len();
@@ -659,7 +677,11 @@ pub(crate) fn straight_corners(bez: &BezPath) -> std::collections::HashMap<usize
             // The closing segment (verts[n-1] -> verts[0]) is a straight line
             // when the subpath is closed.
             let in_straight = if k > 0 { s.straight[k] } else { s.closed };
-            let out_straight = if k + 1 < n { s.straight[k + 1] } else { s.closed };
+            let out_straight = if k + 1 < n {
+                s.straight[k + 1]
+            } else {
+                s.closed
+            };
             if !(in_straight && out_straight) {
                 continue;
             }

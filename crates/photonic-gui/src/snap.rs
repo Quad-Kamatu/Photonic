@@ -80,8 +80,14 @@ fn world_aabb(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
         node.transform.apply(local.x0, local.y1),
         node.transform.apply(local.x1, local.y1),
     ];
-    let x0 = corners.iter().map(|&(x, _)| x).fold(f64::INFINITY, f64::min);
-    let y0 = corners.iter().map(|&(_, y)| y).fold(f64::INFINITY, f64::min);
+    let x0 = corners
+        .iter()
+        .map(|&(x, _)| x)
+        .fold(f64::INFINITY, f64::min);
+    let y0 = corners
+        .iter()
+        .map(|&(_, y)| y)
+        .fold(f64::INFINITY, f64::min);
     let x1 = corners
         .iter()
         .map(|&(x, _)| x)

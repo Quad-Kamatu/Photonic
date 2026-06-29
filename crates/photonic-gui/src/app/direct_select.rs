@@ -91,10 +91,13 @@ impl PhotonicApp {
         // ── Hover cursor feedback ─────────────────────────────────────────────
         // A grab cursor over anchors / handles / corner widgets is the primary
         // discoverability cue for what a press will grab.
-        let hover_cursor = match (self.point_edit_node.and_then(|nid| doc.nodes.get(&nid)), hover_canvas)
-        {
+        let hover_cursor = match (
+            self.point_edit_node.and_then(|nid| doc.nodes.get(&nid)),
+            hover_canvas,
+        ) {
             (Some(node), Some((hx, hy))) => {
-                if ds_find_handle(node, view, &self.point_selected, hx, hy, HANDLE_RADIUS_PX).is_some()
+                if ds_find_handle(node, view, &self.point_selected, hx, hy, HANDLE_RADIUS_PX)
+                    .is_some()
                     || ds_find_corner_widget(
                         node,
                         view,
@@ -173,7 +176,9 @@ impl PhotonicApp {
                         CORNER_WIDGET_PX,
                     )
                 });
-                let anchor_hit = self.point_edit_node.and_then(|nid| find_anchor(nid, cx, cy, doc));
+                let anchor_hit = self
+                    .point_edit_node
+                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
                 let origin_bez = edit_node.and_then(|node| match &node.kind {
                     SceneNodeKind::Path(pn) => Some(pn.path_data.to_bez_path()),
                     _ => None,
@@ -181,8 +186,9 @@ impl PhotonicApp {
 
                 if let Some((anchor, kind)) = handle_hit {
                     self.point_drag_mode = Some(DirectDrag::Handle { anchor, kind });
-                    self.point_drag_origin =
-                        self.point_edit_node.and_then(|nid| doc.nodes.get(&nid).cloned());
+                    self.point_drag_origin = self
+                        .point_edit_node
+                        .and_then(|nid| doc.nodes.get(&nid).cloned());
                 } else if let Some(pivot) = corner_hit {
                     let ob = origin_bez.unwrap_or_default();
                     // Distance from the pivot corner to the press point, so the
@@ -199,8 +205,9 @@ impl PhotonicApp {
                         origin_bez: ob,
                         grab_dist,
                     });
-                    self.point_drag_origin =
-                        self.point_edit_node.and_then(|nid| doc.nodes.get(&nid).cloned());
+                    self.point_drag_origin = self
+                        .point_edit_node
+                        .and_then(|nid| doc.nodes.get(&nid).cloned());
                 } else if let Some(anchor_idx) = anchor_hit {
                     // Select this anchor (replace unless Shift/Ctrl is held)
                     if add_sel {
@@ -211,8 +218,9 @@ impl PhotonicApp {
                         self.point_selected = vec![anchor_idx];
                     }
                     self.point_drag_mode = Some(DirectDrag::Anchors);
-                    self.point_drag_origin =
-                        self.point_edit_node.and_then(|nid| doc.nodes.get(&nid).cloned());
+                    self.point_drag_origin = self
+                        .point_edit_node
+                        .and_then(|nid| doc.nodes.get(&nid).cloned());
                 } else {
                     // Missed everything — select the shape under the cursor.
                     // direct_select_hit selects on a body click even when unfilled.
@@ -267,13 +275,8 @@ impl PhotonicApp {
                                 // Mirror only on a genuine smooth point (collinear
                                 // handles); cusps stay independent. Alt always breaks.
                                 let mirror = !alt && is_smooth_anchor(&bez, anchor);
-                                let new_bez = bez_set_handle(
-                                    &bez,
-                                    anchor,
-                                    kind,
-                                    Point::new(lx, ly),
-                                    mirror,
-                                );
+                                let new_bez =
+                                    bez_set_handle(&bez, anchor, kind, Point::new(lx, ly), mirror);
                                 pn.path_data = PathData::from_bez_path(&new_bez);
                                 *doc_modified = true;
                             }
@@ -294,7 +297,8 @@ impl PhotonicApp {
                         let radius = match (doc.nodes.get(&nid), corners.get(&pivot)) {
                             (Some(node), Some((_, corner, _))) => {
                                 let (lx, ly) = canvas_to_local(&node.transform, ccx, ccy);
-                                let dist = ((lx - corner.x).powi(2) + (ly - corner.y).powi(2)).sqrt();
+                                let dist =
+                                    ((lx - corner.x).powi(2) + (ly - corner.y).powi(2)).sqrt();
                                 (dist - grab_dist).max(0.0)
                             }
                             _ => 0.0,
@@ -425,7 +429,8 @@ impl PhotonicApp {
                         for h in [in_h, out_h].into_iter().flatten() {
                             let (hsx, hsy) = local_to_screen(&node.transform, view, h.1);
                             let h_center = egui::pos2(hsx as f32, hsy as f32);
-                            painter.line_segment([a_center, h_center], egui::Stroke::new(1.0, accent));
+                            painter
+                                .line_segment([a_center, h_center], egui::Stroke::new(1.0, accent));
                             painter.circle_filled(h_center, 3.5, Color32::WHITE);
                             painter.circle_stroke(h_center, 3.5, egui::Stroke::new(1.5, accent));
                         }

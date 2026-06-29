@@ -199,7 +199,7 @@ pub fn liquify_pucker(
             let (sxf, syf) = if r > 0.0 && r < radius {
                 let nd = r / radius;
                 let f = 1.0 - nd; // smooth-ish falloff, 1 at center → 0 at rim
-                // Pucker (amount>0): content moves inward, so we sample *outward*.
+                                  // Pucker (amount>0): content moves inward, so we sample *outward*.
                 let scale = 1.0 + amount * f;
                 (cx + relx * scale, cy + rely * scale)
             } else {
@@ -554,7 +554,10 @@ mod tests {
         let h = orig.height as f32;
         let dst = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
         let out = perspective(&orig, dst);
-        assert!(approx_eq(&out, &orig, 2), "identity perspective should ~match");
+        assert!(
+            approx_eq(&out, &orig, 2),
+            "identity perspective should ~match"
+        );
     }
 
     // ── Effects actually do something ────────────────────────────────────────

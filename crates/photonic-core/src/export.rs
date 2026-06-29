@@ -413,14 +413,7 @@ fn emit_node_inner(
             body.push_str(&format!(
                 "{}<image{}{}{}{} width=\"{}\" height=\"{}\" \
                  href=\"data:image/png;base64,{}\"/>\n",
-                pad,
-                id_attr,
-                transform,
-                opacity,
-                blend,
-                r.image.width,
-                r.image.height,
-                b64,
+                pad, id_attr, transform, opacity, blend, r.image.width, r.image.height, b64,
             ));
         }
     }

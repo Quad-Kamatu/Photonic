@@ -129,13 +129,7 @@ impl DiskScanner {
 
 // ─── Worker-side scanning ───────────────────────────────────────────────────────
 
-fn scan_roots(
-    roots: &[PathBuf],
-    deep: bool,
-    gen: u64,
-    cur: &AtomicU64,
-    tx: &Sender<Msg>,
-) {
+fn scan_roots(roots: &[PathBuf], deep: bool, gen: u64, cur: &AtomicU64, tx: &Sender<Msg>) {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for root in roots {
         if cur.load(Ordering::SeqCst) != gen {
@@ -159,7 +153,11 @@ fn scan_roots(
 }
 
 fn emit(path: PathBuf, gen: u64, seen: &mut HashSet<PathBuf>, tx: &Sender<Msg>) {
-    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(EXT)) != Some(true)
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case(EXT))
+        != Some(true)
     {
         return;
     }
@@ -242,7 +240,11 @@ fn os_index(root: &Path) -> Option<Vec<PathBuf>> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    let v: Vec<PathBuf> = s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect();
+    let v: Vec<PathBuf> = s
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect();
     (!v.is_empty()).then_some(v)
 }
 

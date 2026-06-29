@@ -184,7 +184,13 @@ pub fn lens_blur(img: &mut RasterImage, radius: f32, sel: Option<&Mask>) {
 /// `edge` is a smooth `0..1` ramp of the local difference magnitude (so faint
 /// noise is left alone while real edges get the full effect). Alpha preserved.
 /// No-op when `amount <= 0` or `radius <= 0`.
-pub fn smart_sharpen(img: &mut RasterImage, amount: f32, radius: f32, threshold: u8, sel: Option<&Mask>) {
+pub fn smart_sharpen(
+    img: &mut RasterImage,
+    amount: f32,
+    radius: f32,
+    threshold: u8,
+    sel: Option<&Mask>,
+) {
     let amount = san_amount(amount);
     let radius = san_radius(radius);
     if amount <= 0.0 || radius <= 0.0 {
@@ -630,7 +636,10 @@ mod tests {
         let center = img.pixel(5, 5)[0];
         let corner = img.pixel(0, 0)[0];
         assert_eq!(center, 100, "center should be unchanged");
-        assert!(corner < center, "corner {corner} should be darker than center {center}");
+        assert!(
+            corner < center,
+            "corner {corner} should be darker than center {center}"
+        );
     }
 
     #[test]
@@ -640,7 +649,10 @@ mod tests {
         let center = img.pixel(5, 5)[0];
         let corner = img.pixel(0, 0)[0];
         assert_eq!(center, 100);
-        assert!(corner > center, "corner {corner} should be brighter than center {center}");
+        assert!(
+            corner > center,
+            "corner {corner} should be brighter than center {center}"
+        );
     }
 
     #[test]

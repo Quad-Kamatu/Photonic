@@ -218,7 +218,8 @@ pub fn stroke(img: &mut RasterImage, points: &[(f32, f32)], brush: &Brush, sel: 
     let src_a = brush.color[3] as f32 / 255.0;
     for y in 0..img.height {
         for x in 0..img.width {
-            let mut a = cov[(y as usize) * (img.width as usize) + x as usize] * brush.opacity * src_a;
+            let mut a =
+                cov[(y as usize) * (img.width as usize) + x as usize] * brush.opacity * src_a;
             if a <= 0.0 {
                 continue;
             }
@@ -284,12 +285,24 @@ pub fn clone_stamp(
 }
 
 /// Dodge (lighten) under the brush by `amount` (0..1).
-pub fn dodge(img: &mut RasterImage, points: &[(f32, f32)], brush: &Brush, amount: f32, sel: Option<&Mask>) {
+pub fn dodge(
+    img: &mut RasterImage,
+    points: &[(f32, f32)],
+    brush: &Brush,
+    amount: f32,
+    sel: Option<&Mask>,
+) {
     tone(img, points, brush, amount, true, sel);
 }
 
 /// Burn (darken) under the brush by `amount` (0..1).
-pub fn burn(img: &mut RasterImage, points: &[(f32, f32)], brush: &Brush, amount: f32, sel: Option<&Mask>) {
+pub fn burn(
+    img: &mut RasterImage,
+    points: &[(f32, f32)],
+    brush: &Brush,
+    amount: f32,
+    sel: Option<&Mask>,
+) {
     tone(img, points, brush, amount, false, sel);
 }
 
@@ -304,7 +317,11 @@ fn tone(
     let brush = &brush.sanitized();
     let points = &clean_points(points);
     let cov = stroke_coverage(img.width, img.height, points, brush);
-    let amount = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 0.0 };
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     for y in 0..img.height {
         for x in 0..img.width {
             let mut a = cov[(y as usize) * (img.width as usize) + x as usize] * amount;
@@ -317,7 +334,11 @@ fn tone(
             let mut px = img.pixel(x, y);
             for c in 0..3 {
                 let v = px[c] as f32 / 255.0;
-                let nv = if lighten { v + (1.0 - v) * a } else { v * (1.0 - a) };
+                let nv = if lighten {
+                    v + (1.0 - v) * a
+                } else {
+                    v * (1.0 - a)
+                };
                 px[c] = (nv * 255.0).round().clamp(0.0, 255.0) as u8;
             }
             img.set_pixel(x, y, px);
@@ -337,7 +358,11 @@ pub fn sponge(
     let brush = &brush.sanitized();
     let points = &clean_points(points);
     let cov = stroke_coverage(img.width, img.height, points, brush);
-    let amount = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 0.0 };
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     for y in 0..img.height {
         for x in 0..img.width {
             let mut a = cov[(y as usize) * (img.width as usize) + x as usize] * amount;
@@ -348,7 +373,11 @@ pub fn sponge(
                 a *= m.coverage(x, y);
             }
             let mut px = img.pixel(x, y);
-            let l = luma([px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0]);
+            let l = luma([
+                px[0] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[2] as f32 / 255.0,
+            ]);
             for c in 0..3 {
                 let v = px[c] as f32 / 255.0;
                 let nv = if saturate {
@@ -471,7 +500,13 @@ pub fn smudge(
 }
 
 /// Paint-bucket flood fill from a seed by color tolerance (0..1).
-pub fn bucket_fill(img: &mut RasterImage, seed_x: u32, seed_y: u32, color: [u8; 4], tolerance: f32) {
+pub fn bucket_fill(
+    img: &mut RasterImage,
+    seed_x: u32,
+    seed_y: u32,
+    color: [u8; 4],
+    tolerance: f32,
+) {
     let tolerance = if tolerance.is_finite() {
         tolerance.clamp(0.0, 1.0)
     } else {
@@ -562,7 +597,16 @@ mod tests {
     #[test]
     fn gradient_endpoints() {
         let mut img = RasterImage::new(10, 1);
-        gradient_fill(&mut img, 0.0, 0.0, 10.0, 0.0, [0, 0, 0, 255], [255, 255, 255, 255], None);
+        gradient_fill(
+            &mut img,
+            0.0,
+            0.0,
+            10.0,
+            0.0,
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+            None,
+        );
         assert!(img.pixel(0, 0)[0] < 30);
         assert!(img.pixel(9, 0)[0] > 220);
     }
@@ -584,7 +628,11 @@ mod tests {
         let mut img = RasterImage::new(20, 10);
         for y in 0..10 {
             for x in 0..20 {
-                let c = if x < 10 { [255, 0, 0, 255] } else { [0, 0, 255, 255] };
+                let c = if x < 10 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
                 img.set_pixel(x, y, c);
             }
         }
@@ -595,7 +643,11 @@ mod tests {
         let p = img.pixel(11, 5);
         assert!(p[0] > 60, "expected dragged red, got {:?}", p);
         // ...but it's an intermediate, not pure red — blue is still present.
-        assert!(p[2] > 20 && p[0] < 255, "expected intermediate color, got {:?}", p);
+        assert!(
+            p[2] > 20 && p[0] < 255,
+            "expected intermediate color, got {:?}",
+            p
+        );
     }
 
     #[test]
@@ -603,7 +655,13 @@ mod tests {
         let mut img = RasterImage::filled(10, 10, [255, 0, 0, 255]);
         let b = Brush::new(3.0, [0, 0, 0, 255]);
         // NaN/inf points, empty points, and out-of-range strength must not panic.
-        smudge(&mut img, &[(f32::NAN, 5.0), (5.0, 5.0), (f32::INFINITY, 1.0)], &b, 0.5, None);
+        smudge(
+            &mut img,
+            &[(f32::NAN, 5.0), (5.0, 5.0), (f32::INFINITY, 1.0)],
+            &b,
+            0.5,
+            None,
+        );
         smudge(&mut img, &[], &b, 0.5, None);
         smudge(&mut img, &[(2.0, 2.0), (8.0, 8.0)], &b, f32::NAN, None);
     }
@@ -613,7 +671,11 @@ mod tests {
         for r in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e30, -5.0, 0.0] {
             let b = Brush::new(r, [255, 0, 0, 255]);
             assert!(b.radius.is_finite(), "radius not finite for input {r}");
-            assert!(b.radius >= 0.5 && b.radius <= 4096.0, "radius {} out of range for {r}", b.radius);
+            assert!(
+                b.radius >= 0.5 && b.radius <= 4096.0,
+                "radius {} out of range for {r}",
+                b.radius
+            );
         }
         let p = Brush::pencil(f32::NAN, [0, 0, 0, 255]);
         assert!(p.radius.is_finite());
@@ -631,7 +693,12 @@ mod tests {
         // NaN / inf / huge-but-finite points are filtered or bounded — no panic, no hang.
         stroke(
             &mut img,
-            &[(f32::NAN, 5.0), (5.0, 5.0), (1e30, -1e30), (f32::INFINITY, f32::NAN)],
+            &[
+                (f32::NAN, 5.0),
+                (5.0, 5.0),
+                (1e30, -1e30),
+                (f32::INFINITY, f32::NAN),
+            ],
             &b,
             None,
         );
@@ -650,7 +717,16 @@ mod tests {
         clone_stamp(&mut img2, &[(3.0, 3.0)], &bad, 1, 1, None);
         dodge(&mut img2, &[(4.0, 4.0)], &bad, f32::NAN, None);
         bucket_fill(&mut img2, 0, 0, [1, 2, 3, 255], f32::NAN);
-        gradient_fill(&mut img2, f32::NAN, 0.0, f32::INFINITY, 1.0, [0; 4], [255; 4], None);
+        gradient_fill(
+            &mut img2,
+            f32::NAN,
+            0.0,
+            f32::INFINITY,
+            1.0,
+            [0; 4],
+            [255; 4],
+            None,
+        );
     }
 
     #[test]

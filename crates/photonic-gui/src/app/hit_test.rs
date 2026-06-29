@@ -105,7 +105,12 @@ pub(crate) fn direct_select_hit(
     None
 }
 
-pub(crate) fn hit_test(doc: &Document, cx: f64, cy: f64, renderer: &mut PhotonicRenderer) -> Option<NodeId> {
+pub(crate) fn hit_test(
+    doc: &Document,
+    cx: f64,
+    cy: f64,
+    renderer: &mut PhotonicRenderer,
+) -> Option<NodeId> {
     for node in doc.nodes_in_draw_order().into_iter().rev() {
         if node.locked {
             continue;
@@ -162,7 +167,10 @@ pub(crate) fn gui_solid_fill_color(node: &SceneNode) -> Option<photonic_core::co
 }
 
 /// Euclidean distance between two RGBA colors in [0,1] space.
-pub(crate) fn gui_color_dist(a: photonic_core::color::Color, b: photonic_core::color::Color) -> f32 {
+pub(crate) fn gui_color_dist(
+    a: photonic_core::color::Color,
+    b: photonic_core::color::Color,
+) -> f32 {
     let dr = a.r - b.r;
     let dg = a.g - b.g;
     let db = a.b - b.b;
@@ -201,7 +209,12 @@ pub(crate) fn axis_lock_8(dx: f64, dy: f64) -> (f64, f64) {
 /// Treat `(sx, sy)` as the center of a shape and mirror the drag end through it,
 /// returning the two opposite corners `((ax, ay), (bx, by))`. Used when Alt is
 /// held while drawing so the shape grows symmetrically from the start point.
-pub(crate) fn shape_corners_from_center(sx: f64, sy: f64, ex: f64, ey: f64) -> ((f64, f64), (f64, f64)) {
+pub(crate) fn shape_corners_from_center(
+    sx: f64,
+    sy: f64,
+    ex: f64,
+    ey: f64,
+) -> ((f64, f64), (f64, f64)) {
     let dx = ex - sx;
     let dy = ey - sy;
     ((sx - dx, sy - dy), (sx + dx, sy + dy))

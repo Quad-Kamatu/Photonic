@@ -294,11 +294,7 @@ impl WidthProfile {
     }
 
     /// Create a profile with explicit sample positions.
-    pub fn with_positions(
-        name: impl Into<String>,
-        positions: Vec<f64>,
-        widths: Vec<f64>,
-    ) -> Self {
+    pub fn with_positions(name: impl Into<String>, positions: Vec<f64>, widths: Vec<f64>) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
@@ -1355,7 +1351,8 @@ mod tests {
     #[test]
     fn width_profile_legacy_json_defaults_positions_empty_then_falls_back() {
         // A document written before `positions`/`widths_right` existed.
-        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"old","widths":[1.0,3.0]}"#;
+        let json =
+            r#"{"id":"00000000-0000-0000-0000-000000000001","name":"old","widths":[1.0,3.0]}"#;
         let wp: WidthProfile = serde_json::from_str(json).unwrap();
         assert!(wp.positions.is_empty(), "legacy files have no positions");
         assert!(wp.widths_right.is_none());

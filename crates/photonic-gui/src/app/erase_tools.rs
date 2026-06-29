@@ -394,8 +394,14 @@ fn path_canvas_bbox(node: &SceneNode, path: &PathData) -> Option<kurbo::Rect> {
     ];
     let min_x = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
     let min_y = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-    let max_x = corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-    let max_y = corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    let max_x = corners
+        .iter()
+        .map(|p| p.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = corners
+        .iter()
+        .map(|p| p.y)
+        .fold(f64::NEG_INFINITY, f64::max);
     Some(kurbo::Rect::new(min_x, min_y, max_x, max_y))
 }
 
@@ -460,7 +466,11 @@ mod tests {
         assert!(!area.is_empty());
         let bbox = area.bounding_box().unwrap();
         // Diameter ≈ 8 (radius 4 each side); allow caps tolerance.
-        assert!(bbox.width() >= 6.0 && bbox.width() <= 10.0, "got {}", bbox.width());
+        assert!(
+            bbox.width() >= 6.0 && bbox.width() <= 10.0,
+            "got {}",
+            bbox.width()
+        );
     }
 
     #[test]

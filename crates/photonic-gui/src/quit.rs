@@ -33,7 +33,9 @@ pub fn quit_all() -> ! {
                 }
                 if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
                     if comm.trim() == "photonic" {
-                        let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .status();
                     }
                 }
             }

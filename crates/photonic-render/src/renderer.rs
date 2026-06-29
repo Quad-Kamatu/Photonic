@@ -766,7 +766,12 @@ impl PhotonicRenderer {
             blend_mode: BlendMode,
         }
 
-        let (artboard_w, artboard_h, artboards, nodes): (f32, f32, Vec<[f32; 4]>, Vec<NodeSnapshot>) = {
+        let (artboard_w, artboard_h, artboards, nodes): (
+            f32,
+            f32,
+            Vec<[f32; 4]>,
+            Vec<NodeSnapshot>,
+        ) = {
             // try_lock — never block; return cached geometry if lock is contended.
             let doc = match self.document.try_lock() {
                 Ok(g) => g,

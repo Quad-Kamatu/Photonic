@@ -4,14 +4,13 @@ mod demos;
 use demos::*;
 mod hit_test;
 use hit_test::*;
-mod direct_select;
-mod tool_handlers;
-mod layer_ops;
-mod erase_tools;
-mod width_tool;
-mod rulers;
 mod command_center;
-pub(crate) use rulers::GuideEditPopup;
+mod direct_select;
+mod erase_tools;
+mod layer_ops;
+mod rulers;
+mod tool_handlers;
+mod width_tool;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -21,6 +20,7 @@ use photonic_core::{
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
+pub(crate) use rulers::GuideEditPopup;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -119,8 +119,13 @@ pub enum DiffCategory {
 }
 
 const FILE_OPTIONS: &[&str] = &["Document", "Save", "Export"];
-const EDIT_OPTIONS: &[&str] =
-    &["Appearance", "Canvas", "Tool Defaults", "Behavior", "Keyboard Shortcuts"];
+const EDIT_OPTIONS: &[&str] = &[
+    "Appearance",
+    "Canvas",
+    "Tool Defaults",
+    "Behavior",
+    "Keyboard Shortcuts",
+];
 
 // ─── Export dialog ────────────────────────────────────────────────────────────
 
@@ -992,8 +997,14 @@ fn draw_h_gap(
     let (sx1, sy, sx2) = (sx1 as f32, sy as f32, sx2 as f32);
     let stroke = egui::Stroke::new(1.0, color);
     p.line_segment([egui::pos2(sx1, sy), egui::pos2(sx2, sy)], stroke);
-    p.line_segment([egui::pos2(sx1, sy - 4.0), egui::pos2(sx1, sy + 4.0)], stroke);
-    p.line_segment([egui::pos2(sx2, sy - 4.0), egui::pos2(sx2, sy + 4.0)], stroke);
+    p.line_segment(
+        [egui::pos2(sx1, sy - 4.0), egui::pos2(sx1, sy + 4.0)],
+        stroke,
+    );
+    p.line_segment(
+        [egui::pos2(sx2, sy - 4.0), egui::pos2(sx2, sy + 4.0)],
+        stroke,
+    );
     gap_label(p, egui::pos2((sx1 + sx2) * 0.5, sy - 9.0), rx - lx, color);
 }
 
@@ -1016,8 +1027,14 @@ fn draw_v_gap(
     let (sx, sy1, sy2) = (sx as f32, sy1 as f32, sy2 as f32);
     let stroke = egui::Stroke::new(1.0, color);
     p.line_segment([egui::pos2(sx, sy1), egui::pos2(sx, sy2)], stroke);
-    p.line_segment([egui::pos2(sx - 4.0, sy1), egui::pos2(sx + 4.0, sy1)], stroke);
-    p.line_segment([egui::pos2(sx - 4.0, sy2), egui::pos2(sx + 4.0, sy2)], stroke);
+    p.line_segment(
+        [egui::pos2(sx - 4.0, sy1), egui::pos2(sx + 4.0, sy1)],
+        stroke,
+    );
+    p.line_segment(
+        [egui::pos2(sx - 4.0, sy2), egui::pos2(sx + 4.0, sy2)],
+        stroke,
+    );
     gap_label(p, egui::pos2(sx + 14.0, (sy1 + sy2) * 0.5), by - ty, color);
 }
 
@@ -1030,7 +1047,11 @@ fn gap_label(p: &egui::Painter, center: egui::Pos2, value: f64, color: egui::Col
     );
     let rect = egui::Rect::from_center_size(center, galley.size() + egui::vec2(6.0, 3.0));
     p.rect_filled(rect, 2.0, color);
-    p.galley(rect.center() - galley.size() * 0.5, galley, egui::Color32::WHITE);
+    p.galley(
+        rect.center() - galley.size() * 0.5,
+        galley,
+        egui::Color32::WHITE,
+    );
 }
 
 fn fit_artboard_to_rect(view: &mut CanvasView, rect: egui::Rect, bounds: (f64, f64, f64, f64)) {
@@ -1110,9 +1131,14 @@ impl PhotonicApp {
             size: [w.max(1), h.max(1)],
             pixels,
         };
-        let handle = ctx.load_texture(format!("raster_{id}"), color_img, egui::TextureOptions::LINEAR);
+        let handle = ctx.load_texture(
+            format!("raster_{id}"),
+            color_img,
+            egui::TextureOptions::LINEAR,
+        );
         let tex_id = handle.id();
-        self.raster_tex_cache.insert(id, RasterTexCache { handle, hash });
+        self.raster_tex_cache
+            .insert(id, RasterTexCache { handle, hash });
         tex_id
     }
 
@@ -1130,13 +1156,14 @@ impl PhotonicApp {
             .nodes_in_draw_order()
             .iter()
             .filter(|n| {
-                n.visible
-                    && matches!(&n.kind, SceneNodeKind::Raster(r) if !r.is_adjustment_layer())
+                n.visible && matches!(&n.kind, SceneNodeKind::Raster(r) if !r.is_adjustment_layer())
             })
             .map(|n| n.id)
             .collect();
         for id in raster_ids {
-            let Some(node) = doc.get_node(&id) else { continue };
+            let Some(node) = doc.get_node(&id) else {
+                continue;
+            };
             let SceneNodeKind::Raster(rn) = &node.kind else {
                 continue;
             };
@@ -1320,9 +1347,7 @@ impl PhotonicApp {
         // ── Auto-check for a newer release, once per launch ───────────────────
         // Lightweight (no download): just asks GitHub for the latest version.
         // If a newer one exists, `update_available` drives a dismissable banner.
-        if !self.update_checked_startup
-            && self.prefs.auto_check_updates
-            && self.update_rx.is_none()
+        if !self.update_checked_startup && self.prefs.auto_check_updates && self.update_rx.is_none()
         {
             self.update_checked_startup = true;
             self.update_check_rx = Some(crate::update::check_latest());
@@ -1367,8 +1392,11 @@ impl PhotonicApp {
                                 ui.add_space(8.0);
                                 if ui
                                     .button(
-                                        RichText::new(format!("{} Update now", ph::DOWNLOAD_SIMPLE))
-                                            .color(Color32::WHITE),
+                                        RichText::new(format!(
+                                            "{} Update now",
+                                            ph::DOWNLOAD_SIMPLE
+                                        ))
+                                        .color(Color32::WHITE),
                                     )
                                     .clicked()
                                 {
@@ -1383,8 +1411,10 @@ impl PhotonicApp {
             if do_update {
                 if self.update_rx.is_none() {
                     self.update_rx = Some(crate::update::check_and_update());
-                    self.file_status =
-                        Some(format!("Downloading Photonic v{ver}… (current {})", crate::update::CURRENT_VERSION));
+                    self.file_status = Some(format!(
+                        "Downloading Photonic v{ver}… (current {})",
+                        crate::update::CURRENT_VERSION
+                    ));
                 }
                 self.update_available = None;
             } else if dismiss {
@@ -1426,9 +1456,9 @@ impl PhotonicApp {
 
         // Lazily upload the embedded Photonic logo for the top toolbar (once).
         if self.logo_texture.is_none() {
-            if let Ok(img) = photonic_core::raster::image::RasterImage::from_encoded(include_bytes!(
-                "../../assets/logo.png"
-            )) {
+            if let Ok(img) = photonic_core::raster::image::RasterImage::from_encoded(
+                include_bytes!("../../assets/logo.png"),
+            ) {
                 let color = egui::ColorImage::from_rgba_unmultiplied(
                     [img.width as usize, img.height as usize],
                     &img.pixels,
@@ -1502,8 +1532,7 @@ impl PhotonicApp {
                         }
                     },
                     WelcomeAction::AddDiskRoot => {
-                        if let Some(dir) =
-                            run_file_dialog(|| rfd::FileDialog::new().pick_folder())
+                        if let Some(dir) = run_file_dialog(|| rfd::FileDialog::new().pick_folder())
                         {
                             self.welcome.add_disk_root(dir);
                         }
@@ -2734,13 +2763,11 @@ impl PhotonicApp {
                             if dist_px > 0 {
                                 let (lx, ly) = match guide.axis {
                                     crate::snap::SnapAxis::Vertical => {
-                                        let (sx, _) =
-                                            view.canvas_to_screen(guide.coord, 0.0);
+                                        let (sx, _) = view.canvas_to_screen(guide.coord, 0.0);
                                         (sx as f32 + 4.0, rect.center().y)
                                     }
                                     crate::snap::SnapAxis::Horizontal => {
-                                        let (_, sy) =
-                                            view.canvas_to_screen(0.0, guide.coord);
+                                        let (_, sy) = view.canvas_to_screen(0.0, guide.coord);
                                         (rect.center().x, sy as f32 + 4.0)
                                     }
                                 };
@@ -2878,8 +2905,7 @@ impl PhotonicApp {
                                     col,
                                 );
                                 let handle_w = 16.0_f32;
-                                let name_pos =
-                                    egui::pos2(sx0 as f32 + handle_w, sy0 as f32 - 19.0);
+                                let name_pos = egui::pos2(sx0 as f32 + handle_w, sy0 as f32 - 19.0);
                                 let name_rect = egui::Rect::from_min_size(name_pos, galley.size());
                                 let handle_rect = egui::Rect::from_min_size(
                                     egui::pos2(sx0 as f32, sy0 as f32 - 20.0),
@@ -2982,10 +3008,8 @@ impl PhotonicApp {
                                 ];
                                 for (hx, hy, hidx) in corners {
                                     let hc = egui::pos2(hx as f32, hy as f32);
-                                    let hrect = egui::Rect::from_center_size(
-                                        hc,
-                                        egui::vec2(11.0, 11.0),
-                                    );
+                                    let hrect =
+                                        egui::Rect::from_center_size(hc, egui::vec2(11.0, 11.0));
                                     let hresp = ui.interact(
                                         hrect,
                                         ui.id().with(("ab_handle", i, hidx)),
@@ -3044,9 +3068,8 @@ impl PhotonicApp {
                                         for tx in [ox, ox + ow * 0.5, ox + ow] {
                                             let diff = tx - mx;
                                             if diff.abs() < thresh
-                                                && best_dx.map_or(true, |bb: f64| {
-                                                    diff.abs() < bb.abs()
-                                                })
+                                                && best_dx
+                                                    .map_or(true, |bb: f64| diff.abs() < bb.abs())
                                             {
                                                 best_dx = Some(diff);
                                                 guide_x = Some(tx);
@@ -3057,9 +3080,8 @@ impl PhotonicApp {
                                         for ty in [oy, oy + oh * 0.5, oy + oh] {
                                             let diff = ty - my;
                                             if diff.abs() < thresh
-                                                && best_dy.map_or(true, |bb: f64| {
-                                                    diff.abs() < bb.abs()
-                                                })
+                                                && best_dy
+                                                    .map_or(true, |bb: f64| diff.abs() < bb.abs())
                                             {
                                                 best_dy = Some(diff);
                                                 guide_y = Some(ty);
@@ -3296,8 +3318,7 @@ impl PhotonicApp {
                         if down {
                             if let Some(p) = pointer {
                                 let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
-                                let (mut x0, mut y0, mut x1, mut y1) =
-                                    (ox, oy, ox + ow, oy + oh);
+                                let (mut x0, mut y0, mut x1, mut y1) = (ox, oy, ox + ow, oy + oh);
                                 match hidx {
                                     0 => {
                                         x0 = self.snap(cx);
@@ -3316,9 +3337,7 @@ impl PhotonicApp {
                                         y1 = self.snap(cy);
                                     }
                                 }
-                                if let Some(ab) =
-                                    doc.artboards.iter_mut().find(|a| a.id == id)
-                                {
+                                if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == id) {
                                     ab.x = x0.min(x1);
                                     ab.y = y0.min(y1);
                                     ab.width = (x1 - x0).abs().max(16.0);
@@ -3379,7 +3398,8 @@ impl PhotonicApp {
                                             }
                                             // Commit on focus loss (Enter or click
                                             // away); Escape cancels.
-                                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                            let esc =
+                                                ui.input(|i| i.key_pressed(egui::Key::Escape));
                                             if esc {
                                                 close = Some(false);
                                             } else if r.lost_focus() {
@@ -4319,14 +4339,7 @@ impl PhotonicApp {
 
                 // ── Width tool (interactive variable-width stroke editing) ────
                 if self.active_tool == Tool::Width {
-                    self.handle_width_tool(
-                        ui,
-                        &response,
-                        doc,
-                        view,
-                        &mut doc_modified,
-                        history,
-                    );
+                    self.handle_width_tool(ui, &response, doc, view, &mut doc_modified, history);
                     return;
                 }
 
@@ -8602,14 +8615,22 @@ impl PhotonicApp {
                             let side = if left > right { "left" } else { "right" };
                             findings.push(format!(
                                 "{} Balance: {}% more objects on the {} ({} left, {} right).",
-                                ph::WARNING, h_imb, side, left, right
+                                ph::WARNING,
+                                h_imb,
+                                side,
+                                left,
+                                right
                             ));
                         }
                         if v_imb > 40 {
                             let side = if top > bottom { "top" } else { "bottom" };
                             findings.push(format!(
                                 "{} Balance: {}% more objects near the {} ({} top, {} bottom).",
-                                ph::INFO, v_imb, side, top, bottom
+                                ph::INFO,
+                                v_imb,
+                                side,
+                                top,
+                                bottom
                             ));
                         }
                         if h_imb <= 20 && v_imb <= 20 {
@@ -8624,12 +8645,14 @@ impl PhotonicApp {
                         if density < 5.0 {
                             findings.push(format!(
                                 "{} Density: very sparse ({:.1}% canvas coverage).",
-                                ph::INFO, density
+                                ph::INFO,
+                                density
                             ));
                         } else if density > 120.0 {
                             findings.push(format!(
                                 "{} Density: may be overcrowded ({:.1}% combined coverage).",
-                                ph::WARNING, density
+                                ph::WARNING,
+                                density
                             ));
                         }
                         let mut overlap_count = 0usize;
@@ -8652,7 +8675,8 @@ impl PhotonicApp {
                         if overlap_count > 0 {
                             findings.push(format!(
                                 "{} Overlaps: {} overlapping object pair(s) detected.",
-                                ph::INFO, overlap_count
+                                ph::INFO,
+                                overlap_count
                             ));
                         }
                         let solid: Vec<_> = infos.iter().filter(|n| n.solid).collect();
@@ -9892,7 +9916,8 @@ impl PhotonicApp {
                 } => {
                     if let Some(node) = doc.nodes.get(&node_id).cloned() {
                         if let SceneNodeKind::Path(pn) = &node.kind {
-                            let new_bez = bez_set_anchor_position(&pn.path_data.to_bez_path(), index, x, y);
+                            let new_bez =
+                                bez_set_anchor_position(&pn.path_data.to_bez_path(), index, x, y);
                             let mut new_node = node.clone();
                             if let SceneNodeKind::Path(ref mut np) = new_node.kind {
                                 np.path_data = PathData::from_bez_path(&new_bez);
@@ -11020,39 +11045,38 @@ impl PhotonicApp {
 
         // Semantic "Related": cosine-ranked embedding results when the on-device
         // model is ready; otherwise a keyword/fuzzy fallback (no AI needed).
-        let semantic: Vec<&crate::global_search::SearchItem> = if self.semantic.is_ready()
-            && !self.semantic.results.is_empty()
-        {
-            self.semantic
-                .results
-                .iter()
-                .filter(|(idx, score)| {
-                    *score > 0.25
-                        && *idx < items.len()
-                        && !items[*idx].title.to_lowercase().contains(&q)
-                })
-                .take(6)
-                .map(|(idx, _)| &items[*idx])
-                .collect()
-        } else {
-            items
-                .iter()
-                .filter(|it| {
-                    let tl = it.title.to_lowercase();
-                    if tl.contains(&q) {
-                        return false;
-                    }
-                    let hay = format!(
-                        "{} {} {}",
-                        tl,
-                        it.description.to_lowercase(),
-                        it.keywords.join(" ")
-                    );
-                    q.split_whitespace().all(|t| hay.contains(t))
-                        || crate::global_search::fuzzy_subseq(&q, &tl)
-                })
-                .collect()
-        };
+        let semantic: Vec<&crate::global_search::SearchItem> =
+            if self.semantic.is_ready() && !self.semantic.results.is_empty() {
+                self.semantic
+                    .results
+                    .iter()
+                    .filter(|(idx, score)| {
+                        *score > 0.25
+                            && *idx < items.len()
+                            && !items[*idx].title.to_lowercase().contains(&q)
+                    })
+                    .take(6)
+                    .map(|(idx, _)| &items[*idx])
+                    .collect()
+            } else {
+                items
+                    .iter()
+                    .filter(|it| {
+                        let tl = it.title.to_lowercase();
+                        if tl.contains(&q) {
+                            return false;
+                        }
+                        let hay = format!(
+                            "{} {} {}",
+                            tl,
+                            it.description.to_lowercase(),
+                            it.keywords.join(" ")
+                        );
+                        q.split_whitespace().all(|t| hay.contains(t))
+                            || crate::global_search::fuzzy_subseq(&q, &tl)
+                    })
+                    .collect()
+            };
 
         let mut chosen: Option<crate::global_search::SearchAction> = None;
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -11065,31 +11089,43 @@ impl PhotonicApp {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(280.0);
                     ui.set_max_width(340.0);
-                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                        if direct.is_empty() && semantic.is_empty() {
-                            ui.label(RichText::new("No matches").weak());
-                        }
-                        for it in &direct {
-                            if search_result_row(ui, it.icon, &it.title, &it.description, false) {
-                                chosen = Some(it.action);
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .show(ui, |ui| {
+                            if direct.is_empty() && semantic.is_empty() {
+                                ui.label(RichText::new("No matches").weak());
                             }
-                        }
-                        if !semantic.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new("Related").small().weak());
-                            ui.add_space(2.0);
-                            for it in &semantic {
-                                if search_result_row(ui, it.icon, &it.title, &it.description, true) {
+                            for it in &direct {
+                                if search_result_row(ui, it.icon, &it.title, &it.description, false)
+                                {
                                     chosen = Some(it.action);
                                 }
                             }
-                        }
-                    });
+                            if !semantic.is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new("Related").small().weak());
+                                ui.add_space(2.0);
+                                for it in &semantic {
+                                    if search_result_row(
+                                        ui,
+                                        it.icon,
+                                        &it.title,
+                                        &it.description,
+                                        true,
+                                    ) {
+                                        chosen = Some(it.action);
+                                    }
+                                }
+                            }
+                        });
                 });
             });
 
         if chosen.is_none() && enter {
-            chosen = direct.first().or_else(|| semantic.first()).map(|it| it.action);
+            chosen = direct
+                .first()
+                .or_else(|| semantic.first())
+                .map(|it| it.action);
         }
         if let Some(a) = chosen {
             self.apply_search(a, doc, history);
@@ -11746,10 +11782,7 @@ impl PhotonicApp {
         ) && doc.artboards.len() > 1
         {
             let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
-            let parent = path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default();
+            let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let stem = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -11930,7 +11963,10 @@ mod direct_select_geometry_tests {
             .count();
         assert_eq!(quads, 1, "one corner rounded → one quad arc");
         // Still a closed path.
-        assert!(out.elements().iter().any(|e| matches!(e, PathEl::ClosePath)));
+        assert!(out
+            .elements()
+            .iter()
+            .any(|e| matches!(e, PathEl::ClosePath)));
     }
 
     #[test]
@@ -12001,7 +12037,10 @@ mod direct_select_geometry_tests {
         // Logical start anchor (index 0): Out handle on element 1's c1, In
         // handle on the closing curve (element 4) c2 — the seam case.
         let (in_h, out_h) = anchor_handle_pair(&b, 0);
-        assert!(out_h.is_some(), "start anchor should expose its outgoing handle");
+        assert!(
+            out_h.is_some(),
+            "start anchor should expose its outgoing handle"
+        );
         assert!(
             in_h.is_some(),
             "start anchor should resolve its incoming handle across the seam"
@@ -12026,8 +12065,8 @@ mod direct_select_geometry_tests {
         b.move_to((0.0, 0.0));
         b.curve_to((10.0, 0.0), (20.0, 0.0), (30.0, 0.0)); // arrives along +x
         b.curve_to((30.0, 10.0), (30.0, 20.0), (30.0, 30.0)); // leaves along +y
-        // Anchor at index 1 (point 30,0) has In handle (20,0) and Out (30,10):
-        // directions are perpendicular → cusp, not smooth.
+                                                              // Anchor at index 1 (point 30,0) has In handle (20,0) and Out (30,10):
+                                                              // directions are perpendicular → cusp, not smooth.
         assert!(!is_smooth_anchor(&b, 1), "perpendicular handles are a cusp");
     }
 
@@ -12037,7 +12076,10 @@ mod direct_select_geometry_tests {
         b.move_to((0.0, 0.0));
         b.curve_to((10.0, 0.0), (20.0, 0.0), (30.0, 0.0)); // in handle at (20,0)
         b.curve_to((40.0, 0.0), (50.0, 0.0), (60.0, 0.0)); // out handle at (40,0)
-        // At (30,0): in dir →(20,0)-(30,0)=(-1,0), out dir →(40,0)-(30,0)=(+1,0): opposite.
-        assert!(is_smooth_anchor(&b, 1), "collinear opposite handles are smooth");
+                                                           // At (30,0): in dir →(20,0)-(30,0)=(-1,0), out dir →(40,0)-(30,0)=(+1,0): opposite.
+        assert!(
+            is_smooth_anchor(&b, 1),
+            "collinear opposite handles are smooth"
+        );
     }
 }

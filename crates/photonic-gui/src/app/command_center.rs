@@ -89,7 +89,9 @@ impl PhotonicApp {
             }
             "object.group" => self.do_group_selected(doc, history, &mut modified),
             "object.ungroup" => modified = self.ungroup_selection(doc, history),
-            "object.bring_forward" => modified = self.reorder_selected(doc, history, ZMove::Forward),
+            "object.bring_forward" => {
+                modified = self.reorder_selected(doc, history, ZMove::Forward)
+            }
             "object.send_backward" => {
                 modified = self.reorder_selected(doc, history, ZMove::Backward)
             }
@@ -230,7 +232,11 @@ impl PhotonicApp {
         let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) else {
             return false;
         };
-        let layer_len = doc.layers.get(&layer_id).map(|l| l.node_ids.len()).unwrap_or(0);
+        let layer_len = doc
+            .layers
+            .get(&layer_id)
+            .map(|l| l.node_ids.len())
+            .unwrap_or(0);
         if layer_len == 0 {
             return false;
         }
@@ -415,38 +421,42 @@ impl PhotonicApp {
                             self.command_palette_focus = false;
                         }
                         ui.add_space(6.0);
-                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            if filtered.is_empty() {
-                                ui.label(RichText::new("No matching commands").weak());
-                            }
-                            for (i, c) in filtered.iter().enumerate() {
-                                let selected = i == self.command_palette_sel;
-                                let binding = if c.is_tool {
-                                    None
-                                } else {
-                                    self.prefs.resolve_binding(c.id)
-                                };
-                                let row = ui.horizontal(|ui| {
-                                    ui.set_width(ui.available_width());
-                                    let lbl = ui.selectable_label(
-                                        selected,
-                                        RichText::new(&c.label).strong(),
-                                    );
-                                    if let Some(b) = binding {
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(RichText::new(b.display()).weak().small());
-                                            },
-                                        );
-                                    }
-                                    lbl
-                                });
-                                if row.inner.clicked() {
-                                    chosen = Some(c.id);
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                if filtered.is_empty() {
+                                    ui.label(RichText::new("No matching commands").weak());
                                 }
-                            }
-                        });
+                                for (i, c) in filtered.iter().enumerate() {
+                                    let selected = i == self.command_palette_sel;
+                                    let binding = if c.is_tool {
+                                        None
+                                    } else {
+                                        self.prefs.resolve_binding(c.id)
+                                    };
+                                    let row = ui.horizontal(|ui| {
+                                        ui.set_width(ui.available_width());
+                                        let lbl = ui.selectable_label(
+                                            selected,
+                                            RichText::new(&c.label).strong(),
+                                        );
+                                        if let Some(b) = binding {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(b.display()).weak().small(),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                        lbl
+                                    });
+                                    if row.inner.clicked() {
+                                        chosen = Some(c.id);
+                                    }
+                                }
+                            });
                     });
             });
 

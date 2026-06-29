@@ -312,7 +312,9 @@ pub(crate) async fn dispatch_tool_inner(
         // ── Raster (pixel) image editing ────────────────────────────────────────
         "place_image" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::place_image(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::place_image(state, a).await,
+            ))
         }
         "create_raster_layer" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
@@ -334,19 +336,27 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "apply_filter" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::apply_filter(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::apply_filter(state, a).await,
+            ))
         }
         "brush_stroke" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::brush_stroke(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::brush_stroke(state, a).await,
+            ))
         }
         "bucket_fill" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::bucket_fill(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::bucket_fill(state, a).await,
+            ))
         }
         "gradient_fill" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::gradient_fill(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::gradient_fill(state, a).await,
+            ))
         }
         "transform_image" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
@@ -374,11 +384,15 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "retouch" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::retouch(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::retouch(state, a).await,
+            ))
         }
         "liquify" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::raster::liquify(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::raster::liquify(state, a).await,
+            ))
         }
         "build_shape_from_points" => {
             let a: BuildShapeFromPointsArgs =

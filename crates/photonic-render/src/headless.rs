@@ -236,7 +236,8 @@ impl HeadlessRenderer {
             // White artboard rectangle (matches the GPU path's artboard quad).
             if include_artboard_bg {
                 let (rx, ry, rw, rh) =
-                    opts.region.unwrap_or((0.0, 0.0, document.width, document.height));
+                    opts.region
+                        .unwrap_or((0.0, 0.0, document.width, document.height));
                 let (ax0, ay0) = view.canvas_to_screen(rx, ry);
                 let (ax1, ay1) = view.canvas_to_screen(rx + rw, ry + rh);
                 let x0 = (ax0.min(ax1).floor() as i64).max(0);
@@ -595,9 +596,12 @@ fn content_bounds(
 /// any ancestor group is hidden). Photoshop propagates group opacity/visibility
 /// down to children; `nodes_in_draw_order` flattens groups to leaves and drops
 /// that context, so we recover it here and fold it into the rendered alpha.
-fn group_opacity_map(doc: &Document) -> std::collections::HashMap<photonic_core::node::NodeId, f32> {
+fn group_opacity_map(
+    doc: &Document,
+) -> std::collections::HashMap<photonic_core::node::NodeId, f32> {
     use std::collections::HashMap;
-    let mut parent: HashMap<photonic_core::node::NodeId, photonic_core::node::NodeId> = HashMap::new();
+    let mut parent: HashMap<photonic_core::node::NodeId, photonic_core::node::NodeId> =
+        HashMap::new();
     for n in doc.nodes.values() {
         if let SceneNodeKind::Group(g) = &n.kind {
             for c in &g.children {
@@ -786,7 +790,8 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
                         if doc.width > 0.0 && doc.height > 0.0 {
                             let mx = cx / doc.width * m.width as f64;
                             let my = cy / doc.height * m.height as f64;
-                            if mx < 0.0 || my < 0.0 || mx >= m.width as f64 || my >= m.height as f64 {
+                            if mx < 0.0 || my < 0.0 || mx >= m.width as f64 || my >= m.height as f64
+                            {
                                 amt = 0.0;
                             } else {
                                 amt *= m.coverage(mx as u32, my as u32);
@@ -840,7 +845,8 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
             for px in x0..x1 {
                 let (dx, dy) = view.screen_to_canvas(px as f64 + 0.5, py as f64 + 0.5);
                 let lp = inv * kurbo::Point::new(dx, dy);
-                if lp.x < 0.0 || lp.y < 0.0 || lp.x >= img.width as f64 || lp.y >= img.height as f64 {
+                if lp.x < 0.0 || lp.y < 0.0 || lp.x >= img.width as f64 || lp.y >= img.height as f64
+                {
                     continue;
                 }
                 let s = img.sample_bilinear(lp.x as f32 - 0.5, lp.y as f32 - 0.5);
@@ -859,7 +865,11 @@ fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, vie
                     pixels[idx + 2] as f32 / 255.0,
                 ];
                 let ba = pixels[idx + 3] as f32 / 255.0;
-                let cs = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+                let cs = [
+                    s[0] as f32 / 255.0,
+                    s[1] as f32 / 255.0,
+                    s[2] as f32 / 255.0,
+                ];
 
                 let blended = blend_rgb(node.blend_mode, b, cs);
                 let mixed = [

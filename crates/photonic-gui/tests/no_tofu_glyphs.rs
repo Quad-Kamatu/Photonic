@@ -15,17 +15,50 @@ use std::path::{Path, PathBuf};
 
 /// (code point, human-readable guidance) for glyphs that render as tofu.
 const FORBIDDEN: &[(char, &str)] = &[
-    ('\u{2715}', "U+2715 MULTIPLICATION X — use egui_phosphor::regular::X"),
-    ('\u{2713}', "U+2713 CHECK MARK — use egui_phosphor::regular::CHECK"),
-    ('\u{2717}', "U+2717 BALLOT X — use egui_phosphor::regular::X"),
-    ('\u{FF0B}', "U+FF0B FULLWIDTH PLUS — use egui_phosphor::regular::PLUS"),
-    ('\u{FF0D}', "U+FF0D FULLWIDTH HYPHEN-MINUS — use egui_phosphor::regular::MINUS"),
-    ('\u{2139}', "U+2139 INFORMATION SOURCE — use egui_phosphor::regular::INFO"),
-    ('\u{26A0}', "U+26A0 WARNING SIGN — use egui_phosphor::regular::WARNING"),
-    ('\u{25B2}', "U+25B2 BLACK UP-POINTING TRIANGLE — use egui_phosphor::regular::CARET_UP"),
-    ('\u{25BC}', "U+25BC BLACK DOWN-POINTING TRIANGLE — use egui_phosphor::regular::CARET_DOWN"),
-    ('\u{25BE}', "U+25BE SMALL DOWN TRIANGLE — use egui_phosphor::regular::CARET_DOWN"),
-    ('\u{25B4}', "U+25B4 SMALL UP TRIANGLE — use egui_phosphor::regular::CARET_UP"),
+    (
+        '\u{2715}',
+        "U+2715 MULTIPLICATION X — use egui_phosphor::regular::X",
+    ),
+    (
+        '\u{2713}',
+        "U+2713 CHECK MARK — use egui_phosphor::regular::CHECK",
+    ),
+    (
+        '\u{2717}',
+        "U+2717 BALLOT X — use egui_phosphor::regular::X",
+    ),
+    (
+        '\u{FF0B}',
+        "U+FF0B FULLWIDTH PLUS — use egui_phosphor::regular::PLUS",
+    ),
+    (
+        '\u{FF0D}',
+        "U+FF0D FULLWIDTH HYPHEN-MINUS — use egui_phosphor::regular::MINUS",
+    ),
+    (
+        '\u{2139}',
+        "U+2139 INFORMATION SOURCE — use egui_phosphor::regular::INFO",
+    ),
+    (
+        '\u{26A0}',
+        "U+26A0 WARNING SIGN — use egui_phosphor::regular::WARNING",
+    ),
+    (
+        '\u{25B2}',
+        "U+25B2 BLACK UP-POINTING TRIANGLE — use egui_phosphor::regular::CARET_UP",
+    ),
+    (
+        '\u{25BC}',
+        "U+25BC BLACK DOWN-POINTING TRIANGLE — use egui_phosphor::regular::CARET_DOWN",
+    ),
+    (
+        '\u{25BE}',
+        "U+25BE SMALL DOWN TRIANGLE — use egui_phosphor::regular::CARET_DOWN",
+    ),
+    (
+        '\u{25B4}',
+        "U+25B4 SMALL UP TRIANGLE — use egui_phosphor::regular::CARET_UP",
+    ),
 ];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {

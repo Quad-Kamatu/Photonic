@@ -20,7 +20,11 @@ fn model_cache_dir() -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::var("APPDATA").ok().map(PathBuf::from))
-        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache")))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("Photonic").join("models")
 }

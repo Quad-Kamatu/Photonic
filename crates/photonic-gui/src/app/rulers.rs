@@ -149,22 +149,26 @@ impl PhotonicApp {
             };
             if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                 let (cx, cy) = view.screen_to_canvas(p.x as f64, p.y as f64);
-                let preview = egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgba_unmultiplied(0, 200, 200, 200),
-                );
+                let preview =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 200, 200, 200));
                 match orient {
                     GuideOrientation::Horizontal => {
                         self.ruler_drag_pos = cy;
                         painter.line_segment(
-                            [egui::pos2(canvas_rect.min.x, p.y), egui::pos2(canvas_rect.max.x, p.y)],
+                            [
+                                egui::pos2(canvas_rect.min.x, p.y),
+                                egui::pos2(canvas_rect.max.x, p.y),
+                            ],
                             preview,
                         );
                     }
                     GuideOrientation::Vertical => {
                         self.ruler_drag_pos = cx;
                         painter.line_segment(
-                            [egui::pos2(p.x, canvas_rect.min.y), egui::pos2(p.x, canvas_rect.max.y)],
+                            [
+                                egui::pos2(p.x, canvas_rect.min.y),
+                                egui::pos2(p.x, canvas_rect.max.y),
+                            ],
                             preview,
                         );
                     }
@@ -181,7 +185,13 @@ impl PhotonicApp {
                     if in_canvas {
                         let mut new_guides = old.clone();
                         new_guides.push(Guide::new(orient, pos));
-                        history.execute(Command::SetGuides { old, new: new_guides }, doc);
+                        history.execute(
+                            Command::SetGuides {
+                                old,
+                                new: new_guides,
+                            },
+                            doc,
+                        );
                     }
                 }
                 self.ruler_drag = None;
@@ -274,7 +284,13 @@ impl PhotonicApp {
                             // Dragged back onto the ruler → delete.
                             new_guides.remove(idx);
                         }
-                        history.execute(Command::SetGuides { old, new: new_guides }, doc);
+                        history.execute(
+                            Command::SetGuides {
+                                old,
+                                new: new_guides,
+                            },
+                            doc,
+                        );
                     }
                     self.guide_dragging = None;
                 }
@@ -283,7 +299,11 @@ impl PhotonicApp {
 
         // ── Unit selector in the corner box (click to cycle px→mm→in→pt) ─────
         let corner_resp = ui
-            .interact(corner, egui::Id::new("ruler_corner_unit"), egui::Sense::click())
+            .interact(
+                corner,
+                egui::Id::new("ruler_corner_unit"),
+                egui::Sense::click(),
+            )
             .on_hover_text("Click to change ruler units");
         let corner_fg = if self.prefs.dark_mode {
             egui::Color32::from_gray(190)
@@ -319,13 +339,8 @@ impl PhotonicApp {
         let font = egui::FontId::proportional(11.0);
         let galley = painter.layout_no_wrap(text, font, egui::Color32::WHITE);
         let anchor = pointer + egui::vec2(12.0, 12.0);
-        let bg = egui::Rect::from_min_size(anchor, galley.size())
-            .expand2(egui::vec2(4.0, 2.0));
-        painter.rect_filled(
-            bg,
-            3.0,
-            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200),
-        );
+        let bg = egui::Rect::from_min_size(anchor, galley.size()).expand2(egui::vec2(4.0, 2.0));
+        painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200));
         painter.galley(anchor, galley, egui::Color32::WHITE);
     }
 
@@ -370,7 +385,13 @@ impl PhotonicApp {
                 let old = doc.guides.clone();
                 let mut new_guides = old.clone();
                 new_guides[idx].position = photonic_core::to_px(popup.value, unit, RULER_DPI);
-                history.execute(Command::SetGuides { old, new: new_guides }, doc);
+                history.execute(
+                    Command::SetGuides {
+                        old,
+                        new: new_guides,
+                    },
+                    doc,
+                );
             }
             // Closing: leave `self.guide_edit_popup` as None.
         } else if open {
