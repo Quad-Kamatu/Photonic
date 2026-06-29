@@ -8,7 +8,7 @@ use crate::{
     pipeline::{
         coalesce_segments, create_camera_bind_group_layout, create_fill_pipeline,
         create_fill_pipeline_with_blend, draw_segments, separable_blend_state, CameraUniform,
-        DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
+        DrawSegment, Vertex, SCENE_FORMAT, SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke},
 };
@@ -18,7 +18,10 @@ use photonic_core::{
 };
 use wgpu::util::DeviceExt;
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Export render-target encoding. Shared with the windowed document pass via
+/// [`crate::pipeline::SCENE_FORMAT`] so both paths blend in the same space
+/// (issue #145).
+const FORMAT: wgpu::TextureFormat = SCENE_FORMAT;
 const BG: wgpu::Color = wgpu::Color {
     r: 0.15,
     g: 0.15,
