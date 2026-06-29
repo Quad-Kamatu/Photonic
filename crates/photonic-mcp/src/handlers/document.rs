@@ -8,15 +8,15 @@ use crate::protocol::{
     DeleteColorSwatchArgs, DeleteGradientSwatchArgs, DeleteGrammarRuleArgs, DeleteGraphicStyleArgs,
     DeleteLayerArgs, DeleteSpotColorArgs, DeleteSymbolArgs, DeleteVariableArgs,
     DeleteWidthProfileArgs, DeleteWorkspaceArgs, DetectRhythmsArgs, DiffCheckpointsArgs,
-    DuplicateLayerArgs, ExportDesignTokensArgs, ExportRasterArgs, ExportSelectionArgs,
-    ExportSvgArgs, FitToMarginsArgs, GetCanvasOverviewArgs, GetDocumentStateArgs,
-    JumpToHistoryArgs, ListHistoryArgs, LoadSwatchLibraryArgs, LoadSymbolLibraryArgs,
-    LoadWorkspaceArgs, MeasureDistancesArgs, PlaceSymbolArgs, PlayActionArgs,
-    RegisterEventTriggerArgs, RemoveDimensionArgs, RemoveEventTriggerArgs, RemoveExportProfileArgs,
-    ReorderLayersArgs, ResizeCanvasArgs, RestoreCheckpointArgs, RunExportProfileArgs,
-    SaveGradientSwatchArgs, SaveWorkspaceArgs, SetActiveLayerArgs, SetArtboardMarginsArgs,
-    SetDocumentBleedArgs, SetVariableValueArgs, SpraySymbolInstancesArgs, ToolResult, UndoRedoArgs,
-    UpdateColorSwatchArgs,
+    DuplicateLayerArgs, ExportDesignTokensArgs, ExportPdfArgs, ExportRasterArgs,
+    ExportSelectionArgs, ExportSvgArgs, FitToMarginsArgs, GetCanvasOverviewArgs,
+    GetDocumentStateArgs, JumpToHistoryArgs, ListHistoryArgs, LoadSwatchLibraryArgs,
+    LoadSymbolLibraryArgs, LoadWorkspaceArgs, MeasureDistancesArgs, PlaceSymbolArgs,
+    PlayActionArgs, RegisterEventTriggerArgs, RemoveDimensionArgs, RemoveEventTriggerArgs,
+    RemoveExportProfileArgs, ReorderLayersArgs, ResizeCanvasArgs, RestoreCheckpointArgs,
+    RunExportProfileArgs, SaveGradientSwatchArgs, SaveWorkspaceArgs, SetActiveLayerArgs,
+    SetArtboardMarginsArgs, SetDocumentBleedArgs, SetVariableValueArgs, SpraySymbolInstancesArgs,
+    ToolResult, UndoRedoArgs, UpdateColorSwatchArgs,
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
@@ -520,6 +520,36 @@ pub async fn export_svg(state: &AppState, args: ExportSvgArgs) -> ToolResult {
         byte_count, doc.width, doc.height
     ))
     .with_data(serde_json::json!({ "svg": output, "bytes": byte_count }))
+}
+
+pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
+    tracing::debug!("tool: export_pdf");
+    let background = match args.background.as_deref() {
+        Some(hex) => match photonic_core::color::Color::from_hex(hex) {
+            Some(c) => Some(c),
+            None => {
+                return ToolResult::error(format!("Invalid background '{hex}' (expected #rrggbb)"))
+            }
+        },
+        None => None,
+    };
+    let doc = state.document.lock().await;
+    let opts = photonic_core::export::PdfExportOptions { background };
+    let bytes = photonic_core::export::export_pdf(&doc, &opts);
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let byte_count = bytes.len();
+    ToolResult::text(format!(
+        "PDF export — {} bytes, {}×{} page",
+        byte_count, doc.width, doc.height
+    ))
+    .with_data(serde_json::json!({
+        "format": "pdf",
+        "bytes": byte_count,
+        "mime": "application/pdf",
+        "data_base64": b64,
+    }))
 }
 
 pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResult {

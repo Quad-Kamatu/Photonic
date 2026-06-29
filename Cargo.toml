@@ -46,6 +46,9 @@ clap = { version = "4", features = ["derive"] }
 # Image encoding (canvas screenshots)
 image = "0.25"
 
+# PDF export
+pdf-writer = "0.12"
+
 # Scripting
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 

@@ -16,3 +16,4 @@ anyhow = { workspace = true }
 bitflags = { workspace = true }
 smallvec = { workspace = true }
 roxmltree = { workspace = true }
+pdf-writer = { workspace = true }

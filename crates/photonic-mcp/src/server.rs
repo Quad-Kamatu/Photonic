@@ -975,6 +975,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::document::export_svg(state, a).await,
             ))
         }
+        "export_pdf" => {
+            let a: ExportPdfArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::document::export_pdf(state, a).await,
+            ))
+        }
         "export_selection_as_svg" => {
             let a: ExportSelectionArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(
@@ -3710,6 +3716,19 @@ pub fn tool_list() -> Value {
                     "precision": {
                         "type": "integer",
                         "description": "Decimal places for SVG dimension and viewBox values, clamped 1–6 (default: 4). Use 2 for smaller output, 6 for maximum fidelity."
+                    }
+                }
+            }
+        },
+        {
+            "name": "export_pdf",
+            "description": "Export the entire document as a single-page vector PDF (1 document unit = 1 PDF point). Returns the PDF bytes as base64 in `data_base64`.\n\nMVP scope: filled/stroked vector paths with solid colours, node/group transforms and nesting. Gradient fills are approximated by their first stop colour; text, clipping, per-node opacity, blend modes and multi-page artboards are not yet emitted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "background": {
+                        "type": "string",
+                        "description": "Optional page background colour, e.g. \"#ffffff\". Omit for an unpainted (white-in-viewers) page."
                     }
                 }
             }
