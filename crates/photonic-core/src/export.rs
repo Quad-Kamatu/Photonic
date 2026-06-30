@@ -917,10 +917,16 @@ fn fill_rgb(fill: &Fill) -> Option<[f32; 3]> {
         FillKind::FluidGradient(g) => g.points.first().map(|p| p.color)?,
         FillKind::MeshGradient(g) => g.vertices.first().map(|v| v.color)?,
         // Pattern fills can't tile in this representative-RGB path; approximate by
-        // the tile colour at the pattern origin (as gradients use their first stop).
+        // the tile's own centre pixel — always inside the tile (never the
+        // inter-tile gutter, unlike sampling at the document origin) — composited
+        // over white so a semi-transparent sample doesn't read as black on paper.
         FillKind::Pattern(p) => {
-            let s = p.sample_at(0.0, 0.0);
-            return Some([s[0], s[1], s[2]]);
+            let s = p
+                .tile
+                .sample_bilinear(p.tile.width as f32 * 0.5, p.tile.height as f32 * 0.5);
+            let a = s[3] as f32 / 255.0;
+            let over = |c: u8| (c as f32 / 255.0) * a + (1.0 - a);
+            return Some([over(s[0]), over(s[1]), over(s[2])]);
         }
     };
     Some([c.r, c.g, c.b])
