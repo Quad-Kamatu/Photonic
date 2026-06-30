@@ -172,21 +172,50 @@ part of that phase's definition of done.
 
 ## Decisions locked — Phases 4 & 5
 
-**Phase 4 — contextual top bar:**
-- Appears as a **dedicated second toolbar row, only when something is selected**
-  (no crowding of File/Edit/Tools/search/zoom). Overflow collapses into a "More"
-  popover on narrow windows.
-- Selecting an object does **NOT** auto-open the Inspector drawer — the top bar
-  carries the hot props (Canva-style); drawers stay manual/depth-only.
+### Phase 4 — the adaptive hotbar (was "contextual top bar")
 
-**Phase 5 — radial wheel (redesign of the existing `radial_wheel`):**
-- **Nested categories**: right-click opens an outer ring of the context-relevant
-  categories; choosing one swaps the ring to that category's verbs (center =
-  back). Replaces today's paginated flat list of up to 31 verbs.
-- The wheel **fully replaces** the right-click menu (as it already does — there is
-  no list menu on the canvas).
-- Categories (context-filtered, mapped to the drawer taxonomy so the two share a
-  vocabulary):
+A **second toolbar row, ALWAYS shown** (not only on selection), holding the most
+relevant items for the current context — **tools when nothing is selected**,
+properties + quick actions when something is. Overflow collapses into a "More"
+popover on narrow windows. Selecting an object does **NOT** auto-open the
+Inspector drawer — the hotbar carries the hot items; drawers stay manual.
+
+- **Context buckets** drive the content: nothing-selected, single shape/path,
+  single text, single group/image, multi-selection.
+- **Two modes, user-selectable in Settings (Edit ▸ Behavior):**
+  - **Static** — a curated default set per context bucket.
+  - **Adaptive** — ranked by the user's own usage (frequency-with-time-decay per
+    action, per context bucket; persisted in prefs). Surfaces "the tools you
+    actually use" for each context. Cold-start falls back to the static defaults.
+- **Adaptive must stay calm**: gentle/threshold re-ranking (no per-click
+  reshuffling) and a few **pinned core slots** so the bar never fully rearranges
+  under the user. Phase 4a ships the always-on bar with static defaults + the
+  mode toggle; Phase 4b adds the usage tracking + adaptive ranking.
+
+### Phase 5 — radial-wheel refinement (keep, don't rebuild)
+
+The existing `radial_wheel` stays — context-aware, right-click-invoked, fully
+replacing the canvas context menu (it already does; there is no list menu). The
+work is **refinement and animation**, organising the 31 verbs into a **category
+carousel**:
+
+- **True circle**: increase arc tessellation (and AA the strokes) so the ring
+  always reads as a circle, not a faceted polygon.
+- **Category carousel**: the current category's verbs fill the ring; the
+  **previous and next categories peek** at the left/right edges and are
+  **clickable to jump**. **Scroll** rotates between categories.
+- **Central indicator** in the dead zone shows the **current category** (name +
+  icon).
+- **Radial-wipe transition** on category change (chosen over a spiral — it's
+  cleaner to time and feel): the new ring's segments reveal via an angular sweep
+  (sweep angle 0 → 2π, ~180 ms ease-out) while the old ring wipes out; a small
+  fade window at the sweep front softens the edge. Reduced-motion = instant swap.
+- **Per-context verb pass**: tighten which categories/verbs appear for each
+  context (empty / single-path / single-text / single-group / multi) so every
+  ring is tight and relevant.
+- Keep today's **hover + click** verb selection and **Esc** to cancel.
+- Categories (context-filtered; mirror the drawer taxonomy so wheel and drawers
+  share a vocabulary):
   | Category | Verbs (from today's `WheelAction`) | Context |
   |---|---|---|
   | **Create** | Rectangle, Rounded Rect, Ellipse, Polygon, Star, Text | empty canvas |
@@ -195,10 +224,6 @@ part of that phase's definition of done.
   | **Combine** | Union, Subtract, Intersect, Exclude | 2+ nodes |
   | **Path** | Add Anchors, Simplify, Outline Stroke, Reverse, Average, Close | path node |
   | **Color** | Invert, Grayscale | node(s) |
-- **Wheel→drawer handoff**: verbs that want parameters (e.g. Simplify, Outline
-  Stroke) open the matching drawer pre-focused instead of firing blind; immediate
-  verbs (Duplicate, Boolean, Order, Group) execute in place. Keep today's
-  hover+click selection; a flick/release mode can come later.
 
 ## Risks / open questions
 
