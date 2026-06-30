@@ -1,4 +1,5 @@
 use crate::commands::KeyBinding;
+use crate::panels::DrawerGroup;
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -67,6 +68,19 @@ pub struct AppPreferences {
     #[serde(default)]
     pub pinned_tools: Vec<Tool>,
 
+    // DRAWER UI — Canva-style left icon rail + single animated drawer.
+    /// Which drawer group is open, or `None` when only the rail shows. Defaults
+    /// to the Inspector so launch looks ~like the old always-on panel.
+    #[serde(default = "default_open_drawer")]
+    pub open_drawer: Option<DrawerGroup>,
+    /// Target (fully-open) width of the drawer panel, in logical px.
+    #[serde(default = "default_drawer_width")]
+    pub drawer_width: f32,
+    /// When true, drawer open/close transitions are instant (no width tween) —
+    /// honours the user's reduced-motion preference.
+    #[serde(default)]
+    pub reduced_motion: bool,
+
     // KEYBOARD — user shortcut overrides, keyed by `commands::CommandId`.
     // Empty by default (every command uses its registry default). User remaps in
     // the Keyboard Shortcuts settings page populate this and persist to disk.
@@ -76,6 +90,14 @@ pub struct AppPreferences {
 
 fn default_nudge_distance() -> f64 {
     1.0
+}
+
+fn default_open_drawer() -> Option<DrawerGroup> {
+    Some(DrawerGroup::Inspector)
+}
+
+fn default_drawer_width() -> f32 {
+    220.0
 }
 
 /// How the project-history retention limit is measured.
@@ -135,6 +157,9 @@ impl Default for AppPreferences {
             auto_check_updates: true,
             last_seen_version: String::new(),
             pinned_tools: Vec::new(),
+            open_drawer: Some(DrawerGroup::Inspector),
+            drawer_width: 220.0,
+            reduced_motion: false,
             keymap: HashMap::new(),
         }
     }

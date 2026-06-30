@@ -1487,15 +1487,85 @@ impl<'a> PropPanelCtx<'a> {
     }
 }
 
-pub(crate) fn draw_properties_panel(ui: &mut Ui, ctx: &mut PropPanelCtx) -> Option<PanelAction> {
+/// One of the six Canva-style drawer groups surfaced by the left icon rail.
+///
+/// Each group owns a disjoint slice of the ~43 property section functions; every
+/// section is reachable through exactly one group. `draw_drawer` renders the
+/// active group, so only one group's sections are visible at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DrawerGroup {
+    /// Selection inspector: navigator, selected node, tool/shape options, symbol
+    /// overrides, text-variable binding (+ the Direct-Select vertex panel).
+    Inspector,
+    /// Shape/appearance operations: combine, boolean, blend, pathfinder, etc.
+    Modify,
+    /// Alignment, distribution, distances, dimensions, layer ops.
+    Arrange,
+    /// Swatches, gradients, styles, width profiles, symbols, variables, libraries.
+    Assets,
+    /// Document-level tooling: export, data-viz, analysis, grammar, actions, etc.
+    Document,
+    /// Edit history and branches.
+    History,
+}
+
+impl DrawerGroup {
+    /// All groups in rail order (top to bottom).
+    pub const ALL: [DrawerGroup; 6] = [
+        DrawerGroup::Inspector,
+        DrawerGroup::Modify,
+        DrawerGroup::Arrange,
+        DrawerGroup::Assets,
+        DrawerGroup::Document,
+        DrawerGroup::History,
+    ];
+
+    /// Phosphor glyph shown on the rail button.
+    pub fn icon(self) -> &'static str {
+        match self {
+            DrawerGroup::Inspector => ph::SLIDERS_HORIZONTAL,
+            DrawerGroup::Modify => ph::MAGIC_WAND,
+            DrawerGroup::Arrange => ph::ARROWS_OUT_CARDINAL,
+            DrawerGroup::Assets => ph::SWATCHES,
+            DrawerGroup::Document => ph::FILE_TEXT,
+            DrawerGroup::History => ph::CLOCK_COUNTER_CLOCKWISE,
+        }
+    }
+
+    /// Human-readable title shown in the drawer header and rail tooltip.
+    pub fn title(self) -> &'static str {
+        match self {
+            DrawerGroup::Inspector => "Inspector",
+            DrawerGroup::Modify => "Modify",
+            DrawerGroup::Arrange => "Arrange",
+            DrawerGroup::Assets => "Assets",
+            DrawerGroup::Document => "Document",
+            DrawerGroup::History => "History",
+        }
+    }
+}
+
+/// Render one drawer group: the group header + the shared search bar, then that
+/// group's section functions in their original dispatch order. Returns any
+/// queued [`PanelAction`].
+///
+/// Replaces the former always-on `draw_properties_panel` monolith: the section
+/// functions are unchanged, just partitioned across the six [`DrawerGroup`]s.
+pub(crate) fn draw_drawer(
+    ui: &mut Ui,
+    ctx: &mut PropPanelCtx,
+    group: DrawerGroup,
+) -> Option<PanelAction> {
     ui.label(
-        RichText::new("PROPERTIES")
+        RichText::new(group.title().to_uppercase())
             .small()
             .color(Color32::from_rgb(80, 80, 110)),
     );
     ui.add_space(2.0);
 
     // ── Search bar ────────────────────────────────────────────────
+    // Filters the section headers within the *open* drawer (each section fn
+    // honours `ctx.q` / `ctx.forced_open`).
     ui.horizontal(|ui| {
         let response = ui.add(
             egui::TextEdit::singleline(&mut *ctx.prop_search)
@@ -1514,67 +1584,80 @@ pub(crate) fn draw_properties_panel(ui: &mut Ui, ctx: &mut PropPanelCtx) -> Opti
     });
     ui.add_space(4.0);
 
-    // Helper: returns true when the section label matches the current query.
-    // An empty query matches everything.
+    // An empty query matches everything; a non-empty query forces matching
+    // headers open so their contents are visible.
     ctx.q = ctx.prop_search.trim().to_lowercase();
-    // When searching, force every matching header open so the user sees the contents.
     ctx.forced_open = if ctx.q.is_empty() { None } else { Some(true) };
 
-    // ── Context-aware: vertex editing (Direct Selection) ──────────────────
-    // When a path is in point-edit mode, the panel shows ONLY anchor/vertex
-    // properties — node Transform/Fill/Stroke/Path sections are suppressed so the
-    // inspector reflects exactly what is selected, like Illustrator.
-    if ctx.active_tool == Tool::DirectSelect {
-        if let Some(nid) = ctx.point_edit_node {
-            if let Some(node) = ctx.doc.nodes.get(&nid) {
-                draw_vertex_panel(ui, node, nid, ctx.point_selected, &mut ctx.action);
-                return ctx.action.take();
+    match group {
+        DrawerGroup::Inspector => {
+            // ── Context-aware: vertex editing (Direct Selection) ──────────
+            // When a path is in point-edit mode, the inspector shows ONLY
+            // anchor/vertex properties — node Transform/Fill/Stroke/Path
+            // sections are suppressed, like Illustrator. This early-return
+            // belongs to the Inspector drawer.
+            if ctx.active_tool == Tool::DirectSelect {
+                if let Some(nid) = ctx.point_edit_node {
+                    if let Some(node) = ctx.doc.nodes.get(&nid) {
+                        draw_vertex_panel(ui, node, nid, ctx.point_selected, &mut ctx.action);
+                        return ctx.action.take();
+                    }
+                }
             }
+            draw_navigator_section(ui, ctx);
+            draw_selected_node(ui, ctx);
+            draw_tool_shape_options(ui, ctx);
+            draw_symbol_overrides(ui, ctx);
+            draw_text_variable_binding(ui, ctx);
+        }
+        DrawerGroup::Modify => {
+            draw_combine(ui, ctx);
+            draw_boolean_ops(ui, ctx);
+            draw_blend(ui, ctx);
+            draw_pathfinder(ui, ctx);
+            draw_distribute_on_path(ui, ctx);
+            draw_compound_path(ui, ctx);
+            draw_clipping_mask(ui, ctx);
+            draw_blend_colors(ui, ctx);
+            draw_adjust_colors(ui, ctx);
+            draw_flatten_transparency(ui, ctx);
+            draw_copy_appearance(ui, ctx);
+        }
+        DrawerGroup::Arrange => {
+            draw_arrange_align(ui, ctx);
+            draw_alignment(ui, ctx);
+            draw_distribute_no_overlap(ui, ctx);
+            draw_align_to_artboard(ui, ctx);
+            draw_distances(ui, ctx);
+            draw_dimension_annotations(ui, ctx);
+            draw_layer_operations(ui, ctx);
+        }
+        DrawerGroup::Assets => {
+            draw_color_swatches(ui, ctx);
+            draw_spot_colors(ui, ctx);
+            draw_gradient_swatches(ui, ctx);
+            draw_graphic_styles(ui, ctx);
+            draw_width_profiles(ui, ctx);
+            draw_symbols_panel(ui, ctx);
+            draw_variables(ui, ctx);
+            draw_libraries_export(ui, ctx);
+        }
+        DrawerGroup::Document => {
+            draw_export_profiles(ui, ctx);
+            draw_data_visualization(ui, ctx);
+            draw_analysis(ui, ctx);
+            draw_composition_analysis(ui, ctx);
+            draw_document_grammar(ui, ctx);
+            draw_document_workflow(ui, ctx);
+            draw_actions(ui, ctx);
+            draw_event_triggers(ui, ctx);
+            draw_workspaces(ui, ctx);
+        }
+        DrawerGroup::History => {
+            draw_edit_history(ui, ctx);
+            draw_branches(ui, ctx);
         }
     }
-
-    draw_navigator_section(ui, ctx);
-    draw_selected_node(ui, ctx);
-    draw_combine(ui, ctx);
-    draw_boolean_ops(ui, ctx);
-    draw_blend(ui, ctx);
-    draw_pathfinder(ui, ctx);
-    draw_distribute_on_path(ui, ctx);
-    draw_compound_path(ui, ctx);
-    draw_clipping_mask(ui, ctx);
-    draw_blend_colors(ui, ctx);
-    draw_adjust_colors(ui, ctx);
-    draw_flatten_transparency(ui, ctx);
-    draw_copy_appearance(ui, ctx);
-    draw_arrange_align(ui, ctx);
-    draw_alignment(ui, ctx);
-    draw_distribute_no_overlap(ui, ctx);
-    draw_align_to_artboard(ui, ctx);
-    draw_layer_operations(ui, ctx);
-    draw_tool_shape_options(ui, ctx);
-    draw_data_visualization(ui, ctx);
-    draw_export_profiles(ui, ctx);
-    draw_libraries_export(ui, ctx);
-    draw_color_swatches(ui, ctx);
-    draw_spot_colors(ui, ctx);
-    draw_gradient_swatches(ui, ctx);
-    draw_graphic_styles(ui, ctx);
-    draw_width_profiles(ui, ctx);
-    draw_analysis(ui, ctx);
-    draw_distances(ui, ctx);
-    draw_dimension_annotations(ui, ctx);
-    draw_composition_analysis(ui, ctx);
-    draw_document_grammar(ui, ctx);
-    draw_document_workflow(ui, ctx);
-    draw_actions(ui, ctx);
-    draw_edit_history(ui, ctx);
-    draw_event_triggers(ui, ctx);
-    draw_workspaces(ui, ctx);
-    draw_branches(ui, ctx);
-    draw_variables(ui, ctx);
-    draw_text_variable_binding(ui, ctx);
-    draw_symbol_overrides(ui, ctx);
-    draw_symbols_panel(ui, ctx);
 
     ctx.action.take()
 }

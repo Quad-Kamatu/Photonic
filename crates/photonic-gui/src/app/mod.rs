@@ -25,7 +25,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
-    panels::{self, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp},
+    panels::{self, DrawerGroup, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp},
     preferences::AppPreferences,
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
@@ -669,6 +669,14 @@ pub struct PhotonicApp {
     pub workspace_name_input: String,
 
     // ── Properties panel ─────────────────────────────────────────────────────
+    /// Which drawer group is currently open in the left rail, or `None` when the
+    /// drawer is collapsed and only the rail shows. Mirrors `prefs.open_drawer`
+    /// and is persisted there. Defaults to `Some(Inspector)`.
+    pub open_drawer: Option<DrawerGroup>,
+    /// Last group that was open, used to keep rendering the correct drawer
+    /// content during the close (collapse) animation after `open_drawer` flips
+    /// to `None`. Not persisted.
+    pub last_drawer_group: DrawerGroup,
     /// Live search query that filters which property accordions are visible.
     pub prop_search: String,
     /// Recolor panel: comma-separated hex palette input.
@@ -907,6 +915,8 @@ impl Default for PhotonicApp {
             event_trigger_action: String::new(),
             workspace_name_input: String::new(),
 
+            open_drawer: Some(DrawerGroup::Inspector),
+            last_drawer_group: DrawerGroup::Inspector,
             prop_search: String::new(),
             recolor_palette_input: String::new(),
 
@@ -1497,10 +1507,15 @@ impl PhotonicApp {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
         let console_visible = prefs.console_open_on_start;
+        let open_drawer = prefs.open_drawer;
         let mut s = Self::default();
         s.prefs = prefs;
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
+        s.open_drawer = open_drawer;
+        if let Some(g) = open_drawer {
+            s.last_drawer_group = g;
+        }
         s
     }
 
@@ -1509,6 +1524,7 @@ impl PhotonicApp {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
         let console_visible = prefs.console_open_on_start;
+        let open_drawer = prefs.open_drawer;
         let mut s = Self {
             show_welcome: true,
             ..Self::default()
@@ -1516,6 +1532,10 @@ impl PhotonicApp {
         s.prefs = prefs;
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
+        s.open_drawer = open_drawer;
+        if let Some(g) = open_drawer {
+            s.last_drawer_group = g;
+        }
         s
     }
 
@@ -2193,6 +2213,9 @@ impl PhotonicApp {
                                         ui.checkbox(&mut self.prefs.auto_check_updates, "Check for updates on launch")
                                             .on_hover_text("Once per launch, ask GitHub for a newer release and show a banner if one exists. No automatic download.");
                                         ui.add_space(4.0);
+                                        ui.checkbox(&mut self.prefs.reduced_motion, "Reduced motion")
+                                            .on_hover_text("Make drawer open/close transitions instant instead of animating the width.");
+                                        ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Arrow nudge (px):");
                                             ui.add(egui::DragValue::new(&mut self.prefs.nudge_distance)
@@ -2599,15 +2622,75 @@ impl PhotonicApp {
                 }
             });
 
-        // ── Properties panel (below tools, separate panel) ────────────────────
-        egui::SidePanel::left("properties")
-            .default_width(220.0)
-            .min_width(160.0)
-            // Cap the width so content (e.g. the search field sizing off
-            // available_width during egui's sizing pass) can't balloon the
-            // panel to fill the screen.
-            .max_width(360.0)
+        // ── Left drawer rail (Canva-style) ────────────────────────────────────
+        // A thin vertical strip with one phosphor-icon button per DrawerGroup.
+        // Clicking a group toggles its drawer; opening one closes any other
+        // (one drawer at a time). Replaces the always-on properties monolith.
+        egui::SidePanel::left("drawer_rail")
+            .resizable(false)
+            .exact_width(40.0)
             .show(ctx, |ui| {
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    for group in DrawerGroup::ALL {
+                        let active = self.open_drawer == Some(group);
+                        let resp = ui
+                            .add(
+                                egui::Button::new(RichText::new(group.icon()).size(18.0))
+                                    .min_size(egui::vec2(30.0, 30.0))
+                                    .selected(active),
+                            )
+                            .on_hover_text(group.title());
+                        if resp.clicked() {
+                            if active {
+                                // Clicking the open group collapses the drawer.
+                                self.open_drawer = None;
+                            } else {
+                                // Opening a group closes whatever else was open.
+                                self.open_drawer = Some(group);
+                                self.last_drawer_group = group;
+                            }
+                            // Persist the drawer state + any pending width change.
+                            self.prefs.open_drawer = self.open_drawer;
+                            self.prefs.save();
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+
+        // ── Animated drawer host ──────────────────────────────────────────────
+        // The width tweens 0 → target on open and target → 0 on close (~150ms,
+        // ease-out, no overshoot). The open/closed STATE flips instantly (input
+        // is never blocked on the tween); only the rendered width animates.
+        // `animate_bool_with_time_and_easing` requests repaint while in flight.
+        // Reduced-motion makes the transition instant.
+        let drawer_open = self.open_drawer.is_some();
+        let anim_time = if self.prefs.reduced_motion { 0.0 } else { 0.15 };
+        let t = ctx.animate_bool_with_time_and_easing(
+            egui::Id::new("drawer_width_anim"),
+            drawer_open,
+            anim_time,
+            egui::emath::easing::cubic_out,
+        );
+        // Render the open group, or — during the close tween — the last one open.
+        let render_group = self.open_drawer.unwrap_or(self.last_drawer_group);
+        let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
+        if t > 0.001 {
+            let fully_open = drawer_open && t >= 0.999;
+            let mut panel = egui::SidePanel::left("properties");
+            panel = if fully_open {
+                // Fully open: let the user drag-resize within range.
+                panel
+                    .resizable(true)
+                    .min_width(160.0)
+                    .max_width(420.0)
+                    .default_width(target_w)
+            } else {
+                // Mid-tween: drive an exact eased width (no resize handle).
+                panel.resizable(false).exact_width((target_w * t).max(1.0))
+            };
+            let resp = panel.show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
                     let selection_count = doc.selection.node_ids.len();
@@ -2679,11 +2762,20 @@ impl PhotonicApp {
                         q: String::new(),
                         forced_open: None,
                     };
-                    if let Some(action) = panels::draw_properties_panel(ui, &mut ctx) {
+                    if let Some(action) = panels::draw_drawer(ui, &mut ctx, render_group) {
                         self.pending_panel_actions.push(action);
                     }
                 });
             });
+            // Capture a user resize of the fully-open drawer so it persists
+            // (in-memory now; flushed to disk on the next toggle/close).
+            if fully_open {
+                let w = resp.response.rect.width();
+                if (w - self.prefs.drawer_width).abs() > 0.5 {
+                    self.prefs.drawer_width = w;
+                }
+            }
+        }
 
         // ── Right panel: layers + change log + AI chat ──────────────────────
         egui::SidePanel::right("right_panel")
