@@ -10439,6 +10439,30 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::SetCharacterMetrics {
+                    node_id,
+                    baseline_shift,
+                    script_position,
+                } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if matches!(node.kind, SceneNodeKind::Text(_)) {
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Text(ref mut tn) = new_node.kind {
+                                tn.baseline_shift = baseline_shift;
+                                tn.script_position = script_position;
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                        }
+                    }
+                }
+
                 PanelAction::LinkTextFrames { from_id, to_id } => {
                     if from_id != to_id {
                         let from_node = doc.nodes.get(&from_id).cloned();

@@ -581,6 +581,12 @@ pub enum PanelAction {
         node_id: NodeId,
         features: Vec<String>,
     },
+    /// Set advanced character metrics (baseline shift + super/subscript) on a text node.
+    SetCharacterMetrics {
+        node_id: NodeId,
+        baseline_shift: f64,
+        script_position: photonic_core::node::ScriptPosition,
+    },
     /// Link two text nodes as a threaded text chain.
     LinkTextFrames { from_id: NodeId, to_id: NodeId },
     /// Remove a text node from its thread chain.
@@ -2998,6 +3004,42 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             {
                                 let dec = if o_active { "" } else { "overline" };
                                 action = Some(PanelAction::SetTextDecoration { node_id: text_nid, decoration: dec.to_string() });
+                            }
+                        });
+                        // Advanced character metrics: super/subscript + baseline shift.
+                        ui.horizontal(|ui| {
+                            use photonic_core::node::ScriptPosition;
+                            let cur_script = tn.script_position;
+                            let normal_active = cur_script == ScriptPosition::Normal;
+                            let sup_active = cur_script == ScriptPosition::Superscript;
+                            let sub_active = cur_script == ScriptPosition::Subscript;
+                            ui.label("Script:");
+                            if ui.add(egui::Button::new("N").selected(normal_active))
+                                .on_hover_text("Normal baseline").clicked() && !normal_active
+                            {
+                                action = Some(PanelAction::SetCharacterMetrics { node_id: text_nid, baseline_shift: tn.baseline_shift, script_position: ScriptPosition::Normal });
+                            }
+                            if ui.add(egui::Button::new(RichText::new("x²").small()).selected(sup_active))
+                                .on_hover_text("Superscript").clicked()
+                            {
+                                let next = if sup_active { ScriptPosition::Normal } else { ScriptPosition::Superscript };
+                                action = Some(PanelAction::SetCharacterMetrics { node_id: text_nid, baseline_shift: tn.baseline_shift, script_position: next });
+                            }
+                            if ui.add(egui::Button::new(RichText::new("x₂").small()).selected(sub_active))
+                                .on_hover_text("Subscript").clicked()
+                            {
+                                let next = if sub_active { ScriptPosition::Normal } else { ScriptPosition::Subscript };
+                                action = Some(PanelAction::SetCharacterMetrics { node_id: text_nid, baseline_shift: tn.baseline_shift, script_position: next });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Baseline shift:");
+                            let mut bshift = tn.baseline_shift;
+                            if ui.add(egui::DragValue::new(&mut bshift).speed(0.25).range(-200.0..=200.0).suffix(" px"))
+                                .on_hover_text("Baseline shift in document units (positive raises the text)")
+                                .changed()
+                            {
+                                action = Some(PanelAction::SetCharacterMetrics { node_id: text_nid, baseline_shift: bshift, script_position: tn.script_position });
                             }
                         });
                     });

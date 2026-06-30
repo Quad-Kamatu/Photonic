@@ -384,18 +384,30 @@ fn emit_node_inner(
                 .replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;");
+            // Advanced character metrics: super/subscript reduces the rendered
+            // font size and offsets the baseline; an explicit baseline shift adds
+            // to that offset. SVG `baseline-shift` is positive-up, matching ours.
+            let effective_font_size = t.font_size * t.script_position.size_scale();
+            let shift_units =
+                t.script_position.baseline_offset_em() * t.font_size + t.baseline_shift;
+            let baseline_shift_attr = if shift_units.abs() > 1e-9 {
+                format!(" baseline-shift=\"{shift_units}\"")
+            } else {
+                String::new()
+            };
             body.push_str(&format!(
                 "{}<text{}{}{}{} font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" \
-                 text-anchor=\"{}\"{}{}>{}</text>\n",
+                 text-anchor=\"{}\"{}{}{}>{}</text>\n",
                 pad,
                 id_attr,
                 transform,
                 opacity,
                 blend,
                 t.font_family,
-                t.font_size,
+                effective_font_size,
                 t.font_weight,
                 anchor,
+                baseline_shift_attr,
                 fill,
                 stroke,
                 content,

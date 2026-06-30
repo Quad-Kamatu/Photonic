@@ -533,6 +533,14 @@ pub struct TextNode {
     /// Tab stop positions in document units. Empty means default tab stops every 4 em widths.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tab_stops: Vec<f64>,
+    /// Baseline shift in document units, applied to the whole node. Positive raises the
+    /// text above the baseline, negative lowers it. Default: 0.0 (on the baseline).
+    #[serde(default)]
+    pub baseline_shift: f64,
+    /// Script position for the whole node: normal, superscript, or subscript.
+    /// Super/subscript render at a reduced size with a vertical offset. Default: Normal.
+    #[serde(default)]
+    pub script_position: ScriptPosition,
 }
 
 fn default_line_height() -> f64 {
@@ -565,6 +573,62 @@ impl TextNode {
             paragraph_spacing_after: 0.0,
             text_indent: 0.0,
             tab_stops: Vec::new(),
+            baseline_shift: 0.0,
+            script_position: ScriptPosition::Normal,
+        }
+    }
+}
+
+/// Script position for a text node: normal, superscript, or subscript.
+///
+/// Super/subscript render the whole node at a reduced font size with a vertical
+/// baseline offset. This is a node-level attribute; true character-range
+/// super/subscript (e.g. the "2" in "m²") requires a per-character run model and
+/// is tracked as deferred work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptPosition {
+    #[default]
+    Normal,
+    Superscript,
+    Subscript,
+}
+
+impl ScriptPosition {
+    /// Font-size multiplier applied for this script position.
+    pub fn size_scale(self) -> f64 {
+        match self {
+            ScriptPosition::Normal => 1.0,
+            ScriptPosition::Superscript | ScriptPosition::Subscript => 0.58,
+        }
+    }
+
+    /// Baseline offset in em of the *base* font size. Positive raises the glyphs
+    /// (superscript), negative lowers them (subscript), zero for normal.
+    pub fn baseline_offset_em(self) -> f64 {
+        match self {
+            ScriptPosition::Normal => 0.0,
+            ScriptPosition::Superscript => 0.33,
+            ScriptPosition::Subscript => -0.10,
+        }
+    }
+
+    /// Parse from a lowercase string accepted by the MCP / GUI layers.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "normal" | "" => Some(ScriptPosition::Normal),
+            "superscript" | "super" | "sup" | "sups" => Some(ScriptPosition::Superscript),
+            "subscript" | "sub" | "subs" => Some(ScriptPosition::Subscript),
+            _ => None,
+        }
+    }
+
+    /// Canonical lowercase string form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScriptPosition::Normal => "normal",
+            ScriptPosition::Superscript => "superscript",
+            ScriptPosition::Subscript => "subscript",
         }
     }
 }

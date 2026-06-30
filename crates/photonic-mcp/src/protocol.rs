@@ -4184,6 +4184,23 @@ pub struct SetParagraphOptionsArgs {
     pub indent: Option<f64>,
 }
 
+// ─── Character Metrics Args ───────────────────────────────────────────────────
+
+/// Arguments for `set_character_metrics` tool.
+#[derive(Debug, Deserialize, Default)]
+pub struct SetCharacterMetricsArgs {
+    /// ID or name of the text node.
+    pub node_id: String,
+    /// Baseline shift in document units (positive raises the text above the
+    /// baseline, negative lowers it). Pass null to leave unchanged.
+    #[serde(default)]
+    pub baseline_shift: Option<f64>,
+    /// Script position: "normal", "superscript" (alias "super"), or "subscript"
+    /// (alias "sub"). Pass null to leave unchanged.
+    #[serde(default)]
+    pub script_position: Option<String>,
+}
+
 // ─── List History Args ────────────────────────────────────────────────────────
 
 /// Arguments for `list_history` tool
