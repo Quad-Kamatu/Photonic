@@ -4006,7 +4006,12 @@ impl PhotonicApp {
                                 canvas_y: cy,
                             },
                         };
-                        self.radial_wheel = Some(WheelState::new(pos, (cx, cy), &wheel_ctx));
+                        self.radial_wheel = Some(WheelState::new(
+                            pos,
+                            (cx, cy),
+                            &wheel_ctx,
+                            self.prefs.reduced_motion,
+                        ));
                     }
                 }
 
@@ -4014,19 +4019,21 @@ impl PhotonicApp {
                 // This block runs before any early-return tool handlers so the
                 // wheel is always rendered while open.
                 if self.radial_wheel.is_some() {
-                    // Scroll wheel cycles pages
+                    let now = ui.input(|i| i.time);
+
+                    // Scroll wheel rotates between categories (carousel).
                     let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
                     if scroll_y != 0.0 {
                         if let Some(ref mut wheel) = self.radial_wheel {
                             if scroll_y > 0.0 {
-                                wheel.prev_page();
+                                wheel.prev_category(now);
                             } else {
-                                wheel.next_page();
+                                wheel.next_category(now);
                             }
                         }
                     }
 
-                    // Update hover position
+                    // Update hover position (ring segment + peek tabs)
                     if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
                         if let Some(ref mut wheel) = self.radial_wheel {
                             wheel.update_hover(cursor);
@@ -4035,7 +4042,11 @@ impl PhotonicApp {
 
                     // Paint the overlay now — before any `return` can skip it
                     if let Some(ref wheel) = self.radial_wheel {
-                        wheel.draw(ui.painter());
+                        wheel.draw(ui.painter(), now);
+                        // Keep animating the radial-wipe transition smoothly.
+                        if wheel.is_animating(now) {
+                            ui.ctx().request_repaint();
+                        }
                     }
 
                     // Escape closes without selecting
@@ -4044,19 +4055,26 @@ impl PhotonicApp {
                         return;
                     }
 
-                    // Primary click: select item or dismiss
+                    // Primary click: jump to a peeked category, fire a verb, or dismiss.
                     if response.clicked_by(egui::PointerButton::Primary) {
+                        let on_peek = self
+                            .radial_wheel
+                            .as_ref()
+                            .map_or(false, |w| w.peek_hovered.is_some());
+                        if on_peek {
+                            if let Some(ref mut wheel) = self.radial_wheel {
+                                wheel.jump_peek(now);
+                            }
+                            return; // stay open on the new category
+                        }
                         if let Some(wheel) = self.radial_wheel.take() {
-                            if let Some(idx) = wheel.hovered {
-                                // item index is relative to the current page
-                                if let Some(item) = wheel.current_page_items().get(idx) {
-                                    let pa = PanelAction::from_wheel_action(
-                                        item.action.clone(),
-                                        wheel.canvas_pos,
-                                        self.fill_color,
-                                    );
-                                    self.pending_panel_actions.push(pa);
-                                }
+                            if let Some(action) = wheel.hovered_action() {
+                                let pa = PanelAction::from_wheel_action(
+                                    action,
+                                    wheel.canvas_pos,
+                                    self.fill_color,
+                                );
+                                self.pending_panel_actions.push(pa);
                             }
                         }
                         return; // consume click — don't pass to tool handler
