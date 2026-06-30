@@ -1,4 +1,5 @@
-use egui::{Align2, Color32, FontId, Painter, Pos2};
+use egui::{Align2, Color32, FontId, Painter, Pos2, Rect};
+use egui_phosphor::regular as ph;
 use photonic_core::node::NodeId;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -8,11 +9,11 @@ const INNER_R: f32 = 40.0;
 const OUTER_R: f32 = 130.0;
 const LABEL_R: f32 = 90.0;
 
-/// Peek-tab band: drawn just outside the ring at the left (prev) / right (next).
-const PEEK_R_INNER: f32 = OUTER_R + 4.0;
-const PEEK_R_OUTER: f32 = OUTER_R + 26.0;
-/// Half-angle (radians) of the prev/next peek wedge around the horizontal axis.
-const PEEK_HALF_ANGLE: f32 = 0.42;
+/// Prev/next category "peek" pills, drawn just outside the ring at the left
+/// (prev) / right (next), each labelled with a caret arrow + category name.
+const PEEK_PILL_W: f32 = 88.0;
+const PEEK_PILL_H: f32 = 26.0;
+const PEEK_GAP: f32 = 12.0;
 
 /// Category-position dots inside the dead zone.
 const DOT_R: f32 = 2.0;
@@ -454,14 +455,13 @@ impl WheelState {
         self.hovered = None;
         self.peek_hovered = None;
 
-        // Peek tabs sit just outside the ring at the left / right.
-        if self.cat_count() > 1 && (PEEK_R_INNER..=PEEK_R_OUTER).contains(&dist) {
-            let ang = dy.atan2(dx); // 0 = right (+x), ±PI = left
-            if ang.abs() <= PEEK_HALF_ANGLE {
+        // Peek pills sit just outside the ring at the left / right.
+        if self.cat_count() > 1 {
+            if self.peek_rect(PeekSide::Next).contains(cursor) {
                 self.peek_hovered = Some(PeekSide::Next);
                 return;
             }
-            if (ang.abs() - std::f32::consts::PI).abs() <= PEEK_HALF_ANGLE {
+            if self.peek_rect(PeekSide::Prev).contains(cursor) {
                 self.peek_hovered = Some(PeekSide::Prev);
                 return;
             }
@@ -555,13 +555,18 @@ impl WheelState {
             let stroke_col = with_alpha(if hovered { border_hovered } else { border }, a);
             let stroke_w = if hovered { 2.0 } else { 1.0 };
 
+            // Fill via a convex quad-strip MESH. egui's `PathShape` fill fans a
+            // non-convex annular sector from its first vertex, which produced the
+            // spike artifacts radiating across the hub; a quad strip per arc step
+            // is convex and tessellates cleanly.
+            painter.add(fill_arc_sector(self.origin, INNER_R, OUTER_R, start, end, fill));
+            // Stroke the outline on top (stroking a concave path is fine, and the
+            // dense tessellation + AA keeps the ring reading as a smooth circle).
             let pts = arc_polygon(self.origin, INNER_R, OUTER_R, start, end);
             painter.add(egui::Shape::Path(egui::epaint::PathShape {
                 points: pts,
                 closed: true,
-                fill,
-                // PathStroke is anti-aliased; combined with dense tessellation the
-                // ring reads as a smooth circle rather than a faceted polygon.
+                fill: Color32::TRANSPARENT,
                 stroke: egui::epaint::PathStroke::new(stroke_w, stroke_col),
             }));
         }
@@ -589,52 +594,59 @@ impl WheelState {
         }
     }
 
-    /// Draw a small clickable tab hinting at the prev / next category.
+    /// Screen rect of the prev/next "peek" pill on the given side.
+    fn peek_rect(&self, side: PeekSide) -> Rect {
+        let cx = match side {
+            PeekSide::Next => self.origin.x + OUTER_R + PEEK_GAP + PEEK_PILL_W / 2.0,
+            PeekSide::Prev => self.origin.x - OUTER_R - PEEK_GAP - PEEK_PILL_W / 2.0,
+        };
+        Rect::from_center_size(
+            egui::pos2(cx, self.origin.y),
+            egui::vec2(PEEK_PILL_W, PEEK_PILL_H),
+        )
+    }
+
+    /// Draw a clickable "pill" hinting at the prev / next category, with a caret
+    /// arrow pointing in the scroll direction.
     fn draw_peek(&self, painter: &Painter, side: PeekSide) {
         let Some(cat) = self.categories.get(self.neighbour(side)) else {
             return;
         };
         let hovered = self.peek_hovered == Some(side);
-
-        // Centre angle: 0 (right) for Next, PI (left) for Prev.
-        let center = match side {
-            PeekSide::Next => 0.0,
-            PeekSide::Prev => std::f32::consts::PI,
-        };
-        let start = center - PEEK_HALF_ANGLE;
-        let end = center + PEEK_HALF_ANGLE;
+        let rect = self.peek_rect(side);
 
         let fill = if hovered {
             Color32::from_rgba_unmultiplied(110, 86, 207, 235)
         } else {
-            Color32::from_rgba_unmultiplied(40, 38, 62, 215)
+            Color32::from_rgba_unmultiplied(40, 38, 62, 220)
         };
-        let border = Color32::from_rgba_unmultiplied(90, 80, 160, 200);
-        let pts = arc_polygon(self.origin, PEEK_R_INNER, PEEK_R_OUTER, start, end);
-        painter.add(egui::Shape::Path(egui::epaint::PathShape {
-            points: pts,
-            closed: true,
-            fill,
-            stroke: egui::epaint::PathStroke::new(1.0, border),
-        }));
-
-        // Neighbour name, just outside the tab.
-        let label_r = PEEK_R_OUTER + 12.0;
-        let col = if hovered {
-            Color32::from_rgb(255, 255, 255)
+        let border = if hovered {
+            Color32::from_rgba_unmultiplied(160, 130, 255, 240)
         } else {
-            Color32::from_rgb(185, 180, 215)
+            Color32::from_rgba_unmultiplied(90, 80, 160, 200)
         };
-        let anchor = match side {
-            PeekSide::Next => Align2::LEFT_CENTER,
-            PeekSide::Prev => Align2::RIGHT_CENTER,
+        let text_col = if hovered {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(190, 185, 220)
+        };
+
+        // Fully-rounded pill.
+        let rounding = egui::Rounding::same(PEEK_PILL_H / 2.0);
+        painter.rect_filled(rect, rounding, fill);
+        painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0, border));
+
+        // Caret arrow (pointing outward = the scroll direction) + category name.
+        let label = match side {
+            PeekSide::Prev => format!("{}  {}", ph::CARET_LEFT, cat.name),
+            PeekSide::Next => format!("{}  {}", cat.name, ph::CARET_RIGHT),
         };
         painter.text(
-            egui::pos2(self.origin.x + center.cos() * label_r, self.origin.y),
-            anchor,
-            cat.name,
-            FontId::proportional(10.0),
-            col,
+            rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(11.0),
+            text_col,
         );
     }
 
@@ -700,6 +712,40 @@ fn with_alpha(c: Color32, factor: f32) -> Color32 {
 fn arc_steps(start: f32, end: f32) -> usize {
     let span = (end - start).abs();
     ((span / 0.052).ceil() as usize).clamp(12, 96)
+}
+
+/// Fill an annular sector as a convex quad-strip mesh — one quad per arc step
+/// between the inner and outer arcs. Unlike a single non-convex `PathShape`
+/// fill (which fans from the first vertex and spikes across the hub), every
+/// quad here is convex, so egui tessellates it without artifacts.
+fn fill_arc_sector(
+    center: Pos2,
+    r_inner: f32,
+    r_outer: f32,
+    start: f32,
+    end: f32,
+    color: Color32,
+) -> egui::Shape {
+    let steps = arc_steps(start, end);
+    let mut mesh = egui::epaint::Mesh::default();
+    for s in 0..=steps {
+        let a = start + (end - start) * (s as f32 / steps as f32);
+        let (c, si) = (a.cos(), a.sin());
+        mesh.colored_vertex(
+            egui::pos2(center.x + c * r_inner, center.y + si * r_inner),
+            color,
+        );
+        mesh.colored_vertex(
+            egui::pos2(center.x + c * r_outer, center.y + si * r_outer),
+            color,
+        );
+    }
+    for s in 0..steps {
+        let b = (s * 2) as u32; // inner_s, outer_s, inner_s+1, outer_s+1 = b, b+1, b+2, b+3
+        mesh.add_triangle(b, b + 1, b + 3);
+        mesh.add_triangle(b, b + 3, b + 2);
+    }
+    egui::Shape::Mesh(mesh)
 }
 
 fn arc_polygon(center: Pos2, r_inner: f32, r_outer: f32, start: f32, end: f32) -> Vec<Pos2> {
