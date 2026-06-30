@@ -1144,10 +1144,13 @@ fn build_geometry(
             }
         }
 
-        // Overprint preview: a solid fill matching an overprint-flagged spot ink
-        // composites with Multiply instead of its own (knockout) blend mode.
+        // Overprint preview: a (crisp) solid fill matching an overprint-flagged
+        // spot ink composites with Multiply instead of its own knockout blend.
+        // Skip when the fill is blurred (object-blur/feather) — that fill is
+        // suppressed to the effects layer, so this segment is only the stroke and
+        // must not be forced to Multiply.
         let mut blend = node.blend_mode;
-        if !overprint_hexes.is_empty() && path_node.fill.enabled {
+        if !overprint_hexes.is_empty() && !fill_blurred && path_node.fill.enabled {
             if let FillKind::Solid(col) = &path_node.fill.kind {
                 if overprint_hexes.contains(&col.to_hex()) {
                     blend = BlendMode::Multiply;

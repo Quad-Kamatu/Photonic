@@ -1401,6 +1401,13 @@ impl PhotonicApp {
             };
             let renderer = self.preview_renderer.as_ref().unwrap();
             let (rgba, rw_px, rh_px) = renderer.render_rgba_with_opts(doc, pw, ph, &opts);
+            // GPU readback can fail (device loss / OOM), in which case the
+            // renderer returns empty pixels with a non-zero size. Skip this frame
+            // rather than upload a zero-length buffer at a non-zero extent (wgpu
+            // validation panic); the cache is left untouched and we retry next frame.
+            if rgba.is_empty() {
+                return;
+            }
             let (iw, ih) = (rw_px as usize, rh_px as usize);
             let mut pixels = Vec::with_capacity(iw * ih);
             for px in rgba.chunks_exact(4) {
