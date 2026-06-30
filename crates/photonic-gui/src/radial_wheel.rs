@@ -21,10 +21,10 @@ const DOT_GAP: f32 = 8.0;
 
 // ── Animation constants ─────────────────────────────────────────────────────────
 
-/// Duration (seconds) of the radial-wipe transition between categories.
-const WIPE_DURATION: f64 = 0.18;
-/// Angular width (radians) of the soft fade window at the sweep front.
-const WIPE_FADE: f32 = 0.9;
+/// Duration (seconds) of the content cross-fade between categories. The solid
+/// ring base stays constant; only the segment content (dividers + labels +
+/// hover highlight) fades out/in.
+const TRANSITION_DURATION: f64 = 0.14;
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
@@ -431,19 +431,19 @@ impl WheelState {
     }
 
     /// Eased wipe progress in `0..=1` (1 = settled).
-    fn wipe_progress(&self, now: f64) -> f32 {
+    fn transition_progress(&self, now: f64) -> f32 {
         match self.anim_start {
             None => 1.0,
             Some(t0) => {
-                let raw = ((now - t0) / WIPE_DURATION).clamp(0.0, 1.0) as f32;
+                let raw = ((now - t0) / TRANSITION_DURATION).clamp(0.0, 1.0) as f32;
                 egui::emath::easing::cubic_out(raw)
             }
         }
     }
 
-    /// Whether a wipe is still in flight (drives repaint requests).
+    /// Whether the cross-fade is still in flight (drives repaint requests).
     pub fn is_animating(&self, now: f64) -> bool {
-        self.anim_start.is_some() && self.wipe_progress(now) < 1.0
+        self.anim_start.is_some() && self.transition_progress(now) < 1.0
     }
 
     /// Update hovered ring segment + peek tab from the cursor position.
@@ -485,29 +485,24 @@ impl WheelState {
             return;
         }
 
-        let progress = self.wipe_progress(now);
+        let progress = self.transition_progress(now);
         let animating = self.anim_start.is_some() && progress < 1.0;
 
-        // ── Ring segments ──────────────────────────────────────────────────────
-        // Sweep travels 0 → TAU (+fade) clockwise from the top. A segment's alpha
-        // ramps in as the sweep front passes its angular position.
-        let sweep = progress * (TAU + WIPE_FADE);
-
+        // ── Ring base + content ────────────────────────────────────────────────
+        // The ring is a single constant SOLID donut (the "circle background");
+        // segments are transparent and only the hovered wedge lights up. On a
+        // category change the BASE stays put and only the content layer
+        // (dividers + labels + hover highlight) cross-fades — because the fade
+        // happens over a solid base (not the bare canvas), there is no opacity
+        // dip and therefore no flicker.
+        self.draw_base(painter);
         if animating {
-            // True radial WIPE (not a cross-fade): paint the NEW ring fully
-            // opaque underneath, then wipe the OLD ring OUT on top as the sweep
-            // front passes. Cross-fading both rings made each segment dip below
-            // full opacity mid-transition (two semi-transparent layers summing
-            // to < 1 over the dark canvas) — that dip is the flicker. Layering a
-            // solid new ring under a fading old ring keeps coverage solid.
-            self.draw_ring(painter, self.current_cat, |_| 1.0);
             if let Some(prev) = self.prev_cat {
-                self.draw_ring(painter, prev, |seg_angle| {
-                    1.0 - ((sweep - seg_angle) / WIPE_FADE).clamp(0.0, 1.0)
-                });
+                self.draw_content(painter, prev, 1.0 - progress);
             }
+            self.draw_content(painter, self.current_cat, progress);
         } else {
-            self.draw_ring(painter, self.current_cat, |_| 1.0);
+            self.draw_content(painter, self.current_cat, 1.0);
         }
 
         // ── Peek tabs (prev / next neighbours) ────────────────────────────────
@@ -524,9 +519,24 @@ impl WheelState {
         self.draw_center_indicator(painter);
     }
 
-    /// Draw one category's ring; `alpha_fn` maps a segment's clockwise-from-top
-    /// angle to an opacity factor in `0..=1` (used for the radial wipe).
-    fn draw_ring(&self, painter: &Painter, cat_idx: usize, alpha_fn: impl Fn(f32) -> f32) {
+    /// Draw the constant SOLID ring base (the "circle background"): one filled
+    /// donut + crisp inner/outer rim circles. Category-independent, so it stays
+    /// put across transitions.
+    fn draw_base(&self, painter: &Painter) {
+        let bg = Color32::from_rgba_unmultiplied(30, 30, 45, 224);
+        let rim = Color32::from_rgba_unmultiplied(120, 105, 200, 210);
+        painter.add(fill_arc_sector(self.origin, INNER_R, OUTER_R, 0.0, TAU, bg));
+        painter.circle_stroke(self.origin, OUTER_R, egui::Stroke::new(1.5, rim));
+        painter.circle_stroke(self.origin, INNER_R, egui::Stroke::new(1.0, rim));
+    }
+
+    /// Draw one category's CONTENT over the base, scaled by `alpha`: the hovered
+    /// wedge highlight (segments are otherwise transparent), the divider lines,
+    /// and the option labels. Cross-faded on a category change.
+    fn draw_content(&self, painter: &Painter, cat_idx: usize, alpha: f32) {
+        if alpha <= 0.01 {
+            return;
+        }
         let Some(cat) = self.categories.get(cat_idx) else {
             return;
         };
@@ -537,51 +547,45 @@ impl WheelState {
         let seg_angle = TAU / n as f32;
         let is_current = cat_idx == self.current_cat;
 
-        let bg_normal = Color32::from_rgba_unmultiplied(30, 30, 45, 220);
-        let bg_hovered = Color32::from_rgba_unmultiplied(110, 86, 207, 240);
-        let border = Color32::from_rgba_unmultiplied(90, 80, 160, 200);
-        let border_hovered = Color32::from_rgba_unmultiplied(160, 130, 255, 240);
-        let label_normal = Color32::from_rgb(180, 175, 210);
-        let label_hovered = Color32::from_rgb(255, 255, 255);
+        let divider = with_alpha(Color32::from_rgba_unmultiplied(95, 85, 165, 200), alpha);
+        let hover_fill = with_alpha(Color32::from_rgba_unmultiplied(110, 86, 207, 235), alpha);
+        let label_normal = with_alpha(Color32::from_rgb(190, 185, 220), alpha);
+        let label_hovered = with_alpha(Color32::from_rgb(255, 255, 255), alpha);
 
-        // Segments.
-        for i in 0..n {
-            let a = alpha_fn(i as f32 * seg_angle);
-            if a <= 0.003 {
-                continue;
+        // Hover highlight: only the hovered wedge, only on the settled category.
+        if is_current {
+            if let Some(i) = self.hovered {
+                let start = i as f32 * seg_angle - seg_angle / 2.0 - FRAC_PI_2;
+                let end = start + seg_angle;
+                painter.add(fill_arc_sector(
+                    self.origin,
+                    INNER_R,
+                    OUTER_R,
+                    start,
+                    end,
+                    hover_fill,
+                ));
             }
-            let hovered = is_current && self.hovered == Some(i);
-            let start = i as f32 * seg_angle - seg_angle / 2.0 - FRAC_PI_2;
-            let end = start + seg_angle;
-            let fill = with_alpha(if hovered { bg_hovered } else { bg_normal }, a);
-            let stroke_col = with_alpha(if hovered { border_hovered } else { border }, a);
-            let stroke_w = if hovered { 2.0 } else { 1.0 };
+        }
 
-            // Fill via a convex quad-strip MESH. egui's `PathShape` fill fans a
-            // non-convex annular sector from its first vertex, which produced the
-            // spike artifacts radiating across the hub; a quad strip per arc step
-            // is convex and tessellates cleanly.
-            painter.add(fill_arc_sector(self.origin, INNER_R, OUTER_R, start, end, fill));
-            // Stroke the outline on top (stroking a concave path is fine, and the
-            // dense tessellation + AA keeps the ring reading as a smooth circle).
-            let pts = arc_polygon(self.origin, INNER_R, OUTER_R, start, end);
-            painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                points: pts,
-                closed: true,
-                fill: Color32::TRANSPARENT,
-                stroke: egui::epaint::PathStroke::new(stroke_w, stroke_col),
-            }));
+        // Divider lines at each segment boundary (single, crisp).
+        for i in 0..n {
+            let a = i as f32 * seg_angle - seg_angle / 2.0 - FRAC_PI_2;
+            let (c, s) = (a.cos(), a.sin());
+            painter.line_segment(
+                [
+                    egui::pos2(self.origin.x + c * INNER_R, self.origin.y + s * INNER_R),
+                    egui::pos2(self.origin.x + c * OUTER_R, self.origin.y + s * OUTER_R),
+                ],
+                egui::Stroke::new(1.0, divider),
+            );
         }
 
         // Labels.
         for i in 0..n {
-            let a = alpha_fn(i as f32 * seg_angle);
-            if a <= 0.05 {
-                continue;
-            }
             let hovered = is_current && self.hovered == Some(i);
             let mid = i as f32 * seg_angle - FRAC_PI_2;
-            let col = with_alpha(if hovered { label_hovered } else { label_normal }, a);
+            let col = if hovered { label_hovered } else { label_normal };
             let size = if hovered { 12.0 } else { 11.0 };
             painter.text(
                 egui::pos2(
@@ -750,24 +754,3 @@ fn fill_arc_sector(
     egui::Shape::Mesh(mesh)
 }
 
-fn arc_polygon(center: Pos2, r_inner: f32, r_outer: f32, start: f32, end: f32) -> Vec<Pos2> {
-    let steps = arc_steps(start, end);
-    let mut pts = Vec::with_capacity(steps * 2 + 2);
-
-    for s in 0..=steps {
-        let a = start + (end - start) * (s as f32 / steps as f32);
-        pts.push(egui::pos2(
-            center.x + a.cos() * r_inner,
-            center.y + a.sin() * r_inner,
-        ));
-    }
-    for s in (0..=steps).rev() {
-        let a = start + (end - start) * (s as f32 / steps as f32);
-        pts.push(egui::pos2(
-            center.x + a.cos() * r_outer,
-            center.y + a.sin() * r_outer,
-        ));
-    }
-
-    pts
-}
