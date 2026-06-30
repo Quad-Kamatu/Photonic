@@ -2598,34 +2598,15 @@ impl PhotonicApp {
                 });
             });
 
-        // ── Left tools panel ─────────────────────────────────────────────────
-        egui::SidePanel::left("tools")
-            .default_width(180.0)
-            .min_width(140.0)
-            .show(ctx, |ui| {
-                if let Some(tool) =
-                    panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
-                {
-                    self.pen_points.clear();
-                    self.pencil_points.clear();
-                    self.lasso_points.clear();
-                    self.isolated_group = None;
-                    self.point_edit_node = None;
-                    self.point_selected.clear();
-                    self.point_drag_origin = None;
-                    self.point_drag_mode = None;
-                    self.active_tool = tool;
-                    if tool != Tool::Select && tool != Tool::DirectSelect {
-                        self.selected_id = None;
-                        doc.selection.clear();
-                    }
-                }
-            });
-
         // ── Left drawer rail (Canva-style) ────────────────────────────────────
-        // A thin vertical strip with one phosphor-icon button per DrawerGroup.
-        // Clicking a group toggles its drawer; opening one closes any other
-        // (one drawer at a time). Replaces the always-on properties monolith.
+        // A thin vertical strip with one phosphor-icon button per DrawerGroup —
+        // Tools now lives here too (the old standalone tools panel is gone).
+        // Clicking a group toggles its drawer; opening one closes any other.
+        // A group with no content for the current context is DISABLED, and an
+        // open drawer whose content disappears animates closed (and reappears
+        // when the context returns) via `effective_open` — no state churn.
+        let sel_count = doc.selection.node_ids.len();
+        let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
         egui::SidePanel::left("drawer_rail")
             .resizable(false)
             .exact_width(40.0)
@@ -2633,16 +2614,18 @@ impl PhotonicApp {
                 ui.add_space(6.0);
                 ui.vertical_centered(|ui| {
                     for group in DrawerGroup::ALL {
-                        let active = self.open_drawer == Some(group);
+                        let active = effective_open == Some(group);
+                        let enabled = group.has_content(sel_count);
                         let resp = ui
-                            .add(
+                            .add_enabled(
+                                enabled,
                                 egui::Button::new(RichText::new(group.icon()).size(18.0))
                                     .min_size(egui::vec2(30.0, 30.0))
                                     .selected(active),
                             )
                             .on_hover_text(group.title());
                         if resp.clicked() {
-                            if active {
+                            if self.open_drawer == Some(group) {
                                 // Clicking the open group collapses the drawer.
                                 self.open_drawer = None;
                             } else {
@@ -2665,8 +2648,10 @@ impl PhotonicApp {
         // is never blocked on the tween); only the rendered width animates.
         // `animate_bool_with_time_and_easing` requests repaint while in flight.
         // Reduced-motion makes the transition instant.
-        let drawer_open = self.open_drawer.is_some();
-        let anim_time = if self.prefs.reduced_motion { 0.0 } else { 0.15 };
+        // Recompute after the rail click so opening/closing animates this frame.
+        let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        let drawer_open = effective_open.is_some();
+        let anim_time = if self.prefs.reduced_motion { 0.0 } else { 0.18 };
         let t = ctx.animate_bool_with_time_and_easing(
             egui::Id::new("drawer_width_anim"),
             drawer_open,
@@ -2674,7 +2659,7 @@ impl PhotonicApp {
             egui::emath::easing::cubic_out,
         );
         // Render the open group, or — during the close tween — the last one open.
-        let render_group = self.open_drawer.unwrap_or(self.last_drawer_group);
+        let render_group = effective_open.unwrap_or(self.last_drawer_group);
         let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
         if t > 0.001 {
             let fully_open = drawer_open && t >= 0.999;
@@ -2691,7 +2676,32 @@ impl PhotonicApp {
                 panel.resizable(false).exact_width((target_w * t).max(1.0))
             };
             let resp = panel.show(ctx, |ui| {
+                // Cross-fade the content with the slide (alpha tracks the eased
+                // width factor) so the transition clearly reads as an animation
+                // rather than a pop.
+                ui.set_opacity(t);
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    if render_group == DrawerGroup::Tools {
+                        // Tools drawer: render the tool palette + apply selection.
+                        if let Some(tool) =
+                            panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
+                        {
+                            self.pen_points.clear();
+                            self.pencil_points.clear();
+                            self.lasso_points.clear();
+                            self.isolated_group = None;
+                            self.point_edit_node = None;
+                            self.point_selected.clear();
+                            self.point_drag_origin = None;
+                            self.point_drag_mode = None;
+                            self.active_tool = tool;
+                            if tool != Tool::Select && tool != Tool::DirectSelect {
+                                self.selected_id = None;
+                                doc.selection.clear();
+                            }
+                        }
+                        return;
+                    }
                     let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
                     let selection_count = doc.selection.node_ids.len();
                     let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();

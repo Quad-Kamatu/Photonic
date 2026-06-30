@@ -1494,6 +1494,8 @@ impl<'a> PropPanelCtx<'a> {
 /// active group, so only one group's sections are visible at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DrawerGroup {
+    /// Tool palette: selection/navigation/drawing/path tools + pinned hotbar.
+    Tools,
     /// Selection inspector: navigator, selected node, tool/shape options, symbol
     /// overrides, text-variable binding (+ the Direct-Select vertex panel).
     Inspector,
@@ -1511,7 +1513,8 @@ pub enum DrawerGroup {
 
 impl DrawerGroup {
     /// All groups in rail order (top to bottom).
-    pub const ALL: [DrawerGroup; 6] = [
+    pub const ALL: [DrawerGroup; 7] = [
+        DrawerGroup::Tools,
         DrawerGroup::Inspector,
         DrawerGroup::Modify,
         DrawerGroup::Arrange,
@@ -1523,6 +1526,7 @@ impl DrawerGroup {
     /// Phosphor glyph shown on the rail button.
     pub fn icon(self) -> &'static str {
         match self {
+            DrawerGroup::Tools => ph::TOOLBOX,
             DrawerGroup::Inspector => ph::SLIDERS_HORIZONTAL,
             DrawerGroup::Modify => ph::MAGIC_WAND,
             DrawerGroup::Arrange => ph::ARROWS_OUT_CARDINAL,
@@ -1535,12 +1539,29 @@ impl DrawerGroup {
     /// Human-readable title shown in the drawer header and rail tooltip.
     pub fn title(self) -> &'static str {
         match self {
+            DrawerGroup::Tools => "Tools",
             DrawerGroup::Inspector => "Inspector",
             DrawerGroup::Modify => "Modify",
             DrawerGroup::Arrange => "Arrange",
             DrawerGroup::Assets => "Assets",
             DrawerGroup::Document => "Document",
             DrawerGroup::History => "History",
+        }
+    }
+
+    /// Whether this drawer has any content worth showing in the current context.
+    /// Rail icons for groups returning `false` are disabled, and an open drawer
+    /// that loses its content auto-collapses. Tools, Inspector (navigator + tool
+    /// options), and the always-on library/document/history groups are always
+    /// available; the operation drawers (Modify/Arrange) need a selection.
+    pub fn has_content(self, selection_count: usize) -> bool {
+        match self {
+            DrawerGroup::Tools
+            | DrawerGroup::Inspector
+            | DrawerGroup::Assets
+            | DrawerGroup::Document
+            | DrawerGroup::History => true,
+            DrawerGroup::Modify | DrawerGroup::Arrange => selection_count >= 1,
         }
     }
 }
@@ -1657,6 +1678,9 @@ pub(crate) fn draw_drawer(
             draw_edit_history(ui, ctx);
             draw_branches(ui, ctx);
         }
+        // Tools is rendered by the app layer (it needs tool state, not the
+        // property ctx), so it is never routed through draw_drawer.
+        DrawerGroup::Tools => {}
     }
 
     ctx.action.take()
