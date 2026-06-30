@@ -1,4 +1,5 @@
 use crate::commands::KeyBinding;
+use crate::hotbar::{HotbarBucket, HotbarMode};
 use crate::panels::DrawerGroup;
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,16 @@ pub struct AppPreferences {
     #[serde(default)]
     pub reduced_motion: bool,
 
+    // HOTBAR — the always-on adaptive second toolbar row (#154 Phase 4).
+    /// Static (curated default order) or Adaptive (ranked by the user's usage).
+    #[serde(default)]
+    pub hotbar_mode: HotbarMode,
+    /// Per-bucket usage scores: bucket key → (item id → frequency-with-decay).
+    /// Bumped each time a hotbar item is invoked in that bucket; drives the
+    /// Adaptive ordering. Empty = cold start (falls back to static order).
+    #[serde(default)]
+    pub hotbar_usage: HashMap<String, HashMap<String, f32>>,
+
     // KEYBOARD — user shortcut overrides, keyed by `commands::CommandId`.
     // Empty by default (every command uses its registry default). User remaps in
     // the Keyboard Shortcuts settings page populate this and persist to disk.
@@ -160,6 +171,8 @@ impl Default for AppPreferences {
             open_drawer: Some(DrawerGroup::Tools),
             drawer_width: 220.0,
             reduced_motion: false,
+            hotbar_mode: HotbarMode::default(),
+            hotbar_usage: HashMap::new(),
             keymap: HashMap::new(),
         }
     }
@@ -201,6 +214,26 @@ impl AppPreferences {
                 (HISTORY_SIZE_MODE_STEP_CEILING, Some(bytes))
             }
         }
+    }
+
+    /// Current usage score for a hotbar item within a bucket (0 if unseen).
+    pub fn hotbar_score(&self, bucket: HotbarBucket, item_id: &str) -> f32 {
+        self.hotbar_usage
+            .get(bucket.key())
+            .and_then(|m| m.get(item_id))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Record one use of `item_id` in `bucket`: mildly decay every score in the
+    /// bucket, then bump the used item by `+1`. Frequency with a recency bias.
+    pub fn bump_hotbar_usage(&mut self, bucket: HotbarBucket, item_id: &str) {
+        const DECAY: f32 = 0.95;
+        let m = self.hotbar_usage.entry(bucket.key().to_string()).or_default();
+        for v in m.values_mut() {
+            *v *= DECAY;
+        }
+        *m.entry(item_id.to_string()).or_insert(0.0) += 1.0;
     }
 
     fn prefs_path() -> Option<std::path::PathBuf> {

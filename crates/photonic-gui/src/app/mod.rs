@@ -25,11 +25,23 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
+    hotbar::{self, HotbarAction, HotbarBucket, HotbarEffect, HotbarItem, HotbarMode},
     panels::{self, DrawerGroup, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp},
     preferences::AppPreferences,
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
 };
+
+/// Cached hotbar ordering. Rebuilt only when the signature (context bucket,
+/// single-group flag, or mode) changes — never per click or per frame — so the
+/// Adaptive order stays calm.
+struct HotbarCacheState {
+    bucket: HotbarBucket,
+    single_is_group: bool,
+    single_is_fillable_path: bool,
+    mode: HotbarMode,
+    items: Vec<HotbarItem>,
+}
 
 // ─── Eyedropper ───────────────────────────────────────────────────────────────
 
@@ -454,6 +466,9 @@ pub struct PhotonicApp {
     /// Actions queued by panel widgets (z-order, boolean ops) to be processed
     /// after all panels have finished drawing, with access to doc + history.
     pub pending_panel_actions: Vec<PanelAction>,
+    /// Cached adaptive-hotbar ordering for the current context (see
+    /// [`HotbarCacheState`]). `None` until first built.
+    hotbar_cache: Option<HotbarCacheState>,
     /// Canvas viewport rect captured this frame — used to recenter the view
     /// when the Navigator emits a `CenterViewOn` action.
     last_canvas_rect: Option<egui::Rect>,
@@ -855,6 +870,7 @@ impl Default for PhotonicApp {
             },
 
             pending_panel_actions: Vec::new(),
+            hotbar_cache: None,
             last_canvas_rect: None,
             last_history_size_check: 0.0,
             cached_history_bytes: (f64::NEG_INFINITY, 0),
@@ -1539,6 +1555,236 @@ impl PhotonicApp {
         s
     }
 
+    // ── Adaptive hotbar (#154 Phase 4) ───────────────────────────────────────
+
+    /// Classify the current selection into a hotbar context bucket. Returns the
+    /// bucket, whether a lone selection is a group (enables Ungroup), whether a
+    /// lone selection is a path the colour ops can actually recolour (enables
+    /// Invert / Grayscale), and the single selected node id (for single-target
+    /// actions).
+    fn hotbar_bucket(&self, doc: &Document) -> (HotbarBucket, bool, bool, Option<NodeId>) {
+        match doc.selection.count() {
+            0 => (HotbarBucket::Empty, false, false, None),
+            1 => {
+                let id = doc.selection.ids().next().copied();
+                let kind = id.and_then(|i| doc.get_node(&i)).map(|n| &n.kind);
+                let (bucket, is_group) = match kind {
+                    Some(SceneNodeKind::Text(_)) => (HotbarBucket::Text, false),
+                    Some(SceneNodeKind::Group(_)) => (HotbarBucket::Shape, true),
+                    _ => (HotbarBucket::Shape, false),
+                };
+                // Invert/Grayscale only mutate a Path's fill (non-`None`) and an
+                // enabled stroke; gate the buttons on something they can change.
+                let is_fillable_path = matches!(kind, Some(SceneNodeKind::Path(p))
+                    if !matches!(p.fill.kind, photonic_core::style::FillKind::None)
+                        || p.stroke.enabled);
+                (bucket, is_group, is_fillable_path, id)
+            }
+            _ => (HotbarBucket::Multi, false, false, None),
+        }
+    }
+
+    /// Rebuild the cached hotbar ordering only when its signature changed —
+    /// bucket, single-group flag, or mode. This is what keeps Adaptive ordering
+    /// calm: scores bumped by clicks do not re-rank until the bucket changes.
+    fn refresh_hotbar_cache(
+        &mut self,
+        bucket: HotbarBucket,
+        single_is_group: bool,
+        single_is_fillable_path: bool,
+    ) {
+        let mode = self.prefs.hotbar_mode;
+        let stale = match &self.hotbar_cache {
+            Some(c) => {
+                c.bucket != bucket
+                    || c.single_is_group != single_is_group
+                    || c.single_is_fillable_path != single_is_fillable_path
+                    || c.mode != mode
+            }
+            None => true,
+        };
+        if stale {
+            let items = hotbar::ordered_items(
+                bucket,
+                single_is_group,
+                single_is_fillable_path,
+                mode,
+                |id| self.prefs.hotbar_score(bucket, id),
+            );
+            self.hotbar_cache = Some(HotbarCacheState {
+                bucket,
+                single_is_group,
+                single_is_fillable_path,
+                mode,
+                items,
+            });
+        }
+    }
+
+    /// Draw the always-on hotbar row (its own `TopBottomPanel`, below the main
+    /// toolbar). Shown every frame regardless of selection.
+    fn draw_hotbar(&mut self, ctx: &egui::Context, doc: &mut Document) {
+        let (bucket, single_is_group, single_is_fillable_path, single_id) =
+            self.hotbar_bucket(doc);
+        self.refresh_hotbar_cache(bucket, single_is_group, single_is_fillable_path);
+        let items = self
+            .hotbar_cache
+            .as_ref()
+            .map(|c| c.items.clone())
+            .unwrap_or_default();
+        let active_tool = self.active_tool;
+
+        let mut invoked: Option<HotbarItem> = None;
+        egui::TopBottomPanel::top("hotbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8.0, 3.0)),
+            )
+            .show(ctx, |ui| {
+                invoked = hotbar::render(ui, &items, active_tool);
+            });
+
+        if let Some(item) = invoked {
+            self.invoke_hotbar_item(item, bucket, single_id, doc);
+        }
+    }
+
+    /// Run a hotbar item: bump its per-bucket usage (persisted), then either
+    /// apply the tool (reusing the existing tool-apply path) or dispatch the
+    /// existing `PanelAction`(s) for the verb against the live selection.
+    fn invoke_hotbar_item(
+        &mut self,
+        item: HotbarItem,
+        bucket: HotbarBucket,
+        single_id: Option<NodeId>,
+        doc: &Document,
+    ) {
+        // Usage tracking — bump + persist (drives Adaptive ranking next rebuild).
+        self.prefs.bump_hotbar_usage(bucket, item.id);
+        self.prefs.save();
+
+        match item.effect {
+            HotbarEffect::Tool(tool) => {
+                // Same tool-apply logic the Tools drawer/rail uses.
+                self.pen_points.clear();
+                self.pencil_points.clear();
+                self.lasso_points.clear();
+                self.isolated_group = None;
+                self.point_edit_node = None;
+                self.point_selected.clear();
+                self.point_drag_origin = None;
+                self.point_drag_mode = None;
+                self.active_tool = tool;
+            }
+            HotbarEffect::Action(action) => {
+                for pa in Self::hotbar_panel_actions(action, bucket, single_id, doc) {
+                    self.pending_panel_actions.push(pa);
+                }
+            }
+        }
+    }
+
+    /// Map a hotbar verb to the existing [`PanelAction`](s) for the live
+    /// selection. Single-target verbs use `single_id`; multi-selection verbs
+    /// either have a dedicated "selected" action or fan out over the selection.
+    fn hotbar_panel_actions(
+        action: HotbarAction,
+        bucket: HotbarBucket,
+        single_id: Option<NodeId>,
+        doc: &Document,
+    ) -> Vec<PanelAction> {
+        let sel: Vec<NodeId> = doc.selection.ids().copied().collect();
+        let is_multi = bucket == HotbarBucket::Multi;
+        match action {
+            HotbarAction::Duplicate => {
+                if is_multi {
+                    sel.iter()
+                        .map(|id| PanelAction::DuplicateNode { node_id: *id })
+                        .collect()
+                } else {
+                    single_id
+                        .map(|id| vec![PanelAction::DuplicateNode { node_id: id }])
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::Delete => {
+                if is_multi {
+                    vec![PanelAction::DeleteSelected]
+                } else {
+                    single_id
+                        .map(|id| vec![PanelAction::DeleteNode { node_id: id }])
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::Group => vec![PanelAction::GroupSelected],
+            HotbarAction::Ungroup => single_id
+                .map(|id| vec![PanelAction::UngroupNode { node_id: id }])
+                .unwrap_or_default(),
+            HotbarAction::BringToFront => {
+                if is_multi {
+                    sel.iter()
+                        .map(|id| PanelAction::ReorderNode {
+                            node_id: *id,
+                            op: ZOrderOp::BringToFront,
+                        })
+                        .collect()
+                } else {
+                    single_id
+                        .map(|id| {
+                            vec![PanelAction::ReorderNode {
+                                node_id: id,
+                                op: ZOrderOp::BringToFront,
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::SendToBack => {
+                if is_multi {
+                    sel.iter()
+                        .map(|id| PanelAction::ReorderNode {
+                            node_id: *id,
+                            op: ZOrderOp::SendToBack,
+                        })
+                        .collect()
+                } else {
+                    single_id
+                        .map(|id| {
+                            vec![PanelAction::ReorderNode {
+                                node_id: id,
+                                op: ZOrderOp::SendToBack,
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::BoolUnion => {
+                vec![PanelAction::BooleanOp(
+                    photonic_core::ops::boolean::BooleanOp::Union,
+                )]
+            }
+            HotbarAction::BoolSubtract => {
+                vec![PanelAction::BooleanOp(
+                    photonic_core::ops::boolean::BooleanOp::Subtract,
+                )]
+            }
+            HotbarAction::AlignLeft => vec![PanelAction::AlignNodes {
+                operation: "left".into(),
+                key_object_id: None,
+            }],
+            HotbarAction::AlignCenterH => vec![PanelAction::AlignNodes {
+                operation: "center_horizontal".into(),
+                key_object_id: None,
+            }],
+            // Empty vec = "use current selection" (resolved in the action handler).
+            HotbarAction::CopyAsSvg => vec![PanelAction::CopyAsSvg { node_ids: vec![] }],
+            HotbarAction::Invert => vec![PanelAction::InvertColors { node_ids: vec![] }],
+            HotbarAction::Grayscale => {
+                vec![PanelAction::ConvertToGrayscale { node_ids: vec![] }]
+            }
+        }
+    }
+
     /// Draw the full UI for one frame.
     ///
     /// Returns `true` if the document was modified this frame.
@@ -1922,6 +2168,9 @@ impl PhotonicApp {
                 });
             });
 
+        // ── Adaptive hotbar (always-on second top row) ───────────────────────
+        self.draw_hotbar(ctx, doc);
+
         // Close drawer on Escape
         if viewport_kb(ctx) && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.active_drawer == Some(DrawerKind::Edit) {
@@ -2215,6 +2464,26 @@ impl PhotonicApp {
                                         ui.add_space(4.0);
                                         ui.checkbox(&mut self.prefs.reduced_motion, "Reduced motion")
                                             .on_hover_text("Make drawer open/close transitions instant instead of animating the width.");
+                                        ui.add_space(4.0);
+
+                                        // ── Hotbar mode ───────────────────────────────
+                                        ui.horizontal(|ui| {
+                                            ui.label("Hotbar:");
+                                            let mut mode = self.prefs.hotbar_mode;
+                                            let changed = ui
+                                                .selectable_value(&mut mode, HotbarMode::Static, "Static")
+                                                .on_hover_text("Show the curated default set for each selection context.")
+                                                .clicked()
+                                                | ui
+                                                .selectable_value(&mut mode, HotbarMode::Adaptive, "Adaptive")
+                                                .on_hover_text("Rank each context's items by your own usage (most-used first), with pinned leading slots.")
+                                                .clicked();
+                                            if changed && mode != self.prefs.hotbar_mode {
+                                                self.prefs.hotbar_mode = mode;
+                                                // Force the hotbar order to rebuild under the new mode.
+                                                self.hotbar_cache = None;
+                                            }
+                                        });
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Arrow nudge (px):");
