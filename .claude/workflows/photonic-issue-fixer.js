@@ -32,7 +32,7 @@ const REPO = '/home/josephh/Code Bases/KamatuStudio/Photonic'
 // defaults. Parse defensively so config always lands.
 const A = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch { return {} } })() : args || {}
 
-const BASE = A.baseBranch || 'feat/raster-editing'
+const BASE = A.baseBranch || 'main'
 const WORK = A.workBranch || 'pre-deploy/issue-fixer-batch'
 const PR_TITLE = A.prTitle || 'feat: batch issue fixes (aggregated)'
 const MAX_ROUNDS = A.maxRounds || 3
