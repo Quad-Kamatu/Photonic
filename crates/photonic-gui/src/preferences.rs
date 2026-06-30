@@ -93,7 +93,7 @@ fn default_nudge_distance() -> f64 {
 }
 
 fn default_open_drawer() -> Option<DrawerGroup> {
-    Some(DrawerGroup::Inspector)
+    Some(DrawerGroup::Tools)
 }
 
 fn default_drawer_width() -> f32 {
@@ -157,7 +157,7 @@ impl Default for AppPreferences {
             auto_check_updates: true,
             last_seen_version: String::new(),
             pinned_tools: Vec::new(),
-            open_drawer: Some(DrawerGroup::Inspector),
+            open_drawer: Some(DrawerGroup::Tools),
             drawer_width: 220.0,
             reduced_motion: false,
             keymap: HashMap::new(),

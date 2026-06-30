@@ -915,8 +915,8 @@ impl Default for PhotonicApp {
             event_trigger_action: String::new(),
             workspace_name_input: String::new(),
 
-            open_drawer: Some(DrawerGroup::Inspector),
-            last_drawer_group: DrawerGroup::Inspector,
+            open_drawer: Some(DrawerGroup::Tools),
+            last_drawer_group: DrawerGroup::Tools,
             prop_search: String::new(),
             recolor_palette_input: String::new(),
 
