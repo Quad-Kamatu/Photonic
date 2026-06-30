@@ -17,9 +17,12 @@
 - **CI drift gate**: the lint job regenerates the file and runs
   `git diff --exit-code docs/mcp-api.md`, so the reference can never silently
   drift from the code again.
-- **`docs/architecture.md`**: handler-module table corrected to all nine modules
-  under `crates/photonic-mcp/src/handlers/` (was five), and pointed at the
-  generated reference.
+- **`docs/architecture.md`**: handler-module table corrected to list **all ten**
+  modules under `crates/photonic-mcp/src/handlers/` (was five), including the
+  `handlers/raster.rs` row added by `feat/raster-editing` (pixel editing: place/
+  create raster layers, adjustments, filters, brush stroke, bucket/gradient fill,
+  image transform, layer masks, raster info), and pointed at the generated
+  reference.
 - **`ROADMAP.md`**: marked historical with a banner pointing to the generated
   `docs/mcp-api.md` as the authoritative tool list (content retained for
   rationale/history rather than deleted).
