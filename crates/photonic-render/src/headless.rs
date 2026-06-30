@@ -15,7 +15,8 @@ use crate::{
 };
 use image::{ImageBuffer, Rgba};
 use photonic_core::{
-    layer::BlendMode, node::SceneNodeKind, raster::blend::blend_rgb, style::FillKind, Document,
+    layer::BlendMode, node::SceneNodeKind, raster::blend::blend_rgb, style::FillKind, Color,
+    Document,
 };
 use wgpu::util::DeviceExt;
 
@@ -55,6 +56,11 @@ pub struct ExportOptions {
     /// instead of the full document — used for per-artboard export. Takes
     /// precedence over `crop_to_content`.
     pub region: Option<(f64, f64, f64, f64)>,
+    /// Overprint preview (#22): when true, any node whose solid fill hex-matches
+    /// an `overprint`-flagged [`SpotColor`] in `document.spot_colors` composites
+    /// with [`BlendMode::Multiply`] instead of knocking out. A non-ICC visual
+    /// approximation of print overprint. Off for normal export.
+    pub overprint_preview: bool,
 }
 
 impl Default for ExportOptions {
@@ -65,6 +71,7 @@ impl Default for ExportOptions {
             ico_sizes: vec![16, 32, 48, 256],
             jpeg_quality: 90,
             region: None,
+            overprint_preview: false,
         }
     }
 }
@@ -194,18 +201,22 @@ impl HeadlessRenderer {
     }
 
     /// Render `document` to a PNG at an explicit pixel size with full export control.
-    pub fn render_png_with_opts(
+    /// Render to a raw RGBA8 pixel buffer (`(pixels, width, height)`), shared by
+    /// PNG/JPEG/… export and the on-canvas Pixel/Overprint Preview overlay.
+    /// Returns empty `pixels` on GPU readback failure.
+    pub fn render_rgba_with_opts(
         &self,
         document: &Document,
         w: u32,
         h: u32,
         opts: &ExportOptions,
-    ) -> Vec<u8> {
+    ) -> (Vec<u8>, u32, u32) {
         let w = w.max(1);
         let h = h.max(1);
 
         let include_artboard_bg = opts.background == ExportBackground::Artboard;
-        let (verts, idxs, segments, blur_jobs) = build_geometry(document, include_artboard_bg);
+        let (verts, idxs, segments, blur_jobs) =
+            build_geometry(document, include_artboard_bg, opts.overprint_preview);
 
         // Camera: an explicit region (per-artboard export) wins; otherwise fit
         // the content bounding box or the full document to the output size.
@@ -278,12 +289,7 @@ impl HeadlessRenderer {
                 }
             }
             crate::compositor::composite_document(&mut pixels, w, h, document, &view);
-            let img: ImageBuffer<Rgba<u8>, _> =
-                ImageBuffer::from_raw(w, h, pixels).unwrap_or_else(|| ImageBuffer::new(w, h));
-            let mut png = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-                .unwrap_or_default();
-            return png;
+            return (pixels, w, h);
         }
 
         // Final readback target: single-sample, COPY_SRC.
@@ -407,7 +413,7 @@ impl HeadlessRenderer {
         });
         self.device.poll(wgpu::Maintain::Wait);
         if rx.recv().ok().and_then(|r| r.ok()).is_none() {
-            return vec![];
+            return (vec![], w, h);
         }
 
         let raw = slice.get_mapped_range();
@@ -424,7 +430,22 @@ impl HeadlessRenderer {
         // aligned via the same camera so raster and vector content register.
         composite_raster_nodes(&mut pixels, w, h, document, &view);
 
-        // Encode as PNG
+        (pixels, w, h)
+    }
+
+    /// Render to an in-memory PNG with options. Thin wrapper over
+    /// [`Self::render_rgba_with_opts`] (the shared raw-RGBA path).
+    pub fn render_png_with_opts(
+        &self,
+        document: &Document,
+        w: u32,
+        h: u32,
+        opts: &ExportOptions,
+    ) -> Vec<u8> {
+        let (pixels, w, h) = self.render_rgba_with_opts(document, w, h, opts);
+        if pixels.is_empty() {
+            return vec![];
+        }
         let img: ImageBuffer<Rgba<u8>, _> =
             ImageBuffer::from_raw(w, h, pixels).unwrap_or_else(|| ImageBuffer::new(w, h));
         let mut png = Vec::new();
@@ -964,6 +985,7 @@ fn silhouette_job(
 fn build_geometry(
     doc: &Document,
     include_artboard_bg: bool,
+    overprint_preview: bool,
 ) -> (Vec<Vertex>, Vec<u32>, Vec<DrawSegment>, Vec<BlurJob>) {
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
@@ -971,6 +993,18 @@ fn build_geometry(
     // Per-node index ranges tagged with their blend mode, coalesced at the end.
     let mut raw_segments: Vec<(BlendMode, u32, u32)> = Vec::new();
     let mut blur_jobs: Vec<BlurJob> = Vec::new();
+
+    // Overprint preview (#22): canonicalised hexes of the overprint-flagged spot
+    // colours. A node's solid fill matching one composites with Multiply (below).
+    let overprint_hexes: std::collections::HashSet<String> = if overprint_preview {
+        doc.spot_colors
+            .iter()
+            .filter(|s| s.overprint)
+            .filter_map(|s| Color::from_hex(&s.hex).map(|c| c.to_hex()))
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
 
     // Optional white artboard rectangle (always first 4 vertices when present).
     if include_artboard_bg {
@@ -1110,7 +1144,20 @@ fn build_geometry(
             }
         }
 
-        raw_segments.push((node.blend_mode, seg_start, idxs.len() as u32));
+        // Overprint preview: a (crisp) solid fill matching an overprint-flagged
+        // spot ink composites with Multiply instead of its own knockout blend.
+        // Skip when the fill is blurred (object-blur/feather) — that fill is
+        // suppressed to the effects layer, so this segment is only the stroke and
+        // must not be forced to Multiply.
+        let mut blend = node.blend_mode;
+        if !overprint_hexes.is_empty() && !fill_blurred && path_node.fill.enabled {
+            if let FillKind::Solid(col) = &path_node.fill.kind {
+                if overprint_hexes.contains(&col.to_hex()) {
+                    blend = BlendMode::Multiply;
+                }
+            }
+        }
+        raw_segments.push((blend, seg_start, idxs.len() as u32));
     }
 
     let segments = coalesce_segments(raw_segments);
@@ -1533,5 +1580,60 @@ mod blend_tests {
             near > 0.1,
             "shadow should be visible near the edge, got {near}"
         );
+    }
+
+    #[test]
+    fn overprint_preview_multiplies_matching_spot_ink() {
+        use photonic_core::SpotColor;
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping overprint-preview test");
+            return;
+        };
+
+        let mut doc = Document::new("overprint-test", 100.0, 100.0);
+        let backdrop = SceneNode::new(
+            "backdrop",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 100.0, 100.0)).with_fill(Fill::solid(
+                    Color::new(BACKDROP[0], BACKDROP[1], BACKDROP[2], 1.0),
+                )),
+            ),
+        );
+        doc.add_node(backdrop, None);
+        // Top shape keeps Normal blend; overprint must come from the spot match.
+        let top_col = Color::new(SOURCE[0], SOURCE[1], SOURCE[2], 1.0);
+        let top = SceneNode::new(
+            "top",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(25.0, 25.0, 50.0, 50.0))
+                    .with_fill(Fill::solid(top_col)),
+            ),
+        );
+        doc.add_node(top, None);
+        doc.spot_colors
+            .push(SpotColor::new("Overprint Ink", top_col.to_hex(), true));
+
+        let opts = ExportOptions {
+            overprint_preview: true,
+            ..ExportOptions::default()
+        };
+        let (pixels, w, _h) = r.render_rgba_with_opts(&doc, 100, 100, &opts);
+        let i = ((50 * w + 50) * 4) as usize;
+        let got = [
+            srgb_to_linear(pixels[i] as f32 / 255.0),
+            srgb_to_linear(pixels[i + 1] as f32 / 255.0),
+            srgb_to_linear(pixels[i + 2] as f32 / 255.0),
+        ];
+        let want = expected(BlendMode::Multiply);
+        for c in 0..3 {
+            assert!(
+                (got[c] - want[c]).abs() < 0.03,
+                "overprint channel {c}: got {:.3}, want {:.3}",
+                got[c],
+                want[c],
+            );
+        }
     }
 }

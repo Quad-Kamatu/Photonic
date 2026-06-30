@@ -203,6 +203,7 @@ impl ExportDialog {
             ico_sizes,
             jpeg_quality: self.jpeg_quality,
             region: None,
+            overprint_preview: false,
         }
     }
 }
@@ -1360,13 +1361,86 @@ impl PhotonicApp {
         doc: &Document,
         view: &CanvasView,
     ) {
-        // #22 Pixel/Overprint Preview overlay is temporarily DEFERRED. Its render
-        // backend (`HeadlessRenderer::render_rgba_with_opts` /
-        // `ExportOptions.overprint_preview`) was dropped when this branch merged
-        // main's new GPU effects renderer, which refactored that path. The
-        // toggles remain but paint no overlay until #22 is re-ported onto the new
-        // render architecture (tracked under #22).
-        let _ = (ctx, painter, doc, view);
+        // Region = active artboard (or first artboard, or the full document).
+        let (rx, ry, rw, rh) = doc
+            .active_artboard
+            .and_then(|id| doc.artboards.iter().find(|a| a.id == id))
+            .or_else(|| doc.artboards.first())
+            .map(|a| (a.x, a.y, a.width, a.height))
+            .unwrap_or((0.0, 0.0, doc.width, doc.height));
+        let pw = rw.round().max(1.0) as u32;
+        let ph = rh.round().max(1.0) as u32;
+
+        // ── Content/mode/size hash (FNV-1a) ──────────────────────────────────
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |bytes: &[u8]| {
+            for &b in bytes {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        if let Ok(bytes) = serde_json::to_vec(doc) {
+            feed(&bytes);
+        }
+        feed(&[self.pixel_preview as u8, self.overprint_preview as u8]);
+        feed(&pw.to_le_bytes());
+        feed(&ph.to_le_bytes());
+
+        // ── Re-render only on change ─────────────────────────────────────────
+        let stale = self.preview_tex_cache.as_ref().map(|c| c.hash) != Some(hash);
+        if stale {
+            if self.preview_renderer.is_none() {
+                self.preview_renderer =
+                    Some(pollster::block_on(photonic_render::HeadlessRenderer::new()));
+            }
+            let opts = photonic_render::ExportOptions {
+                background: photonic_render::ExportBackground::Artboard,
+                region: Some((rx, ry, rw, rh)),
+                overprint_preview: self.overprint_preview,
+                ..Default::default()
+            };
+            let renderer = self.preview_renderer.as_ref().unwrap();
+            let (rgba, rw_px, rh_px) = renderer.render_rgba_with_opts(doc, pw, ph, &opts);
+            // GPU readback can fail (device loss / OOM), in which case the
+            // renderer returns empty pixels with a non-zero size. Skip this frame
+            // rather than upload a zero-length buffer at a non-zero extent (wgpu
+            // validation panic); the cache is left untouched and we retry next frame.
+            if rgba.is_empty() {
+                return;
+            }
+            let (iw, ih) = (rw_px as usize, rh_px as usize);
+            let mut pixels = Vec::with_capacity(iw * ih);
+            for px in rgba.chunks_exact(4) {
+                pixels.push(egui::Color32::from_rgba_unmultiplied(
+                    px[0], px[1], px[2], px[3],
+                ));
+            }
+            let color_img = egui::ColorImage {
+                size: [iw.max(1), ih.max(1)],
+                pixels,
+            };
+            let handle =
+                ctx.load_texture("photonic_preview", color_img, egui::TextureOptions::NEAREST);
+            self.preview_tex_cache = Some(PreviewTexCache { handle, hash });
+        }
+
+        let Some(cache) = &self.preview_tex_cache else {
+            return;
+        };
+        // Paint over the artboard's screen rect.
+        let (sx0, sy0) = view.canvas_to_screen(rx, ry);
+        let (sx1, sy1) = view.canvas_to_screen(rx + rw, ry + rh);
+        let scr = egui::Rect::from_min_max(
+            egui::pos2(sx0 as f32, sy0 as f32),
+            egui::pos2(sx1 as f32, sy1 as f32),
+        );
+        let mut mesh = egui::Mesh::with_texture(cache.handle.id());
+        mesh.add_rect_with_uv(
+            scr,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        painter.add(egui::Shape::mesh(mesh));
     }
 
     /// Handle the interactive RasterBrush/RasterEraser tools: paint/erase onto
