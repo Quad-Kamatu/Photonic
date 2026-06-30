@@ -1,4 +1,5 @@
 use crate::color::Color;
+use crate::raster::image::RasterImage;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -50,6 +51,14 @@ impl Fill {
             enabled: true,
         }
     }
+
+    pub fn pattern(pattern: PatternFill) -> Self {
+        Self {
+            kind: FillKind::Pattern(pattern),
+            opacity: 1.0,
+            enabled: true,
+        }
+    }
 }
 
 impl Default for Fill {
@@ -66,6 +75,9 @@ pub enum FillKind {
     Gradient(Gradient),
     FluidGradient(FluidGradient),
     MeshGradient(MeshGradient),
+    /// A tiled raster pattern fill. Self-contained: carries its own RGBA tile and
+    /// an independent pattern transform applied in document space.
+    Pattern(PatternFill),
 }
 
 impl FillKind {
@@ -87,7 +99,164 @@ impl FillKind {
                 let [r, g2, b, a] = mg.sample_at(x, y);
                 [r, g2, b, a * opacity]
             }
+            FillKind::Pattern(p) => {
+                let [r, g2, b, a] = p.sample_at(x, y);
+                [r, g2, b, a * opacity]
+            }
         }
+    }
+}
+
+// ─── Pattern fill (tiled raster) ─────────────────────────────────────────────
+
+/// Tile layout for a [`PatternFill`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternTileType {
+    /// Tiles aligned on a regular grid.
+    #[default]
+    Grid,
+    /// Alternate rows shifted by half a tile width (running-bond brick).
+    BrickByRow,
+    /// Alternate columns shifted by half a tile height (stack-bond brick).
+    BrickByColumn,
+    /// Hexagonal-style staggered rows. With a rectangular raster tile this is a
+    /// half-offset row stagger; true hex-cell clipping is a future refinement.
+    Hex,
+}
+
+impl PatternTileType {
+    /// Parse from a snake_case label (as used by the MCP/GUI layer).
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "grid" => Some(Self::Grid),
+            "brick_by_row" => Some(Self::BrickByRow),
+            "brick_by_column" => Some(Self::BrickByColumn),
+            "hex" => Some(Self::Hex),
+            _ => None,
+        }
+    }
+
+    /// The snake_case label for this layout.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::BrickByRow => "brick_by_row",
+            Self::BrickByColumn => "brick_by_column",
+            Self::Hex => "hex",
+        }
+    }
+}
+
+/// A tiled raster pattern fill. The `tile` pixels are embedded in the fill so the
+/// pattern renders identically on every path (canvas, headless, GPU CPU-sample)
+/// with no document-registry lookup at render time — exactly like a gradient
+/// carries its own stops.
+///
+/// The pattern transform (`scale`, `rotation`, `offset`) is applied in document
+/// space and is *independent* of the owning node's transform: a pattern stays
+/// pinned to document space, so translating the shape scrolls the artwork
+/// underneath the pattern rather than dragging the pattern with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatternFill {
+    /// Embedded RGBA8 tile (self-contained — serialized as a base64 PNG).
+    pub tile: RasterImage,
+    /// Tile layout.
+    #[serde(default)]
+    pub tile_type: PatternTileType,
+    /// Uniform scale of the pattern (1.0 = tile pixels map 1:1 to document units).
+    pub scale: f64,
+    /// Rotation of the pattern in radians (document space).
+    pub rotation: f64,
+    /// Document-space anchor / translation of the pattern origin.
+    pub offset: [f64; 2],
+    /// Gutter between tiles, in tile pixels. The gutter samples as transparent.
+    pub spacing: f64,
+}
+
+impl PatternFill {
+    /// Build a pattern from a tile with an identity transform and grid layout.
+    pub fn new(tile: RasterImage) -> Self {
+        Self {
+            tile,
+            tile_type: PatternTileType::Grid,
+            scale: 1.0,
+            rotation: 0.0,
+            offset: [0.0, 0.0],
+            spacing: 0.0,
+        }
+    }
+
+    /// Sample the pattern color at document-space coordinates `(x, y)`.
+    ///
+    /// Maps `(x, y)` through the inverse pattern transform into tile space,
+    /// applies the layout row/column shift, wraps into the
+    /// `[0, tile_w + spacing) × [0, tile_h + spacing)` period, and bilinearly
+    /// samples the tile. Coordinates that land in the inter-tile gutter return
+    /// transparent.
+    pub fn sample_at(&self, x: f64, y: f64) -> [f32; 4] {
+        let tw = self.tile.width as f64;
+        let th = self.tile.height as f64;
+        if tw <= 0.0 || th <= 0.0 {
+            return [0.0; 4];
+        }
+
+        // 1. Inverse translate.
+        let px = x - self.offset[0];
+        let py = y - self.offset[1];
+
+        // 2. Inverse rotation (R(-θ)).
+        let (sin, cos) = self.rotation.sin_cos();
+        let rx = px * cos + py * sin;
+        let ry = -px * sin + py * cos;
+
+        // 3. Inverse scale → tile-space coordinates (units = tile pixels).
+        let s = if self.scale.abs() < 1e-9 {
+            1.0
+        } else {
+            self.scale
+        };
+        let tx = rx / s;
+        let ty = ry / s;
+
+        // Period (tile + gutter) in tile pixels.
+        let pw = tw + self.spacing.max(0.0);
+        let ph = th + self.spacing.max(0.0);
+
+        // 4. Layout shift.
+        let (mut sx, mut sy) = (tx, ty);
+        match self.tile_type {
+            PatternTileType::Grid => {}
+            PatternTileType::BrickByRow | PatternTileType::Hex => {
+                let row = (ty / ph).floor() as i64;
+                if row.rem_euclid(2) == 1 {
+                    sx += pw * 0.5;
+                }
+            }
+            PatternTileType::BrickByColumn => {
+                let col = (tx / pw).floor() as i64;
+                if col.rem_euclid(2) == 1 {
+                    sy += ph * 0.5;
+                }
+            }
+        }
+
+        // 5. Wrap into the tile period.
+        let u = sx.rem_euclid(pw);
+        let v = sy.rem_euclid(ph);
+
+        // Gutter → transparent.
+        if u >= tw || v >= th {
+            return [0.0; 4];
+        }
+
+        let texel = self.tile.sample_bilinear(u as f32, v as f32);
+        [
+            texel[0] as f32 / 255.0,
+            texel[1] as f32 / 255.0,
+            texel[2] as f32 / 255.0,
+            texel[3] as f32 / 255.0,
+        ]
     }
 }
 
@@ -538,4 +707,115 @@ pub fn interpolate_stops(stops: &[GradientStop], t: f32) -> [f32; 4] {
 
     let s = &stops[stops.len() - 1];
     [s.color.r, s.color.g, s.color.b, s.color.a]
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+    use crate::raster::image::RasterImage;
+
+    /// A 2×2 tile: red, green / blue, white (RGBA8, opaque).
+    fn quad_tile() -> RasterImage {
+        let pixels = vec![
+            255, 0, 0, 255, // (0,0) red
+            0, 255, 0, 255, // (1,0) green
+            0, 0, 255, 255, // (0,1) blue
+            255, 255, 255, 255, // (1,1) white
+        ];
+        RasterImage::from_rgba(2, 2, pixels).unwrap()
+    }
+
+    #[test]
+    fn samples_tile_at_origin() {
+        let p = PatternFill::new(quad_tile());
+        // Bilinear sampling hits texel centers at integer tile coords: (0,0) → red.
+        let c = p.sample_at(0.0, 0.0);
+        assert!(c[0] > 0.9 && c[1] < 0.1 && c[2] < 0.1, "got {:?}", c);
+    }
+
+    #[test]
+    fn tiling_is_periodic() {
+        let p = PatternFill::new(quad_tile());
+        // Period is the 2px tile width; +2 in x lands on the same texel.
+        let a = p.sample_at(0.0, 0.0);
+        let b = p.sample_at(2.0, 0.0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pattern_does_not_move_with_whole_tile_translation() {
+        // The fill itself is fixed in document space: sampling the same doc point
+        // always yields the same texel regardless of the owning shape's position,
+        // and a whole-period offset reproduces the original.
+        let p = PatternFill::new(quad_tile());
+        let base = p.sample_at(0.0, 1.0); // texel (0,1) → blue
+        assert!(
+            base[2] > 0.9 && base[0] < 0.1,
+            "expected blue, got {:?}",
+            base
+        );
+        let shifted = p.sample_at(0.0 + 2.0, 1.0 + 2.0);
+        assert_eq!(base, shifted);
+    }
+
+    #[test]
+    fn spacing_gutter_is_transparent() {
+        let mut p = PatternFill::new(quad_tile());
+        p.spacing = 2.0; // period becomes 4px; tile occupies [0,2), gutter [2,4)
+        let gutter = p.sample_at(3.0, 0.5);
+        assert_eq!(
+            gutter[3], 0.0,
+            "gutter should be transparent, got {:?}",
+            gutter
+        );
+        let inside = p.sample_at(0.5, 0.5);
+        assert!(inside[3] > 0.9);
+    }
+
+    #[test]
+    fn brick_by_row_shifts_odd_rows() {
+        let p = PatternFill {
+            tile_type: PatternTileType::BrickByRow,
+            ..PatternFill::new(quad_tile())
+        };
+        // Row 0 (y in [0,2)): no shift → x=0.5 is texel (0,0) red.
+        let row0 = p.sample_at(0.5, 0.5);
+        // Row 1 (y in [2,4)): shifted by +1px in x → x=0.5 maps to wrapped 1.5 = texel (1, _).
+        let row1 = p.sample_at(0.5, 2.5);
+        assert_ne!(row0, row1, "odd row should be horizontally offset");
+    }
+
+    #[test]
+    fn rotation_maps_axis() {
+        // 90° rotation: a point on the +x doc axis maps onto the tile's y axis.
+        let mut p = PatternFill::new(quad_tile());
+        p.rotation = std::f64::consts::FRAC_PI_2;
+        // Sanity: sampling stays within the tile and returns an opaque texel.
+        let c = p.sample_at(1.5, 0.5);
+        assert!(c[3] > 0.9, "rotated sample should be opaque, got {:?}", c);
+    }
+
+    #[test]
+    fn roundtrips_through_fillkind_serde() {
+        let fill = Fill::pattern(PatternFill {
+            tile_type: PatternTileType::Hex,
+            scale: 2.0,
+            rotation: 0.5,
+            offset: [10.0, 20.0],
+            spacing: 1.0,
+            ..PatternFill::new(quad_tile())
+        });
+        let json = serde_json::to_string(&fill).unwrap();
+        assert!(json.contains("\"type\":\"pattern\""), "json: {}", json);
+        let back: Fill = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            FillKind::Pattern(p) => {
+                assert_eq!(p.tile_type, PatternTileType::Hex);
+                assert_eq!(p.scale, 2.0);
+                assert_eq!(p.offset, [10.0, 20.0]);
+                assert_eq!(p.tile.width, 2);
+            }
+            other => panic!("expected pattern, got {:?}", other),
+        }
+    }
 }

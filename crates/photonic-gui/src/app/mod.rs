@@ -6925,6 +6925,9 @@ impl PhotonicApp {
                                                 v.color = v.color.invert();
                                             }
                                         }
+                                        FillKind::Pattern(p) => {
+                                            p.tile.map_rgb(|[r, g, b]| [1.0 - r, 1.0 - g, 1.0 - b]);
+                                        }
                                         FillKind::None => {}
                                     }
                                     if np.stroke.enabled {
@@ -6973,6 +6976,12 @@ impl PhotonicApp {
                                             for v in &mut mg.vertices {
                                                 v.color = v.color.to_grayscale();
                                             }
+                                        }
+                                        FillKind::Pattern(p) => {
+                                            p.tile.map_rgb(|rgb| {
+                                                let l = photonic_core::raster::image::luma(rgb);
+                                                [l, l, l]
+                                            });
                                         }
                                         FillKind::None => {}
                                     }
@@ -7036,6 +7045,22 @@ impl PhotonicApp {
                                             for v in &mut mg.vertices {
                                                 v.color = shift(v.color);
                                             }
+                                        }
+                                        FillKind::Pattern(p) => {
+                                            p.tile.map_pixels(|[r, g, b, a]| {
+                                                let c = shift(Color {
+                                                    r: r as f32 / 255.0,
+                                                    g: g as f32 / 255.0,
+                                                    b: b as f32 / 255.0,
+                                                    a: a as f32 / 255.0,
+                                                });
+                                                [
+                                                    (c.r * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                    (c.g * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                    (c.b * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                    (c.a * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                ]
+                                            });
                                         }
                                         FillKind::None => {}
                                     }

@@ -3345,6 +3345,7 @@ fn generate_name(node: &SceneNode) -> String {
                     FillKind::Gradient(_)
                     | FillKind::FluidGradient(_)
                     | FillKind::MeshGradient(_) => "gradient".to_string(),
+                    FillKind::Pattern(_) => "pattern".to_string(),
                     FillKind::None => "outline".to_string(),
                 }
             };
@@ -3586,6 +3587,21 @@ pub async fn get_css_preview(state: &AppState, args: GetCssPreviewArgs) -> ToolR
                             .to_string(),
                     );
                 }
+            }
+            FillKind::Pattern(p) => {
+                use base64::Engine;
+                let png = p.tile.to_png();
+                let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+                let size = (p.tile.width.max(1) as f64 + p.spacing.max(0.0)) * p.scale.max(0.001);
+                lines.push(format!(
+                    "background-image: url(data:image/png;base64,{b64});"
+                ));
+                lines.push("background-repeat: repeat;".to_string());
+                lines.push(format!("background-size: {:.1}px;", size));
+                notes.push(
+                    "Pattern fill exported as a repeating CSS background image (grid layout); brick/hex staggers are approximated."
+                        .to_string(),
+                );
             }
         }
     }
@@ -10317,6 +10333,9 @@ pub async fn invert_colors(state: &AppState, args: InvertColorsArgs) -> ToolResu
                             v.color = v.color.invert();
                         }
                     }
+                    FillKind::Pattern(p) => {
+                        p.tile.map_rgb(|[r, g, b]| [1.0 - r, 1.0 - g, 1.0 - b]);
+                    }
                     FillKind::None => {}
                 }
                 if path.stroke.enabled {
@@ -10417,6 +10436,22 @@ pub async fn adjust_colors(state: &AppState, args: AdjustColorsArgs) -> ToolResu
                         v.color = shift_color(v.color);
                     }
                 }
+                FillKind::Pattern(p) => {
+                    p.tile.map_pixels(|[r, g, b, a]| {
+                        let c = shift_color(photonic_core::Color {
+                            r: r as f32 / 255.0,
+                            g: g as f32 / 255.0,
+                            b: b as f32 / 255.0,
+                            a: a as f32 / 255.0,
+                        });
+                        [
+                            (c.r * 255.0).round().clamp(0.0, 255.0) as u8,
+                            (c.g * 255.0).round().clamp(0.0, 255.0) as u8,
+                            (c.b * 255.0).round().clamp(0.0, 255.0) as u8,
+                            (c.a * 255.0).round().clamp(0.0, 255.0) as u8,
+                        ]
+                    });
+                }
                 FillKind::None => {}
             }
             if path.stroke.enabled {
@@ -10497,6 +10532,12 @@ pub async fn convert_to_grayscale(state: &AppState, args: ConvertToGrayscaleArgs
                         for v in &mut mg.vertices {
                             v.color = v.color.to_grayscale();
                         }
+                    }
+                    FillKind::Pattern(p) => {
+                        p.tile.map_rgb(|rgb| {
+                            let l = photonic_core::raster::image::luma(rgb);
+                            [l, l, l]
+                        });
                     }
                     FillKind::None => {}
                 }
@@ -11705,6 +11746,7 @@ pub async fn pathfinder_outline(state: &AppState, args: PathfinderOutlineArgs) -
                 .map(|p| p.color)
                 .unwrap_or(photonic_core::color::Color::BLACK),
             FillKind::MeshGradient(_) => photonic_core::color::Color::BLACK,
+            FillKind::Pattern(_) => photonic_core::color::Color::BLACK,
             FillKind::None => photonic_core::color::Color::BLACK,
         };
 
