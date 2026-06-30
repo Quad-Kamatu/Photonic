@@ -170,6 +170,36 @@ Every phase that introduces or moves a surface must ship its transitions to the
 **Motion & animation** standard above — snappy, ease-out, clarity-serving — as
 part of that phase's definition of done.
 
+## Decisions locked — Phases 4 & 5
+
+**Phase 4 — contextual top bar:**
+- Appears as a **dedicated second toolbar row, only when something is selected**
+  (no crowding of File/Edit/Tools/search/zoom). Overflow collapses into a "More"
+  popover on narrow windows.
+- Selecting an object does **NOT** auto-open the Inspector drawer — the top bar
+  carries the hot props (Canva-style); drawers stay manual/depth-only.
+
+**Phase 5 — radial wheel (redesign of the existing `radial_wheel`):**
+- **Nested categories**: right-click opens an outer ring of the context-relevant
+  categories; choosing one swaps the ring to that category's verbs (center =
+  back). Replaces today's paginated flat list of up to 31 verbs.
+- The wheel **fully replaces** the right-click menu (as it already does — there is
+  no list menu on the canvas).
+- Categories (context-filtered, mapped to the drawer taxonomy so the two share a
+  vocabulary):
+  | Category | Verbs (from today's `WheelAction`) | Context |
+  |---|---|---|
+  | **Create** | Rectangle, Rounded Rect, Ellipse, Polygon, Star, Text | empty canvas |
+  | **Object** | Duplicate, Delete, Group, Ungroup, Copy as SVG | any selection |
+  | **Order** | Bring to Front/Forward, Send Backward/to Back | single node |
+  | **Combine** | Union, Subtract, Intersect, Exclude | 2+ nodes |
+  | **Path** | Add Anchors, Simplify, Outline Stroke, Reverse, Average, Close | path node |
+  | **Color** | Invert, Grayscale | node(s) |
+- **Wheel→drawer handoff**: verbs that want parameters (e.g. Simplify, Outline
+  Stroke) open the matching drawer pre-focused instead of firing blind; immediate
+  verbs (Duplicate, Boolean, Order, Group) execute in place. Keep today's
+  hover+click selection; a flick/release mode can come later.
+
 ## Risks / open questions
 
 - **Top-bar real estate** on narrow windows — needs an overflow/responsive rule.
