@@ -331,17 +331,20 @@ fn emit_node_inner(
         String::new()
     };
 
+    let filter = filter_attrs(node, defs);
+
     match &node.kind {
         SceneNodeKind::Path(p) => {
             let fill = fill_attrs(&p.fill, defs, grad_counter);
             let stroke = stroke_attrs(&p.stroke);
             body.push_str(&format!(
-                "{}<path{}{}{}{}{}{} d=\"{}\"/>\n",
+                "{}<path{}{}{}{}{}{}{} d=\"{}\"/>\n",
                 pad,
                 id_attr,
                 transform,
                 opacity,
                 blend,
+                filter,
                 fill,
                 stroke,
                 p.path_data.as_svg(),
@@ -349,8 +352,8 @@ fn emit_node_inner(
         }
         SceneNodeKind::Group(g) => {
             body.push_str(&format!(
-                "{}<g{}{}{}{}>\n",
-                pad, id_attr, transform, opacity, blend
+                "{}<g{}{}{}{}{}>\n",
+                pad, id_attr, transform, opacity, blend, filter
             ));
             for child_id in &g.children {
                 if let Some(child) = doc.nodes.get(child_id) {
@@ -431,6 +434,57 @@ fn transform_attr(t: &Transform) -> String {
         return String::new();
     }
     format!(" transform=\"matrix({a},{b},{c},{d},{e},{f})\"")
+}
+
+/// Emit an SVG `<filter>` for the node's live effects (drop shadow, object blur,
+/// feather) into `defs` and return the ` filter="url(#…)"` attribute, or an
+/// empty string when no effects are enabled. Effects chain in order: blur the
+/// source first, then the drop shadow.
+fn filter_attrs(node: &SceneNode, defs: &mut String) -> String {
+    let ds = &node.drop_shadow;
+    let ob = &node.object_blur;
+    let ft = &node.feather;
+    if !ds.enabled && !ob.enabled && !ft.enabled {
+        return String::new();
+    }
+    let id = format!("fx{}", node.id.simple());
+    let mut prims = String::new();
+    // Object blur / feather both soften the graphic; object blur wins if both set.
+    if ob.enabled {
+        prims.push_str(&format!(
+            "    <feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{:.3}\"/>\n",
+            ob.radius
+        ));
+    } else if ft.enabled {
+        prims.push_str(&format!(
+            "    <feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{:.3}\"/>\n",
+            ft.radius
+        ));
+    }
+    if ds.enabled {
+        let c = &ds.color;
+        let hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8
+        );
+        prims.push_str(&format!(
+            "    <feDropShadow dx=\"{:.3}\" dy=\"{:.3}\" stdDeviation=\"{:.3}\" \
+             flood-color=\"{}\" flood-opacity=\"{:.3}\"/>\n",
+            ds.dx,
+            ds.dy,
+            ds.blur,
+            hex,
+            (c.a * ds.opacity).clamp(0.0, 1.0),
+        ));
+    }
+    // Generous region so blurs/shadows are not clipped.
+    defs.push_str(&format!(
+        "    <filter id=\"{}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">\n{}    </filter>\n",
+        id, prims
+    ));
+    format!(" filter=\"url(#{})\"", id)
 }
 
 fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
@@ -621,6 +675,200 @@ fn stroke_attrs(stroke: &Stroke) -> String {
     s
 }
 
+// ─── PDF export (vector) ────────────────────────────────────────────────────
+
+/// Options controlling vector PDF export.
+#[derive(Debug, Clone, Default)]
+pub struct PdfExportOptions {
+    /// Paint a full-page background rectangle of this colour before the artwork.
+    /// `None` (default) leaves the page background unpainted (white in viewers).
+    pub background: Option<Color>,
+}
+
+/// Export `doc` as a single-page vector PDF (1 document unit = 1 PDF point).
+///
+/// MVP scope: filled/stroked vector paths with solid colours, node/group affine
+/// transforms, and group nesting. Gradient fills are approximated by their first
+/// stop colour; text, clipping, per-node opacity, blend modes and multi-page
+/// artboards are documented follow-ups.
+pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
+    use pdf_writer::{Content, Finish, Pdf, Rect, Ref};
+
+    let w = doc.width as f32;
+    let h = doc.height as f32;
+
+    let catalog_id = Ref::new(1);
+    let page_tree_id = Ref::new(2);
+    let page_id = Ref::new(3);
+    let content_id = Ref::new(4);
+
+    // ── Content stream ────────────────────────────────────────────────────────
+    let mut content = Content::new();
+    // PDF is Y-up with the origin at the bottom-left; Photonic/SVG is Y-down with
+    // the origin at the top-left. Flip Y once so document coordinates map directly.
+    content.transform([1.0, 0.0, 0.0, -1.0, 0.0, h]);
+
+    if let Some(bg) = opts.background {
+        content.set_fill_rgb(bg.r, bg.g, bg.b);
+        content.move_to(0.0, 0.0);
+        content.line_to(w, 0.0);
+        content.line_to(w, h);
+        content.line_to(0.0, h);
+        content.close_path();
+        content.fill_nonzero();
+    }
+
+    for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible => l,
+            _ => continue,
+        };
+        for node_id in &layer.node_ids {
+            if let Some(node) = doc.nodes.get(node_id) {
+                emit_node_pdf(node, doc, &mut content);
+            }
+        }
+    }
+
+    let stream = content.finish();
+
+    // ── Document structure ──────────────────────────────────────────────────────
+    let mut pdf = Pdf::new();
+    pdf.catalog(catalog_id).pages(page_tree_id);
+    pdf.pages(page_tree_id).kids([page_id]).count(1);
+    {
+        let mut page = pdf.page(page_id);
+        page.parent(page_tree_id)
+            .media_box(Rect::new(0.0, 0.0, w, h))
+            .contents(content_id);
+        page.resources().finish();
+        page.finish();
+    }
+    pdf.stream(content_id, &stream);
+    pdf.finish()
+}
+
+/// Recursively emit a node's geometry into the PDF content stream, applying its
+/// affine transform within a save/restore so siblings are unaffected.
+fn emit_node_pdf(node: &SceneNode, doc: &Document, content: &mut pdf_writer::Content) {
+    if !node.visible {
+        return;
+    }
+    let [a, b, c, d, e, f] = node.transform.matrix;
+    content.save_state();
+    content.transform([a as f32, b as f32, c as f32, d as f32, e as f32, f as f32]);
+
+    match &node.kind {
+        SceneNodeKind::Path(p) => {
+            emit_path_geometry(&p.path_data, content);
+            let fill = fill_rgb(&p.fill);
+            let stroke = if p.stroke.enabled && p.stroke.width > 0.0 {
+                Some(&p.stroke)
+            } else {
+                None
+            };
+            if let Some([fr, fg, fb]) = fill {
+                content.set_fill_rgb(fr, fg, fb);
+            }
+            if let Some(s) = stroke {
+                content.set_stroke_rgb(s.color.r, s.color.g, s.color.b);
+                content.set_line_width(s.width as f32);
+            }
+            match (fill.is_some(), stroke.is_some()) {
+                (true, true) => {
+                    content.fill_nonzero_and_stroke();
+                }
+                (true, false) => {
+                    content.fill_nonzero();
+                }
+                (false, true) => {
+                    content.stroke();
+                }
+                // No paint — discard the path so it does not linger in the stream.
+                (false, false) => {
+                    content.end_path();
+                }
+            }
+        }
+        SceneNodeKind::Group(g) => {
+            for child_id in &g.children {
+                if let Some(child) = doc.nodes.get(child_id) {
+                    emit_node_pdf(child, doc, content);
+                }
+            }
+        }
+        // Text is omitted in the MVP (PDF text needs embedded/subsetted fonts,
+        // which requires a font system not available in photonic-core).
+        SceneNodeKind::Text(_) => {}
+        // Raster layers are omitted in the MVP (PDF image XObjects + the raster
+        // compositing pipeline are out of scope for the vector PDF exporter).
+        SceneNodeKind::Raster(_) => {}
+    }
+
+    content.restore_state();
+}
+
+/// Emit a `PathData`'s segments as PDF path-construction operators. Quadratic
+/// segments are elevated to cubics (PDF has no quadratic operator).
+fn emit_path_geometry(path: &crate::path::PathData, content: &mut pdf_writer::Content) {
+    use kurbo::PathEl;
+    let bez = path.to_bez_path();
+    let mut cur = (0.0_f64, 0.0_f64);
+    for el in bez.elements() {
+        match el {
+            PathEl::MoveTo(p) => {
+                content.move_to(p.x as f32, p.y as f32);
+                cur = (p.x, p.y);
+            }
+            PathEl::LineTo(p) => {
+                content.line_to(p.x as f32, p.y as f32);
+                cur = (p.x, p.y);
+            }
+            PathEl::QuadTo(c1, p) => {
+                // Quadratic → cubic control-point elevation.
+                let c1x = cur.0 + 2.0 / 3.0 * (c1.x - cur.0);
+                let c1y = cur.1 + 2.0 / 3.0 * (c1.y - cur.1);
+                let c2x = p.x + 2.0 / 3.0 * (c1.x - p.x);
+                let c2y = p.y + 2.0 / 3.0 * (c1.y - p.y);
+                content.cubic_to(
+                    c1x as f32, c1y as f32, c2x as f32, c2y as f32, p.x as f32, p.y as f32,
+                );
+                cur = (p.x, p.y);
+            }
+            PathEl::CurveTo(c1, c2, p) => {
+                content.cubic_to(
+                    c1.x as f32,
+                    c1.y as f32,
+                    c2.x as f32,
+                    c2.y as f32,
+                    p.x as f32,
+                    p.y as f32,
+                );
+                cur = (p.x, p.y);
+            }
+            PathEl::ClosePath => {
+                content.close_path();
+            }
+        }
+    }
+}
+
+/// Resolve a fill to a representative solid RGB, or `None` when the fill is
+/// disabled / `None`. Gradient fills are approximated by their first stop.
+fn fill_rgb(fill: &Fill) -> Option<[f32; 3]> {
+    if !fill.enabled {
+        return None;
+    }
+    let c = match &fill.kind {
+        FillKind::None => return None,
+        FillKind::Solid(c) => *c,
+        FillKind::Gradient(g) => g.stops.first().map(|s| s.color)?,
+        FillKind::FluidGradient(g) => g.points.first().map(|p| p.color)?,
+        FillKind::MeshGradient(g) => g.vertices.first().map(|v| v.color)?,
+    };
+    Some([c.r, c.g, c.b])
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -693,5 +941,137 @@ mod tests {
             modes.contains(&BlendMode::Multiply),
             "blend mode lost on re-import; modes = {modes:?}"
         );
+    }
+
+    #[test]
+    fn pdf_export_is_a_valid_single_page_pdf() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("t", 200.0, 150.0);
+        let mut rect = PathNode::new(PathData::rect(10.0, 10.0, 80.0, 60.0));
+        rect.fill = Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0));
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(rect),
+        );
+        doc.add_node(node, None);
+
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(bytes.starts_with(b"%PDF-1"), "missing PDF header");
+        assert!(text.contains("%%EOF"), "missing EOF marker");
+        assert!(text.contains("/Type /Page"), "missing page object");
+        assert!(text.contains("MediaBox"), "missing MediaBox");
+        // Red fill colour + a fill-path operator in the (uncompressed) stream.
+        assert!(
+            text.contains("1 0 0 rg"),
+            "missing red fill operator:\n{text}"
+        );
+        assert!(
+            text.contains(" m\n") || text.contains(" m "),
+            "missing path move op"
+        );
+    }
+
+    #[test]
+    fn pdf_export_empty_document_is_valid() {
+        let doc = Document::new("t", 100.0, 100.0);
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        assert!(bytes.starts_with(b"%PDF-1"));
+        assert!(String::from_utf8_lossy(&bytes).contains("%%EOF"));
+    }
+
+    #[test]
+    fn pdf_export_approximates_gradient_with_first_stop() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::{Fill, FillKind, Gradient, GradientKind, GradientStop};
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let grad = Gradient {
+            kind: GradientKind::Linear,
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Color::new(0.0, 1.0, 0.0, 1.0),
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Color::new(0.0, 0.0, 1.0, 1.0),
+                },
+            ],
+            coords: vec![0.0, 0.0, 100.0, 0.0],
+        };
+        let mut p = PathNode::new(PathData::rect(0.0, 0.0, 50.0, 50.0));
+        p.fill = Fill {
+            kind: FillKind::Gradient(grad),
+            opacity: 1.0,
+            enabled: true,
+        };
+        let node = SceneNode::new("g", doc.active_layer_id.unwrap(), SceneNodeKind::Path(p));
+        doc.add_node(node, None);
+
+        let text =
+            String::from_utf8_lossy(&export_pdf(&doc, &PdfExportOptions::default())).into_owned();
+        // First stop is green → "0 1 0 rg".
+        assert!(
+            text.contains("0 1 0 rg"),
+            "expected first-stop green fill:\n{text}"
+        );
+    }
+
+    #[test]
+    fn live_effects_export_svg_filters() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        node.drop_shadow.enabled = true;
+        node.drop_shadow.dx = 5.0;
+        node.drop_shadow.dy = 6.0;
+        node.drop_shadow.blur = 3.0;
+        node.object_blur.enabled = true;
+        node.object_blur.radius = 2.5;
+        doc.add_node(node, None);
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(svg.contains("<filter"), "expected a filter def:\n{svg}");
+        assert!(
+            svg.contains("<feDropShadow"),
+            "expected feDropShadow:\n{svg}"
+        );
+        assert!(svg.contains("dx=\"5.000\""), "expected shadow dx:\n{svg}");
+        assert!(
+            svg.contains("<feGaussianBlur"),
+            "expected feGaussianBlur:\n{svg}"
+        );
+        assert!(
+            svg.contains("filter=\"url(#fx"),
+            "path should reference the filter:\n{svg}"
+        );
+    }
+
+    #[test]
+    fn no_filter_emitted_without_effects() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        doc.add_node(node, None);
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(!svg.contains("<filter"), "no effects → no filter:\n{svg}");
     }
 }

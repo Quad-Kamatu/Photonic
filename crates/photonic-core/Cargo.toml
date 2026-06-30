@@ -18,3 +18,4 @@ smallvec = { workspace = true }
 roxmltree = { workspace = true }
 image = { workspace = true }
 base64 = { workspace = true }
+pdf-writer = { workspace = true }
