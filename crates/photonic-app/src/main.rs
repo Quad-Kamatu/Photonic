@@ -91,30 +91,46 @@ fn main() -> Result<()> {
 
     register_file_association();
 
-    let document = if let Some(path) = &args.file {
+    // Loaded document plus any persistent history embedded in a `.photon` file
+    // (so a double-clicked or CLI-opened project restores its undo history too).
+    let (document, loaded_history) = if let Some(path) = &args.file {
         let content = std::fs::read_to_string(path)?;
         // Detect format by extension: `.svg` is imported, everything else is
-        // treated as Photonic JSON (`.photon`). Previously every file argument
+        // treated as a Photonic file (`.photon`). Previously every file argument
         // was parsed as JSON, so opening an SVG via the CLI/file argument failed.
         let is_svg = path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
         if is_svg {
-            photonic_core::import_svg(&content)
-                .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?
+            let doc = photonic_core::import_svg(&content)
+                .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?;
+            (doc, None)
         } else {
-            Document::from_json(&content)
+            // `load_photon` accepts both the new wrapper format (document +
+            // history) and legacy bare-`Document` files.
+            photonic_core::load_photon(&content)
                 .map_err(|e| anyhow::anyhow!("failed to open '{}': {e}", path.display()))?
         }
     } else {
-        Document::default_artboard()
+        (Document::default_artboard(), None)
     };
 
     info!("Photonic — document: '{}'", document.name);
 
     let document_arc = Arc::new(Mutex::new(document));
-    let history_arc: Arc<Mutex<CommandHistory>> = Arc::new(Mutex::new(CommandHistory::new(200)));
+    // Apply the user's configured history limits BEFORE restoring, so a large
+    // size-mode history isn't truncated to the default step ceiling on the
+    // launch path (the GUI applies limits per-frame, but restore_state enforces
+    // immediately, so the limits must already be set here).
+    let (hist_steps, hist_size) =
+        photonic_gui::preferences::AppPreferences::load().history_limits();
+    let mut initial_history = CommandHistory::new(hist_steps);
+    initial_history.set_limits(hist_steps, hist_size);
+    if let Some(snap) = loaded_history {
+        initial_history.restore_state(snap);
+    }
+    let history_arc: Arc<Mutex<CommandHistory>> = Arc::new(Mutex::new(initial_history));
     let (capture_tx, capture_rx) = std::sync::mpsc::channel::<oneshot::Sender<Vec<u8>>>();
 
     // Audit log shared between the MCP server thread and the GUI Audit panel.
@@ -358,6 +374,9 @@ impl ApplicationHandler for PhotonicWinitApp {
         match event {
             WindowEvent::CloseRequested => {
                 info!("Window closed");
+                // Flush preferences so settings changed right before quitting
+                // (e.g. the history limit) survive to the next launch.
+                state.gui.prefs.save();
                 event_loop.exit();
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {

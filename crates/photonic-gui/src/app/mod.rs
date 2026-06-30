@@ -189,6 +189,7 @@ impl ExportDialog {
             ico_sizes,
             jpeg_quality: self.jpeg_quality,
             region: None,
+            overprint_preview: false,
         }
     }
 }
@@ -272,6 +273,15 @@ pub struct DiffOverlayState {
 /// A cached egui texture for a raster node, with the content hash it was built
 /// from so it can be invalidated when the pixels or mask change.
 struct RasterTexCache {
+    handle: egui::TextureHandle,
+    hash: u64,
+}
+
+/// A cached egui texture for the Pixel/Overprint Preview overlay (#22). The
+/// `hash` folds the document content, active mode, and target pixel size so the
+/// expensive headless re-render only runs when something the preview depends on
+/// changes.
+struct PreviewTexCache {
     handle: egui::TextureHandle,
     hash: u64,
 }
@@ -444,6 +454,16 @@ pub struct PhotonicApp {
     /// Actions queued by panel widgets (z-order, boolean ops) to be processed
     /// after all panels have finished drawing, with access to doc + history.
     pub pending_panel_actions: Vec<PanelAction>,
+    /// Canvas viewport rect captured this frame — used to recenter the view
+    /// when the Navigator emits a `CenterViewOn` action.
+    last_canvas_rect: Option<egui::Rect>,
+    /// egui time (seconds) of the last throttled history size-cap check, so
+    /// size-mode enforcement runs ~every 1.5 s instead of every frame.
+    last_history_size_check: f64,
+    /// Throttled cache for the History settings readout: (egui time, bytes).
+    /// `history_byte_size()` serializes the whole history, so the readout reuses
+    /// this for ~0.5 s rather than recomputing on every repaint.
+    cached_history_bytes: (f64, u64),
 
     // ── Claude chat ───────────────────────────────────────────────────────────
     pub claude_chat: ClaudeChatState,
@@ -487,9 +507,24 @@ pub struct PhotonicApp {
     // ── Diff highlight overlay ────────────────────────────────────────────────
     pub diff: DiffOverlayState,
 
-    // ── Outline Mode ─────────────────────────────────────────────────────────
+    // ── View preview modes ───────────────────────────────────────────────────
     /// When true, the canvas shows path wireframes only (no fills or strokes).
+    /// Mutually exclusive with `pixel_preview` and `overprint_preview`.
     pub outline_mode: bool,
+    /// When true, the active artboard is overlaid with a nearest-sampled render
+    /// at its export pixel size so true aliasing/pixel snapping is visible (#22).
+    /// Mutually exclusive with the other view modes.
+    pub pixel_preview: bool,
+    /// When true, overprint-flagged spot inks composite with Multiply in a
+    /// nearest-sampled export render overlaid on the active artboard (#22).
+    /// Mutually exclusive with the other view modes.
+    pub overprint_preview: bool,
+    /// Cached preview-overlay texture + the content/mode/size hash it was built
+    /// from. Re-rendered only when the hash changes.
+    preview_tex_cache: Option<PreviewTexCache>,
+    /// Lazily-created headless renderer powering the preview overlay so the GUI
+    /// reuses one GPU device instead of spinning one up every frame.
+    preview_renderer: Option<photonic_render::HeadlessRenderer>,
 
     /// Cache of uploaded egui textures for raster nodes, keyed by node id.
     /// Re-uploaded only when the pixel/mask content hash changes.
@@ -812,6 +847,9 @@ impl Default for PhotonicApp {
             },
 
             pending_panel_actions: Vec::new(),
+            last_canvas_rect: None,
+            last_history_size_check: 0.0,
+            cached_history_bytes: (f64::NEG_INFINITY, 0),
 
             claude_chat: ClaudeChatState::default(),
 
@@ -882,6 +920,10 @@ impl Default for PhotonicApp {
             window_logical_pos: (0, 0),
             window_scale_factor: 1.0,
             outline_mode: false,
+            pixel_preview: false,
+            overprint_preview: false,
+            preview_tex_cache: None,
+            preview_renderer: None,
             guides_visible: true,
             ruler_drag: None,
             ruler_drag_pos: 0.0,
@@ -1068,7 +1110,12 @@ fn fit_artboard_to_rect(view: &mut CanvasView, rect: egui::Rect, bounds: (f64, f
     view.pan_y = rect.center().y as f64 - cy * zoom;
 }
 
-fn load_document(path: &Path) -> Result<Document, String> {
+/// Load a `.photon` (or `.svg`) file, returning the document and — for
+/// `.photon` files that embed it — the persistent history snapshot to restore.
+/// SVG imports and legacy history-less `.photon` files yield `None` history.
+fn load_document(
+    path: &Path,
+) -> Result<(Document, Option<photonic_core::HistorySnapshot>), String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -1076,10 +1123,53 @@ fn load_document(path: &Path) -> Result<Document, String> {
         .to_lowercase();
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     if ext == "svg" {
-        photonic_core::import_svg(&content).map_err(|e| e.to_string())
+        photonic_core::import_svg(&content)
+            .map(|doc| (doc, None))
+            .map_err(|e| e.to_string())
     } else {
-        Document::from_json(&content).map_err(|e| e.to_string())
+        photonic_core::load_photon(&content).map_err(|e| e.to_string())
     }
+}
+
+/// Human-readable byte size (B / KB / MB) for the history-size readout.
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < MB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{:.1} MB", b / MB)
+    }
+}
+
+/// Install the history restored from a just-opened file. With an embedded
+/// snapshot we restore it; without one (SVG / legacy `.photon`) we reset, so a
+/// previously-open project's history can't carry over into the new document.
+fn apply_opened_history(
+    history: &mut CommandHistory,
+    snap: Option<photonic_core::HistorySnapshot>,
+) {
+    match snap {
+        Some(s) => history.restore_state(s),
+        None => history.reset(),
+    }
+}
+
+/// Serialize a document together with its persistent history into a `.photon`
+/// file. Enforces the configured size cap first so the written history respects
+/// the user's budget.
+fn write_photon_file(
+    path: &Path,
+    doc: &Document,
+    history: &mut CommandHistory,
+) -> Result<(), String> {
+    history.enforce_size();
+    let snap = history.snapshot_state();
+    let json = photonic_core::save_photon(doc, Some(&snap)).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
 impl PhotonicApp {
@@ -1194,6 +1284,128 @@ impl PhotonicApp {
             mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
             painter.add(egui::Shape::mesh(mesh));
         }
+    }
+
+    /// Toggle Outline Mode, clearing the other (mutually exclusive) view modes.
+    pub fn toggle_outline_mode(&mut self) {
+        self.outline_mode = !self.outline_mode;
+        if self.outline_mode {
+            self.pixel_preview = false;
+            self.overprint_preview = false;
+        }
+    }
+
+    /// Toggle Pixel Preview, clearing the other (mutually exclusive) view modes.
+    pub fn toggle_pixel_preview(&mut self) {
+        self.pixel_preview = !self.pixel_preview;
+        if self.pixel_preview {
+            self.outline_mode = false;
+            self.overprint_preview = false;
+        }
+        self.preview_tex_cache = None;
+    }
+
+    /// Toggle Overprint Preview, clearing the other (mutually exclusive) modes.
+    pub fn toggle_overprint_preview(&mut self) {
+        self.overprint_preview = !self.overprint_preview;
+        if self.overprint_preview {
+            self.outline_mode = false;
+            self.pixel_preview = false;
+        }
+        self.preview_tex_cache = None;
+    }
+
+    /// True when Pixel or Overprint Preview is active.
+    fn preview_active(&self) -> bool {
+        self.pixel_preview || self.overprint_preview
+    }
+
+    /// Paint the Pixel/Overprint Preview overlay (#22): render the active
+    /// artboard through the headless/export path at its native export pixel size
+    /// and paint the result as a NEAREST-sampled texture over the artboard rect,
+    /// so the user sees the exact bytes the exporter would write (true aliasing,
+    /// pixel snapping, and overprint-ink multiply). The render is content-hashed
+    /// and only re-run when the document, mode, or target size changes.
+    fn paint_preview_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        doc: &Document,
+        view: &CanvasView,
+    ) {
+        // Region = active artboard (or first artboard, or the full document).
+        let (rx, ry, rw, rh) = doc
+            .active_artboard
+            .and_then(|id| doc.artboards.iter().find(|a| a.id == id))
+            .or_else(|| doc.artboards.first())
+            .map(|a| (a.x, a.y, a.width, a.height))
+            .unwrap_or((0.0, 0.0, doc.width, doc.height));
+        let pw = rw.round().max(1.0) as u32;
+        let ph = rh.round().max(1.0) as u32;
+
+        // ── Content/mode/size hash (FNV-1a) ──────────────────────────────────
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |bytes: &[u8]| {
+            for &b in bytes {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        if let Ok(bytes) = serde_json::to_vec(doc) {
+            feed(&bytes);
+        }
+        feed(&[self.pixel_preview as u8, self.overprint_preview as u8]);
+        feed(&pw.to_le_bytes());
+        feed(&ph.to_le_bytes());
+
+        // ── Re-render only on change ─────────────────────────────────────────
+        let stale = self.preview_tex_cache.as_ref().map(|c| c.hash) != Some(hash);
+        if stale {
+            if self.preview_renderer.is_none() {
+                self.preview_renderer =
+                    Some(pollster::block_on(photonic_render::HeadlessRenderer::new()));
+            }
+            let opts = photonic_render::ExportOptions {
+                background: photonic_render::ExportBackground::Artboard,
+                region: Some((rx, ry, rw, rh)),
+                overprint_preview: self.overprint_preview,
+                ..Default::default()
+            };
+            let renderer = self.preview_renderer.as_ref().unwrap();
+            let (rgba, rw_px, rh_px) = renderer.render_rgba_with_opts(doc, pw, ph, &opts);
+            let (iw, ih) = (rw_px as usize, rh_px as usize);
+            let mut pixels = Vec::with_capacity(iw * ih);
+            for px in rgba.chunks_exact(4) {
+                pixels.push(egui::Color32::from_rgba_unmultiplied(
+                    px[0], px[1], px[2], px[3],
+                ));
+            }
+            let color_img = egui::ColorImage {
+                size: [iw.max(1), ih.max(1)],
+                pixels,
+            };
+            let handle =
+                ctx.load_texture("photonic_preview", color_img, egui::TextureOptions::NEAREST);
+            self.preview_tex_cache = Some(PreviewTexCache { handle, hash });
+        }
+
+        let Some(cache) = &self.preview_tex_cache else {
+            return;
+        };
+        // Paint over the artboard's screen rect.
+        let (sx0, sy0) = view.canvas_to_screen(rx, ry);
+        let (sx1, sy1) = view.canvas_to_screen(rx + rw, ry + rh);
+        let scr = egui::Rect::from_min_max(
+            egui::pos2(sx0 as f32, sy0 as f32),
+            egui::pos2(sx1 as f32, sy1 as f32),
+        );
+        let mut mesh = egui::Mesh::with_texture(cache.handle.id());
+        mesh.add_rect_with_uv(
+            scr,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        painter.add(egui::Shape::mesh(mesh));
     }
 
     /// Handle the interactive RasterBrush/RasterEraser tools: paint/erase onto
@@ -1320,6 +1532,24 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // ── Apply the configured history-retention limits ─────────────────────
+        // Cheap and idempotent when unchanged, so it's safe every frame. In
+        // size-limited mode the byte cap is re-checked on a throttle (below)
+        // rather than here, since measuring it serializes the history.
+        let (max_steps, size_limit) = self.prefs.history_limits();
+        history.set_limits(max_steps, size_limit);
+        if size_limit.is_some() {
+            let now = ctx.input(|i| i.time);
+            if now - self.last_history_size_check >= 1.5 {
+                self.last_history_size_check = now;
+                history.enforce_size();
+            }
+        }
+        // Surface a one-time warning when the cap forced oldest steps to drop.
+        if let Some(msg) = history.take_limit_warning() {
+            self.file_status = Some(msg);
+        }
 
         // ── Command palette (Ctrl/Cmd+K) — drawn on top of everything ─────────
         // Handled before tool dispatch so a chosen command runs this frame.
@@ -1509,6 +1739,9 @@ impl PhotonicApp {
                             new_doc.artboards = boards;
                         }
                         *doc = new_doc;
+                        // Fresh document — drop any prior project's history so it
+                        // can't bleed into the new one.
+                        history.reset();
                         // Fit all artboards to the viewport on the next frame
                         // (once the real viewport rect is known).
                         self.fit_pending = true;
@@ -1518,9 +1751,10 @@ impl PhotonicApp {
                         doc_modified = true;
                     }
                     WelcomeAction::OpenFile(path) => match load_document(&path) {
-                        Ok(loaded) => {
+                        Ok((loaded, hist_snap)) => {
                             self.welcome.add_recent(path.clone(), loaded.name.clone());
                             *doc = loaded;
+                            apply_opened_history(history, hist_snap);
                             self.fit_pending = true;
                             self.current_file = Some(path);
                             self.selected_id = None;
@@ -1546,9 +1780,10 @@ impl PhotonicApp {
                                 .pick_file()
                         }) {
                             match load_document(&path) {
-                                Ok(loaded) => {
+                                Ok((loaded, hist_snap)) => {
                                     self.welcome.add_recent(path.clone(), loaded.name.clone());
                                     *doc = loaded;
+                                    apply_opened_history(history, hist_snap);
                                     self.fit_pending = true;
                                     self.current_file = Some(path);
                                     self.selected_id = None;
@@ -1586,6 +1821,11 @@ impl PhotonicApp {
                     // File toggle button — opens/closes the File drawer
                     let file_active = self.active_drawer == Some(DrawerKind::File);
                     if ui.selectable_label(file_active, "File").clicked() {
+                        // Switching drawers away from Edit must flush prefs, else
+                        // a just-changed setting (e.g. history limit) is lost.
+                        if self.active_drawer == Some(DrawerKind::Edit) {
+                            self.prefs.save();
+                        }
                         self.active_drawer = if file_active {
                             None
                         } else {
@@ -1609,6 +1849,9 @@ impl PhotonicApp {
                     // Tools menu — lists all tools, lets user pin them to the sidebar
                     let tools_active = self.active_drawer == Some(DrawerKind::Tools);
                     if ui.selectable_label(tools_active, "Tools").clicked() {
+                        if self.active_drawer == Some(DrawerKind::Edit) {
+                            self.prefs.save();
+                        }
                         self.active_drawer = if tools_active {
                             None
                         } else {
@@ -1704,6 +1947,7 @@ impl PhotonicApp {
                                         ui.add_space(4.0);
                                         if ui.button("  New  ").clicked() {
                                             *doc = Document::default_artboard();
+                                            history.reset();
                                             self.current_file = None;
                                             self.selected_id = None;
                                             self.file_status = Some("New document".into());
@@ -1721,9 +1965,10 @@ impl PhotonicApp {
                                                     .pick_file()
                                             }) {
                                                 match load_document(&path) {
-                                                    Ok(loaded) => {
+                                                    Ok((loaded, hist_snap)) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
                                                         *doc = loaded;
+                                                        apply_opened_history(history, hist_snap);
                                                         self.fit_pending = true;
                                                         self.selected_id = None;
                                                         doc_modified = true;
@@ -1743,15 +1988,12 @@ impl PhotonicApp {
                                             self.active_drawer = None;
                                             self.selected_drawer_option = None;
                                             if let Some(path) = &self.current_file.clone() {
-                                                match doc.to_json() {
-                                                    Ok(json) => match std::fs::write(path, &json) {
-                                                        Ok(_) => {
-                                                            self.welcome.add_recent(path.clone(), doc.name.clone());
-                                                            self.file_status = Some(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
-                                                        }
-                                                        Err(e) => self.file_status = Some(format!("Save failed: {e}")),
-                                                    },
-                                                    Err(e) => self.file_status = Some(format!("Serialize failed: {e}")),
+                                                match write_photon_file(path, doc, history) {
+                                                    Ok(_) => {
+                                                        self.welcome.add_recent(path.clone(), doc.name.clone());
+                                                        self.file_status = Some(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                                                    }
+                                                    Err(e) => self.file_status = Some(format!("Save failed: {e}")),
                                                 }
                                             }
                                         }
@@ -1775,16 +2017,13 @@ impl PhotonicApp {
                                                 let path = if path.extension().is_none() {
                                                     path.with_extension("photon")
                                                 } else { path };
-                                                match doc.to_json() {
-                                                    Ok(json) => match std::fs::write(&path, &json) {
-                                                        Ok(_) => {
-                                                            self.welcome.add_recent(path.clone(), doc.name.clone());
-                                                            self.file_status = Some(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
-                                                            self.current_file = Some(path);
-                                                        }
-                                                        Err(e) => self.file_status = Some(format!("Save failed: {e}")),
-                                                    },
-                                                    Err(e) => self.file_status = Some(format!("Serialize failed: {e}")),
+                                                match write_photon_file(&path, doc, history) {
+                                                    Ok(_) => {
+                                                        self.welcome.add_recent(path.clone(), doc.name.clone());
+                                                        self.file_status = Some(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                                                        self.current_file = Some(path);
+                                                    }
+                                                    Err(e) => self.file_status = Some(format!("Save failed: {e}")),
                                                 }
                                             }
                                         }
@@ -1882,8 +2121,35 @@ impl PhotonicApp {
                                             });
                                         });
                                         ui.checkbox(&mut self.prefs.show_rulers, "Show Rulers");
-                                        ui.checkbox(&mut self.outline_mode, "Outline Mode")
-                                            .on_hover_text("Show path wireframes only (no fills or strokes). Shortcut: Ctrl+Y");
+                                        // The three view-preview modes are mutually exclusive:
+                                        // enabling one clears the others.
+                                        if ui.checkbox(&mut self.outline_mode, "Outline Mode")
+                                            .on_hover_text("Show path wireframes only (no fills or strokes). Shortcut: Ctrl+Y")
+                                            .changed() && self.outline_mode
+                                        {
+                                            self.pixel_preview = false;
+                                            self.overprint_preview = false;
+                                        }
+                                        if ui.checkbox(&mut self.pixel_preview, "Pixel Preview")
+                                            .on_hover_text("Show the active artboard at its export pixel size with nearest-neighbour sampling, so aliasing and pixel snapping match the exported file. Shortcut: Ctrl+Alt+Y")
+                                            .changed()
+                                        {
+                                            if self.pixel_preview {
+                                                self.outline_mode = false;
+                                                self.overprint_preview = false;
+                                            }
+                                            self.preview_tex_cache = None;
+                                        }
+                                        if ui.checkbox(&mut self.overprint_preview, "Overprint Preview")
+                                            .on_hover_text("Simulate overprint: solid fills matching an overprint-flagged spot color multiply into the backdrop instead of knocking out. Shortcut: Ctrl+Shift+Y")
+                                            .changed()
+                                        {
+                                            if self.overprint_preview {
+                                                self.outline_mode = false;
+                                                self.pixel_preview = false;
+                                            }
+                                            self.preview_tex_cache = None;
+                                        }
                                         ui.separator();
                                         ui.label(egui::RichText::new("Guides").strong());
                                         ui.checkbox(&mut self.guides_visible, "Show Guides")
@@ -1935,6 +2201,68 @@ impl PhotonicApp {
                                                 .fixed_decimals(1))
                                                 .on_hover_text("Distance moved per arrow key press (Shift×10)");
                                         });
+
+                                        // ── Project History ──────────────────────────
+                                        ui.add_space(10.0);
+                                        ui.separator();
+                                        ui.label(RichText::new("Project History").strong());
+                                        ui.label(
+                                            RichText::new(
+                                                "Undo/redo, checkpoints, and branches are saved inside the .photon file. \
+                                                 This caps how much is kept; the oldest steps are dropped when the cap is hit.",
+                                            )
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(4.0);
+                                        use crate::preferences::HistoryLimitMode;
+                                        ui.horizontal(|ui| {
+                                            ui.label("Limit by:");
+                                            ui.selectable_value(&mut self.prefs.history_limit_mode, HistoryLimitMode::Steps, "Steps")
+                                                .on_hover_text("Cap the number of undo steps retained");
+                                            ui.selectable_value(&mut self.prefs.history_limit_mode, HistoryLimitMode::Size, "Size")
+                                                .on_hover_text("Cap the serialized size of the saved history");
+                                        });
+                                        ui.add_space(4.0);
+                                        match self.prefs.history_limit_mode {
+                                            HistoryLimitMode::Steps => {
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Max steps:");
+                                                    ui.add(egui::DragValue::new(&mut self.prefs.history_max_steps)
+                                                        .speed(10.0)
+                                                        .range(10..=100_000));
+                                                });
+                                            }
+                                            HistoryLimitMode::Size => {
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Max history size (MB):");
+                                                    ui.add(egui::DragValue::new(&mut self.prefs.history_max_mb)
+                                                        .speed(1.0)
+                                                        .range(1.0..=4000.0)
+                                                        .fixed_decimals(0))
+                                                        .on_hover_text("Budget for the history payload specifically — the document's own size is separate.");
+                                                });
+                                            }
+                                        }
+                                        ui.add_space(4.0);
+                                        // Live readout. history_byte_size serializes the whole history, so
+                                        // throttle it to ~2 Hz even while this page is visible.
+                                        let hist_steps = history.undo_depth();
+                                        let now = ui.input(|i| i.time);
+                                        if now - self.cached_history_bytes.0 > 0.5 {
+                                            self.cached_history_bytes = (now, history.history_byte_size());
+                                        }
+                                        let hist_bytes = self.cached_history_bytes.1;
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Currently: {} step{} · {} of history in file",
+                                                hist_steps,
+                                                if hist_steps == 1 { "" } else { "s" },
+                                                format_bytes(hist_bytes),
+                                            ))
+                                            .weak()
+                                            .small(),
+                                        );
                                     }
                                     Some(4) => {
                                         ui.label(RichText::new("Keyboard Shortcuts").strong());
@@ -2421,6 +2749,7 @@ impl PhotonicApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
+                self.last_canvas_rect = Some(rect);
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
                 // ── Deferred fit-to-viewport on new/open ─────────────────────
@@ -2468,10 +2797,21 @@ impl PhotonicApp {
 
                 // ── Raster (pixel) layers ──────────────────────────────────────
                 // Painted over the GPU-rendered vector layer as textured quads,
-                // matching the headless export compositor. Skipped in outline mode.
-                if !self.outline_mode {
+                // matching the headless export compositor. Skipped in outline mode
+                // and in Pixel/Overprint Preview (those re-composite via the
+                // headless render, so the live overlay would double up).
+                if !self.outline_mode && !self.preview_active() {
                     let raster_painter = ui.painter_at(rect);
                     self.paint_raster_nodes(ctx, &raster_painter, doc, view);
+                }
+
+                // ── Pixel / Overprint Preview overlay (#22) ────────────────────
+                // Overlay the active artboard with a nearest-sampled export-
+                // resolution render so true aliasing/pixel snapping (Pixel
+                // Preview) and overprint-ink multiply (Overprint Preview) show.
+                if self.preview_active() {
+                    let preview_painter = ui.painter_at(rect);
+                    self.paint_preview_overlay(ctx, &preview_painter, doc, view);
                 }
 
                 // ── Outline Mode overlay ──────────────────────────────────────
@@ -4512,6 +4852,18 @@ impl PhotonicApp {
                         self.selected_id = Some(node_id);
                         doc.selection = Selection::single(node_id);
                         doc_modified = true;
+                    }
+                }
+                PanelAction::CenterViewOn { canvas_x, canvas_y } => {
+                    // Recenter the canvas on the clicked Navigator point, keeping
+                    // the current zoom. Mirrors `fit_artboard_to_rect`'s pan math.
+                    if let Some(canvas_rect) = self.last_canvas_rect {
+                        view.pan_x = canvas_rect.center().x as f64 - canvas_x * view.zoom;
+                        view.pan_y = canvas_rect.center().y as f64 - canvas_y * view.zoom;
+                        // Snap the smooth-pan velocity so inertia doesn't fight the jump.
+                        self.smooth.pan_vel_x = 0.0;
+                        self.smooth.pan_vel_y = 0.0;
+                        ctx.request_repaint();
                     }
                 }
                 PanelAction::ReorderNode { node_id, op } => {
@@ -10983,9 +11335,19 @@ impl PhotonicApp {
             A::ToggleGrid => self.prefs.show_grid = !self.prefs.show_grid,
             A::ToggleGuides => self.guides_visible = !self.guides_visible,
             A::ToggleAudit => self.audit.panel_open = !self.audit.panel_open,
-            A::FileMenu => self.active_drawer = Some(DrawerKind::File),
+            A::FileMenu => {
+                if self.active_drawer == Some(DrawerKind::Edit) {
+                    self.prefs.save();
+                }
+                self.active_drawer = Some(DrawerKind::File);
+            }
             A::EditMenu => self.active_drawer = Some(DrawerKind::Edit),
-            A::ToolsMenu => self.active_drawer = Some(DrawerKind::Tools),
+            A::ToolsMenu => {
+                if self.active_drawer == Some(DrawerKind::Edit) {
+                    self.prefs.save();
+                }
+                self.active_drawer = Some(DrawerKind::Tools);
+            }
             A::Undo => {
                 if history.undo(doc) {
                     self.invalidate_point_edit(doc);
@@ -10997,7 +11359,9 @@ impl PhotonicApp {
                 }
             }
             A::FitView => self.fit_pending = true,
-            A::OutlineMode => self.outline_mode = !self.outline_mode,
+            A::OutlineMode => self.toggle_outline_mode(),
+            A::PixelPreview => self.toggle_pixel_preview(),
+            A::OverprintPreview => self.toggle_overprint_preview(),
             A::CheckUpdates => {
                 if self.update_rx.is_none() {
                     self.update_rx = Some(crate::update::check_and_update());

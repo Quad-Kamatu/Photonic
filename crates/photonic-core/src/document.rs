@@ -1200,12 +1200,19 @@ impl Document {
     /// (unknown fields dropped) while within
     /// [`crate::migration::COMPAT_WINDOW`]; beyond that window it is rejected.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        Self::from_value(value)
+    }
+
+    /// Deserialize from an already-parsed JSON tree, migrating it forward to
+    /// [`CURRENT_FORMAT_VERSION`] first. Shared by [`from_json`] and the
+    /// `.photon` file wrapper (which carries the document as a sub-value).
+    pub fn from_value(mut value: serde_json::Value) -> Result<Self, serde_json::Error> {
         use crate::migration;
 
         // Migrate at the JSON-tree level before struct deserialization so new
         // fields can be filled and moved fields renamed without the in-memory
         // types having to understand older layouts.
-        let mut value: serde_json::Value = serde_json::from_str(json)?;
         let file_version = migration::detect_version(&value);
 
         if file_version > CURRENT_FORMAT_VERSION {

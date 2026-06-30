@@ -3,6 +3,7 @@ use crate::{
     layer::{Layer, LayerId},
     node::{NodeId, SceneNode},
 };
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -487,11 +488,138 @@ mod tests {
         assert_eq!(history.undo_depth(), 0);
         assert!(!history.can_redo());
     }
+
+    // ── Persistence: snapshot / restore round-trips ──────────────────────────
+
+    fn push_n_nodes(history: &mut CommandHistory, doc: &mut Document, n: usize) {
+        for _ in 0..n {
+            let node = make_node(doc);
+            history.execute(
+                Command::AddNode {
+                    node,
+                    layer_id: None,
+                },
+                doc,
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_restore_round_trips_undo_stack() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        push_n_nodes(&mut history, &mut doc, 3);
+        let cp = history.create_checkpoint("cp".into(), &doc);
+        assert_eq!(history.undo_depth(), 3);
+
+        let snap = history.snapshot_state();
+        // Serialize → deserialize (proves Command + Checkpoint are serde-safe).
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored: HistorySnapshot = serde_json::from_str(&json).unwrap();
+
+        let mut fresh = CommandHistory::new(200);
+        fresh.restore_state(restored);
+        assert_eq!(fresh.undo_depth(), 3);
+        assert_eq!(fresh.list_checkpoints().len(), 1);
+        assert_eq!(fresh.list_checkpoints()[0].id, cp);
+        // Restored history is still functional: undo unwinds a real command.
+        assert!(fresh.undo(&mut doc));
+        assert_eq!(fresh.undo_depth(), 2);
+    }
+
+    #[test]
+    fn set_limits_trims_to_step_ceiling() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        push_n_nodes(&mut history, &mut doc, 10);
+        assert_eq!(history.undo_depth(), 10);
+
+        history.set_limits(4, None);
+        assert_eq!(history.undo_depth(), 4, "step ceiling not enforced");
+        // A warning should have latched on the trim.
+        assert!(history.take_limit_warning().is_some());
+        // Drained once.
+        assert!(history.take_limit_warning().is_none());
+    }
+
+    #[test]
+    fn size_cap_trims_until_within_budget() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(100_000);
+        push_n_nodes(&mut history, &mut doc, 30);
+        let full = history.history_byte_size();
+        assert!(full > 0);
+
+        // Budget that only fits a fraction of the history forces trimming.
+        let budget = full / 3;
+        history.set_limits(100_000, Some(budget));
+        assert!(
+            history.history_byte_size() <= budget || history.undo_depth() <= 5,
+            "size cap did not bring history within budget (or down to the floor)"
+        );
+        assert!(history.undo_depth() < 30, "nothing was trimmed");
+    }
+
+    #[test]
+    fn checkpoint_snapshot_content_survives_round_trip() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        push_n_nodes(&mut history, &mut doc, 2);
+        let node_ct = doc.nodes.len();
+        let cp = history.create_checkpoint("cp".into(), &doc);
+
+        let json = serde_json::to_string(&history.snapshot_state()).unwrap();
+        let restored: HistorySnapshot = serde_json::from_str(&json).unwrap();
+        let mut fresh = CommandHistory::new(200);
+        fresh.restore_state(restored);
+
+        let snap_doc = fresh
+            .restore_checkpoint(cp)
+            .expect("checkpoint must be restorable after round-trip");
+        assert_eq!(
+            snap_doc.nodes.len(),
+            node_ct,
+            "checkpoint snapshot lost its document content across serialization"
+        );
+    }
+
+    #[test]
+    fn size_cap_never_trims_named_checkpoints() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(100_000);
+        push_n_nodes(&mut history, &mut doc, 4);
+        history.create_checkpoint("keep".into(), &doc);
+        let full = history.history_byte_size();
+
+        // A budget far below a single checkpoint forces maximal trimming.
+        history.set_limits(100_000, Some(full / 4));
+        // Undo steps may be trimmed, but the named checkpoint is preserved …
+        assert_eq!(
+            history.list_checkpoints().len(),
+            1,
+            "size cap must never auto-delete a named checkpoint"
+        );
+        // … and because the un-trimmable checkpoint dominates, an honest
+        // over-budget warning is raised.
+        assert!(history.take_limit_warning().is_some());
+    }
+
+    #[test]
+    fn reset_clears_all_persistent_state() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        push_n_nodes(&mut history, &mut doc, 3);
+        history.create_checkpoint("cp".into(), &doc);
+        history.reset();
+        assert_eq!(history.undo_depth(), 0);
+        assert!(history.list_checkpoints().is_empty());
+        assert!(!history.can_undo());
+    }
 }
 
 /// A reversible command that can be applied to a Document.
 /// Each variant carries enough data to undo itself.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     /// Add a new node to the document.
     AddNode {
@@ -964,7 +1092,7 @@ impl Command {
 }
 
 /// A named snapshot of the document at a point in time (like a git commit).
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: Uuid,
     pub name: String,
@@ -972,6 +1100,43 @@ pub struct Checkpoint {
     pub created_at: u64,
     /// Full document snapshot for restoration.
     snapshot: Document,
+}
+
+/// A serializable point-in-time copy of a [`CommandHistory`]'s persistent
+/// state: the undo/redo stacks, named checkpoints, and named branches. The
+/// transient parts of `CommandHistory` (debounce timers, the in-memory
+/// `revision` counter, and the configured limits) are intentionally excluded —
+/// they are runtime state, not project data.
+///
+/// This is what travels inside a `.photon` file so a project's full edit
+/// history survives save → close → reopen and file transfer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HistorySnapshot {
+    #[serde(default)]
+    pub undo_stack: Vec<Command>,
+    #[serde(default)]
+    pub redo_stack: Vec<Command>,
+    #[serde(default)]
+    pub checkpoints: Vec<Checkpoint>,
+    #[serde(default)]
+    pub branches: std::collections::HashMap<String, Document>,
+}
+
+impl HistorySnapshot {
+    /// Bring nested documents (branch states and checkpoint snapshots) up to the
+    /// load-time invariants the rest of the app relies on — currently, that every
+    /// document has at least one artboard (`ensure_default_artboard`). The
+    /// top-level document is normalized by [`Document::from_value`] on load, but
+    /// the documents embedded in history bypass that path, so they are fixed up
+    /// here after deserialization. Commands' embedded nodes need no such fixup.
+    pub fn normalize_nested(&mut self) {
+        for doc in self.branches.values_mut() {
+            doc.ensure_default_artboard();
+        }
+        for cp in self.checkpoints.iter_mut() {
+            cp.snapshot.ensure_default_artboard();
+        }
+    }
 }
 
 /// Public summary of a checkpoint (no snapshot data).
@@ -1031,8 +1196,23 @@ pub struct CommandHistory {
     undo_stack: Vec<Command>,
     /// Commands that have been undone (redo stack). Cleared on new command.
     redo_stack: Vec<Command>,
-    /// Maximum undo steps to retain.
+    /// Hard ceiling on retained undo steps. Always enforced (cheaply) on every
+    /// `execute`, independent of the optional size cap below, so memory stays
+    /// bounded even in size-limited mode.
     max_depth: usize,
+    /// Optional cap on the *serialized* size of the persistent history (the
+    /// `.photon` history payload, in bytes). `None` = no size cap. Enforced
+    /// out of the hot path via [`enforce_size`] because measuring it requires
+    /// serializing the history.
+    size_limit_bytes: Option<u64>,
+    /// Rising-edge latch for the user-facing "history limit reached" warning.
+    /// Set true once when trimming begins; reset when history falls back under
+    /// the soft threshold so the warning can fire again on the next breach.
+    warned_at_limit: bool,
+    /// A one-shot warning message for the GUI to surface, produced the first
+    /// time the limit forces oldest steps to be dropped. Drained via
+    /// [`take_limit_warning`].
+    pending_warning: Option<String>,
     /// Named snapshots (git-style commits). Most recent is last.
     checkpoints: Vec<Checkpoint>,
     /// Named document branches — forks of the document state by name.
@@ -1041,6 +1221,19 @@ pub struct CommandHistory {
     gui_debounce: DebounceCheckpoint,
     /// Debounce timer for MCP-triggered checkpoints (60 s timeout).
     mcp_debounce: DebounceCheckpoint,
+    /// Monotonically-incrementing content revision, bumped on every mutation that
+    /// changes the document (execute / undo / redo / checkpoint or branch restore).
+    /// Lets viewers (e.g. the GUI Pixel/Overprint Preview cache) detect content
+    /// changes cheaply without re-serializing the whole document each frame.
+    /// Never reset, so it cannot collide across document replacements.
+    revision: u64,
+}
+
+/// Serialized byte length of a single history entry (a `Command` or
+/// `Checkpoint`), used for incremental size accounting in
+/// [`CommandHistory::enforce_size`].
+fn entry_byte_size<T: Serialize>(v: &T) -> u64 {
+    serde_json::to_vec(v).map(|b| b.len() as u64).unwrap_or(0)
 }
 
 impl Default for CommandHistory {
@@ -1055,11 +1248,194 @@ impl CommandHistory {
             undo_stack: vec![],
             redo_stack: vec![],
             max_depth,
+            size_limit_bytes: None,
+            warned_at_limit: false,
+            pending_warning: None,
             checkpoints: vec![],
             branches: std::collections::HashMap::new(),
             gui_debounce: DebounceCheckpoint::new(30),
             mcp_debounce: DebounceCheckpoint::new(60),
+            revision: 0,
         }
+    }
+
+    // ── Configurable history limits ──────────────────────────────────────────
+
+    /// Soft floor on undo steps the size cap trims down to: while over budget we
+    /// keep at least this many recent undo steps before falling back to trimming
+    /// the redo stack. As an absolute last resort (redo empty, still over) undo
+    /// may be taken below this, down to a single step. Named checkpoints and
+    /// branches are deliberate user artifacts and are NEVER auto-trimmed.
+    const MIN_RETAINED_STEPS: usize = 5;
+
+    /// Set the retention limits and immediately re-enforce them.
+    ///
+    /// `max_steps` is the hard step ceiling (always >= 1). `size_bytes` is the
+    /// optional cap on the serialized history payload. Cheap and idempotent when
+    /// the limits are unchanged, so callers may invoke it every frame.
+    pub fn set_limits(&mut self, max_steps: usize, size_bytes: Option<u64>) {
+        let max_steps = max_steps.max(1);
+        if self.max_depth == max_steps && self.size_limit_bytes == size_bytes {
+            return;
+        }
+        self.max_depth = max_steps;
+        self.size_limit_bytes = size_bytes;
+        self.enforce_steps();
+        self.enforce_size();
+    }
+
+    /// The configured step ceiling.
+    pub fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+
+    /// The configured size cap in bytes, if any.
+    pub fn size_limit_bytes(&self) -> Option<u64> {
+        self.size_limit_bytes
+    }
+
+    /// Serialized size, in bytes, of the persistent history payload — exactly
+    /// what gets written into the `.photon` file. This is the "history size"
+    /// the size cap constrains (the document is measured separately).
+    pub fn history_byte_size(&self) -> u64 {
+        serde_json::to_vec(&self.snapshot_state())
+            .map(|v| v.len() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Drop oldest undo steps until within the step ceiling. Cheap — no
+    /// serialization. Latches a warning on the first step actually dropped.
+    fn enforce_steps(&mut self) {
+        let mut dropped = false;
+        while self.undo_stack.len() > self.max_depth {
+            self.undo_stack.remove(0);
+            dropped = true;
+        }
+        // Recovered comfortably under the ceiling → re-arm the warning latch.
+        if self.undo_stack.len() * 10 < self.max_depth * 9 {
+            self.warned_at_limit = false;
+        }
+        if dropped {
+            self.latch_warning(
+                "Project history reached its maximum step count — the oldest \
+                 undo steps are being discarded. Raise the limit in \
+                 Edit ▸ Behavior ▸ Project History.",
+            );
+        }
+    }
+
+    /// Enforce the optional size cap by trimming the linear undo/redo history
+    /// until the serialized payload is within budget. Named checkpoints and
+    /// branches are user artifacts and are never auto-deleted — if they alone
+    /// exceed the budget, a distinct warning is raised instead. No-op when no
+    /// size cap is configured. Returns true if it dropped any step.
+    ///
+    /// Measures the whole history once, then trims against a running byte
+    /// estimate (each removed entry's own serialized size), so the cost is
+    /// O(history size) rather than O(entries · history size). One exact
+    /// re-measure at the end drives the warning + re-arm decisions.
+    pub fn enforce_size(&mut self) -> bool {
+        let Some(limit) = self.size_limit_bytes else {
+            return false;
+        };
+
+        let mut est = self.history_byte_size();
+        let mut dropped = false;
+        while est > limit {
+            // `+1` approximates the JSON array separator per element.
+            if self.undo_stack.len() > Self::MIN_RETAINED_STEPS {
+                est = est.saturating_sub(entry_byte_size(&self.undo_stack[0]).saturating_add(1));
+                self.undo_stack.remove(0);
+            } else if !self.redo_stack.is_empty() {
+                est = est.saturating_sub(entry_byte_size(&self.redo_stack[0]).saturating_add(1));
+                self.redo_stack.remove(0);
+            } else if self.undo_stack.len() > 1 {
+                est = est.saturating_sub(entry_byte_size(&self.undo_stack[0]).saturating_add(1));
+                self.undo_stack.remove(0);
+            } else {
+                // Only a single undo step plus un-trimmable checkpoints/branches
+                // remain. Stop rather than wipe the last step.
+                break;
+            }
+            dropped = true;
+        }
+
+        // Exact size now drives the (accurate) warning and the re-arm latch.
+        let actual = self.history_byte_size();
+        if actual > limit {
+            self.latch_warning(
+                "Project history exceeds its size limit because of saved \
+                 checkpoints or branches — delete some, or raise the limit in \
+                 Edit ▸ Behavior ▸ Project History.",
+            );
+        } else if dropped {
+            self.latch_warning(
+                "Project history reached its size limit — the oldest undo steps \
+                 are being discarded to make room. Raise the limit in \
+                 Edit ▸ Behavior ▸ Project History.",
+            );
+        }
+        if actual * 10 < limit * 9 {
+            self.warned_at_limit = false;
+        }
+        dropped
+    }
+
+    /// Set the one-shot warning on the rising edge only (so it fires once per
+    /// breach, not on every trimmed step), with a context-specific message.
+    fn latch_warning(&mut self, msg: &str) {
+        if !self.warned_at_limit {
+            self.warned_at_limit = true;
+            self.pending_warning = Some(msg.to_string());
+        }
+    }
+
+    /// Take the pending limit warning, if any, for the GUI to display once.
+    pub fn take_limit_warning(&mut self) -> Option<String> {
+        self.pending_warning.take()
+    }
+
+    // ── Persistence (save/restore the full history with the document) ─────────
+
+    /// Capture the persistent history (undo/redo/checkpoints/branches) for
+    /// serialization into a `.photon` file. Clones; does not mutate self.
+    pub fn snapshot_state(&self) -> HistorySnapshot {
+        HistorySnapshot {
+            undo_stack: self.undo_stack.clone(),
+            redo_stack: self.redo_stack.clone(),
+            checkpoints: self.checkpoints.clone(),
+            branches: self.branches.clone(),
+        }
+    }
+
+    /// Replace the persistent history with a restored snapshot (on file open),
+    /// then re-enforce the current limits. Configured limits, debounce timers,
+    /// and the revision counter are preserved. Bumps `revision` so revision-
+    /// keyed caches refresh.
+    pub fn restore_state(&mut self, s: HistorySnapshot) {
+        self.undo_stack = s.undo_stack;
+        self.redo_stack = s.redo_stack;
+        self.checkpoints = s.checkpoints;
+        self.branches = s.branches;
+        self.warned_at_limit = false;
+        self.pending_warning = None;
+        self.revision = self.revision.wrapping_add(1);
+        self.enforce_steps();
+        self.enforce_size();
+    }
+
+    /// Clear all persistent history (undo/redo/checkpoints/branches) while
+    /// keeping the configured limits. Used when opening a document that carries
+    /// no embedded history, or on New, so a previous project's history can't
+    /// bleed into the freshly loaded one. Bumps `revision`.
+    pub fn reset(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.checkpoints.clear();
+        self.branches.clear();
+        self.warned_at_limit = false;
+        self.pending_warning = None;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Apply a command and push it onto the undo stack.
@@ -1072,10 +1448,10 @@ impl CommandHistory {
         reevaluate_constraints(doc);
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
-        // Trim to max depth
-        if self.undo_stack.len() > self.max_depth {
-            self.undo_stack.remove(0);
-        }
+        // Enforce the step ceiling on the hot path (cheap). The optional size
+        // cap is enforced separately via `enforce_size` (off the hot path,
+        // since it must serialize the history to measure it).
+        self.enforce_steps();
         self.gui_debounce.schedule(desc);
     }
 

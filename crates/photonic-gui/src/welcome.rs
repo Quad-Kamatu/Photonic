@@ -1940,7 +1940,7 @@ fn load_doc(path: &Path) -> Result<Document, String> {
 /// Prefers `%APPDATA%\Photonic` on Windows (matching the rest of the app), then
 /// falls back to `$XDG_CONFIG_HOME/Photonic` / `~/.config/Photonic` so recent
 /// documents load on Linux and macOS too.
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     if let Ok(appdata) = std::env::var("APPDATA") {
         return Some(PathBuf::from(appdata).join("Photonic"));
     }

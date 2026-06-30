@@ -40,6 +40,20 @@ pub struct AppPreferences {
     /// Arrow-key nudge distance in document pixels (Shift multiplies by 10).
     #[serde(default = "default_nudge_distance")]
     pub nudge_distance: f64,
+
+    // HISTORY — bound on the project undo/redo history persisted in the .photon
+    // file. The user picks the unit: a step count, or a serialized-size budget
+    // (in MB) applied to the history payload specifically (separate from the
+    // document's own size). Once the history exceeds the cap, the oldest steps
+    // are discarded to make room (with a warning the first time).
+    #[serde(default)]
+    pub history_limit_mode: HistoryLimitMode,
+    /// Max retained undo steps when `history_limit_mode == Steps`.
+    #[serde(default = "default_history_max_steps")]
+    pub history_max_steps: usize,
+    /// Max serialized history size in MB when `history_limit_mode == Size`.
+    #[serde(default = "default_history_max_mb")]
+    pub history_max_mb: f64,
     /// Check GitHub for a newer release once on launch and prompt if available.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
@@ -62,6 +76,29 @@ pub struct AppPreferences {
 
 fn default_nudge_distance() -> f64 {
     1.0
+}
+
+/// How the project-history retention limit is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HistoryLimitMode {
+    /// Cap by number of undo steps.
+    #[default]
+    Steps,
+    /// Cap by serialized size of the history payload (MB).
+    Size,
+}
+
+/// Hard ceiling applied in Size mode so memory stays bounded regardless of how
+/// large the byte budget is. The size cap does the real trimming; this just
+/// prevents an unbounded step count.
+pub const HISTORY_SIZE_MODE_STEP_CEILING: usize = 100_000;
+
+fn default_history_max_steps() -> usize {
+    200
+}
+
+fn default_history_max_mb() -> f64 {
+    50.0
 }
 
 fn default_true() -> bool {
@@ -92,6 +129,9 @@ impl Default for AppPreferences {
             default_stroke_width: 1.0,
             console_open_on_start: false,
             nudge_distance: 1.0,
+            history_limit_mode: HistoryLimitMode::Steps,
+            history_max_steps: 200,
+            history_max_mb: 50.0,
             auto_check_updates: true,
             last_seen_version: String::new(),
             pinned_tools: Vec::new(),
@@ -124,13 +164,22 @@ impl AppPreferences {
         None
     }
 
+    /// Resolve the configured history retention limits as
+    /// `(max_steps, size_limit_bytes)` for [`photonic_core::CommandHistory::set_limits`].
+    /// In Steps mode the size cap is `None`; in Size mode a high step ceiling
+    /// keeps memory bounded while the byte budget does the trimming.
+    pub fn history_limits(&self) -> (usize, Option<u64>) {
+        match self.history_limit_mode {
+            HistoryLimitMode::Steps => (self.history_max_steps.max(1), None),
+            HistoryLimitMode::Size => {
+                let bytes = (self.history_max_mb.max(0.1) * 1_048_576.0) as u64;
+                (HISTORY_SIZE_MODE_STEP_CEILING, Some(bytes))
+            }
+        }
+    }
+
     fn prefs_path() -> Option<std::path::PathBuf> {
-        let appdata = std::env::var("APPDATA").ok()?;
-        Some(
-            std::path::Path::new(&appdata)
-                .join("Photonic")
-                .join("preferences.json"),
-        )
+        crate::welcome::config_dir().map(|d| d.join("preferences.json"))
     }
 
     /// Load from disk, falling back to Default on any error.

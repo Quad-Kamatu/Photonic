@@ -22,6 +22,8 @@ pub enum SearchAction {
     Redo,
     FitView,
     OutlineMode,
+    PixelPreview,
+    OverprintPreview,
     CheckUpdates,
 }
 
@@ -193,6 +195,20 @@ pub fn items() -> Vec<SearchItem> {
             "Toggle wireframe outline preview of all shapes",
             &["wireframe", "skeleton", "preview"],
             SearchAction::OutlineMode,
+        ),
+        cmd(
+            "Pixel Preview",
+            ph::GRID_NINE,
+            "Preview the active artboard at export pixel size with nearest-neighbour sampling to show true aliasing and pixel snapping",
+            &["aliasing", "pixels", "raster", "export preview", "nearest"],
+            SearchAction::PixelPreview,
+        ),
+        cmd(
+            "Overprint Preview",
+            ph::DROP,
+            "Simulate overprint: solid fills matching an overprint spot ink multiply into the backdrop instead of knocking out",
+            &["print", "spot color", "ink", "multiply", "knockout", "prepress"],
+            SearchAction::OverprintPreview,
         ),
         cmd(
             "Check for Updates",

@@ -50,6 +50,16 @@ impl KeyBinding {
             command: false,
         }
     }
+    /// Ctrl/Cmd + Alt + key, e.g. Ctrl+Alt+Y.
+    pub const fn ctrl_alt(key: egui::Key) -> Self {
+        Self {
+            key,
+            ctrl: true,
+            shift: false,
+            alt: true,
+            command: false,
+        }
+    }
     /// A bare key with no modifiers, e.g. Delete.
     pub const fn plain(key: egui::Key) -> Self {
         Self {
@@ -272,6 +282,16 @@ pub static REGISTRY: &[CommandDef] = &[
         id: "view.outline_mode",
         label: "Toggle Outline Mode",
         default: Some(KeyBinding::ctrl(Key::Y)),
+    },
+    CommandDef {
+        id: "view.pixel_preview",
+        label: "Toggle Pixel Preview",
+        default: Some(KeyBinding::ctrl_alt(Key::Y)),
+    },
+    CommandDef {
+        id: "view.overprint_preview",
+        label: "Toggle Overprint Preview",
+        default: Some(KeyBinding::ctrl_shift(Key::Y)),
     },
     CommandDef {
         id: "view.toggle_guides",

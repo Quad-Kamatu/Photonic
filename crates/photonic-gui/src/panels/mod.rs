@@ -16,6 +16,8 @@ use uuid::Uuid;
 use crate::radial_wheel::WheelAction;
 use crate::tools::Tool;
 
+mod navigator;
+
 // ─── Eyedropper types ─────────────────────────────────────────────────────────
 
 /// Which color slot should receive the eyedropper result (node-agnostic).
@@ -634,6 +636,8 @@ pub enum PanelAction {
     LoadWorkspace { name: String },
     /// Delete a named workspace.
     DeleteWorkspace { name: String },
+    /// Recenter the canvas viewport on a canvas-space point (Navigator click).
+    CenterViewOn { canvas_x: f64, canvas_y: f64 },
 }
 
 /// Discriminant for which shape the radial wheel should create.
@@ -1524,102 +1528,9 @@ pub fn draw_properties_panel(
 
     // ── Navigator Panel ───────────────────────────────────────────────────────
     if matches("Navigator") {
-        egui::CollapsingHeader::new("Navigator")
-            .default_open(false)
-            .open(forced_open)
-            .show(ui, |ui: &mut Ui| {
-                // Collect visible nodes and compute canvas bounds
-                let mut min_x = f64::MAX;
-                let mut min_y = f64::MAX;
-                let mut max_x = f64::MIN;
-                let mut max_y = f64::MIN;
-                let nav_nodes: Vec<(f64, f64, f64, f64, photonic_core::node::NodeId)> = doc
-                    .nodes_in_draw_order()
-                    .into_iter()
-                    .filter(|n| n.visible)
-                    .filter_map(|n: &SceneNode| {
-                        let lb = n.local_bounds()?;
-                        let (x0, y0): (f64, f64) = n.transform.apply(lb.x0, lb.y0);
-                        let (x1, y1): (f64, f64) = n.transform.apply(lb.x1, lb.y1);
-                        let nx = x0.min(x1);
-                        let ny = y0.min(y1);
-                        let nw = (x1 - x0).abs().max(1.0_f64);
-                        let nh = (y1 - y0).abs().max(1.0_f64);
-                        Some((nx, ny, nw, nh, n.id))
-                    })
-                    .collect();
-                for &(nx, ny, nw, nh, _) in &nav_nodes {
-                    if nx < min_x {
-                        min_x = nx;
-                    }
-                    if ny < min_y {
-                        min_y = ny;
-                    }
-                    if nx + nw > max_x {
-                        max_x = nx + nw;
-                    }
-                    if ny + nh > max_y {
-                        max_y = ny + nh;
-                    }
-                }
-                if min_x == f64::MAX {
-                    min_x = 0.0;
-                    min_y = 0.0;
-                    max_x = 800.0;
-                    max_y = 600.0;
-                }
-                let canvas_w = (max_x - min_x).max(1.0);
-                let canvas_h = (max_y - min_y).max(1.0);
-
-                // Allocate a fixed-height thumbnail area
-                let nav_w = ui.available_width().min(200.0);
-                let nav_h = (nav_w * (canvas_h / canvas_w) as f32).clamp(40.0, 160.0);
-                let (response, painter) =
-                    ui.allocate_painter(egui::vec2(nav_w, nav_h), egui::Sense::hover());
-                let rect = response.rect;
-                // Background
-                painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 40));
-
-                // Scale factor
-                let sx = nav_w as f64 / canvas_w;
-                let sy = nav_h as f64 / canvas_h;
-                let scale = sx.min(sy) as f32;
-
-                let off_x = rect.min.x + ((nav_w as f64 - canvas_w * scale as f64) * 0.5) as f32;
-                let off_y = rect.min.y + ((nav_h as f64 - canvas_h * scale as f64) * 0.5) as f32;
-
-                // Draw each node as a colored rect
-                for &(nx, ny, nw, nh, nid) in &nav_nodes {
-                    let is_selected = selected_id == Some(nid);
-                    let srx = off_x + ((nx - min_x) * scale as f64) as f32;
-                    let sry = off_y + ((ny - min_y) * scale as f64) as f32;
-                    let srw = (nw * scale as f64).max(1.0_f64) as f32;
-                    let srh = (nh * scale as f64).max(1.0_f64) as f32;
-                    let r = egui::Rect::from_min_size(egui::pos2(srx, sry), egui::vec2(srw, srh));
-                    let fill_color = if is_selected {
-                        egui::Color32::from_rgba_unmultiplied(100, 180, 255, 180)
-                    } else {
-                        egui::Color32::from_rgba_unmultiplied(180, 180, 200, 120)
-                    };
-                    painter.rect_filled(r, 1.0, fill_color);
-                    if is_selected {
-                        painter.rect_stroke(r, 1.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-                    }
-                }
-
-                // Stats
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} nodes  {:.0}×{:.0}",
-                        nav_nodes.len(),
-                        canvas_w,
-                        canvas_h
-                    ))
-                    .small()
-                    .weak(),
-                );
-            });
+        if let Some(a) = navigator::draw_navigator(ui, doc, selected_id, forced_open) {
+            action = Some(a);
+        }
         ui.add_space(2.0);
     }
 

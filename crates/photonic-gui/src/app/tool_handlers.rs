@@ -113,9 +113,20 @@ impl PhotonicApp {
             }
 
             // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
-            // a user remap takes effect (#140).
+            // a user remap takes effect (#140). The three view-preview modes are
+            // mutually exclusive (#22).
             if self.binding_pressed(ui.ctx(), "view.outline_mode") {
-                self.outline_mode = !self.outline_mode;
+                self.toggle_outline_mode();
+            }
+
+            // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
+            if self.binding_pressed(ui.ctx(), "view.pixel_preview") {
+                self.toggle_pixel_preview();
+            }
+
+            // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
+            if self.binding_pressed(ui.ctx(), "view.overprint_preview") {
+                self.toggle_overprint_preview();
             }
 
             // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
