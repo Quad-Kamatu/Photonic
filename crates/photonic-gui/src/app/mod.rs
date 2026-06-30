@@ -26,7 +26,9 @@ use std::sync::Arc;
 
 use crate::{
     hotbar::{self, HotbarAction, HotbarBucket, HotbarEffect, HotbarItem, HotbarMode},
-    panels::{self, DrawerGroup, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp},
+    panels::{
+        self, DrawerGroup, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp,
+    },
     preferences::AppPreferences,
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
@@ -1624,8 +1626,7 @@ impl PhotonicApp {
     /// Draw the always-on hotbar row (its own `TopBottomPanel`, below the main
     /// toolbar). Shown every frame regardless of selection.
     fn draw_hotbar(&mut self, ctx: &egui::Context, doc: &mut Document) {
-        let (bucket, single_is_group, single_is_fillable_path, single_id) =
-            self.hotbar_bucket(doc);
+        let (bucket, single_is_group, single_is_fillable_path, single_id) = self.hotbar_bucket(doc);
         self.refresh_hotbar_cache(bucket, single_is_group, single_is_fillable_path);
         let items = self
             .hotbar_cache

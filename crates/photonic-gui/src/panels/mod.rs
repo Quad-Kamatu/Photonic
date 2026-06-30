@@ -1700,7 +1700,6 @@ fn draw_navigator_section(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(2.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -3879,7 +3878,6 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -3908,7 +3906,6 @@ fn draw_combine(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
         ui.add_space(2.0);
     }
-
 }
 
 fn draw_boolean_ops(ui: &mut Ui, ctx: &mut PropPanelCtx) {
@@ -3972,7 +3969,6 @@ fn draw_boolean_ops(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4032,7 +4028,6 @@ fn draw_blend(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4099,7 +4094,6 @@ fn draw_pathfinder(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4142,7 +4136,6 @@ fn draw_distribute_on_path(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4193,7 +4186,6 @@ fn draw_compound_path(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4246,7 +4238,6 @@ fn draw_clipping_mask(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             ui.add_space(4.0);
         }
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4304,7 +4295,6 @@ fn draw_blend_colors(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4389,7 +4379,6 @@ fn draw_adjust_colors(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4416,7 +4405,6 @@ fn draw_flatten_transparency(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4490,7 +4478,6 @@ fn draw_copy_appearance(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4517,7 +4504,6 @@ fn draw_arrange_align(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
         ui.add_space(2.0);
     }
-
 }
 
 fn draw_alignment(ui: &mut Ui, ctx: &mut PropPanelCtx) {
@@ -4672,7 +4658,6 @@ fn draw_alignment(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4708,7 +4693,6 @@ fn draw_distribute_no_overlap(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -4793,7 +4777,6 @@ fn draw_align_to_artboard(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4821,7 +4804,6 @@ fn draw_layer_operations(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -4847,7 +4829,6 @@ fn draw_tool_shape_options(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 });
             });
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -5139,7 +5120,6 @@ fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         }
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -5189,7 +5169,6 @@ fn draw_export_profiles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -5216,7 +5195,6 @@ fn draw_libraries_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
         ui.add_space(2.0);
     }
-
 }
 
 fn draw_color_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
@@ -5314,7 +5292,6 @@ fn draw_color_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -5383,7 +5360,6 @@ fn draw_spot_colors(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -5466,7 +5442,6 @@ fn draw_gradient_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -5545,7 +5520,6 @@ fn draw_graphic_styles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -5657,7 +5631,6 @@ fn draw_width_profiles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -5681,7 +5654,6 @@ fn draw_analysis(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
         ui.add_space(2.0);
     }
-
 }
 
 fn draw_distances(ui: &mut Ui, ctx: &mut PropPanelCtx) {
@@ -5723,7 +5695,6 @@ fn draw_distances(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -5815,7 +5786,6 @@ fn draw_dimension_annotations(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -5863,7 +5833,6 @@ fn draw_composition_analysis(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -5986,7 +5955,6 @@ fn draw_document_grammar(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -6016,7 +5984,6 @@ fn draw_document_workflow(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
         ui.add_space(2.0);
     }
-
 }
 
 fn draw_actions(ui: &mut Ui, ctx: &mut PropPanelCtx) {
@@ -6072,7 +6039,6 @@ fn draw_actions(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -6153,7 +6119,6 @@ fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -6253,7 +6218,6 @@ fn draw_event_triggers(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -6332,7 +6296,6 @@ fn draw_workspaces(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -6402,7 +6365,6 @@ fn draw_branches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(4.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
@@ -6451,7 +6413,6 @@ fn draw_variables(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         ui.add_space(4.0);
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -6502,7 +6463,6 @@ fn draw_text_variable_binding(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             }
         }
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -6574,7 +6534,6 @@ fn draw_symbol_overrides(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             ui.add_space(2.0);
         }
     }
-
 
     if action.is_some() {
         ctx.action = action;
@@ -6710,12 +6669,10 @@ fn draw_symbols_panel(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(2.0);
     }
 
-
     if action.is_some() {
         ctx.action = action;
     }
 }
-
 
 // ─── Fill editor ─────────────────────────────────────────────────────────────
 

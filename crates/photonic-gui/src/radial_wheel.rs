@@ -753,4 +753,3 @@ fn fill_arc_sector(
     }
     egui::Shape::Mesh(mesh)
 }
-

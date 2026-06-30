@@ -229,7 +229,10 @@ impl AppPreferences {
     /// bucket, then bump the used item by `+1`. Frequency with a recency bias.
     pub fn bump_hotbar_usage(&mut self, bucket: HotbarBucket, item_id: &str) {
         const DECAY: f32 = 0.95;
-        let m = self.hotbar_usage.entry(bucket.key().to_string()).or_default();
+        let m = self
+            .hotbar_usage
+            .entry(bucket.key().to_string())
+            .or_default();
         for v in m.values_mut() {
             *v *= DECAY;
         }

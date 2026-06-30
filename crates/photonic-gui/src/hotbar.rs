@@ -151,7 +151,12 @@ const EMPTY_ITEMS: &[HotbarItem] = &[
 /// run on a path with paintable colour (see [`FILL_ITEMS`]). First two
 /// (Duplicate, Delete) are pinned.
 const OBJECT_ITEMS: &[HotbarItem] = &[
-    action("act.duplicate", ph::COPY, "Duplicate", HotbarAction::Duplicate),
+    action(
+        "act.duplicate",
+        ph::COPY,
+        "Duplicate",
+        HotbarAction::Duplicate,
+    ),
     action("act.delete", ph::TRASH, "Delete", HotbarAction::Delete),
     action(
         "act.front",
@@ -165,7 +170,12 @@ const OBJECT_ITEMS: &[HotbarItem] = &[
         "Send to Back",
         HotbarAction::SendToBack,
     ),
-    action("act.copy_svg", ph::CODE, "Copy as SVG", HotbarAction::CopyAsSvg),
+    action(
+        "act.copy_svg",
+        ph::CODE,
+        "Copy as SVG",
+        HotbarAction::CopyAsSvg,
+    ),
 ];
 
 /// Curated set for a single **text** node. Text nodes have no path fill/stroke,
@@ -180,7 +190,12 @@ const TEXT_ITEMS: &[HotbarItem] = OBJECT_ITEMS;
 /// enabled stroke). Gating these keeps them from being dead buttons on a group,
 /// an image, or a fill-less path.
 const FILL_ITEMS: &[HotbarItem] = &[
-    action("act.invert", ph::SWAP, "Invert Colors", HotbarAction::Invert),
+    action(
+        "act.invert",
+        ph::SWAP,
+        "Invert Colors",
+        HotbarAction::Invert,
+    ),
     action(
         "act.grayscale",
         ph::CIRCLE_HALF,
@@ -200,9 +215,19 @@ const UNGROUP_ITEM: HotbarItem = action(
 /// Multi-selection actions. First two (Group, Duplicate) are pinned.
 const MULTI_ITEMS: &[HotbarItem] = &[
     action("act.group", ph::FRAME_CORNERS, "Group", HotbarAction::Group),
-    action("act.duplicate", ph::COPY, "Duplicate", HotbarAction::Duplicate),
+    action(
+        "act.duplicate",
+        ph::COPY,
+        "Duplicate",
+        HotbarAction::Duplicate,
+    ),
     action("act.delete", ph::TRASH, "Delete", HotbarAction::Delete),
-    action("act.bool_union", ph::UNITE, "Unite", HotbarAction::BoolUnion),
+    action(
+        "act.bool_union",
+        ph::UNITE,
+        "Unite",
+        HotbarAction::BoolUnion,
+    ),
     action(
         "act.bool_subtract",
         ph::SUBTRACT,
@@ -233,8 +258,18 @@ const MULTI_ITEMS: &[HotbarItem] = &[
         "Send to Back",
         HotbarAction::SendToBack,
     ),
-    action("act.copy_svg", ph::CODE, "Copy as SVG", HotbarAction::CopyAsSvg),
-    action("act.invert", ph::SWAP, "Invert Colors", HotbarAction::Invert),
+    action(
+        "act.copy_svg",
+        ph::CODE,
+        "Copy as SVG",
+        HotbarAction::CopyAsSvg,
+    ),
+    action(
+        "act.invert",
+        ph::SWAP,
+        "Invert Colors",
+        HotbarAction::Invert,
+    ),
     action(
         "act.grayscale",
         ph::CIRCLE_HALF,
