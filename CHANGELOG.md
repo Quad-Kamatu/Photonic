@@ -13,6 +13,17 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- Opt-in crash reporting and diagnostics (#59): when Photonic panics it now
+  writes a structured, non-sensitive crash report (app version, UTC time,
+  OS/arch, panic message, backtrace) to a `crash-reports/` folder in your
+  Photonic config directory — local
+  capture is always on. Sending is opt-in: on the next launch a one-time consent
+  dialog (or, once enabled, a Report/Dismiss banner) offers to file the crash as
+  a pre-filled GitHub issue you review in your browser before submitting. No
+  document content, file paths, or environment variables are ever collected, and
+  nothing is sent automatically. A new "Privacy & Diagnostics" settings tab adds
+  the consent toggle, an Open crash-report folder button, and a Report a bug
+  button.
 - Auto-check-on-launch update prompt: once per launch Photonic asks GitHub for
   the latest release (no download) and shows a dismissable banner if a newer
   version exists.

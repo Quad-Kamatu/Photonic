@@ -57,7 +57,10 @@ fn main() -> Result<()> {
     };
     let log_path = log_dir.join("photonic.log");
 
-    // Panic hook: write to log file before the process dies.
+    // Panic hook: write to log file before the process dies, then capture a
+    // structured crash report (#59). Local capture is unconditional — it is the
+    // same non-sensitive crash facts already going to the log; only *sending* a
+    // report is gated behind explicit consent in the GUI on the next launch.
     {
         let path = log_path.clone();
         let orig = std::panic::take_hook();
@@ -70,6 +73,15 @@ fn main() -> Result<()> {
                 .open(&path)
             {
                 let _ = writeln!(f, "[PANIC] {info}");
+            }
+
+            // `force_capture` records a backtrace regardless of RUST_BACKTRACE so
+            // a report is always actionable. Best-effort: never panic in the hook.
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let report = photonic_core::CrashReport::capture(info, &backtrace);
+            match report.write() {
+                Ok(p) => eprintln!("Photonic crash report written: {}", p.display()),
+                Err(e) => eprintln!("Failed to write crash report: {e}"),
             }
         }));
     }

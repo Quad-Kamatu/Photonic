@@ -139,6 +139,7 @@ const EDIT_OPTIONS: &[&str] = &[
     "Tool Defaults",
     "Behavior",
     "Keyboard Shortcuts",
+    "Privacy & Diagnostics",
 ];
 
 // ─── Export dialog ────────────────────────────────────────────────────────────
@@ -423,6 +424,13 @@ pub struct PhotonicApp {
     show_whats_new: bool,
     /// Whether the once-per-launch "did the version change?" check has run.
     whats_new_checked: bool,
+
+    // ── Crash reporting (#59) ─────────────────────────────────────────────────
+    /// Pending local crash report files found on launch (oldest first). Drives
+    /// the one-time consent dialog / report banner. Empty = nothing to offer.
+    pending_crash_reports: Vec<std::path::PathBuf>,
+    /// Whether the once-per-launch scan for pending crash reports has run.
+    crash_reports_scanned: bool,
 
     /// Which corner handle is being dragged (None = not resizing).
     resizing: Option<ResizeHandle>,
@@ -849,6 +857,8 @@ impl Default for PhotonicApp {
             whats_new_notes: Vec::new(),
             show_whats_new: false,
             whats_new_checked: false,
+            pending_crash_reports: Vec::new(),
+            crash_reports_scanned: false,
             resizing: None,
             resize_origin_bounds: None,
             resize_origin_transform: None,
@@ -1171,6 +1181,103 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", b / MB)
     }
+}
+
+// ─── Crash reporting helpers (#59) ─────────────────────────────────────────────
+
+/// Reveal a folder in the OS file manager (best-effort, never blocks/panics).
+fn open_path_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+/// Percent-encode a string for a URL query value (RFC 3986 unreserved kept).
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The serverless GitHub "new issue" base URL for the Photonic repo (matches the
+/// update channel — `update::REPO_OWNER` / `REPO_NAME`).
+fn issue_new_base() -> String {
+    format!(
+        "https://github.com/{}/{}/issues/new",
+        crate::update::REPO_OWNER,
+        crate::update::REPO_NAME,
+    )
+}
+
+/// A blank "Report a bug" issue URL (no crash attached).
+fn blank_issue_url() -> String {
+    format!(
+        "{}?labels=bug&title={}",
+        issue_new_base(),
+        percent_encode("Bug report: "),
+    )
+}
+
+/// A pre-filled GitHub issue URL for a captured crash report. The body is the
+/// user-reviewable Markdown built by the report; GitHub opens it in the browser
+/// where the user edits/submits — nothing is sent automatically. The body is
+/// bounded so the resulting URL stays within practical browser limits.
+fn issue_url_for_report(report: &photonic_core::CrashReport) -> String {
+    // GitHub's issue-prefill GET endpoint rejects very long URLs (HTTP 414 URI
+    // Too Long), so the bound must be on the *final, percent-encoded* URL — not
+    // the raw body. Percent-encoding expands most backtrace bytes (spaces,
+    // slashes, colons, parens, newlines) to `%XX`, roughly 3x, so a raw body
+    // that "fits" can balloon past the limit once encoded. We trim the raw body
+    // until the whole encoded URL is under a safe ceiling.
+    const MAX_URL: usize = 7000;
+    const TRIM_NOTE: &str = "\n…(truncated to fit GitHub's URL limit)…\n```\n";
+
+    let base = issue_new_base();
+    let title = percent_encode(&report.issue_title());
+    let prefix = format!("{base}?labels=crash&title={title}&body=");
+    let full = report.issue_body();
+
+    // Fast path: the untrimmed body already fits within the encoded budget.
+    let encoded_full = percent_encode(&full);
+    if prefix.len() + encoded_full.len() <= MAX_URL {
+        return format!("{prefix}{encoded_full}");
+    }
+
+    // Otherwise trim the raw body (always on a char boundary) until the encoded
+    // body + the closing trim note fit the remaining budget. The note re-closes
+    // the backtrace's ``` fence so the Markdown isn't left mid-block.
+    let budget = MAX_URL.saturating_sub(prefix.len() + percent_encode(TRIM_NOTE).len());
+    let mut cut = full.len();
+    loop {
+        while cut > 0 && !full.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut == 0 {
+            break;
+        }
+        let encoded_len = percent_encode(&full[..cut]).len();
+        if encoded_len <= budget {
+            break;
+        }
+        // Shrink by ~the encoded overflow (≥1 raw byte per encoded char),
+        // floored so we always make progress and converge quickly.
+        let over = encoded_len - budget;
+        cut = cut.saturating_sub((over / 3).max(64));
+    }
+
+    let mut body = full[..cut].to_string();
+    body.push_str(TRIM_NOTE);
+    format!("{prefix}{}", percent_encode(&body))
 }
 
 /// Install the history restored from a just-opened file. With an embedded
@@ -1950,6 +2057,18 @@ impl PhotonicApp {
             self.draw_whats_new(ctx);
         }
 
+        // ── Pending crash reports (#59) ───────────────────────────────────────
+        // Local capture is always on; this only governs *offering* to send. Scan
+        // once per launch, then either ask for one-time consent (consent == None)
+        // or surface a Report/Dismiss banner (consent == Some(true)).
+        if !self.crash_reports_scanned {
+            self.crash_reports_scanned = true;
+            self.pending_crash_reports = photonic_core::diagnostics::pending_reports();
+        }
+        if !self.pending_crash_reports.is_empty() {
+            self.draw_crash_report_prompt(ctx);
+        }
+
         // ── Apply theme ───────────────────────────────────────────────────────
         if self.prefs.dark_mode {
             ctx.set_visuals(crate::theme::build_dark_theme());
@@ -2681,6 +2800,150 @@ impl PhotonicApp {
                                         if let Some(id) = reset {
                                             self.prefs.keymap.remove(&id);
                                             self.prefs.save();
+                                        }
+                                    }
+                                    Some(5) => {
+                                        ui.label(RichText::new(format!(
+                                            "{}  Privacy & Diagnostics",
+                                            ph::SHIELD_CHECK
+                                        )).strong());
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Photonic always writes a local crash report when it \
+                                                 panics so a problem can be diagnosed. Reports are \
+                                                 stored on this machine only and are never sent \
+                                                 automatically.",
+                                            )
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(8.0);
+
+                                        // Consent toggle (off by default; persisted as Some(_)).
+                                        let mut consent =
+                                            self.prefs.crash_reporting_consent.unwrap_or(false);
+                                        if ui
+                                            .checkbox(
+                                                &mut consent,
+                                                "Offer to file crash reports as GitHub issues",
+                                            )
+                                            .on_hover_text(
+                                                "When enabled, after a crash Photonic offers to open a \
+                                                 pre-filled GitHub issue that you review and submit \
+                                                 yourself. Nothing leaves this machine without that action.",
+                                            )
+                                            .changed()
+                                        {
+                                            self.prefs.crash_reporting_consent = Some(consent);
+                                            self.prefs.save();
+                                        }
+                                        ui.add_space(8.0);
+
+                                        // Plain-language disclosure of collected / excluded data.
+                                        ui.label(
+                                            RichText::new("A report contains").strong().small(),
+                                        );
+                                        ui.label(
+                                            RichText::new(
+                                                "•  App version, UTC time, OS and architecture\n\
+                                                 •  The panic message and a backtrace",
+                                            )
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new("Never included").strong().small(),
+                                        );
+                                        ui.label(
+                                            RichText::new(
+                                                "•  Document content or project data\n\
+                                                 •  File names or paths\n\
+                                                 •  Environment variables",
+                                            )
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(10.0);
+
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .button(format!(
+                                                    "{}  Open crash-report folder",
+                                                    ph::FOLDER_OPEN
+                                                ))
+                                                .on_hover_text(
+                                                    "Reveal the folder holding crash reports \
+                                                     (in your Photonic config folder).",
+                                                )
+                                                .clicked()
+                                            {
+                                                if let Some(dir) = photonic_core::crash_dir() {
+                                                    let _ = std::fs::create_dir_all(&dir);
+                                                    open_path_in_file_manager(&dir);
+                                                }
+                                            }
+                                            if ui
+                                                .button(format!("{}  Report a bug", ph::BUG))
+                                                .on_hover_text(
+                                                    "Open a blank GitHub issue in your browser.",
+                                                )
+                                                .clicked()
+                                            {
+                                                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                                    blank_issue_url(),
+                                                ));
+                                            }
+                                        });
+
+                                        // Pending local crash reports — let the user file or clear
+                                        // them directly from settings regardless of consent state.
+                                        let pending =
+                                            photonic_core::diagnostics::pending_reports();
+                                        if !pending.is_empty() {
+                                            ui.add_space(10.0);
+                                            ui.separator();
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{}  {} pending crash report{}",
+                                                    ph::WARNING,
+                                                    pending.len(),
+                                                    if pending.len() == 1 { "" } else { "s" },
+                                                ))
+                                                .small(),
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .button(format!(
+                                                        "{}  Report latest…",
+                                                        ph::PAPER_PLANE_TILT
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    if let Some(path) = pending.last() {
+                                                        if let Some(report) =
+                                                            photonic_core::diagnostics::load_report(
+                                                                path,
+                                                            )
+                                                        {
+                                                            ui.ctx().open_url(
+                                                                egui::OpenUrl::new_tab(
+                                                                    issue_url_for_report(&report),
+                                                                ),
+                                                            );
+                                                        }
+                                                        let _ = photonic_core::diagnostics::clear_report(path);
+                                                        self.pending_crash_reports.clear();
+                                                    }
+                                                }
+                                                if ui.button("Dismiss all").clicked() {
+                                                    for p in &pending {
+                                                        let _ = photonic_core::diagnostics::clear_report(p);
+                                                    }
+                                                    self.pending_crash_reports.clear();
+                                                }
+                                            });
                                         }
                                     }
                                     _ => {}
@@ -12111,6 +12374,191 @@ impl PhotonicApp {
 
     /// Centered modal listing release notes for versions the user just skipped.
     /// Dimming scrim behind, single "Got it" button to dismiss.
+    /// Crash-report prompt shown on launch when local reports are pending (#59).
+    ///
+    /// - consent `None`  → a one-time modal asking whether to enable reporting;
+    ///   answering it sets `crash_reporting_consent` to `Some(bool)`.
+    /// - consent `Some(true)`  → a dismissable banner offering Report / Dismiss.
+    /// - consent `Some(false)` → nothing is offered (reports stay on disk for the
+    ///   settings page; we simply stop nagging).
+    ///
+    /// Reported or dismissed files are deleted so they are not re-offered.
+    fn draw_crash_report_prompt(&mut self, ctx: &egui::Context) {
+        match self.prefs.crash_reporting_consent {
+            None => {
+                // One-time consent modal.
+                egui::Area::new(egui::Id::new("crash_consent_scrim"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(egui::pos2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        let screen = ctx.screen_rect();
+                        ui.painter()
+                            .rect_filled(screen, 0.0, Color32::from_black_alpha(160));
+                        ui.allocate_rect(screen, egui::Sense::click());
+                    });
+
+                let mut choice: Option<bool> = None;
+                egui::Window::new(
+                    RichText::new(format!("{}  Help improve Photonic", ph::SHIELD_CHECK))
+                        .size(16.0),
+                )
+                .id(egui::Id::new("crash_consent_window"))
+                .order(egui::Order::Foreground)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.label(format!(
+                        "Photonic closed unexpectedly. {} local crash report{} {} ready.",
+                        self.pending_crash_reports.len(),
+                        if self.pending_crash_reports.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        if self.pending_crash_reports.len() == 1 {
+                            "is"
+                        } else {
+                            "are"
+                        },
+                    ));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "May Photonic offer to file these as GitHub issues in future? \
+                             A report includes the app version, time, OS/arch, the panic \
+                             message and a backtrace. It never includes your document, file \
+                             paths, or environment variables — and you always review the \
+                             pre-filled issue in your browser before submitting it.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                RichText::new(format!("{}  Enable & report", ph::PAPER_PLANE_TILT))
+                                    .color(Color32::WHITE),
+                            )
+                            .clicked()
+                        {
+                            choice = Some(true);
+                        }
+                        if ui.button("Not now").clicked() {
+                            choice = Some(false);
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(
+                            "You can change this anytime in Edit ▸ Privacy & Diagnostics.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
+
+                if let Some(allow) = choice {
+                    self.prefs.crash_reporting_consent = Some(allow);
+                    self.prefs.save();
+                    if allow {
+                        // File the newest report immediately and clear ONLY that
+                        // one from disk. Any remaining reports stay on disk and
+                        // are offered again on next launch — deleting them here
+                        // would silently destroy unreported diagnostics (the very
+                        // data this feature exists to preserve). Delete-all is
+                        // reserved for the explicit Dismiss action.
+                        if let Some(path) = self.pending_crash_reports.last() {
+                            if let Some(report) = photonic_core::diagnostics::load_report(path) {
+                                ctx.open_url(egui::OpenUrl::new_tab(issue_url_for_report(&report)));
+                            }
+                            let _ = photonic_core::diagnostics::clear_report(path);
+                        }
+                    }
+                    // Stop offering for this session; declining ("Not now") leaves
+                    // every report on disk (still listed in the settings page).
+                    self.pending_crash_reports.clear();
+                }
+            }
+            Some(true) => {
+                // Dismissable Report / Dismiss banner.
+                let mut report = false;
+                let mut dismiss = false;
+                let n = self.pending_crash_reports.len();
+                egui::Area::new(egui::Id::new("crash_report_banner"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 52.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style())
+                            .fill(Color32::from_rgb(48, 33, 33))
+                            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(190, 90, 90)))
+                            .rounding(10.0)
+                            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(ph::BUG)
+                                            .size(18.0)
+                                            .color(Color32::from_rgb(240, 150, 150)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Photonic recovered from a crash — {n} report{} ready",
+                                            if n == 1 { "" } else { "s" },
+                                        ))
+                                        .strong()
+                                        .color(Color32::from_rgb(240, 226, 226)),
+                                    );
+                                    ui.add_space(8.0);
+                                    if ui
+                                        .button(
+                                            RichText::new(format!(
+                                                "{}  Report",
+                                                ph::PAPER_PLANE_TILT
+                                            ))
+                                            .color(Color32::WHITE),
+                                        )
+                                        .clicked()
+                                    {
+                                        report = true;
+                                    }
+                                    if ui.button("Dismiss").clicked() {
+                                        dismiss = true;
+                                    }
+                                });
+                            });
+                    });
+                if report {
+                    // File the newest report and clear ONLY that one from disk —
+                    // identical semantics to the consent dialog and the settings
+                    // "Report latest…" path. Remaining reports are re-offered next
+                    // launch instead of being destroyed.
+                    if let Some(path) = self.pending_crash_reports.last() {
+                        if let Some(rep) = photonic_core::diagnostics::load_report(path) {
+                            ctx.open_url(egui::OpenUrl::new_tab(issue_url_for_report(&rep)));
+                        }
+                        let _ = photonic_core::diagnostics::clear_report(path);
+                    }
+                    self.pending_crash_reports.clear();
+                } else if dismiss {
+                    // Explicit dismissal is the only delete-all path: discard
+                    // every pending report from disk.
+                    for p in &self.pending_crash_reports {
+                        let _ = photonic_core::diagnostics::clear_report(p);
+                    }
+                    self.pending_crash_reports.clear();
+                }
+            }
+            Some(false) => {
+                // Declined: don't nag. Stop offering this session (reports remain
+                // on disk and are still listed in the settings page).
+                self.pending_crash_reports.clear();
+            }
+        }
+    }
+
     fn draw_whats_new(&mut self, ctx: &egui::Context) {
         // Dim the rest of the app.
         egui::Area::new(egui::Id::new("whats_new_scrim"))
@@ -12896,5 +13344,49 @@ mod direct_select_geometry_tests {
             is_smooth_anchor(&b, 1),
             "collinear opposite handles are smooth"
         );
+    }
+}
+
+#[cfg(test)]
+mod crash_report_url_tests {
+    use super::*;
+
+    fn report_with_backtrace(len: usize) -> photonic_core::CrashReport {
+        // A backtrace full of bytes that each percent-encode to %XX (3 chars):
+        // spaces, slashes, colons, newlines — exactly the worst case in release.
+        let backtrace: String = " /:\n".repeat(len / 4 + 1);
+        photonic_core::CrashReport {
+            version: "9.9.9".to_string(),
+            timestamp: "2026-06-30T00:00:00Z".to_string(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            panic_message: "boom".to_string(),
+            location: Some("src/lib.rs:1:1".to_string()),
+            backtrace,
+        }
+    }
+
+    #[test]
+    fn url_stays_under_github_limit_for_huge_backtrace() {
+        // ~16 KB of all-%XX backtrace would encode to ~48 KB if unbounded.
+        let report = report_with_backtrace(16_000);
+        let url = issue_url_for_report(&report);
+        assert!(
+            url.len() <= 7000,
+            "encoded URL must stay within the budget, got {}",
+            url.len()
+        );
+        // Truncated bodies re-close the code fence via the trim note.
+        let body = url.split("&body=").nth(1).unwrap();
+        assert!(body.contains(&percent_encode("truncated to fit")));
+    }
+
+    #[test]
+    fn small_report_is_not_truncated() {
+        let report = report_with_backtrace(40);
+        let url = issue_url_for_report(&report);
+        assert!(url.len() <= 7000);
+        let body = url.split("&body=").nth(1).unwrap();
+        assert!(!body.contains(&percent_encode("truncated to fit")));
     }
 }

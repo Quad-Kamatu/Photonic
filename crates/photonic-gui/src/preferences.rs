@@ -64,6 +64,12 @@ pub struct AppPreferences {
     /// a fresh install (no popup the very first time).
     #[serde(default)]
     pub last_seen_version: String,
+    /// Consent for opt-in crash reporting (#59). `None` = never asked (off until
+    /// the one-time dialog is answered), `Some(false)` = declined, `Some(true)` =
+    /// allowed to offer pre-filled bug reports. Off by default — nothing is ever
+    /// sent without an explicit, user-reviewed action.
+    #[serde(default)]
+    pub crash_reporting_consent: Option<bool>,
 
     // HOTBAR — tools pinned to the sidebar by the user
     #[serde(default)]
@@ -167,6 +173,7 @@ impl Default for AppPreferences {
             history_max_mb: 50.0,
             auto_check_updates: true,
             last_seen_version: String::new(),
+            crash_reporting_consent: None,
             pinned_tools: Vec::new(),
             open_drawer: Some(DrawerGroup::Tools),
             drawer_width: 220.0,
