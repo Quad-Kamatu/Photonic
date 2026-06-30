@@ -1,12 +1,13 @@
 use crate::protocol::{
     AddColorSwatchArgs, AddConstructionLineArgs, AddDimensionArgs, AddExportProfileArgs,
     AnalyzeCompositionArgs, ApplyColorSwatchArgs, ApplyDocumentTemplateArgs,
-    ApplyGradientSwatchArgs, ApplyGraphicStyleArgs, ApplySpotColorArgs, ApplyWidthProfileArgs,
-    BranchCreateArgs, BranchDeleteArgs, BranchSwitchArgs, BreakLinkToSymbolArgs, CheckGrammarArgs,
-    DefineActionArgs, DefineGrammarRuleArgs, DefineGraphicStyleArgs, DefineSpotColorArgs,
-    DefineSymbolArgs, DefineVariableArgs, DefineWidthProfileArgs, DeleteActionArgs,
-    DeleteColorSwatchArgs, DeleteGradientSwatchArgs, DeleteGrammarRuleArgs, DeleteGraphicStyleArgs,
-    DeleteLayerArgs, DeleteSpotColorArgs, DeleteSymbolArgs, DeleteVariableArgs,
+    ApplyGradientSwatchArgs, ApplyGraphicStyleArgs, ApplyPatternFillArgs, ApplySpotColorArgs,
+    ApplyWidthProfileArgs, BranchCreateArgs, BranchDeleteArgs, BranchSwitchArgs,
+    BreakLinkToSymbolArgs, CheckGrammarArgs, DefineActionArgs, DefineGrammarRuleArgs,
+    DefineGraphicStyleArgs, DefinePatternArgs, DefineSpotColorArgs, DefineSymbolArgs,
+    DefineVariableArgs, DefineWidthProfileArgs, DeleteActionArgs, DeleteColorSwatchArgs,
+    DeleteGradientSwatchArgs, DeleteGrammarRuleArgs, DeleteGraphicStyleArgs, DeleteLayerArgs,
+    DeletePatternArgs, DeleteSpotColorArgs, DeleteSymbolArgs, DeleteVariableArgs,
     DeleteWidthProfileArgs, DeleteWorkspaceArgs, DetectRhythmsArgs, DiffCheckpointsArgs,
     DuplicateLayerArgs, ExportDesignTokensArgs, ExportPdfArgs, ExportRasterArgs,
     ExportSelectionArgs, ExportSvgArgs, FitToMarginsArgs, GetCanvasOverviewArgs,
@@ -2133,6 +2134,207 @@ pub async fn delete_width_profile(state: &AppState, args: DeleteWidthProfileArgs
     }
 }
 
+// ─── Patterns ──────────────────────────────────────────────────────────────────
+
+/// Define (or overwrite) a named tiled pattern in the document registry.
+pub async fn define_pattern(state: &AppState, args: DefinePatternArgs) -> ToolResult {
+    tracing::debug!("tool: define_pattern");
+    use base64::Engine;
+    use photonic_core::document::Pattern;
+    use photonic_core::style::{PatternFill, PatternTileType};
+    use photonic_core::RasterImage;
+
+    if args.name.trim().is_empty() {
+        return ToolResult::error("Pattern name must not be empty.");
+    }
+
+    // Resolve tile bytes from a file path or inline base64.
+    let bytes = if let Some(path) = &args.path {
+        match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return ToolResult::error(format!("Failed to read '{}': {}", path, e)),
+        }
+    } else if let Some(b64) = &args.data_base64 {
+        match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+            Ok(b) => b,
+            Err(e) => return ToolResult::error(format!("Invalid base64: {}", e)),
+        }
+    } else {
+        return ToolResult::error("define_pattern requires `path` or `data_base64`.");
+    };
+
+    let tile = match RasterImage::from_encoded(&bytes) {
+        Ok(t) => t,
+        Err(e) => return ToolResult::error(format!("Failed to decode tile image: {}", e)),
+    };
+
+    let mut fill = PatternFill::new(tile);
+    if let Some(t) = &args.tile_type {
+        match PatternTileType::from_label(t) {
+            Some(tt) => fill.tile_type = tt,
+            None => return ToolResult::error(format!("Unknown tile_type: {}", t)),
+        }
+    }
+    if let Some(s) = args.scale {
+        fill.scale = s;
+    }
+    if let Some(r) = args.rotation_degrees {
+        fill.rotation = r.to_radians();
+    }
+    if let Some(o) = args.offset {
+        fill.offset = o;
+    }
+    if let Some(sp) = args.spacing {
+        fill.spacing = sp;
+    }
+
+    let name = args.name.trim().to_string();
+    let (tw, th) = (fill.tile.width, fill.tile.height);
+    let mut doc = state.document.lock().await;
+
+    let pattern_id = if let Some(existing) = doc.patterns.iter_mut().find(|p| p.name == name) {
+        existing.fill = fill;
+        existing.id
+    } else {
+        let pattern = Pattern::new(&name, fill);
+        let id = pattern.id;
+        doc.patterns.push(pattern);
+        id
+    };
+
+    ToolResult::text(format!(
+        "Defined pattern '{}' ({}×{}px tile).",
+        name, tw, th
+    ))
+    .with_data(serde_json::json!({
+        "name": name,
+        "id": pattern_id.to_string(),
+        "tile_width": tw,
+        "tile_height": th,
+    }))
+}
+
+/// List all named patterns in the document registry.
+pub async fn list_patterns(state: &AppState) -> ToolResult {
+    tracing::debug!("tool: list_patterns");
+    let doc = state.document.lock().await;
+    let patterns: Vec<serde_json::Value> = doc
+        .patterns
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "id": p.id.to_string(),
+                "tile_width": p.fill.tile.width,
+                "tile_height": p.fill.tile.height,
+                "tile_type": p.fill.tile_type.label(),
+                "scale": p.fill.scale,
+                "rotation_degrees": p.fill.rotation.to_degrees(),
+                "offset": p.fill.offset,
+                "spacing": p.fill.spacing,
+            })
+        })
+        .collect();
+    ToolResult::text(format!("{} pattern(s).", patterns.len()))
+        .with_data(serde_json::json!({ "patterns": patterns }))
+}
+
+/// Apply a registry pattern as the fill of path nodes (undo-safe batch).
+pub async fn apply_pattern_fill(state: &AppState, args: ApplyPatternFillArgs) -> ToolResult {
+    tracing::debug!("tool: apply_pattern_fill");
+    use photonic_core::history::Command;
+    use photonic_core::node::SceneNodeKind;
+    use photonic_core::style::{Fill, PatternTileType};
+
+    // Resolve the pattern fill (by name or id), then drop the lock.
+    let fill = {
+        let doc = state.document.lock().await;
+        let found = doc
+            .patterns
+            .iter()
+            .find(|p| p.name == args.pattern || p.id.to_string() == args.pattern);
+        match found {
+            None => {
+                return ToolResult::error(format!("No pattern named '{}'.", args.pattern));
+            }
+            Some(p) => {
+                let mut f = p.fill.clone();
+                if let Some(t) = &args.tile_type {
+                    match PatternTileType::from_label(t) {
+                        Some(tt) => f.tile_type = tt,
+                        None => return ToolResult::error(format!("Unknown tile_type: {}", t)),
+                    }
+                }
+                if let Some(s) = args.scale {
+                    f.scale = s;
+                }
+                if let Some(r) = args.rotation_degrees {
+                    f.rotation = r.to_radians();
+                }
+                if let Some(o) = args.offset {
+                    f.offset = o;
+                }
+                if let Some(sp) = args.spacing {
+                    f.spacing = sp;
+                }
+                f
+            }
+        }
+    };
+
+    let doc = state.document.lock().await;
+    let mut commands: Vec<Command> = Vec::new();
+
+    for id_str in &args.node_ids {
+        let node_id = uuid::Uuid::parse_str(id_str)
+            .ok()
+            .or_else(|| doc.find_node_by_name(id_str).map(|n| n.id));
+        if let Some(nid) = node_id {
+            if let Some(node) = doc.nodes.get(&nid).cloned() {
+                if let SceneNodeKind::Path(_) = node.kind {
+                    let mut new_node = node.clone();
+                    if let SceneNodeKind::Path(ref mut pn) = new_node.kind {
+                        pn.fill = Fill::pattern(fill.clone());
+                    }
+                    commands.push(Command::UpdateNode {
+                        old: node,
+                        new: new_node,
+                    });
+                }
+            }
+        }
+    }
+
+    if commands.is_empty() {
+        return ToolResult::text("No matching path nodes found.");
+    }
+
+    let count = commands.len();
+    drop(doc);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    history.execute(Command::Batch(commands), &mut doc);
+    drop(history);
+
+    ToolResult::text(format!(
+        "Applied pattern '{}' to {} path node(s).",
+        args.pattern, count
+    ))
+}
+
+/// Delete a named pattern from the registry. Does not affect nodes already filled.
+pub async fn delete_pattern(state: &AppState, args: DeletePatternArgs) -> ToolResult {
+    tracing::debug!("tool: delete_pattern");
+    let mut doc = state.document.lock().await;
+    let before = doc.patterns.len();
+    doc.patterns.retain(|p| p.name != args.name);
+    if doc.patterns.len() < before {
+        ToolResult::text(format!("Deleted pattern '{}'.", args.name))
+    } else {
+        ToolResult::error(format!("No pattern named '{}' found.", args.name))
+    }
+}
+
 // ─── Property Constraints ──────────────────────────────────────────────────────
 
 /// Create a live property constraint binding a node property to an expression.
@@ -2583,6 +2785,7 @@ pub async fn get_canvas_overview(state: &AppState, args: GetCanvasOverviewArgs) 
                 FillKind::Gradient(_) => "#gradient".to_string(),
                 FillKind::FluidGradient(_) => "#fluid".to_string(),
                 FillKind::MeshGradient(_) => "#mesh".to_string(),
+                FillKind::Pattern(_) => "#pattern".to_string(),
                 FillKind::None => "#none".to_string(),
             },
             SceneNodeKind::Text(tn) => match &tn.fill.kind {

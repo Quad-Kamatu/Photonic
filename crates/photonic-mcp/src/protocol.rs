@@ -2097,6 +2097,38 @@ pub enum FillArg {
         cols: u32,
         vertices: Vec<MeshVertexArg>,
     },
+    /// A tiled raster pattern fill. The tile is supplied inline as a base64 PNG,
+    /// so the fill is fully self-contained (consistent with how gradients carry
+    /// their own stops). For an ergonomic, reusable workflow prefer
+    /// `define_pattern` + `apply_pattern_fill`, which resolve from the document
+    /// pattern registry.
+    ///
+    /// Example:
+    /// ```json
+    /// {
+    ///   "type": "pattern",
+    ///   "tile_base64": "<base64 PNG>",
+    ///   "tile_type": "grid",
+    ///   "scale": 1.0,
+    ///   "rotation_degrees": 0.0,
+    ///   "offset": [0, 0],
+    ///   "spacing": 0.0
+    /// }
+    /// ```
+    Pattern {
+        /// Base64-encoded PNG (or any image format) for the tile.
+        tile_base64: String,
+        #[serde(default)]
+        tile_type: Option<String>,
+        #[serde(default)]
+        scale: Option<f64>,
+        #[serde(default)]
+        rotation_degrees: Option<f64>,
+        #[serde(default)]
+        offset: Option<[f64; 2]>,
+        #[serde(default)]
+        spacing: Option<f64>,
+    },
 }
 
 impl FillArg {
@@ -2186,6 +2218,41 @@ impl FillArg {
                     })
                     .collect();
                 Ok(Fill::mesh_gradient(MeshGradient::new(*rows, *cols, verts?)))
+            }
+            FillArg::Pattern {
+                tile_base64,
+                tile_type,
+                scale,
+                rotation_degrees,
+                offset,
+                spacing,
+            } => {
+                use base64::Engine;
+                use photonic_core::style::{PatternFill, PatternTileType};
+                use photonic_core::RasterImage;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(tile_base64.as_bytes())
+                    .map_err(|e| format!("Invalid base64 tile: {}", e))?;
+                let tile = RasterImage::from_encoded(&bytes)
+                    .map_err(|e| format!("Failed to decode pattern tile: {}", e))?;
+                let mut pat = PatternFill::new(tile);
+                if let Some(t) = tile_type {
+                    pat.tile_type = PatternTileType::from_label(t)
+                        .ok_or_else(|| format!("Unknown tile_type: {}", t))?;
+                }
+                if let Some(s) = scale {
+                    pat.scale = *s;
+                }
+                if let Some(r) = rotation_degrees {
+                    pat.rotation = r.to_radians();
+                }
+                if let Some(o) = offset {
+                    pat.offset = *o;
+                }
+                if let Some(sp) = spacing {
+                    pat.spacing = *sp;
+                }
+                Ok(Fill::pattern(pat))
             }
         }
     }
@@ -3529,6 +3596,71 @@ pub struct ApplyWidthProfileArgs {
 #[derive(Debug, Deserialize)]
 pub struct DeleteWidthProfileArgs {
     /// Name of the width profile to delete.
+    pub name: String,
+}
+
+// ─── Pattern Args ─────────────────────────────────────────────────────────────
+
+/// Arguments for `define_pattern` tool — adds a reusable tiled pattern to the
+/// document pattern registry. Supply the tile via `path` (a file on disk) or
+/// `data_base64` (inline image bytes).
+#[derive(Debug, Deserialize)]
+pub struct DefinePatternArgs {
+    /// Unique pattern name. Overwrites an existing pattern with the same name.
+    pub name: String,
+    /// Path to a tile image file (PNG/JPEG/WebP/…). Mutually optional with `data_base64`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Base64-encoded tile image bytes. Mutually optional with `path`.
+    #[serde(default)]
+    pub data_base64: Option<String>,
+    /// Tile layout: "grid" (default), "brick_by_row", "brick_by_column", or "hex".
+    #[serde(default)]
+    pub tile_type: Option<String>,
+    /// Uniform pattern scale (default 1.0).
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// Pattern rotation in degrees (default 0).
+    #[serde(default)]
+    pub rotation_degrees: Option<f64>,
+    /// Document-space offset of the pattern origin (default [0, 0]).
+    #[serde(default)]
+    pub offset: Option<[f64; 2]>,
+    /// Inter-tile gutter in tile pixels (default 0); gutter samples as transparent.
+    #[serde(default)]
+    pub spacing: Option<f64>,
+}
+
+/// Arguments for `apply_pattern_fill` tool — sets a registry pattern as the fill
+/// of one or more path nodes. A clone of the pattern (with optional transform
+/// overrides) is embedded on each node so it renders self-contained.
+#[derive(Debug, Deserialize)]
+pub struct ApplyPatternFillArgs {
+    /// Node UUIDs or names to fill with the pattern.
+    pub node_ids: Vec<String>,
+    /// Name or UUID of the pattern in the document registry.
+    pub pattern: String,
+    /// Override the tile layout for this application.
+    #[serde(default)]
+    pub tile_type: Option<String>,
+    /// Override the pattern scale for this application.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// Override the pattern rotation (degrees) for this application.
+    #[serde(default)]
+    pub rotation_degrees: Option<f64>,
+    /// Override the pattern offset for this application.
+    #[serde(default)]
+    pub offset: Option<[f64; 2]>,
+    /// Override the inter-tile spacing for this application.
+    #[serde(default)]
+    pub spacing: Option<f64>,
+}
+
+/// Arguments for `delete_pattern` tool
+#[derive(Debug, Deserialize)]
+pub struct DeletePatternArgs {
+    /// Name of the pattern to delete from the registry.
     pub name: String,
 }
 

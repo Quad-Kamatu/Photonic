@@ -252,11 +252,25 @@ impl HeadlessRenderer {
         // document on the CPU in true draw order so vector and raster nodes
         // z-interleave correctly (the GPU path renders all vectors as one plane
         // beneath the rasters). Pure-vector documents keep the GPU path below.
+        //
+        // Pattern fills are also routed here: the GPU path colours each fill at
+        // its mesh *vertices* (great for gradients), but a tiled pattern must be
+        // sampled per *pixel* — which is exactly what the CPU compositor does via
+        // `FillKind::sample_at`. (Like the raster path, glyph text is not painted
+        // by the CPU compositor; a document mixing pattern fills and text follows
+        // the same long-standing limitation as raster+text documents.)
         let has_raster = document
             .nodes
             .values()
             .any(|n| matches!(&n.kind, SceneNodeKind::Raster(_)));
-        if has_raster {
+        let has_pattern = document.nodes.values().any(|n| {
+            matches!(
+                &n.kind,
+                SceneNodeKind::Path(pn)
+                    if matches!(pn.fill.kind, photonic_core::style::FillKind::Pattern(_))
+            )
+        });
+        if has_raster || has_pattern {
             let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
             let bg = match opts.background {
                 ExportBackground::Artboard => [
@@ -1635,5 +1649,81 @@ mod blend_tests {
                 want[c],
             );
         }
+    }
+
+    /// Render a rectangle filled with a 20×20 two-colour checker pattern and
+    /// confirm (a) the pattern actually tiles on-canvas (the checker alternates
+    /// across the rectangle), and (b) the pattern is pinned to document space —
+    /// translating the rectangle by a whole tile period leaves each absolute
+    /// document pixel showing the same pattern colour (transform independence).
+    #[test]
+    fn pattern_fill_tiles_and_is_transform_independent() {
+        use photonic_core::style::{Fill, PatternFill};
+        use photonic_core::transform::Transform;
+        use photonic_core::RasterImage;
+
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping pattern tiling test");
+            return;
+        };
+
+        // 20×20 checker: 10px cells, red / blue.
+        let cell = 10u32;
+        let n = 20u32;
+        let mut tile = RasterImage::new(n, n);
+        for y in 0..n {
+            for x in 0..n {
+                let on = ((x / cell) + (y / cell)) % 2 == 0;
+                let rgba = if on {
+                    [230, 30, 30, 255]
+                } else {
+                    [30, 30, 230, 255]
+                };
+                tile.set_pixel(x, y, rgba);
+            }
+        }
+        let pattern = PatternFill::new(tile);
+
+        let build = |dx: f64| -> image::RgbaImage {
+            let mut doc = Document::new("pattern-test", 100.0, 100.0);
+            let mut node = SceneNode::new(
+                "rect",
+                doc.active_layer_id.unwrap(),
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 100.0, 100.0))
+                        .with_fill(Fill::pattern(pattern.clone())),
+                ),
+            );
+            // Move the shape; the pattern must NOT move with it.
+            node.transform = Transform::translate(dx, 0.0);
+            doc.add_node(node, None);
+            let png = r.render_png_at_size(&doc, 100, 100);
+            image::load_from_memory(&png)
+                .expect("decode png")
+                .to_rgba8()
+        };
+
+        let img = build(0.0);
+        // (a) Tiling: a red cell texel and the horizontally-adjacent blue cell.
+        let red = img.get_pixel(5, 5).0; // cell (0,0) → red
+        let blue = img.get_pixel(15, 5).0; // cell (1,0) → blue
+        assert!(red[0] > 150 && red[2] < 100, "expected red, got {:?}", red);
+        assert!(
+            blue[2] > 150 && blue[0] < 100,
+            "expected blue, got {:?}",
+            blue
+        );
+
+        // (b) Transform independence: shifting the rect by a whole 20px tile
+        // period leaves the same document pixel showing the same pattern colour.
+        let shifted = build(20.0);
+        let a = img.get_pixel(50, 50).0;
+        let b = shifted.get_pixel(50, 50).0;
+        let close = (0..3).all(|i| (a[i] as i32 - b[i] as i32).abs() <= 12);
+        assert!(
+            close,
+            "pattern should be pinned to doc space: {:?} vs {:?}",
+            a, b
+        );
     }
 }

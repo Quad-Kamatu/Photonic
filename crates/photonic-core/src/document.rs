@@ -3,6 +3,7 @@ use crate::{
     layer::{Layer, LayerId},
     node::{NodeId, SceneNode, SceneNodeKind},
     selection::Selection,
+    style::PatternFill,
     Color,
 };
 use serde::{Deserialize, Serialize};
@@ -151,6 +152,33 @@ impl Symbol {
             id: Uuid::new_v4(),
             name: name.into(),
             master_node_id,
+        }
+    }
+}
+
+// ─── Pattern registry ─────────────────────────────────────────────────────────
+
+/// A named, reusable pattern in the document-level pattern registry.
+///
+/// The registry is the *authoring* home for patterns (define once, apply many).
+/// When applied to a node, a clone of `fill` (including its embedded tile) is
+/// stored on the node so the rendered fill stays self-contained and independent
+/// of the registry entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pattern {
+    pub id: Uuid,
+    /// Unique display name.
+    pub name: String,
+    /// The pattern fill definition (embedded tile + transform).
+    pub fill: PatternFill,
+}
+
+impl Pattern {
+    pub fn new(name: impl Into<String>, fill: PatternFill) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            fill,
         }
     }
 }
@@ -633,6 +661,9 @@ pub struct Document {
     /// Named variable-width stroke profiles.
     #[serde(default)]
     pub width_profiles: Vec<WidthProfile>,
+    /// Named reusable patterns — tiled raster fills defined once and applied to nodes.
+    #[serde(default)]
+    pub patterns: Vec<Pattern>,
     /// Live property constraints — parametric bindings of a node property to an
     /// expression over other nodes' properties. Re-evaluated after every mutation.
     #[serde(default)]
@@ -795,6 +826,7 @@ impl Document {
             spot_colors: Vec::new(),
             graphic_styles: Vec::new(),
             width_profiles: Vec::new(),
+            patterns: Vec::new(),
             constraints: Vec::new(),
             grammar_rules: Vec::new(),
             action_sets: Vec::new(),

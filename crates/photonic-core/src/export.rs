@@ -620,6 +620,57 @@ fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
                 format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
             }
         }
+        FillKind::Pattern(p) => {
+            use base64::Engine;
+            let id = format!("pat-{}", *counter);
+            *counter += 1;
+
+            let tw = p.tile.width.max(1);
+            let th = p.tile.height.max(1);
+            // The pattern cell is the tile plus its inter-tile gutter.
+            let cell_w = tw as f64 + p.spacing.max(0.0);
+            let cell_h = th as f64 + p.spacing.max(0.0);
+
+            let png = p.tile.to_png();
+            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+
+            // patternTransform mirrors PatternFill's document-space transform:
+            // translate(offset) → rotate(deg) → scale(s). SVG applies these
+            // right-to-left, matching the inverse-transform sample order.
+            let deg = p.rotation.to_degrees();
+            let mut xform = String::new();
+            if p.offset[0] != 0.0 || p.offset[1] != 0.0 {
+                xform.push_str(&format!("translate({} {}) ", p.offset[0], p.offset[1]));
+            }
+            if deg.abs() > 1e-9 {
+                xform.push_str(&format!("rotate({deg}) "));
+            }
+            if (p.scale - 1.0).abs() > 1e-9 {
+                xform.push_str(&format!("scale({}) ", p.scale));
+            }
+            let xform = xform.trim_end();
+            let xform_attr = if xform.is_empty() {
+                String::new()
+            } else {
+                format!(" patternTransform=\"{xform}\"")
+            };
+
+            // Grid layout is exact; brick/hex staggers are approximated by the
+            // grid cell here — on-canvas/headless remain the source of truth.
+            defs.push_str(&format!(
+                "    <pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" \
+                 width=\"{cell_w}\" height=\"{cell_h}\"{xform_attr}>\n\
+                 \x20     <image x=\"0\" y=\"0\" width=\"{tw}\" height=\"{th}\" \
+                 href=\"data:image/png;base64,{b64}\"/>\n\
+                 \x20 </pattern>\n",
+            ));
+
+            if (fill.opacity - 1.0).abs() < 0.001 {
+                format!(" fill=\"url(#{id})\"")
+            } else {
+                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
+            }
+        }
     }
 }
 
@@ -865,6 +916,12 @@ fn fill_rgb(fill: &Fill) -> Option<[f32; 3]> {
         FillKind::Gradient(g) => g.stops.first().map(|s| s.color)?,
         FillKind::FluidGradient(g) => g.points.first().map(|p| p.color)?,
         FillKind::MeshGradient(g) => g.vertices.first().map(|v| v.color)?,
+        // Pattern fills can't tile in this representative-RGB path; approximate by
+        // the tile colour at the pattern origin (as gradients use their first stop).
+        FillKind::Pattern(p) => {
+            let s = p.sample_at(0.0, 0.0);
+            return Some([s[0], s[1], s[2]]);
+        }
     };
     Some([c.r, c.g, c.b])
 }

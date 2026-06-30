@@ -1574,6 +1574,28 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::document::delete_width_profile(state, a).await,
             ))
         }
+        "define_pattern" => {
+            let a: DefinePatternArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::define_pattern(state, a).await,
+            ))
+        }
+        "list_patterns" => Ok(ToolOutput::readonly(
+            handlers::document::list_patterns(state).await,
+        )),
+        "apply_pattern_fill" => {
+            let a: ApplyPatternFillArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::apply_pattern_fill(state, a).await,
+            ))
+        }
+        "delete_pattern" => {
+            let a: DeletePatternArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::delete_pattern(state, a).await,
+            ))
+        }
         "set_constraint" => {
             let a: crate::protocol::SetConstraintArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -5518,6 +5540,57 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Name of the profile to delete." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "define_pattern",
+            "description": "Define (or overwrite) a named tiled raster pattern in the document pattern registry. Supply the tile via `path` (a file on disk) or `data_base64` (inline image bytes). Patterns are applied to nodes with apply_pattern_fill; the applied fill embeds a clone of the tile so it renders self-contained on canvas, headless, and SVG.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Unique pattern name." },
+                    "path": { "type": "string", "description": "Path to a tile image file (PNG/JPEG/WebP/…)." },
+                    "data_base64": { "type": "string", "description": "Base64-encoded tile image bytes (alternative to `path`)." },
+                    "tile_type": { "type": "string", "enum": ["grid", "brick_by_row", "brick_by_column", "hex"], "description": "Tile layout (default 'grid')." },
+                    "scale": { "type": "number", "description": "Uniform pattern scale (default 1.0)." },
+                    "rotation_degrees": { "type": "number", "description": "Pattern rotation in degrees (default 0)." },
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "Document-space [x, y] offset of the pattern origin (default [0, 0])." },
+                    "spacing": { "type": "number", "description": "Inter-tile gutter in tile pixels; samples as transparent (default 0)." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "list_patterns",
+            "description": "List all named patterns in the document pattern registry, with their tile dimensions and transform.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "apply_pattern_fill",
+            "description": "Apply a registry pattern as the fill of one or more path nodes (undo-safe batch). A clone of the pattern's tile is embedded on each node, with optional per-application transform overrides. The pattern transform is independent of the node transform — moving the shape scrolls the artwork under the pattern.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Node UUIDs or names to fill with the pattern." },
+                    "pattern": { "type": "string", "description": "Name or UUID of the pattern to apply." },
+                    "tile_type": { "type": "string", "enum": ["grid", "brick_by_row", "brick_by_column", "hex"], "description": "Override the tile layout for this application." },
+                    "scale": { "type": "number", "description": "Override the pattern scale for this application." },
+                    "rotation_degrees": { "type": "number", "description": "Override the pattern rotation (degrees) for this application." },
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "Override the pattern [x, y] offset for this application." },
+                    "spacing": { "type": "number", "description": "Override the inter-tile spacing for this application." }
+                },
+                "required": ["node_ids", "pattern"]
+            }
+        },
+        {
+            "name": "delete_pattern",
+            "description": "Delete a named pattern from the registry. Does not affect nodes already filled with it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the pattern to delete." }
                 },
                 "required": ["name"]
             }

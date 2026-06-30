@@ -6,7 +6,7 @@ use photonic_core::{
     ops::boolean::BooleanOp,
     style::{
         FluidGradient, FluidGradientPoint, Gradient, GradientKind, GradientStop, LineJoin,
-        MeshGradient, MeshGradientVertex, Stroke,
+        MeshGradient, MeshGradientVertex, PatternFill, Stroke,
     },
     CheckpointInfo, Color, Document, Fill, GaussianGlow, GlowEffect, PrimitiveKind, SceneNode,
     SceneNodeKind,
@@ -6684,6 +6684,7 @@ enum FillType {
     Radial,
     Fluid,
     Mesh,
+    Pattern,
 }
 
 /// Render a small eyedropper icon button. Returns `true` when clicked.
@@ -6707,6 +6708,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
         },
         FillKind::FluidGradient(_) => FillType::Fluid,
         FillKind::MeshGradient(_) => FillType::Mesh,
+        FillKind::Pattern(_) => FillType::Pattern,
     };
 
     let mut chosen_type = current_type;
@@ -6720,6 +6722,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             ("Radial", FillType::Radial),
             ("Fluid", FillType::Fluid),
             ("Mesh", FillType::Mesh),
+            ("Pattern", FillType::Pattern),
         ] {
             if ui.selectable_label(chosen_type == t, label).clicked() {
                 chosen_type = t;
@@ -6740,6 +6743,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             FillKind::MeshGradient(mg) => {
                 mg.vertices.first().map(|v| v.color).unwrap_or(Color::BLACK)
             }
+            FillKind::Pattern(_) => Color::BLACK,
             FillKind::None => Color::BLACK,
         };
         let white = Color {
@@ -6813,6 +6817,7 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     ],
                 ))
             }
+            FillType::Pattern => Fill::pattern(PatternFill::new(default_checker_tile())),
         };
         return Some(new_fill);
     }
@@ -7165,9 +7170,117 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                 return Some(new_fill);
             }
         }
+
+        FillKind::Pattern(p) => {
+            use photonic_core::style::PatternTileType;
+            let mut new_p = p.clone();
+            let mut pat_changed = false;
+
+            ui.label(
+                RichText::new(format!("Tile {}×{}px", p.tile.width, p.tile.height))
+                    .small()
+                    .weak(),
+            );
+
+            // Tile layout.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Layout").small().weak());
+                for (label, t) in [
+                    ("Grid", PatternTileType::Grid),
+                    ("Brick", PatternTileType::BrickByRow),
+                    ("Brick↕", PatternTileType::BrickByColumn),
+                    ("Hex", PatternTileType::Hex),
+                ] {
+                    if ui.selectable_label(new_p.tile_type == t, label).clicked() {
+                        new_p.tile_type = t;
+                        pat_changed = true;
+                    }
+                }
+            });
+
+            // Scale.
+            let mut scale = new_p.scale as f32;
+            if ui
+                .add(
+                    egui::Slider::new(&mut scale, 0.05..=8.0)
+                        .text("Scale")
+                        .logarithmic(true),
+                )
+                .changed()
+            {
+                new_p.scale = scale as f64;
+                pat_changed = true;
+            }
+
+            // Rotation (degrees in UI, radians in model).
+            let mut rot_deg = new_p.rotation.to_degrees() as f32;
+            if ui
+                .add(egui::Slider::new(&mut rot_deg, -180.0..=180.0).text("Rotate°"))
+                .changed()
+            {
+                new_p.rotation = (rot_deg as f64).to_radians();
+                pat_changed = true;
+            }
+
+            // Offset.
+            ui.horizontal(|ui| {
+                let mut ox = new_p.offset[0] as f32;
+                let mut oy = new_p.offset[1] as f32;
+                if ui
+                    .add(egui::DragValue::new(&mut ox).prefix("x: ").speed(1.0))
+                    .changed()
+                {
+                    new_p.offset[0] = ox as f64;
+                    pat_changed = true;
+                }
+                if ui
+                    .add(egui::DragValue::new(&mut oy).prefix("y: ").speed(1.0))
+                    .changed()
+                {
+                    new_p.offset[1] = oy as f64;
+                    pat_changed = true;
+                }
+            });
+
+            // Spacing (gutter).
+            let mut spacing = new_p.spacing as f32;
+            if ui
+                .add(egui::Slider::new(&mut spacing, 0.0..=64.0).text("Spacing"))
+                .changed()
+            {
+                new_p.spacing = spacing as f64;
+                pat_changed = true;
+            }
+
+            if pat_changed {
+                let mut new_fill = fill.clone();
+                new_fill.kind = photonic_core::style::FillKind::Pattern(new_p);
+                return Some(new_fill);
+            }
+        }
     }
 
     None
+}
+
+/// A small two-tone checkerboard tile used as the default when a user switches a
+/// fill to `Pattern` in the inspector (gives an immediately visible pattern).
+fn default_checker_tile() -> photonic_core::RasterImage {
+    let n = 32u32; // tile is 2×2 cells of 16px
+    let cell = 16u32;
+    let mut img = photonic_core::RasterImage::new(n, n);
+    for y in 0..n {
+        for x in 0..n {
+            let on = ((x / cell) + (y / cell)) % 2 == 0;
+            let rgba = if on {
+                [40, 40, 48, 255]
+            } else {
+                [220, 220, 230, 255]
+            };
+            img.set_pixel(x, y, rgba);
+        }
+    }
+    img
 }
 
 // ─── Stroke editor ────────────────────────────────────────────────────────────
