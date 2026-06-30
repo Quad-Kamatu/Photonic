@@ -494,16 +494,18 @@ impl WheelState {
         let sweep = progress * (TAU + WIPE_FADE);
 
         if animating {
+            // True radial WIPE (not a cross-fade): paint the NEW ring fully
+            // opaque underneath, then wipe the OLD ring OUT on top as the sweep
+            // front passes. Cross-fading both rings made each segment dip below
+            // full opacity mid-transition (two semi-transparent layers summing
+            // to < 1 over the dark canvas) — that dip is the flicker. Layering a
+            // solid new ring under a fading old ring keeps coverage solid.
+            self.draw_ring(painter, self.current_cat, |_| 1.0);
             if let Some(prev) = self.prev_cat {
-                // Old ring wipes OUT behind the sweep front.
                 self.draw_ring(painter, prev, |seg_angle| {
                     1.0 - ((sweep - seg_angle) / WIPE_FADE).clamp(0.0, 1.0)
                 });
             }
-            // New ring wipes IN as the sweep passes.
-            self.draw_ring(painter, self.current_cat, |seg_angle| {
-                ((sweep - seg_angle) / WIPE_FADE).clamp(0.0, 1.0)
-            });
         } else {
             self.draw_ring(painter, self.current_cat, |_| 1.0);
         }
