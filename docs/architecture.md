@@ -238,6 +238,7 @@ struct AppState {
 | `handlers/audit.rs` | Audit-log query and export |
 | `handlers/clipboard.rs` | Copy/paste nodes, clipboard history |
 | `handlers/color_guide.rs` | Color-harmony guide and palette suggestions |
+| `handlers/raster.rs` | Pixel editing: place/create raster layers, adjustments, filters, brush stroke, bucket/gradient fill, image transform, layer masks, raster info (selection-confined; routed through `Command::UpdateNode` for undo) |
 
 The full tool surface is **auto-generated** — see [mcp-api.md](mcp-api.md),
 regenerated from `server::tool_list()` via

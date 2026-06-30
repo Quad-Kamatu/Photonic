@@ -1,6 +1,18 @@
 use bytemuck::{Pod, Zeroable};
 use photonic_core::layer::BlendMode;
 
+/// The colour encoding of the document fill/blend render target — the single
+/// source of truth for "what space does fixed-function blending run in".
+///
+/// It is an **sRGB** format on purpose: with an sRGB attachment the GPU blend
+/// unit decodes each channel to linear, blends, then re-encodes, so separable
+/// modes (Multiply/Screen) and partial-alpha src-over composite in linear
+/// space. Both the headless export path (`headless::FORMAT`) and the windowed
+/// document pass (`PhotonicRenderer::scene_format`) target this encoding, which
+/// is what makes on-canvas rendering and exported output pixel-identical
+/// (issue #145).
+pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
 /// The four separable blend modes implementable with fixed-function GPU blending.
 ///
 /// Backdrop-read modes (Overlay, SoftLight, ColorDodge, ColorBurn) and the
@@ -510,6 +522,38 @@ pub fn create_blur_pipeline_with_blend(
 mod tests {
     use super::*;
     use wgpu::{BlendFactor, BlendOperation};
+
+    #[test]
+    fn scene_format_is_srgb_for_linear_blending() {
+        // The document blend target must be sRGB-encoded so fixed-function
+        // blending decodes to linear, blends, and re-encodes (issue #145).
+        assert!(
+            SCENE_FORMAT.is_srgb(),
+            "SCENE_FORMAT must be an sRGB format so blending runs in linear space",
+        );
+    }
+
+    #[test]
+    fn windowed_scene_format_derivation_is_srgb() {
+        // The windowed renderer derives its scene format from the swapchain
+        // surface format via `add_srgb_suffix()`. For every non-sRGB surface
+        // format we accept, that derivation must yield a distinct sRGB format
+        // (otherwise the document pass would silently blend in non-sRGB space).
+        for surface in [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ] {
+            let scene = surface.add_srgb_suffix();
+            assert!(
+                scene.is_srgb(),
+                "{surface:?}.add_srgb_suffix() must be sRGB"
+            );
+            assert_ne!(
+                scene, surface,
+                "{surface:?} must map to a distinct sRGB view format",
+            );
+        }
+    }
 
     #[test]
     fn separable_modes_have_blend_states() {

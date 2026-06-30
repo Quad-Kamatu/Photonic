@@ -38,7 +38,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
             Tool::DirectSelect => "Direct Select",
@@ -69,7 +69,7 @@ impl Tool {
         }
     }
 
-    pub fn icon(self) -> &'static str {
+    pub const fn icon(self) -> &'static str {
         match self {
             Tool::Select => ph::CURSOR,
             Tool::DirectSelect => ph::BEZIER_CURVE,

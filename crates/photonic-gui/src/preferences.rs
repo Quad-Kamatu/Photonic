@@ -1,4 +1,6 @@
 use crate::commands::KeyBinding;
+use crate::hotbar::{HotbarBucket, HotbarMode};
+use crate::panels::DrawerGroup;
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -40,6 +42,20 @@ pub struct AppPreferences {
     /// Arrow-key nudge distance in document pixels (Shift multiplies by 10).
     #[serde(default = "default_nudge_distance")]
     pub nudge_distance: f64,
+
+    // HISTORY — bound on the project undo/redo history persisted in the .photon
+    // file. The user picks the unit: a step count, or a serialized-size budget
+    // (in MB) applied to the history payload specifically (separate from the
+    // document's own size). Once the history exceeds the cap, the oldest steps
+    // are discarded to make room (with a warning the first time).
+    #[serde(default)]
+    pub history_limit_mode: HistoryLimitMode,
+    /// Max retained undo steps when `history_limit_mode == Steps`.
+    #[serde(default = "default_history_max_steps")]
+    pub history_max_steps: usize,
+    /// Max serialized history size in MB when `history_limit_mode == Size`.
+    #[serde(default = "default_history_max_mb")]
+    pub history_max_mb: f64,
     /// Check GitHub for a newer release once on launch and prompt if available.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
@@ -53,6 +69,29 @@ pub struct AppPreferences {
     #[serde(default)]
     pub pinned_tools: Vec<Tool>,
 
+    // DRAWER UI — Canva-style left icon rail + single animated drawer.
+    /// Which drawer group is open, or `None` when only the rail shows. Defaults
+    /// to the Inspector so launch looks ~like the old always-on panel.
+    #[serde(default = "default_open_drawer")]
+    pub open_drawer: Option<DrawerGroup>,
+    /// Target (fully-open) width of the drawer panel, in logical px.
+    #[serde(default = "default_drawer_width")]
+    pub drawer_width: f32,
+    /// When true, drawer open/close transitions are instant (no width tween) —
+    /// honours the user's reduced-motion preference.
+    #[serde(default)]
+    pub reduced_motion: bool,
+
+    // HOTBAR — the always-on adaptive second toolbar row (#154 Phase 4).
+    /// Static (curated default order) or Adaptive (ranked by the user's usage).
+    #[serde(default)]
+    pub hotbar_mode: HotbarMode,
+    /// Per-bucket usage scores: bucket key → (item id → frequency-with-decay).
+    /// Bumped each time a hotbar item is invoked in that bucket; drives the
+    /// Adaptive ordering. Empty = cold start (falls back to static order).
+    #[serde(default)]
+    pub hotbar_usage: HashMap<String, HashMap<String, f32>>,
+
     // KEYBOARD — user shortcut overrides, keyed by `commands::CommandId`.
     // Empty by default (every command uses its registry default). User remaps in
     // the Keyboard Shortcuts settings page populate this and persist to disk.
@@ -62,6 +101,37 @@ pub struct AppPreferences {
 
 fn default_nudge_distance() -> f64 {
     1.0
+}
+
+fn default_open_drawer() -> Option<DrawerGroup> {
+    Some(DrawerGroup::Tools)
+}
+
+fn default_drawer_width() -> f32 {
+    220.0
+}
+
+/// How the project-history retention limit is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HistoryLimitMode {
+    /// Cap by number of undo steps.
+    #[default]
+    Steps,
+    /// Cap by serialized size of the history payload (MB).
+    Size,
+}
+
+/// Hard ceiling applied in Size mode so memory stays bounded regardless of how
+/// large the byte budget is. The size cap does the real trimming; this just
+/// prevents an unbounded step count.
+pub const HISTORY_SIZE_MODE_STEP_CEILING: usize = 100_000;
+
+fn default_history_max_steps() -> usize {
+    200
+}
+
+fn default_history_max_mb() -> f64 {
+    50.0
 }
 
 fn default_true() -> bool {
@@ -92,9 +162,17 @@ impl Default for AppPreferences {
             default_stroke_width: 1.0,
             console_open_on_start: false,
             nudge_distance: 1.0,
+            history_limit_mode: HistoryLimitMode::Steps,
+            history_max_steps: 200,
+            history_max_mb: 50.0,
             auto_check_updates: true,
             last_seen_version: String::new(),
             pinned_tools: Vec::new(),
+            open_drawer: Some(DrawerGroup::Tools),
+            drawer_width: 220.0,
+            reduced_motion: false,
+            hotbar_mode: HotbarMode::default(),
+            hotbar_usage: HashMap::new(),
             keymap: HashMap::new(),
         }
     }
@@ -124,13 +202,45 @@ impl AppPreferences {
         None
     }
 
+    /// Resolve the configured history retention limits as
+    /// `(max_steps, size_limit_bytes)` for [`photonic_core::CommandHistory::set_limits`].
+    /// In Steps mode the size cap is `None`; in Size mode a high step ceiling
+    /// keeps memory bounded while the byte budget does the trimming.
+    pub fn history_limits(&self) -> (usize, Option<u64>) {
+        match self.history_limit_mode {
+            HistoryLimitMode::Steps => (self.history_max_steps.max(1), None),
+            HistoryLimitMode::Size => {
+                let bytes = (self.history_max_mb.max(0.1) * 1_048_576.0) as u64;
+                (HISTORY_SIZE_MODE_STEP_CEILING, Some(bytes))
+            }
+        }
+    }
+
+    /// Current usage score for a hotbar item within a bucket (0 if unseen).
+    pub fn hotbar_score(&self, bucket: HotbarBucket, item_id: &str) -> f32 {
+        self.hotbar_usage
+            .get(bucket.key())
+            .and_then(|m| m.get(item_id))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Record one use of `item_id` in `bucket`: mildly decay every score in the
+    /// bucket, then bump the used item by `+1`. Frequency with a recency bias.
+    pub fn bump_hotbar_usage(&mut self, bucket: HotbarBucket, item_id: &str) {
+        const DECAY: f32 = 0.95;
+        let m = self
+            .hotbar_usage
+            .entry(bucket.key().to_string())
+            .or_default();
+        for v in m.values_mut() {
+            *v *= DECAY;
+        }
+        *m.entry(item_id.to_string()).or_insert(0.0) += 1.0;
+    }
+
     fn prefs_path() -> Option<std::path::PathBuf> {
-        let appdata = std::env::var("APPDATA").ok()?;
-        Some(
-            std::path::Path::new(&appdata)
-                .join("Photonic")
-                .join("preferences.json"),
-        )
+        crate::welcome::config_dir().map(|d| d.join("preferences.json"))
     }
 
     /// Load from disk, falling back to Default on any error.
