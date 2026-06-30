@@ -245,7 +245,9 @@ fn node_outline(node: &SceneNode) -> Vec<Subpath> {
     // Decimate to the per-node budget, sharing it across subpaths in proportion
     // to their original vertex counts (min 3 each so each subpath survives).
     let total: usize = subs.iter().map(|s| s.pts.len()).sum();
-    if total > NAV_LOD_VERTICES && total > 0 {
+    // `total > NAV_LOD_VERTICES` already implies `total > 0` (the budget is
+    // non-zero), so it also guards the `/ total` below.
+    if total > NAV_LOD_VERTICES {
         for s in subs.iter_mut() {
             let target =
                 ((NAV_LOD_VERTICES as f64) * (s.pts.len() as f64 / total as f64)).round() as usize;
