@@ -2,6 +2,7 @@ pub mod app;
 pub mod commands;
 pub mod disk_search;
 pub mod global_search;
+pub mod hotbar;
 pub mod lightfall;
 pub mod panels;
 pub mod preferences;

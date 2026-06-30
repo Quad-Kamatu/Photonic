@@ -25,11 +25,23 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
-    panels::{self, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp},
+    hotbar::{self, HotbarAction, HotbarBucket, HotbarEffect, HotbarItem, HotbarMode},
+    panels::{self, DrawerGroup, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp},
     preferences::AppPreferences,
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
 };
+
+/// Cached hotbar ordering. Rebuilt only when the signature (context bucket,
+/// single-group flag, or mode) changes — never per click or per frame — so the
+/// Adaptive order stays calm.
+struct HotbarCacheState {
+    bucket: HotbarBucket,
+    single_is_group: bool,
+    single_is_fillable_path: bool,
+    mode: HotbarMode,
+    items: Vec<HotbarItem>,
+}
 
 // ─── Eyedropper ───────────────────────────────────────────────────────────────
 
@@ -454,6 +466,9 @@ pub struct PhotonicApp {
     /// Actions queued by panel widgets (z-order, boolean ops) to be processed
     /// after all panels have finished drawing, with access to doc + history.
     pub pending_panel_actions: Vec<PanelAction>,
+    /// Cached adaptive-hotbar ordering for the current context (see
+    /// [`HotbarCacheState`]). `None` until first built.
+    hotbar_cache: Option<HotbarCacheState>,
     /// Canvas viewport rect captured this frame — used to recenter the view
     /// when the Navigator emits a `CenterViewOn` action.
     last_canvas_rect: Option<egui::Rect>,
@@ -669,6 +684,14 @@ pub struct PhotonicApp {
     pub workspace_name_input: String,
 
     // ── Properties panel ─────────────────────────────────────────────────────
+    /// Which drawer group is currently open in the left rail, or `None` when the
+    /// drawer is collapsed and only the rail shows. Mirrors `prefs.open_drawer`
+    /// and is persisted there. Defaults to `Some(Inspector)`.
+    pub open_drawer: Option<DrawerGroup>,
+    /// Last group that was open, used to keep rendering the correct drawer
+    /// content during the close (collapse) animation after `open_drawer` flips
+    /// to `None`. Not persisted.
+    pub last_drawer_group: DrawerGroup,
     /// Live search query that filters which property accordions are visible.
     pub prop_search: String,
     /// Recolor panel: comma-separated hex palette input.
@@ -847,6 +870,7 @@ impl Default for PhotonicApp {
             },
 
             pending_panel_actions: Vec::new(),
+            hotbar_cache: None,
             last_canvas_rect: None,
             last_history_size_check: 0.0,
             cached_history_bytes: (f64::NEG_INFINITY, 0),
@@ -907,6 +931,8 @@ impl Default for PhotonicApp {
             event_trigger_action: String::new(),
             workspace_name_input: String::new(),
 
+            open_drawer: Some(DrawerGroup::Tools),
+            last_drawer_group: DrawerGroup::Tools,
             prop_search: String::new(),
             recolor_palette_input: String::new(),
 
@@ -1497,10 +1523,15 @@ impl PhotonicApp {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
         let console_visible = prefs.console_open_on_start;
+        let open_drawer = prefs.open_drawer;
         let mut s = Self::default();
         s.prefs = prefs;
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
+        s.open_drawer = open_drawer;
+        if let Some(g) = open_drawer {
+            s.last_drawer_group = g;
+        }
         s
     }
 
@@ -1509,6 +1540,7 @@ impl PhotonicApp {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
         let console_visible = prefs.console_open_on_start;
+        let open_drawer = prefs.open_drawer;
         let mut s = Self {
             show_welcome: true,
             ..Self::default()
@@ -1516,7 +1548,241 @@ impl PhotonicApp {
         s.prefs = prefs;
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
+        s.open_drawer = open_drawer;
+        if let Some(g) = open_drawer {
+            s.last_drawer_group = g;
+        }
         s
+    }
+
+    // ── Adaptive hotbar (#154 Phase 4) ───────────────────────────────────────
+
+    /// Classify the current selection into a hotbar context bucket. Returns the
+    /// bucket, whether a lone selection is a group (enables Ungroup), whether a
+    /// lone selection is a path the colour ops can actually recolour (enables
+    /// Invert / Grayscale), and the single selected node id (for single-target
+    /// actions).
+    fn hotbar_bucket(&self, doc: &Document) -> (HotbarBucket, bool, bool, Option<NodeId>) {
+        match doc.selection.count() {
+            0 => (HotbarBucket::Empty, false, false, None),
+            1 => {
+                let id = doc.selection.ids().next().copied();
+                let kind = id.and_then(|i| doc.get_node(&i)).map(|n| &n.kind);
+                let (bucket, is_group) = match kind {
+                    Some(SceneNodeKind::Text(_)) => (HotbarBucket::Text, false),
+                    Some(SceneNodeKind::Group(_)) => (HotbarBucket::Shape, true),
+                    _ => (HotbarBucket::Shape, false),
+                };
+                // Invert/Grayscale only mutate a Path's fill (non-`None`) and an
+                // enabled stroke; gate the buttons on something they can change.
+                let is_fillable_path = matches!(kind, Some(SceneNodeKind::Path(p))
+                    if !matches!(p.fill.kind, photonic_core::style::FillKind::None)
+                        || p.stroke.enabled);
+                (bucket, is_group, is_fillable_path, id)
+            }
+            _ => (HotbarBucket::Multi, false, false, None),
+        }
+    }
+
+    /// Rebuild the cached hotbar ordering only when its signature changed —
+    /// bucket, single-group flag, or mode. This is what keeps Adaptive ordering
+    /// calm: scores bumped by clicks do not re-rank until the bucket changes.
+    fn refresh_hotbar_cache(
+        &mut self,
+        bucket: HotbarBucket,
+        single_is_group: bool,
+        single_is_fillable_path: bool,
+    ) {
+        let mode = self.prefs.hotbar_mode;
+        let stale = match &self.hotbar_cache {
+            Some(c) => {
+                c.bucket != bucket
+                    || c.single_is_group != single_is_group
+                    || c.single_is_fillable_path != single_is_fillable_path
+                    || c.mode != mode
+            }
+            None => true,
+        };
+        if stale {
+            let items = hotbar::ordered_items(
+                bucket,
+                single_is_group,
+                single_is_fillable_path,
+                mode,
+                |id| self.prefs.hotbar_score(bucket, id),
+            );
+            self.hotbar_cache = Some(HotbarCacheState {
+                bucket,
+                single_is_group,
+                single_is_fillable_path,
+                mode,
+                items,
+            });
+        }
+    }
+
+    /// Draw the always-on hotbar row (its own `TopBottomPanel`, below the main
+    /// toolbar). Shown every frame regardless of selection.
+    fn draw_hotbar(&mut self, ctx: &egui::Context, doc: &mut Document) {
+        let (bucket, single_is_group, single_is_fillable_path, single_id) =
+            self.hotbar_bucket(doc);
+        self.refresh_hotbar_cache(bucket, single_is_group, single_is_fillable_path);
+        let items = self
+            .hotbar_cache
+            .as_ref()
+            .map(|c| c.items.clone())
+            .unwrap_or_default();
+        let active_tool = self.active_tool;
+
+        let mut invoked: Option<HotbarItem> = None;
+        egui::TopBottomPanel::top("hotbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8.0, 3.0)),
+            )
+            .show(ctx, |ui| {
+                invoked = hotbar::render(ui, &items, active_tool);
+            });
+
+        if let Some(item) = invoked {
+            self.invoke_hotbar_item(item, bucket, single_id, doc);
+        }
+    }
+
+    /// Run a hotbar item: bump its per-bucket usage (persisted), then either
+    /// apply the tool (reusing the existing tool-apply path) or dispatch the
+    /// existing `PanelAction`(s) for the verb against the live selection.
+    fn invoke_hotbar_item(
+        &mut self,
+        item: HotbarItem,
+        bucket: HotbarBucket,
+        single_id: Option<NodeId>,
+        doc: &Document,
+    ) {
+        // Usage tracking — bump + persist (drives Adaptive ranking next rebuild).
+        self.prefs.bump_hotbar_usage(bucket, item.id);
+        self.prefs.save();
+
+        match item.effect {
+            HotbarEffect::Tool(tool) => {
+                // Same tool-apply logic the Tools drawer/rail uses.
+                self.pen_points.clear();
+                self.pencil_points.clear();
+                self.lasso_points.clear();
+                self.isolated_group = None;
+                self.point_edit_node = None;
+                self.point_selected.clear();
+                self.point_drag_origin = None;
+                self.point_drag_mode = None;
+                self.active_tool = tool;
+            }
+            HotbarEffect::Action(action) => {
+                for pa in Self::hotbar_panel_actions(action, bucket, single_id, doc) {
+                    self.pending_panel_actions.push(pa);
+                }
+            }
+        }
+    }
+
+    /// Map a hotbar verb to the existing [`PanelAction`](s) for the live
+    /// selection. Single-target verbs use `single_id`; multi-selection verbs
+    /// either have a dedicated "selected" action or fan out over the selection.
+    fn hotbar_panel_actions(
+        action: HotbarAction,
+        bucket: HotbarBucket,
+        single_id: Option<NodeId>,
+        doc: &Document,
+    ) -> Vec<PanelAction> {
+        let sel: Vec<NodeId> = doc.selection.ids().copied().collect();
+        let is_multi = bucket == HotbarBucket::Multi;
+        match action {
+            HotbarAction::Duplicate => {
+                if is_multi {
+                    sel.iter()
+                        .map(|id| PanelAction::DuplicateNode { node_id: *id })
+                        .collect()
+                } else {
+                    single_id
+                        .map(|id| vec![PanelAction::DuplicateNode { node_id: id }])
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::Delete => {
+                if is_multi {
+                    vec![PanelAction::DeleteSelected]
+                } else {
+                    single_id
+                        .map(|id| vec![PanelAction::DeleteNode { node_id: id }])
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::Group => vec![PanelAction::GroupSelected],
+            HotbarAction::Ungroup => single_id
+                .map(|id| vec![PanelAction::UngroupNode { node_id: id }])
+                .unwrap_or_default(),
+            HotbarAction::BringToFront => {
+                if is_multi {
+                    sel.iter()
+                        .map(|id| PanelAction::ReorderNode {
+                            node_id: *id,
+                            op: ZOrderOp::BringToFront,
+                        })
+                        .collect()
+                } else {
+                    single_id
+                        .map(|id| {
+                            vec![PanelAction::ReorderNode {
+                                node_id: id,
+                                op: ZOrderOp::BringToFront,
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::SendToBack => {
+                if is_multi {
+                    sel.iter()
+                        .map(|id| PanelAction::ReorderNode {
+                            node_id: *id,
+                            op: ZOrderOp::SendToBack,
+                        })
+                        .collect()
+                } else {
+                    single_id
+                        .map(|id| {
+                            vec![PanelAction::ReorderNode {
+                                node_id: id,
+                                op: ZOrderOp::SendToBack,
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+            }
+            HotbarAction::BoolUnion => {
+                vec![PanelAction::BooleanOp(
+                    photonic_core::ops::boolean::BooleanOp::Union,
+                )]
+            }
+            HotbarAction::BoolSubtract => {
+                vec![PanelAction::BooleanOp(
+                    photonic_core::ops::boolean::BooleanOp::Subtract,
+                )]
+            }
+            HotbarAction::AlignLeft => vec![PanelAction::AlignNodes {
+                operation: "left".into(),
+                key_object_id: None,
+            }],
+            HotbarAction::AlignCenterH => vec![PanelAction::AlignNodes {
+                operation: "center_horizontal".into(),
+                key_object_id: None,
+            }],
+            // Empty vec = "use current selection" (resolved in the action handler).
+            HotbarAction::CopyAsSvg => vec![PanelAction::CopyAsSvg { node_ids: vec![] }],
+            HotbarAction::Invert => vec![PanelAction::InvertColors { node_ids: vec![] }],
+            HotbarAction::Grayscale => {
+                vec![PanelAction::ConvertToGrayscale { node_ids: vec![] }]
+            }
+        }
     }
 
     /// Draw the full UI for one frame.
@@ -1902,6 +2168,9 @@ impl PhotonicApp {
                 });
             });
 
+        // ── Adaptive hotbar (always-on second top row) ───────────────────────
+        self.draw_hotbar(ctx, doc);
+
         // Close drawer on Escape
         if viewport_kb(ctx) && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.active_drawer == Some(DrawerKind::Edit) {
@@ -2192,6 +2461,29 @@ impl PhotonicApp {
                                         ui.add_space(4.0);
                                         ui.checkbox(&mut self.prefs.auto_check_updates, "Check for updates on launch")
                                             .on_hover_text("Once per launch, ask GitHub for a newer release and show a banner if one exists. No automatic download.");
+                                        ui.add_space(4.0);
+                                        ui.checkbox(&mut self.prefs.reduced_motion, "Reduced motion")
+                                            .on_hover_text("Make drawer open/close transitions instant instead of animating the width.");
+                                        ui.add_space(4.0);
+
+                                        // ── Hotbar mode ───────────────────────────────
+                                        ui.horizontal(|ui| {
+                                            ui.label("Hotbar:");
+                                            let mut mode = self.prefs.hotbar_mode;
+                                            let changed = ui
+                                                .selectable_value(&mut mode, HotbarMode::Static, "Static")
+                                                .on_hover_text("Show the curated default set for each selection context.")
+                                                .clicked()
+                                                | ui
+                                                .selectable_value(&mut mode, HotbarMode::Adaptive, "Adaptive")
+                                                .on_hover_text("Rank each context's items by your own usage (most-used first), with pinned leading slots.")
+                                                .clicked();
+                                            if changed && mode != self.prefs.hotbar_mode {
+                                                self.prefs.hotbar_mode = mode;
+                                                // Force the hotbar order to rebuild under the new mode.
+                                                self.hotbar_cache = None;
+                                            }
+                                        });
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Arrow nudge (px):");
@@ -2575,110 +2867,194 @@ impl PhotonicApp {
                 });
             });
 
-        // ── Left tools panel ─────────────────────────────────────────────────
-        egui::SidePanel::left("tools")
-            .default_width(180.0)
-            .min_width(140.0)
+        // ── Left drawer rail (Canva-style) ────────────────────────────────────
+        // A thin vertical strip with one phosphor-icon button per DrawerGroup —
+        // Tools now lives here too (the old standalone tools panel is gone).
+        // Clicking a group toggles its drawer; opening one closes any other.
+        // A group with no content for the current context is DISABLED, and an
+        // open drawer whose content disappears animates closed (and reappears
+        // when the context returns) via `effective_open` — no state churn.
+        let sel_count = doc.selection.node_ids.len();
+        let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        egui::SidePanel::left("drawer_rail")
+            .resizable(false)
+            .exact_width(40.0)
             .show(ctx, |ui| {
-                if let Some(tool) =
-                    panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
-                {
-                    self.pen_points.clear();
-                    self.pencil_points.clear();
-                    self.lasso_points.clear();
-                    self.isolated_group = None;
-                    self.point_edit_node = None;
-                    self.point_selected.clear();
-                    self.point_drag_origin = None;
-                    self.point_drag_mode = None;
-                    self.active_tool = tool;
-                    if tool != Tool::Select && tool != Tool::DirectSelect {
-                        self.selected_id = None;
-                        doc.selection.clear();
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    for group in DrawerGroup::ALL {
+                        let active = effective_open == Some(group);
+                        let enabled = group.has_content(sel_count);
+                        let resp = ui
+                            .add_enabled(
+                                enabled,
+                                egui::Button::new(RichText::new(group.icon()).size(18.0))
+                                    .min_size(egui::vec2(30.0, 30.0))
+                                    .selected(active),
+                            )
+                            .on_hover_text(group.title());
+                        if resp.clicked() {
+                            if self.open_drawer == Some(group) {
+                                // Clicking the open group collapses the drawer.
+                                self.open_drawer = None;
+                            } else {
+                                // Opening a group closes whatever else was open.
+                                self.open_drawer = Some(group);
+                                self.last_drawer_group = group;
+                            }
+                            // Persist the drawer state + any pending width change.
+                            self.prefs.open_drawer = self.open_drawer;
+                            self.prefs.save();
+                        }
+                        ui.add_space(4.0);
                     }
-                }
+                });
             });
 
-        // ── Properties panel (below tools, separate panel) ────────────────────
-        egui::SidePanel::left("properties")
-            .default_width(220.0)
-            .min_width(160.0)
-            // Cap the width so content (e.g. the search field sizing off
-            // available_width during egui's sizing pass) can't balloon the
-            // panel to fill the screen.
-            .max_width(360.0)
-            .show(ctx, |ui| {
+        // ── Animated drawer host ──────────────────────────────────────────────
+        // The width tweens 0 → target on open and target → 0 on close (~150ms,
+        // ease-out, no overshoot). The open/closed STATE flips instantly (input
+        // is never blocked on the tween); only the rendered width animates.
+        // `animate_bool_with_time_and_easing` requests repaint while in flight.
+        // Reduced-motion makes the transition instant.
+        // Recompute after the rail click so opening/closing animates this frame.
+        let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        let drawer_open = effective_open.is_some();
+        let anim_time = if self.prefs.reduced_motion { 0.0 } else { 0.18 };
+        let t = ctx.animate_bool_with_time_and_easing(
+            egui::Id::new("drawer_width_anim"),
+            drawer_open,
+            anim_time,
+            egui::emath::easing::cubic_out,
+        );
+        // Render the open group, or — during the close tween — the last one open.
+        let render_group = effective_open.unwrap_or(self.last_drawer_group);
+        let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
+        if t > 0.001 {
+            let fully_open = drawer_open && t >= 0.999;
+            let mut panel = egui::SidePanel::left("properties");
+            panel = if fully_open {
+                // Fully open: let the user drag-resize within range.
+                panel
+                    .resizable(true)
+                    .min_width(160.0)
+                    .max_width(420.0)
+                    .default_width(target_w)
+            } else {
+                // Mid-tween: drive an exact eased width (no resize handle).
+                panel.resizable(false).exact_width((target_w * t).max(1.0))
+            };
+            let resp = panel.show(ctx, |ui| {
+                // Cross-fade the content with the slide (alpha tracks the eased
+                // width factor) so the transition clearly reads as an animation
+                // rather than a pop.
+                ui.set_opacity(t);
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    if render_group == DrawerGroup::Tools {
+                        // Tools drawer: render the tool palette + apply selection.
+                        if let Some(tool) =
+                            panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
+                        {
+                            self.pen_points.clear();
+                            self.pencil_points.clear();
+                            self.lasso_points.clear();
+                            self.isolated_group = None;
+                            self.point_edit_node = None;
+                            self.point_selected.clear();
+                            self.point_drag_origin = None;
+                            self.point_drag_mode = None;
+                            self.active_tool = tool;
+                            if tool != Tool::Select && tool != Tool::DirectSelect {
+                                self.selected_id = None;
+                                doc.selection.clear();
+                            }
+                        }
+                        return;
+                    }
                     let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
                     let selection_count = doc.selection.node_ids.len();
-                    if let Some(action) = panels::draw_properties_panel(
-                        ui,
-                        doc,
-                        self.active_tool,
-                        &mut self.fill_color,
-                        &mut self.polygon_sides,
-                        &mut self.star_points,
-                        &mut self.star_inner_ratio,
-                        &mut self.rounded_rect_radius,
-                        &mut self.spiral_turns,
-                        &mut self.spiral_inner_radius,
-                        &mut self.spiral_segs_per_turn,
-                        selected_node,
-                        self.selected_id,
-                        selection_count,
-                        &doc.selection.node_ids.iter().cloned().collect::<Vec<_>>(),
-                        self.point_edit_node,
-                        &self.point_selected,
-                        &mut self.prop_search,
-                        &mut self.shear_x,
-                        &mut self.shear_y,
-                        &mut self.line_snap_45,
-                        &mut self.color_guide_rule,
-                        &mut self.arc_start_angle,
-                        &mut self.arc_end_angle,
-                        &mut self.arc_open,
-                        &mut self.grid_cols,
-                        &mut self.grid_rows,
-                        &mut self.polar_grid_rings,
-                        &mut self.polar_grid_sectors,
-                        &mut self.polar_grid_inner_ratio,
-                        &mut self.recolor_palette_input,
-                        &mut self.magic_wand_attribute,
-                        &mut self.magic_wand_tolerance,
-                        &mut self.eraser_radius,
-                        &self.composition_findings,
-                        &self.rhythm_findings,
-                        &self.branch_names.clone(),
-                        &mut self.branch_name_input,
-                        &mut self.swatch_library_selected,
-                        &mut self.graphic_style_name_input,
-                        &mut self.width_profile_name_input,
-                        &self.grammar_rules,
-                        &mut self.grammar_rule_name_input,
-                        &mut self.grammar_rule_type_selected,
-                        &mut self.grammar_rule_params_input,
-                        &self.grammar_check_results,
-                        &self.distance_results,
-                        &self.action_names,
-                        &self.history_entries,
-                        history.undo_depth(),
-                        &mut self.bleed_mm_input,
-                        &mut self.slug_mm_input,
-                        &mut self.construction_angle,
-                        &mut self.construction_x,
-                        &mut self.construction_y,
-                        &mut self.margin_top_input,
-                        &mut self.margin_right_input,
-                        &mut self.margin_bottom_input,
-                        &mut self.margin_left_input,
-                        &mut self.event_trigger_event,
-                        &mut self.event_trigger_action,
-                        &mut self.workspace_name_input,
-                    ) {
+                    let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();
+                    let branch_names = self.branch_names.clone();
+                    let mut ctx = panels::PropPanelCtx {
+                        doc: doc,
+                        active_tool: self.active_tool,
+                        fill_color: &mut self.fill_color,
+                        polygon_sides: &mut self.polygon_sides,
+                        star_points: &mut self.star_points,
+                        star_inner_ratio: &mut self.star_inner_ratio,
+                        rounded_rect_radius: &mut self.rounded_rect_radius,
+                        spiral_turns: &mut self.spiral_turns,
+                        spiral_inner_radius: &mut self.spiral_inner_radius,
+                        spiral_segs_per_turn: &mut self.spiral_segs_per_turn,
+                        selected_node: selected_node,
+                        selected_id: self.selected_id,
+                        selection_count: selection_count,
+                        selected_ids: &selected_ids,
+                        point_edit_node: self.point_edit_node,
+                        point_selected: &self.point_selected,
+                        prop_search: &mut self.prop_search,
+                        shear_x: &mut self.shear_x,
+                        shear_y: &mut self.shear_y,
+                        line_snap_45: &mut self.line_snap_45,
+                        color_guide_rule: &mut self.color_guide_rule,
+                        arc_start_angle: &mut self.arc_start_angle,
+                        arc_end_angle: &mut self.arc_end_angle,
+                        arc_open: &mut self.arc_open,
+                        grid_cols: &mut self.grid_cols,
+                        grid_rows: &mut self.grid_rows,
+                        polar_grid_rings: &mut self.polar_grid_rings,
+                        polar_grid_sectors: &mut self.polar_grid_sectors,
+                        polar_grid_inner_ratio: &mut self.polar_grid_inner_ratio,
+                        recolor_palette_input: &mut self.recolor_palette_input,
+                        magic_wand_attribute: &mut self.magic_wand_attribute,
+                        magic_wand_tolerance: &mut self.magic_wand_tolerance,
+                        eraser_radius: &mut self.eraser_radius,
+                        composition_findings: &self.composition_findings,
+                        rhythm_findings: &self.rhythm_findings,
+                        branch_names: &branch_names,
+                        branch_name_input: &mut self.branch_name_input,
+                        swatch_library_selected: &mut self.swatch_library_selected,
+                        graphic_style_name_input: &mut self.graphic_style_name_input,
+                        width_profile_name_input: &mut self.width_profile_name_input,
+                        grammar_rules: &self.grammar_rules,
+                        grammar_rule_name_input: &mut self.grammar_rule_name_input,
+                        grammar_rule_type_selected: &mut self.grammar_rule_type_selected,
+                        grammar_rule_params_input: &mut self.grammar_rule_params_input,
+                        grammar_check_results: &self.grammar_check_results,
+                        distance_results: &self.distance_results,
+                        action_names: &self.action_names,
+                        history_entries: &self.history_entries,
+                        history_total: history.undo_depth(),
+                        bleed_mm_input: &mut self.bleed_mm_input,
+                        slug_mm_input: &mut self.slug_mm_input,
+                        construction_angle: &mut self.construction_angle,
+                        construction_x: &mut self.construction_x,
+                        construction_y: &mut self.construction_y,
+                        margin_top: &mut self.margin_top_input,
+                        margin_right: &mut self.margin_right_input,
+                        margin_bottom: &mut self.margin_bottom_input,
+                        margin_left: &mut self.margin_left_input,
+                        event_trigger_event: &mut self.event_trigger_event,
+                        event_trigger_action: &mut self.event_trigger_action,
+                        workspace_name_input: &mut self.workspace_name_input,
+                        action: None,
+                        q: String::new(),
+                        forced_open: None,
+                    };
+                    if let Some(action) = panels::draw_drawer(ui, &mut ctx, render_group) {
                         self.pending_panel_actions.push(action);
                     }
                 });
             });
+            // Capture a user resize of the fully-open drawer so it persists
+            // (in-memory now; flushed to disk on the next toggle/close).
+            if fully_open {
+                let w = resp.response.rect.width();
+                if (w - self.prefs.drawer_width).abs() > 0.5 {
+                    self.prefs.drawer_width = w;
+                }
+            }
+        }
 
         // ── Right panel: layers + change log + AI chat ──────────────────────
         egui::SidePanel::right("right_panel")
@@ -3899,7 +4275,12 @@ impl PhotonicApp {
                                 canvas_y: cy,
                             },
                         };
-                        self.radial_wheel = Some(WheelState::new(pos, (cx, cy), &wheel_ctx));
+                        self.radial_wheel = Some(WheelState::new(
+                            pos,
+                            (cx, cy),
+                            &wheel_ctx,
+                            self.prefs.reduced_motion,
+                        ));
                     }
                 }
 
@@ -3907,19 +4288,21 @@ impl PhotonicApp {
                 // This block runs before any early-return tool handlers so the
                 // wheel is always rendered while open.
                 if self.radial_wheel.is_some() {
-                    // Scroll wheel cycles pages
+                    let now = ui.input(|i| i.time);
+
+                    // Scroll wheel rotates between categories (carousel).
                     let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
                     if scroll_y != 0.0 {
                         if let Some(ref mut wheel) = self.radial_wheel {
                             if scroll_y > 0.0 {
-                                wheel.prev_page();
+                                wheel.prev_category(now);
                             } else {
-                                wheel.next_page();
+                                wheel.next_category(now);
                             }
                         }
                     }
 
-                    // Update hover position
+                    // Update hover position (ring segment + peek tabs)
                     if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
                         if let Some(ref mut wheel) = self.radial_wheel {
                             wheel.update_hover(cursor);
@@ -3928,7 +4311,11 @@ impl PhotonicApp {
 
                     // Paint the overlay now — before any `return` can skip it
                     if let Some(ref wheel) = self.radial_wheel {
-                        wheel.draw(ui.painter());
+                        wheel.draw(ui.painter(), now);
+                        // Keep animating the radial-wipe transition smoothly.
+                        if wheel.is_animating(now) {
+                            ui.ctx().request_repaint();
+                        }
                     }
 
                     // Escape closes without selecting
@@ -3937,19 +4324,26 @@ impl PhotonicApp {
                         return;
                     }
 
-                    // Primary click: select item or dismiss
+                    // Primary click: jump to a peeked category, fire a verb, or dismiss.
                     if response.clicked_by(egui::PointerButton::Primary) {
+                        let on_peek = self
+                            .radial_wheel
+                            .as_ref()
+                            .map_or(false, |w| w.peek_hovered.is_some());
+                        if on_peek {
+                            if let Some(ref mut wheel) = self.radial_wheel {
+                                wheel.jump_peek(now);
+                            }
+                            return; // stay open on the new category
+                        }
                         if let Some(wheel) = self.radial_wheel.take() {
-                            if let Some(idx) = wheel.hovered {
-                                // item index is relative to the current page
-                                if let Some(item) = wheel.current_page_items().get(idx) {
-                                    let pa = PanelAction::from_wheel_action(
-                                        item.action.clone(),
-                                        wheel.canvas_pos,
-                                        self.fill_color,
-                                    );
-                                    self.pending_panel_actions.push(pa);
-                                }
+                            if let Some(action) = wheel.hovered_action() {
+                                let pa = PanelAction::from_wheel_action(
+                                    action,
+                                    wheel.canvas_pos,
+                                    self.fill_color,
+                                );
+                                self.pending_panel_actions.push(pa);
                             }
                         }
                         return; // consume click — don't pass to tool handler

@@ -1414,118 +1414,284 @@ fn draw_vertex_panel(
     }
 }
 
-pub fn draw_properties_panel(
-    ui: &mut Ui,
-    doc: &Document,
-    active_tool: Tool,
-    fill_color: &mut [f32; 4],
-    polygon_sides: &mut u32,
-    star_points: &mut u32,
-    star_inner_ratio: &mut f32,
-    rounded_rect_radius: &mut f64,
-    spiral_turns: &mut f32,
-    spiral_inner_radius: &mut f32,
-    spiral_segs_per_turn: &mut u32,
-    selected_node: Option<&SceneNode>,
-    selected_id: Option<NodeId>,
-    selection_count: usize,
-    selected_ids: &[NodeId],
-    point_edit_node: Option<NodeId>,
-    point_selected: &[usize],
-    prop_search: &mut String,
-    shear_x: &mut f64,
-    shear_y: &mut f64,
-    line_snap_45: &mut bool,
-    color_guide_rule: &mut String,
-    arc_start_angle: &mut f64,
-    arc_end_angle: &mut f64,
-    arc_open: &mut bool,
-    grid_cols: &mut u32,
-    grid_rows: &mut u32,
-    polar_grid_rings: &mut u32,
-    polar_grid_sectors: &mut u32,
-    polar_grid_inner_ratio: &mut f32,
-    recolor_palette_input: &mut String,
-    magic_wand_attribute: &mut SelectSameAttr,
-    magic_wand_tolerance: &mut f64,
-    eraser_radius: &mut f64,
-    composition_findings: &[String],
-    rhythm_findings: &[String],
-    branch_names: &[String],
-    branch_name_input: &mut String,
-    swatch_library_selected: &mut String,
-    graphic_style_name_input: &mut String,
-    width_profile_name_input: &mut String,
-    grammar_rules: &[(String, String)], // (name, rule_type)
-    grammar_rule_name_input: &mut String,
-    grammar_rule_type_selected: &mut String,
-    grammar_rule_params_input: &mut String,
-    grammar_check_results: &[(String, bool, String)], // (rule_name, passed, message)
-    distance_results: &[(String, String, f64, f64, f64)], // (from, to, h_gap, v_gap, center_dist)
-    action_names: &[(String, usize)],                 // (name, step_count)
-    history_entries: &[(usize, String)],              // (step_index, description) newest first
-    history_total: usize,
-    bleed_mm_input: &mut f64,
-    slug_mm_input: &mut f64,
-    construction_angle: &mut f64,
-    construction_x: &mut f64,
-    construction_y: &mut f64,
-    margin_top: &mut f64,
-    margin_right: &mut f64,
-    margin_bottom: &mut f64,
-    margin_left: &mut f64,
-    event_trigger_event: &mut String,
-    event_trigger_action: &mut String,
-    workspace_name_input: &mut String,
-) -> Option<PanelAction> {
-    let mut action: Option<PanelAction> = None;
+pub(crate) struct PropPanelCtx<'a> {
+    pub doc: &'a Document,
+    pub active_tool: Tool,
+    pub fill_color: &'a mut [f32; 4],
+    pub polygon_sides: &'a mut u32,
+    pub star_points: &'a mut u32,
+    pub star_inner_ratio: &'a mut f32,
+    pub rounded_rect_radius: &'a mut f64,
+    pub spiral_turns: &'a mut f32,
+    pub spiral_inner_radius: &'a mut f32,
+    pub spiral_segs_per_turn: &'a mut u32,
+    pub selected_node: Option<&'a SceneNode>,
+    pub selected_id: Option<NodeId>,
+    pub selection_count: usize,
+    pub selected_ids: &'a [NodeId],
+    pub point_edit_node: Option<NodeId>,
+    pub point_selected: &'a [usize],
+    pub prop_search: &'a mut String,
+    pub shear_x: &'a mut f64,
+    pub shear_y: &'a mut f64,
+    pub line_snap_45: &'a mut bool,
+    pub color_guide_rule: &'a mut String,
+    pub arc_start_angle: &'a mut f64,
+    pub arc_end_angle: &'a mut f64,
+    pub arc_open: &'a mut bool,
+    pub grid_cols: &'a mut u32,
+    pub grid_rows: &'a mut u32,
+    pub polar_grid_rings: &'a mut u32,
+    pub polar_grid_sectors: &'a mut u32,
+    pub polar_grid_inner_ratio: &'a mut f32,
+    pub recolor_palette_input: &'a mut String,
+    pub magic_wand_attribute: &'a mut SelectSameAttr,
+    pub magic_wand_tolerance: &'a mut f64,
+    pub eraser_radius: &'a mut f64,
+    pub composition_findings: &'a [String],
+    pub rhythm_findings: &'a [String],
+    pub branch_names: &'a [String],
+    pub branch_name_input: &'a mut String,
+    pub swatch_library_selected: &'a mut String,
+    pub graphic_style_name_input: &'a mut String,
+    pub width_profile_name_input: &'a mut String,
+    pub grammar_rules: &'a [(String, String)],
+    pub grammar_rule_name_input: &'a mut String,
+    pub grammar_rule_type_selected: &'a mut String,
+    pub grammar_rule_params_input: &'a mut String,
+    pub grammar_check_results: &'a [(String, bool, String)],
+    pub distance_results: &'a [(String, String, f64, f64, f64)],
+    pub action_names: &'a [(String, usize)],
+    pub history_entries: &'a [(usize, String)],
+    pub history_total: usize,
+    pub bleed_mm_input: &'a mut f64,
+    pub slug_mm_input: &'a mut f64,
+    pub construction_angle: &'a mut f64,
+    pub construction_x: &'a mut f64,
+    pub construction_y: &'a mut f64,
+    pub margin_top: &'a mut f64,
+    pub margin_right: &'a mut f64,
+    pub margin_bottom: &'a mut f64,
+    pub margin_left: &'a mut f64,
+    pub event_trigger_event: &'a mut String,
+    pub event_trigger_action: &'a mut String,
+    pub workspace_name_input: &'a mut String,
+    pub action: Option<PanelAction>,
+    pub q: String,
+    pub forced_open: Option<bool>,
+}
 
+impl<'a> PropPanelCtx<'a> {
+    fn matches(&self, label: &str) -> bool {
+        self.q.is_empty() || label.to_lowercase().contains(&self.q)
+    }
+}
+
+/// One of the six Canva-style drawer groups surfaced by the left icon rail.
+///
+/// Each group owns a disjoint slice of the ~43 property section functions; every
+/// section is reachable through exactly one group. `draw_drawer` renders the
+/// active group, so only one group's sections are visible at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DrawerGroup {
+    /// Tool palette: selection/navigation/drawing/path tools + pinned hotbar.
+    Tools,
+    /// Selection inspector: navigator, selected node, tool/shape options, symbol
+    /// overrides, text-variable binding (+ the Direct-Select vertex panel).
+    Inspector,
+    /// Shape/appearance operations: combine, boolean, blend, pathfinder, etc.
+    Modify,
+    /// Alignment, distribution, distances, dimensions, layer ops.
+    Arrange,
+    /// Swatches, gradients, styles, width profiles, symbols, variables, libraries.
+    Assets,
+    /// Document-level tooling: export, data-viz, analysis, grammar, actions, etc.
+    Document,
+    /// Edit history and branches.
+    History,
+}
+
+impl DrawerGroup {
+    /// All groups in rail order (top to bottom).
+    pub const ALL: [DrawerGroup; 7] = [
+        DrawerGroup::Tools,
+        DrawerGroup::Inspector,
+        DrawerGroup::Modify,
+        DrawerGroup::Arrange,
+        DrawerGroup::Assets,
+        DrawerGroup::Document,
+        DrawerGroup::History,
+    ];
+
+    /// Phosphor glyph shown on the rail button.
+    pub fn icon(self) -> &'static str {
+        match self {
+            DrawerGroup::Tools => ph::TOOLBOX,
+            DrawerGroup::Inspector => ph::SLIDERS_HORIZONTAL,
+            DrawerGroup::Modify => ph::MAGIC_WAND,
+            DrawerGroup::Arrange => ph::ARROWS_OUT_CARDINAL,
+            DrawerGroup::Assets => ph::SWATCHES,
+            DrawerGroup::Document => ph::FILE_TEXT,
+            DrawerGroup::History => ph::CLOCK_COUNTER_CLOCKWISE,
+        }
+    }
+
+    /// Human-readable title shown in the drawer header and rail tooltip.
+    pub fn title(self) -> &'static str {
+        match self {
+            DrawerGroup::Tools => "Tools",
+            DrawerGroup::Inspector => "Inspector",
+            DrawerGroup::Modify => "Modify",
+            DrawerGroup::Arrange => "Arrange",
+            DrawerGroup::Assets => "Assets",
+            DrawerGroup::Document => "Document",
+            DrawerGroup::History => "History",
+        }
+    }
+
+    /// Whether this drawer has any content worth showing in the current context.
+    /// Rail icons for groups returning `false` are disabled, and an open drawer
+    /// that loses its content auto-collapses. Tools, Inspector (navigator + tool
+    /// options), and the always-on library/document/history groups are always
+    /// available; the operation drawers (Modify/Arrange) need a selection.
+    pub fn has_content(self, selection_count: usize) -> bool {
+        match self {
+            DrawerGroup::Tools
+            | DrawerGroup::Inspector
+            | DrawerGroup::Assets
+            | DrawerGroup::Document
+            | DrawerGroup::History => true,
+            DrawerGroup::Modify | DrawerGroup::Arrange => selection_count >= 1,
+        }
+    }
+}
+
+/// Render one drawer group: the group header + the shared search bar, then that
+/// group's section functions in their original dispatch order. Returns any
+/// queued [`PanelAction`].
+///
+/// Replaces the former always-on `draw_properties_panel` monolith: the section
+/// functions are unchanged, just partitioned across the six [`DrawerGroup`]s.
+pub(crate) fn draw_drawer(
+    ui: &mut Ui,
+    ctx: &mut PropPanelCtx,
+    group: DrawerGroup,
+) -> Option<PanelAction> {
     ui.label(
-        RichText::new("PROPERTIES")
+        RichText::new(group.title().to_uppercase())
             .small()
             .color(Color32::from_rgb(80, 80, 110)),
     );
     ui.add_space(2.0);
 
-    // ── Search bar ────────────────────────────────────────────────────────────
+    // ── Search bar ────────────────────────────────────────────────
+    // Filters the section headers within the *open* drawer (each section fn
+    // honours `ctx.q` / `ctx.forced_open`).
     ui.horizontal(|ui| {
         let response = ui.add(
-            egui::TextEdit::singleline(prop_search)
+            egui::TextEdit::singleline(&mut *ctx.prop_search)
                 .hint_text("Search properties…")
                 .desired_width(ui.available_width() - 24.0),
         );
-        if !prop_search.is_empty()
+        if !ctx.prop_search.is_empty()
             && ui
                 .small_button(ph::X)
                 .on_hover_text("Clear search")
                 .clicked()
         {
-            prop_search.clear();
+            ctx.prop_search.clear();
             response.surrender_focus();
         }
     });
     ui.add_space(4.0);
 
-    // Helper: returns true when the section label matches the current query.
-    // An empty query matches everything.
-    let q = prop_search.trim().to_lowercase();
-    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(&q) };
-    // When searching, force every matching header open so the user sees the contents.
-    let forced_open: Option<bool> = if q.is_empty() { None } else { Some(true) };
+    // An empty query matches everything; a non-empty query forces matching
+    // headers open so their contents are visible.
+    ctx.q = ctx.prop_search.trim().to_lowercase();
+    ctx.forced_open = if ctx.q.is_empty() { None } else { Some(true) };
 
-    // ── Context-aware: vertex editing (Direct Selection) ──────────────────────
-    // When a path is in point-edit mode, the panel shows ONLY anchor/vertex
-    // properties — node Transform/Fill/Stroke/Path sections are suppressed so the
-    // inspector reflects exactly what is selected, like Illustrator.
-    if active_tool == Tool::DirectSelect {
-        if let Some(nid) = point_edit_node {
-            if let Some(node) = doc.nodes.get(&nid) {
-                draw_vertex_panel(ui, node, nid, point_selected, &mut action);
-                return action;
+    match group {
+        DrawerGroup::Inspector => {
+            // ── Context-aware: vertex editing (Direct Selection) ──────────
+            // When a path is in point-edit mode, the inspector shows ONLY
+            // anchor/vertex properties — node Transform/Fill/Stroke/Path
+            // sections are suppressed, like Illustrator. This early-return
+            // belongs to the Inspector drawer.
+            if ctx.active_tool == Tool::DirectSelect {
+                if let Some(nid) = ctx.point_edit_node {
+                    if let Some(node) = ctx.doc.nodes.get(&nid) {
+                        draw_vertex_panel(ui, node, nid, ctx.point_selected, &mut ctx.action);
+                        return ctx.action.take();
+                    }
+                }
             }
+            draw_navigator_section(ui, ctx);
+            draw_selected_node(ui, ctx);
+            draw_tool_shape_options(ui, ctx);
+            draw_symbol_overrides(ui, ctx);
+            draw_text_variable_binding(ui, ctx);
         }
+        DrawerGroup::Modify => {
+            draw_combine(ui, ctx);
+            draw_boolean_ops(ui, ctx);
+            draw_blend(ui, ctx);
+            draw_pathfinder(ui, ctx);
+            draw_distribute_on_path(ui, ctx);
+            draw_compound_path(ui, ctx);
+            draw_clipping_mask(ui, ctx);
+            draw_blend_colors(ui, ctx);
+            draw_adjust_colors(ui, ctx);
+            draw_flatten_transparency(ui, ctx);
+            draw_copy_appearance(ui, ctx);
+        }
+        DrawerGroup::Arrange => {
+            draw_arrange_align(ui, ctx);
+            draw_alignment(ui, ctx);
+            draw_distribute_no_overlap(ui, ctx);
+            draw_align_to_artboard(ui, ctx);
+            draw_distances(ui, ctx);
+            draw_dimension_annotations(ui, ctx);
+            draw_layer_operations(ui, ctx);
+        }
+        DrawerGroup::Assets => {
+            draw_color_swatches(ui, ctx);
+            draw_spot_colors(ui, ctx);
+            draw_gradient_swatches(ui, ctx);
+            draw_graphic_styles(ui, ctx);
+            draw_width_profiles(ui, ctx);
+            draw_symbols_panel(ui, ctx);
+            draw_variables(ui, ctx);
+            draw_libraries_export(ui, ctx);
+        }
+        DrawerGroup::Document => {
+            draw_export_profiles(ui, ctx);
+            draw_data_visualization(ui, ctx);
+            draw_analysis(ui, ctx);
+            draw_composition_analysis(ui, ctx);
+            draw_document_grammar(ui, ctx);
+            draw_document_workflow(ui, ctx);
+            draw_actions(ui, ctx);
+            draw_event_triggers(ui, ctx);
+            draw_workspaces(ui, ctx);
+        }
+        DrawerGroup::History => {
+            draw_edit_history(ui, ctx);
+            draw_branches(ui, ctx);
+        }
+        // Tools is rendered by the app layer (it needs tool state, not the
+        // property ctx), so it is never routed through draw_drawer.
+        DrawerGroup::Tools => {}
     }
 
+    ctx.action.take()
+}
+
+fn draw_navigator_section(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_id = ctx.selected_id;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Navigator Panel ───────────────────────────────────────────────────────
     if matches("Navigator") {
         if let Some(a) = navigator::draw_navigator(ui, doc, selected_id, forced_open) {
@@ -1534,6 +1700,35 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let selection_count = ctx.selection_count;
+    let selected_ids = ctx.selected_ids;
+    let shear_x = &mut *ctx.shear_x;
+    let shear_y = &mut *ctx.shear_y;
+    let color_guide_rule = &mut *ctx.color_guide_rule;
+    let recolor_palette_input = &mut *ctx.recolor_palette_input;
+    let bleed_mm_input = &mut *ctx.bleed_mm_input;
+    let slug_mm_input = &mut *ctx.slug_mm_input;
+    let construction_angle = &mut *ctx.construction_angle;
+    let construction_x = &mut *ctx.construction_x;
+    let construction_y = &mut *ctx.construction_y;
+    let margin_top = &mut *ctx.margin_top;
+    let margin_right = &mut *ctx.margin_right;
+    let margin_bottom = &mut *ctx.margin_bottom;
+    let margin_left = &mut *ctx.margin_left;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Selected node info ────────────────────────────────────────────────────
     if let Some(node) = selected_node {
         ui.label(RichText::new("Selected").strong());
@@ -3684,6 +3879,15 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_combine(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
     // ── Combine ──────────────────────────────────────────────────────────────
     if selection_count >= 2
         && (matches("Boolean Operations")
@@ -3705,6 +3909,13 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
+}
+
+fn draw_boolean_ops(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Boolean operations (visible when exactly 2 path nodes are selected) ──
     if selection_count == 2 && matches("Boolean Operations") {
         egui::CollapsingHeader::new("Boolean Operations")
@@ -3761,6 +3972,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_blend(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Blend (visible when exactly 2 nodes selected) ─────────────────────────
     if selection_count == 2 && matches("Blend") {
         egui::CollapsingHeader::new("Blend")
@@ -3810,6 +4033,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_pathfinder(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Pathfinder operations (visible when 2+ nodes selected) ───────────────
     if selection_count >= 2 && matches("Pathfinder") {
         egui::CollapsingHeader::new("Pathfinder")
@@ -3865,6 +4099,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_distribute_on_path(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Distribute on Path (visible when 2+ nodes selected) ─────────────────
     if selection_count >= 2 && matches("Distribute on Path") {
         egui::CollapsingHeader::new("Distribute on Path")
@@ -3898,6 +4143,19 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_compound_path(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Compound Path (visible when 2+ nodes selected, or 1 compound selected) ──
     let is_compound_selected = selected_node
         .and_then(|n| {
@@ -3936,6 +4194,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_clipping_mask(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Clipping Mask (visible when a Group node is selected) ─────────────────
     let is_group_selected = selected_node
         .map(|n| matches!(n.kind, photonic_core::node::SceneNodeKind::Group(_)))
@@ -3977,6 +4247,17 @@ pub fn draw_properties_panel(
         }
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_blend_colors(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Blend Colors (visible when 3+ nodes selected) ────────────────────────
     if selection_count >= 3 && matches("Blend Colors") {
         egui::CollapsingHeader::new("Blend Colors")
@@ -4024,6 +4305,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_adjust_colors(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Adjust Colors (visible when 1+ nodes selected) ───────────────────────
     if selection_count >= 1 && matches("Adjust Colors") {
         egui::CollapsingHeader::new("Adjust Colors")
@@ -4097,6 +4389,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_flatten_transparency(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Flatten Transparency ──────────────────────────────────────────────────
     if selection_count >= 1 && matches("Flatten Transparency") {
         egui::CollapsingHeader::new("Flatten Transparency")
@@ -4114,6 +4417,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_copy_appearance(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let selected_ids = ctx.selected_ids;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Copy Appearance (visible when 2+ nodes selected) ─────────────────────
     if selection_count >= 2 && matches("Copy Appearance") {
         thread_local! {
@@ -4175,6 +4490,15 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_arrange_align(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
     // ── Arrange & Align ──────────────────────────────────────────────────────
     if selection_count >= 2
         && (matches("Alignment")
@@ -4194,6 +4518,14 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
+}
+
+fn draw_alignment(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selected_id = ctx.selected_id;
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Alignment (visible when 2+ nodes selected) ───────────────────────────
     if selection_count >= 2 && matches("Alignment") {
         egui::CollapsingHeader::new("Alignment")
@@ -4340,6 +4672,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_distribute_no_overlap(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Distribute No Overlap (visible when 2+ nodes selected) ──────────────
     if selection_count >= 2 && matches("Distribute No Overlap") {
         egui::CollapsingHeader::new("Distribute No Overlap")
@@ -4365,6 +4709,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_align_to_artboard(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Align to Artboard (visible when 1+ nodes selected) ───────────────────
     if selection_count >= 1 && matches("Align to Artboard") {
         egui::CollapsingHeader::new("Align to Artboard")
@@ -4438,6 +4793,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_layer_operations(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Layer Operations (visible when 2+ nodes selected) ────────────────────
     if selection_count >= 2 && matches("Layer Operations") {
         egui::CollapsingHeader::new("Layer Operations")
@@ -4455,6 +4821,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_tool_shape_options(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let fill_color = &mut *ctx.fill_color;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Tool / shape options ──────────────────────────────────────────────────
     if matches("New Shape Fill") {
         egui::CollapsingHeader::new("New Shape Fill")
@@ -4470,6 +4848,37 @@ pub fn draw_properties_panel(
             });
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let active_tool = ctx.active_tool;
+    let polygon_sides = &mut *ctx.polygon_sides;
+    let star_points = &mut *ctx.star_points;
+    let star_inner_ratio = &mut *ctx.star_inner_ratio;
+    let rounded_rect_radius = &mut *ctx.rounded_rect_radius;
+    let spiral_turns = &mut *ctx.spiral_turns;
+    let spiral_inner_radius = &mut *ctx.spiral_inner_radius;
+    let spiral_segs_per_turn = &mut *ctx.spiral_segs_per_turn;
+    let line_snap_45 = &mut *ctx.line_snap_45;
+    let arc_start_angle = &mut *ctx.arc_start_angle;
+    let arc_end_angle = &mut *ctx.arc_end_angle;
+    let arc_open = &mut *ctx.arc_open;
+    let grid_cols = &mut *ctx.grid_cols;
+    let grid_rows = &mut *ctx.grid_rows;
+    let polar_grid_rings = &mut *ctx.polar_grid_rings;
+    let polar_grid_sectors = &mut *ctx.polar_grid_sectors;
+    let polar_grid_inner_ratio = &mut *ctx.polar_grid_inner_ratio;
+    let magic_wand_attribute = &mut *ctx.magic_wand_attribute;
+    let magic_wand_tolerance = &mut *ctx.magic_wand_tolerance;
+    let eraser_radius = &mut *ctx.eraser_radius;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Data Visualization (always visible) ──────────────────────────────────
     if matches("Data Visualization") {
         egui::CollapsingHeader::new("Data Visualization")
@@ -4730,6 +5139,17 @@ pub fn draw_properties_panel(
         }
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_export_profiles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Export Profiles (always visible) ──────────────────────────────────────
     if matches("Export Profiles") {
         egui::CollapsingHeader::new("Export Profiles")
@@ -4769,6 +5189,14 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_libraries_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let matches = |label: &str| -> bool { ctx.matches(label) };
     // ── Libraries & Export ───────────────────────────────────────────────────
     if matches("Color Swatches")
         || matches("Spot Colors")
@@ -4789,6 +5217,16 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
+}
+
+fn draw_color_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_id = ctx.selected_id;
+    let swatch_library_selected = &mut *ctx.swatch_library_selected;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Color Swatches ────────────────────────────────────────────────────────
     if matches("Color Swatches") {
         egui::CollapsingHeader::new("Color Swatches")
@@ -4876,6 +5314,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_spot_colors(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_id = ctx.selected_id;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Spot Colors ───────────────────────────────────────────────────────────
     if matches("Spot Colors") {
         egui::CollapsingHeader::new("Spot Colors")
@@ -4934,6 +5384,19 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_gradient_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Gradient Swatches ─────────────────────────────────────────────────────
     if matches("Gradient Swatches") {
         egui::CollapsingHeader::new("Gradient Swatches")
@@ -5003,6 +5466,20 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_graphic_styles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_id = ctx.selected_id;
+    let graphic_style_name_input = &mut *ctx.graphic_style_name_input;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Graphic Styles ────────────────────────────────────────────────────────
     if matches("Graphic Styles") {
         egui::CollapsingHeader::new("Graphic Styles")
@@ -5069,6 +5546,21 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_width_profiles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let width_profile_name_input = &mut *ctx.width_profile_name_input;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Width Profiles ────────────────────────────────────────────────────────
     if matches("Width Profiles") {
         egui::CollapsingHeader::new("Width Profiles")
@@ -5165,6 +5657,14 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_analysis(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let matches = |label: &str| -> bool { ctx.matches(label) };
     // ── Analysis ─────────────────────────────────────────────────────────────
     if matches("Distances")
         || matches("Dimension Annotations")
@@ -5182,6 +5682,15 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
+}
+
+fn draw_distances(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selection_count = ctx.selection_count;
+    let selected_ids = ctx.selected_ids;
+    let distance_results = ctx.distance_results;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Distances ─────────────────────────────────────────────────────────────
     if selection_count >= 2 && matches("Distances") {
         egui::CollapsingHeader::new("Distances")
@@ -5215,6 +5724,19 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_dimension_annotations(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selection_count = ctx.selection_count;
+    let selected_ids = ctx.selected_ids;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Dimension Annotations ─────────────────────────────────────────────────
     if (selection_count == 2 || !doc.dimensions.is_empty()) && matches("Dimension Annotations") {
         egui::CollapsingHeader::new("Dimension Annotations")
@@ -5293,6 +5815,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_composition_analysis(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let composition_findings = ctx.composition_findings;
+    let rhythm_findings = ctx.rhythm_findings;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Composition Analysis ──────────────────────────────────────────────────
     if matches("Composition Analysis") {
         egui::CollapsingHeader::new("Composition Analysis")
@@ -5330,6 +5864,22 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_document_grammar(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let grammar_rules = ctx.grammar_rules;
+    let grammar_rule_name_input = &mut *ctx.grammar_rule_name_input;
+    let grammar_rule_type_selected = &mut *ctx.grammar_rule_type_selected;
+    let grammar_rule_params_input = &mut *ctx.grammar_rule_params_input;
+    let grammar_check_results = ctx.grammar_check_results;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Document Grammar ─────────────────────────────────────────────────────
     if matches("Document Grammar") {
         egui::CollapsingHeader::new("Document Grammar")
@@ -5436,6 +5986,14 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_document_workflow(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let matches = |label: &str| -> bool { ctx.matches(label) };
     // ── Document & Workflow ───────────────────────────────────────────────────
     if matches("Actions")
         || matches("History")
@@ -5459,6 +6017,13 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
+}
+
+fn draw_actions(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let action_names = ctx.action_names;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Actions ───────────────────────────────────────────────────────────────
     if matches("Actions") {
         egui::CollapsingHeader::new("Actions")
@@ -5508,6 +6073,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let history_entries = ctx.history_entries;
+    let history_total = ctx.history_total;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let mut action: Option<PanelAction> = None;
     // ── Edit History ──────────────────────────────────────────────────────────
     if matches("History") {
         egui::CollapsingHeader::new("Edit History")
@@ -5578,6 +6154,20 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_event_triggers(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let action_names = ctx.action_names;
+    let event_trigger_event = &mut *ctx.event_trigger_event;
+    let event_trigger_action = &mut *ctx.event_trigger_action;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let mut action: Option<PanelAction> = None;
     // ── Event Triggers ────────────────────────────────────────────────────────
     if matches("Event Triggers") {
         egui::CollapsingHeader::new("Event Triggers")
@@ -5663,6 +6253,19 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_workspaces(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let prop_search = &mut *ctx.prop_search;
+    let workspace_name_input = &mut *ctx.workspace_name_input;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let mut action: Option<PanelAction> = None;
     // ── Workspaces ────────────────────────────────────────────────────────────
     if matches("Workspaces") {
         egui::CollapsingHeader::new("Workspaces")
@@ -5729,6 +6332,19 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_branches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let branch_names = ctx.branch_names;
+    let branch_name_input = &mut *ctx.branch_name_input;
+    let q = ctx.q.as_str();
+    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Branches ──────────────────────────────────────────────────────────────
     if matches("Branches") {
         egui::CollapsingHeader::new("Branches")
@@ -5786,6 +6402,17 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_variables(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Variables ─────────────────────────────────────────────────────────────
     if matches("Variables") {
         egui::CollapsingHeader::new("Variables")
@@ -5825,6 +6452,18 @@ pub fn draw_properties_panel(
         ui.add_space(4.0);
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_text_variable_binding(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_node = ctx.selected_node;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let forced_open = ctx.forced_open;
+    let mut action: Option<PanelAction> = None;
     // ── Text node: Variable Binding (shown when a text node is selected) ──────
     if let Some(node) = selected_node {
         if let SceneNodeKind::Text(ref tn) = node.kind {
@@ -5864,6 +6503,17 @@ pub fn draw_properties_panel(
         }
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_symbol_overrides(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let matches = |label: &str| -> bool { ctx.matches(label) };
+    let mut action: Option<PanelAction> = None;
     // ── Symbol Instance Overrides ────────────────────────────────────────────
     if let (Some(node), Some(nid)) = (selected_node, selected_id) {
         if node.symbol_ref.is_some() && matches("Symbol Override") {
@@ -5925,6 +6575,17 @@ pub fn draw_properties_panel(
         }
     }
 
+
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
+fn draw_symbols_panel(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    let doc = ctx.doc;
+    let selected_node = ctx.selected_node;
+    let selected_id = ctx.selected_id;
+    let mut action: Option<PanelAction> = None;
     // ── Symbols panel ────────────────────────────────────────────────────────
     {
         egui::CollapsingHeader::new("Symbols")
@@ -6049,8 +6710,12 @@ pub fn draw_properties_panel(
         ui.add_space(2.0);
     }
 
-    action
+
+    if action.is_some() {
+        ctx.action = action;
+    }
 }
+
 
 // ─── Fill editor ─────────────────────────────────────────────────────────────
 
