@@ -3363,14 +3363,16 @@ impl PhotonicApp {
         let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
         if t > 0.001 {
             let fully_open = drawer_open && t >= 0.999;
-            // Remove the drawer's left inner margin so its content starts flush
-            // against the rail (pairs with the rail's trimmed right margin above
-            // to close the #168 gap). Set on the base binding so it carries
-            // through both the resizable and the exact-width tween branches.
+            // Give the drawer a small left inner margin (#186 follow-up to #168):
+            // #168 zeroed this to close a ~16 px dead band, but that left the
+            // content touching the rail. Restore a modest 6 px gutter so the
+            // content breathes without reopening the old gap. Set on the base
+            // binding so it carries through both the resizable and the
+            // exact-width tween branches.
             let drawer_frame = {
                 let mut f = egui::Frame::side_top_panel(&ctx.style());
                 f.inner_margin = egui::Margin {
-                    left: 0.0,
+                    left: 6.0,
                     right: 8.0,
                     top: 2.0,
                     bottom: 2.0,
