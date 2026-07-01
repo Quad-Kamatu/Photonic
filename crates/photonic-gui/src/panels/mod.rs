@@ -8,8 +8,7 @@ use photonic_core::{
         FluidGradient, FluidGradientPoint, Gradient, GradientKind, GradientStop, LineJoin,
         MeshGradient, MeshGradientVertex, PatternFill, Stroke,
     },
-    CheckpointInfo, Color, Document, Fill, GaussianGlow, GlowEffect, PrimitiveKind, SceneNode,
-    SceneNodeKind,
+    Color, Document, Fill, GaussianGlow, GlowEffect, PrimitiveKind, SceneNode, SceneNodeKind,
 };
 use uuid::Uuid;
 
@@ -53,6 +52,11 @@ pub enum PanelAction {
     /// Run a boolean operation on the two currently selected nodes.
     BooleanOp(BooleanOp),
     /// Restore the document to a named checkpoint.
+    ///
+    /// The right-side Change Log UI that produced this action was removed
+    /// (#173) as redundant with the left-drawer Edit History; the restore
+    /// handler is retained for a future menu relocation of checkpoint restore.
+    #[allow(dead_code)]
     RestoreCheckpoint(Uuid),
     /// Update the fill of a selected node.
     UpdateNodeFill { node_id: NodeId, fill: Fill },
@@ -78,6 +82,11 @@ pub enum PanelAction {
     CopyAsSvg { node_ids: Vec<NodeId> },
     /// Diff the current document state against a saved checkpoint, populating
     /// the canvas diff-highlight overlay.
+    ///
+    /// The right-side Change Log UI that produced this action was removed
+    /// (#173) as redundant with the left-drawer Edit History; the diff handler
+    /// is retained for a future menu relocation of checkpoint diff.
+    #[allow(dead_code)]
     DiffWithCheckpoint { checkpoint_id: Uuid },
     /// Clear the active diff highlight overlay.
     ClearDiff,
@@ -6098,20 +6107,11 @@ fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             .default_open(false)
             .id_salt("history_panel")
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("Edit history ({} steps):", history_total))
-                            .weak()
-                            .small(),
-                    );
-                    if ui
-                        .small_button("⟳")
-                        .on_hover_text("Refresh history list")
-                        .clicked()
-                    {
-                        action = Some(PanelAction::RefreshHistory);
-                    }
-                });
+                ui.label(
+                    RichText::new(format!("Edit history ({} steps):", history_total))
+                        .weak()
+                        .small(),
+                );
                 ui.add_space(2.0);
                 if history_entries.is_empty() {
                     ui.label(RichText::new("No edits yet.").weak().small());
@@ -7752,97 +7752,6 @@ fn draw_gaussian_glow_editor(
     } else {
         None
     }
-}
-
-// ─── Change log panel ─────────────────────────────────────────────────────────
-
-/// Draw the change-log panel showing the last 50 checkpoints (newest first).
-/// Returns a `RestoreCheckpoint` action when the user clicks an entry.
-pub fn draw_changelog_panel(
-    ui: &mut Ui,
-    checkpoints: &[CheckpointInfo],
-    max_height: f32,
-) -> Option<PanelAction> {
-    let mut result = None;
-
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{} Change Log", ph::CLOCK_CLOCKWISE))
-                .strong()
-                .small(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                RichText::new(format!("{}/50", checkpoints.len()))
-                    .weak()
-                    .small(),
-            );
-        });
-    });
-
-    egui::ScrollArea::vertical()
-        .id_salt("changelog_scroll")
-        .max_height(max_height)
-        .show(ui, |ui| {
-            if checkpoints.is_empty() {
-                ui.label(RichText::new("No changes yet").weak().italics().small());
-                return;
-            }
-
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            for cp in checkpoints.iter().rev() {
-                let age = now_secs.saturating_sub(cp.created_at);
-                let time_str = if age < 60 {
-                    format!("{}s ago", age)
-                } else if age < 3600 {
-                    format!("{}m ago", age / 60)
-                } else {
-                    format!("{}h ago", age / 3600)
-                };
-
-                ui.horizontal(|ui| {
-                    let resp = ui.add(
-                        egui::Label::new(
-                            RichText::new(&cp.name)
-                                .small()
-                                .color(Color32::from_rgb(122, 122, 154)),
-                        )
-                        .sense(egui::Sense::click())
-                        .truncate(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(&time_str).weak().small());
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("{}", ph::GIT_DIFF)).small(),
-                                )
-                                .small()
-                                .frame(false),
-                            )
-                            .on_hover_text("Diff with current document")
-                            .clicked()
-                        {
-                            result = Some(PanelAction::DiffWithCheckpoint {
-                                checkpoint_id: cp.id,
-                            });
-                        }
-                    });
-                    if resp.clicked() {
-                        result = Some(PanelAction::RestoreCheckpoint(cp.id));
-                    }
-                    if resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                });
-            }
-        });
-
-    result
 }
 
 // ─── Audit panel ──────────────────────────────────────────────────────────────

@@ -3346,6 +3346,11 @@ impl PhotonicApp {
                     let selection_count = doc.selection.node_ids.len();
                     let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();
                     let branch_names = self.branch_names.clone();
+                    // Keep the Edit History list live — recompute from the current
+                    // undo stack each frame so it never goes stale after an edit.
+                    // history_entries(20) is cheap (<=20 items); the mutable write
+                    // lands before the immutable &self.history_entries borrow below.
+                    self.history_entries = history.history_entries(20);
                     let mut ctx = panels::PropPanelCtx {
                         doc: doc,
                         active_tool: self.active_tool,
@@ -3427,15 +3432,12 @@ impl PhotonicApp {
             }
         }
 
-        // ── Right panel: layers + change log + AI chat ──────────────────────
+        // ── Right panel: layers + AI chat ───────────────────────────────────
         egui::SidePanel::right("right_panel")
             .default_width(280.0)
             .min_width(220.0)
             .max_width(400.0)
             .show(ctx, |ui| {
-                let total_h = ui.available_height();
-                let changelog_h = (total_h * 0.38).max(120.0).min(total_h - 330.0);
-
                 // ── Layers panel (top) ────────────────────────────────────────
                 egui::ScrollArea::vertical()
                     .id_salt("layers_scroll")
@@ -3450,14 +3452,6 @@ impl PhotonicApp {
                             self.pending_panel_actions.push(action);
                         }
                     });
-
-                ui.separator();
-
-                // ── Change log (middle) ───────────────────────────────────────
-                let checkpoints = history.list_checkpoints();
-                if let Some(action) = panels::draw_changelog_panel(ui, &checkpoints, changelog_h) {
-                    self.pending_panel_actions.push(action);
-                }
 
                 ui.separator();
 
