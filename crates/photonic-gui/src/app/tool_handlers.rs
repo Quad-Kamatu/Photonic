@@ -923,35 +923,40 @@ impl PhotonicApp {
             return;
         }
 
-        // Double-click finalises the path (also fires clicked, so handle first)
+        // Cursor: reflect the Pen's state while active and hovering the canvas.
+        // egui has no dedicated pen glyph, so reuse existing variants: Crosshair for
+        // normal point-placing, and PointingHand when hovering the first anchor with
+        // enough points to close (signals "click to close the path").
+        if response.hovered() {
+            let icon = ui
+                .input(|i| i.pointer.hover_pos())
+                .filter(|&pos| self.pen_over_first_anchor(view, pos))
+                .map(|_| egui::CursorIcon::PointingHand)
+                .unwrap_or(egui::CursorIcon::Crosshair);
+            ui.ctx().set_cursor_icon(icon);
+        }
+
+        // Double-click finalises the path, closing it (also fires clicked, so first)
         if response.double_clicked_by(egui::PointerButton::Primary) {
-            if self.pen_points.len() >= 2 {
-                if let Some(path) = self.build_pen_path() {
-                    let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
-                        (
-                            self.prefs.default_stroke_color,
-                            self.prefs.default_stroke_width,
-                        )
-                    });
-                    let node = make_node(
-                        path,
-                        self.fill_color,
-                        stroke_arg,
-                        "Pen",
-                        doc.node_count() + 1,
-                    );
-                    doc.add_node(node, None);
-                    *doc_modified = true;
-                }
+            if let Some(path) = self.build_pen_path(true) {
+                self.finalize_pen_node(path, doc, doc_modified);
             }
             self.pen_points.clear();
             return;
         }
 
-        // Single click: add an anchor point
+        // Single click: add an anchor point — or close the path if the click lands
+        // on the first anchor (Illustrator-style click-to-close).
         if response.clicked_by(egui::PointerButton::Primary) {
             if !ui.input(|i| i.modifiers.alt) {
                 if let Some(pos) = response.interact_pointer_pos() {
+                    if self.pen_over_first_anchor(view, pos) {
+                        if let Some(path) = self.build_pen_path(true) {
+                            self.finalize_pen_node(path, doc, doc_modified);
+                        }
+                        self.pen_points.clear();
+                        return;
+                    }
                     let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
                     self.pen_points.push((cx, cy));
                 }
@@ -1005,7 +1010,11 @@ impl PhotonicApp {
     }
 
     /// Build a `PathData` polyline from the accumulated pen points.
-    pub(crate) fn build_pen_path(&self) -> Option<PathData> {
+    ///
+    /// When `close` is set and there are at least 3 points, the path is closed
+    /// (`close_path`), producing a filled region rather than an open polyline. A
+    /// closed 2-point path is degenerate, so closing is skipped below the threshold.
+    pub(crate) fn build_pen_path(&self, close: bool) -> Option<PathData> {
         if self.pen_points.len() < 2 {
             return None;
         }
@@ -1015,7 +1024,43 @@ impl PhotonicApp {
         for &(x, y) in &self.pen_points[1..] {
             bez.line_to((x, y));
         }
+        if close && self.pen_points.len() >= 3 {
+            bez.close_path();
+        }
         Some(PathData::from_bez_path(&bez))
+    }
+
+    /// Screen-space hit test: is `screen` within the close radius of the first
+    /// anchor, with enough points placed to close the path? Drives both the
+    /// close-state cursor and click-to-close finalisation.
+    fn pen_over_first_anchor(&self, view: &CanvasView, screen: egui::Pos2) -> bool {
+        const CLOSE_RADIUS: f32 = 8.0;
+        if self.pen_points.len() < 3 {
+            return false;
+        }
+        let (fx, fy) = self.pen_points[0];
+        let (sfx, sfy) = view.canvas_to_screen(fx, fy);
+        (screen - egui::pos2(sfx as f32, sfy as f32)).length() <= CLOSE_RADIUS
+    }
+
+    /// Commit a finalised pen `path` as a new document node (fill + optional
+    /// default stroke). Shared by the double-click and click-to-close paths.
+    fn finalize_pen_node(&self, path: PathData, doc: &mut Document, doc_modified: &mut bool) {
+        let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
+            (
+                self.prefs.default_stroke_color,
+                self.prefs.default_stroke_width,
+            )
+        });
+        let node = make_node(
+            path,
+            self.fill_color,
+            stroke_arg,
+            "Pen",
+            doc.node_count() + 1,
+        );
+        doc.add_node(node, None);
+        *doc_modified = true;
     }
 
     // ── Direct Selection tool handler ─────────────────────────────────────────
