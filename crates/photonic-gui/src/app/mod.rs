@@ -227,6 +227,14 @@ struct SimplifyDialog {
     node_id: NodeId,
     node_name: String,
     tolerance: f64,
+    /// Anchor-point count of the original path, captured when the dialog opens.
+    orig_points: usize,
+    /// Simplified result cached for `cached_tol`, so RDP runs only on a
+    /// tolerance change (or first build), not every frame.
+    preview: Option<PathData>,
+    /// Tolerance the cached `preview` was built for. `NaN` means "not built
+    /// yet" so the first comparison always misses and forces a build.
+    cached_tol: f64,
 }
 
 struct FindReplaceTextDialog {
@@ -3517,6 +3525,44 @@ impl PhotonicApp {
                             );
                             if pts.len() >= 2 {
                                 painter.add(egui::Shape::line(pts, outline_stroke));
+                            }
+                        }
+                    }
+                }
+
+                // ── Simplify Path live preview overlay (#166) ─────────────────
+                // While the Simplify dialog is open, paint the simplified result
+                // as a non-destructive accent wireframe (plus anchor dots) over
+                // the artwork so the tolerance can be judged before Apply. The
+                // simplified PathData is cached per-tolerance, so Ramer-Douglas-
+                // Peucker runs only when the tolerance changes, not every frame.
+                if let Some(dlg) = self.simplify_dialog.as_mut() {
+                    if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            if dlg.preview.is_none() || dlg.cached_tol != dlg.tolerance {
+                                dlg.preview = Some(photonic_core::ops::simplify::simplify_path(
+                                    &pn.path_data,
+                                    dlg.tolerance,
+                                ));
+                                dlg.cached_tol = dlg.tolerance;
+                            }
+                            if let Some(preview) = &dlg.preview {
+                                let pts = bez_to_screen_points_xf(
+                                    &preview.to_bez_path(),
+                                    view,
+                                    &node.transform,
+                                );
+                                if pts.len() >= 2 {
+                                    let painter = ui.painter_at(rect);
+                                    let accent = egui::Color32::from_rgb(110, 86, 207);
+                                    painter.add(egui::Shape::line(
+                                        pts.clone(),
+                                        egui::Stroke::new(1.5, accent),
+                                    ));
+                                    for p in &pts {
+                                        painter.circle_filled(*p, 2.0, accent);
+                                    }
+                                }
                             }
                         }
                     }
@@ -7105,15 +7151,25 @@ impl PhotonicApp {
                 }
 
                 PanelAction::OpenSimplifyDialog { node_id } => {
-                    let name = doc
-                        .nodes
-                        .get(&node_id)
+                    let node = doc.nodes.get(&node_id);
+                    let name = node
                         .map(|n| n.name.clone())
                         .unwrap_or_else(|| node_id.to_string());
+                    let orig_points = node
+                        .and_then(|n| match &n.kind {
+                            SceneNodeKind::Path(pn) => {
+                                Some(photonic_core::ops::simplify::count_points(&pn.path_data))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(0);
                     self.simplify_dialog = Some(SimplifyDialog {
                         node_id,
                         node_name: name,
                         tolerance: 1.0,
+                        orig_points,
+                        preview: None,
+                        cached_tol: f64::NAN,
                     });
                 }
 
@@ -12818,6 +12874,28 @@ impl PhotonicApp {
         let node_name = self.simplify_dialog.as_ref().unwrap().node_name.clone();
         let node_id = self.simplify_dialog.as_ref().unwrap().node_id;
 
+        // Refresh the per-tolerance preview cache (shared with the canvas
+        // overlay) so the "Points: N → M" readout is always in sync, regardless
+        // of draw order. RDP still runs only when the tolerance changes.
+        let orig_points = self.simplify_dialog.as_ref().unwrap().orig_points;
+        let new_points = {
+            let dlg = self.simplify_dialog.as_mut().unwrap();
+            if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    if dlg.preview.is_none() || dlg.cached_tol != dlg.tolerance {
+                        dlg.preview = Some(photonic_core::ops::simplify::simplify_path(
+                            &pn.path_data,
+                            dlg.tolerance,
+                        ));
+                        dlg.cached_tol = dlg.tolerance;
+                    }
+                }
+            }
+            dlg.preview
+                .as_ref()
+                .map(photonic_core::ops::simplify::count_points)
+        };
+
         egui::Window::new("Simplify Path")
             .collapsible(false)
             .resizable(false)
@@ -12840,6 +12918,15 @@ impl PhotonicApp {
                         .weak()
                         .small(),
                 );
+                ui.add_space(4.0);
+                match new_points {
+                    Some(new) => {
+                        ui.label(format!("Points: {} → {}", orig_points, new));
+                    }
+                    None => {
+                        ui.label(format!("Points: {}", orig_points));
+                    }
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
@@ -12870,11 +12957,15 @@ impl PhotonicApp {
                 self.simplify_dialog = None;
             }
             Action::Apply => {
+                // Reuse the preview the dialog/overlay already computed for this
+                // tolerance instead of re-running RDP.
+                let cached = self.simplify_dialog.as_mut().and_then(|d| d.preview.take());
                 self.simplify_dialog = None;
                 if let Some(node) = doc.nodes.get(&node_id) {
                     if let SceneNodeKind::Path(pn) = &node.kind {
-                        let simplified =
-                            photonic_core::ops::simplify::simplify_path(&pn.path_data, tolerance);
+                        let simplified = cached.unwrap_or_else(|| {
+                            photonic_core::ops::simplify::simplify_path(&pn.path_data, tolerance)
+                        });
                         let mut new_path = pn.clone();
                         new_path.path_data = simplified;
                         let mut new_node = node.clone();
