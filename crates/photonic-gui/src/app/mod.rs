@@ -120,7 +120,16 @@ pub enum DirectDrag {
     /// Moving the whole shape by dragging its fill/interior. `start_e`/`start_f`
     /// are the node transform's original translation (`matrix[4]`/`matrix[5]`),
     /// captured at press so the per-frame delta stays stable (#164).
-    Shape { start_e: f64, start_f: f64 },
+    /// `ref_x`/`ref_y` are a canvas-space reference point (the node's bbox
+    /// top-left) captured at press, so grid snap aligns the shape's edge to the
+    /// grid instead of quantizing the raw displacement — mirroring the Move
+    /// tool's `move_snap_ref` (#181 requirement 3). `None` when bounds are
+    /// unavailable, in which case snap falls back to the raw target.
+    Shape {
+        start_e: f64,
+        start_f: f64,
+        ref_pt: Option<(f64, f64)>,
+    },
 }
 
 // ─── Diff highlight ────────────────────────────────────────────────────────────
@@ -498,6 +507,11 @@ pub struct PhotonicApp {
     /// What the current Direct Selection drag is manipulating (None = anchors
     /// or no active drag). Set on drag-start, cleared on release.
     point_drag_mode: Option<DirectDrag>,
+    /// Screen-space position where a Direct Select anchor marquee (rubber-band
+    /// vertex select) began; `None` when no marquee is in progress. Tracked
+    /// separately from `point_drag_mode` because a marquee changes only the
+    /// anchor selection, not geometry (no undo). #181.
+    point_marquee_start: Option<egui::Pos2>,
 
     // ── Shape Builder tool state ──────────────────────────────────────────────
     /// Node under cursor in Shape Builder mode (for highlight preview).
@@ -921,6 +935,7 @@ impl Default for PhotonicApp {
             point_context_anchor: None,
             point_drag_origin: None,
             point_drag_mode: None,
+            point_marquee_start: None,
             shape_builder_hovered: None,
             shape_builder_drag_ids: Vec::new(),
             shape_builder_subtract_mode: false,

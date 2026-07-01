@@ -13,6 +13,7 @@ impl PhotonicApp {
         self.point_context_anchor = None;
         self.point_drag_origin = None;
         self.point_drag_mode = None;
+        self.point_marquee_start = None;
         if let Some(nid) = self.point_edit_node {
             if !doc.nodes.contains_key(&nid) {
                 self.point_edit_node = None;
@@ -30,6 +31,7 @@ impl PhotonicApp {
         self.point_context_anchor = None;
         self.point_drag_origin = None;
         self.point_drag_mode = None;
+        self.point_marquee_start = None;
     }
 
     /// Seed Direct Select's point-edit state from the current object selection
@@ -225,6 +227,7 @@ impl PhotonicApp {
             self.point_context_anchor = None;
             self.point_drag_origin = None;
             self.point_drag_mode = None;
+            self.point_marquee_start = None;
             return;
         }
 
@@ -445,12 +448,17 @@ impl PhotonicApp {
                         .point_edit_node
                         .and_then(|nid| doc.nodes.get(&nid).cloned());
                 } else if let Some(anchor_idx) = anchor_hit {
-                    // Select this anchor (replace unless Shift/Ctrl is held)
                     if add_sel {
+                        // Shift/Ctrl adds the pressed anchor to the selection.
                         if !self.point_selected.contains(&anchor_idx) {
                             self.point_selected.push(anchor_idx);
                         }
                     } else if !self.point_selected.contains(&anchor_idx) {
+                        // Only collapse to a single anchor when grabbing an
+                        // UNselected one; grabbing a member of the current
+                        // multi-selection keeps the whole set so the drag moves
+                        // every selected anchor together via DirectDrag::Anchors
+                        // + bez_move_anchors (#181 requirement 2).
                         self.point_selected = vec![anchor_idx];
                     }
                     self.point_drag_mode = Some(DirectDrag::Anchors);
@@ -465,12 +473,23 @@ impl PhotonicApp {
                         // Pressing the fill of the already-selected shape starts a
                         // whole-shape move (#164 requirement 2). Capture the node
                         // and its original translation so the drag is stable.
-                        if let Some(node) = self.point_edit_node.and_then(|nid| doc.nodes.get(&nid))
-                        {
-                            let start_e = node.transform.matrix[4];
-                            let start_f = node.transform.matrix[5];
-                            self.point_drag_origin = Some(node.clone());
-                            self.point_drag_mode = Some(DirectDrag::Shape { start_e, start_f });
+                        if let Some(nid) = self.point_edit_node {
+                            if let Some(node) = doc.nodes.get(&nid) {
+                                let start_e = node.transform.matrix[4];
+                                let start_f = node.transform.matrix[5];
+                                self.point_drag_origin = Some(node.clone());
+                                // Capture a canvas-space reference point (bbox
+                                // top-left) so grid snap aligns the shape's edge
+                                // to the grid, matching the Move tool's
+                                // move_snap_ref (#181 requirement 3).
+                                let ref_pt = selection_canvas_bounds(doc, &[nid], renderer)
+                                    .map(|(x0, y0, _, _)| (x0, y0));
+                                self.point_drag_mode = Some(DirectDrag::Shape {
+                                    start_e,
+                                    start_f,
+                                    ref_pt,
+                                });
+                            }
                         }
                     } else if let Some(nid) = hit_shape {
                         // A different (or first) shape — select it and show all of
@@ -487,8 +506,17 @@ impl PhotonicApp {
                         }
                         self.point_drag_origin = None;
                         self.point_drag_mode = None;
+                    } else if self.point_edit_node.is_some() {
+                        // Empty canvas while a path is being point-edited: begin a
+                        // rubber-band marquee to select the enclosed anchors of the
+                        // edit path (#181 requirement 1). Tracked separately from
+                        // point_drag_mode — a marquee changes only the selection, so
+                        // no drag origin / undo is recorded.
+                        self.point_marquee_start = Some(press_pos);
+                        self.point_drag_origin = None;
+                        self.point_drag_mode = None;
                     } else {
-                        // Empty canvas — deselect.
+                        // Empty canvas with nothing being edited — deselect.
                         self.point_edit_node = None;
                         self.point_selected.clear();
                         self.point_drag_origin = None;
@@ -587,8 +615,12 @@ impl PhotonicApp {
                         }
                     }
                 }
-                Some(DirectDrag::Shape { start_e, start_f }) => {
-                    let (start_e, start_f) = (*start_e, *start_f);
+                Some(DirectDrag::Shape {
+                    start_e,
+                    start_f,
+                    ref_pt,
+                }) => {
+                    let (start_e, start_f, ref_pt) = (*start_e, *start_f, *ref_pt);
                     // Total canvas-space delta from the press point, mirroring the
                     // Move tool (tool_handlers.rs). Writes translation directly.
                     if let (Some(nid), Some(press), Some(cursor)) = (
@@ -596,16 +628,95 @@ impl PhotonicApp {
                         ui.input(|i| i.pointer.press_origin()),
                         response.interact_pointer_pos(),
                     ) {
-                        let dx = (cursor.x - press.x) as f64 / view.zoom;
-                        let dy = (cursor.y - press.y) as f64 / view.zoom;
+                        let raw_dx = (cursor.x - press.x) as f64 / view.zoom;
+                        let raw_dy = (cursor.y - press.y) as f64 / view.zoom;
+                        // Shift locks the move to 8 directions (axis-lock beats
+                        // grid snap); otherwise snap a canvas-space reference
+                        // point (the shape's bbox top-left) to the grid so the
+                        // shape's edge lands ON grid lines, exactly like the Move
+                        // tool's `self.snap(rx + raw_dx) - rx` (#181 requirement
+                        // 3). Snapping the reference point instead of the raw
+                        // target is what makes the shape align to the grid rather
+                        // than merely stepping in grid-sized increments. No-op
+                        // unless prefs.snap_to_grid is enabled.
+                        let (dx, dy) = if shift {
+                            axis_lock_8(raw_dx, raw_dy)
+                        } else {
+                            match ref_pt {
+                                Some((rx, ry)) => {
+                                    (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
+                                }
+                                None => (raw_dx, raw_dy),
+                            }
+                        };
+                        let (te, tf) = (start_e + dx, start_f + dy);
                         if let Some(node) = doc.nodes.get_mut(&nid) {
-                            node.transform.matrix[4] = start_e + dx;
-                            node.transform.matrix[5] = start_f + dy;
+                            node.transform.matrix[4] = te;
+                            node.transform.matrix[5] = tf;
                             *doc_modified = true;
                         }
                     }
                 }
                 None => {}
+            }
+        }
+
+        // ── Marquee complete: select the enclosed anchors ─────────────────────
+        // Runs independently of the geometry-drag history block below: a marquee
+        // only changes the anchor selection, records no undo (#181 requirement 1).
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some(start_pos) = self.point_marquee_start.take() {
+                let end_pos = response
+                    .interact_pointer_pos()
+                    .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                    .unwrap_or(start_pos);
+                let rect = egui::Rect::from_two_pos(start_pos, end_pos);
+                // Collect every anchor of the edit path whose screen position lies
+                // inside the marquee rect. Mapping matches the anchor-square overlay:
+                // node.transform.apply (local→canvas) then view.canvas_to_screen.
+                let hits: Vec<usize> = self
+                    .point_edit_node
+                    .and_then(|nid| doc.nodes.get(&nid))
+                    .and_then(|node| match &node.kind {
+                        SceneNodeKind::Path(pn) => {
+                            let bez = pn.path_data.to_bez_path();
+                            Some(
+                                path_anchor_points(&bez)
+                                    .into_iter()
+                                    .filter_map(|(idx, p)| {
+                                        let (cx, cy) = node.transform.apply(p.x, p.y);
+                                        let (sx, sy) = view.canvas_to_screen(cx, cy);
+                                        rect.contains(egui::pos2(sx as f32, sy as f32))
+                                            .then_some(idx)
+                                    })
+                                    .collect::<Vec<usize>>(),
+                            )
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                if rect.area() < 1.0 && hits.is_empty() {
+                    // Zero-area marquee (a click-through on empty canvas) with no
+                    // enclosed anchors falls back to a plain deselect.
+                    if !add_sel {
+                        self.point_selected.clear();
+                    }
+                } else if add_sel {
+                    // Shift/Ctrl unions the marquee hits with the current selection.
+                    for idx in hits {
+                        if !self.point_selected.contains(&idx) {
+                            self.point_selected.push(idx);
+                        }
+                    }
+                } else {
+                    // Plain marquee replaces the selection with the enclosed anchors.
+                    self.point_selected = hits;
+                }
+                // A marquee never carries a geometry drag; make sure the drag-end
+                // history block below sees no stale origin/mode.
+                self.point_drag_origin = None;
+                self.point_drag_mode = None;
             }
         }
 
@@ -689,6 +800,20 @@ impl PhotonicApp {
                     }
                 }
             }
+        }
+
+        // ── Marquee rubber-band overlay ───────────────────────────────────────
+        // Mirrors the Move tool's marquee (tool_handlers.rs): a translucent accent
+        // rectangle from the press point to the current cursor while dragging (#181).
+        if let Some(start_pos) = self.point_marquee_start {
+            let current_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(start_pos);
+            let rect = egui::Rect::from_two_pos(start_pos, current_pos);
+            ui.painter().rect(
+                rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(110, 86, 207, 30),
+                egui::Stroke::new(1.0, accent),
+            );
         }
 
         // ── Visual overlay ────────────────────────────────────────────────────
