@@ -3171,9 +3171,24 @@ impl PhotonicApp {
         // when the context returns) via `effective_open` — no state churn.
         let sel_count = doc.selection.node_ids.len();
         let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        // Trim the rail's right inner margin to 0 so its buttons hug the drawer
+        // edge — the default `Frame::side_top_panel` uses `symmetric(8, 2)`,
+        // whose 8 px right margin (plus the drawer's 8 px left margin below)
+        // read as a dead ~16 px band between rail and drawer (#168).
+        let rail_frame = {
+            let mut f = egui::Frame::side_top_panel(&ctx.style());
+            f.inner_margin = egui::Margin {
+                left: 5.0,
+                right: 0.0,
+                top: 2.0,
+                bottom: 2.0,
+            };
+            f
+        };
         egui::SidePanel::left("drawer_rail")
             .resizable(false)
             .exact_width(40.0)
+            .frame(rail_frame)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.vertical_centered(|ui| {
@@ -3227,7 +3242,21 @@ impl PhotonicApp {
         let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
         if t > 0.001 {
             let fully_open = drawer_open && t >= 0.999;
-            let mut panel = egui::SidePanel::left("properties");
+            // Remove the drawer's left inner margin so its content starts flush
+            // against the rail (pairs with the rail's trimmed right margin above
+            // to close the #168 gap). Set on the base binding so it carries
+            // through both the resizable and the exact-width tween branches.
+            let drawer_frame = {
+                let mut f = egui::Frame::side_top_panel(&ctx.style());
+                f.inner_margin = egui::Margin {
+                    left: 0.0,
+                    right: 8.0,
+                    top: 2.0,
+                    bottom: 2.0,
+                };
+                f
+            };
+            let mut panel = egui::SidePanel::left("properties").frame(drawer_frame);
             panel = if fully_open {
                 // Fully open: let the user drag-resize within range.
                 panel
