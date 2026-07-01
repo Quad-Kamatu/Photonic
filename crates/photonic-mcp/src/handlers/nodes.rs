@@ -152,7 +152,7 @@ pub async fn create_shape(state: &AppState, args: CreateShapeArgs) -> ToolResult
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd.clone(), &mut doc);
+    history.execute_discrete(cmd.clone(), &mut doc);
 
     ToolResult::text(format!(
         "Created {} '{}' (id: {})",
@@ -192,7 +192,7 @@ pub async fn create_path(state: &AppState, args: CreatePathArgs) -> ToolResult {
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!("Created path '{}' (id: {})", name, node_id))
         .with_data(serde_json::json!({ "node_id": node_id }))
@@ -227,7 +227,7 @@ pub async fn create_curvature_path(state: &AppState, args: CreateCurvaturePathAr
     let node_id = node.id;
     let cmd = Command::AddNode { node, layer_id };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Created smooth curve through {} points (id: {})",
@@ -350,7 +350,7 @@ pub async fn create_flare(state: &AppState, args: CreateFlareArgs) -> ToolResult
         let node = SceneNode::new("Flare Halo", actual_layer, SceneNodeKind::Path(pn));
         let nid = node.id;
         child_ids.push(nid);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(actual_layer),
@@ -391,7 +391,7 @@ pub async fn create_flare(state: &AppState, args: CreateFlareArgs) -> ToolResult
         node.opacity = ray_opacity;
         let nid = node.id;
         child_ids.push(nid);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(actual_layer),
@@ -419,7 +419,7 @@ pub async fn create_flare(state: &AppState, args: CreateFlareArgs) -> ToolResult
         );
         let nid = node.id;
         child_ids.push(nid);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(actual_layer),
@@ -435,7 +435,7 @@ pub async fn create_flare(state: &AppState, args: CreateFlareArgs) -> ToolResult
         SceneNodeKind::Group(photonic_core::node::GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id: actual_layer,
@@ -488,7 +488,7 @@ pub async fn create_spiral(state: &AppState, args: CreateSpiralArgs) -> ToolResu
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Created spiral '{}' ({} turns, outer_r={}, inner_r={}) id: {}",
@@ -524,7 +524,7 @@ pub async fn create_polar_grid(state: &AppState, args: CreatePolarGridArgs) -> T
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Created polar grid '{}' ({} rings, {} sectors, outer_r={}) id: {}",
@@ -558,7 +558,7 @@ pub async fn create_grid(state: &AppState, args: CreateGridArgs) -> ToolResult {
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Created grid '{}' ({}×{} cells, {}×{} size) id: {}",
@@ -624,7 +624,7 @@ pub async fn create_text(state: &AppState, args: CreateTextArgs) -> ToolResult {
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!("Created text '{}' (id: {})", name, node_id))
         .with_data(serde_json::json!({ "node_id": node_id }))
@@ -743,7 +743,7 @@ pub async fn update_node(state: &AppState, args: UpdateNodeArgs) -> ToolResult {
     };
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!("Updated node {}", args.node_id))
 }
@@ -760,7 +760,7 @@ pub async fn delete_nodes(state: &AppState, args: DeleteNodeArgs) -> ToolResult 
     );
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
     ToolResult::text(format!("Deleted {} node(s)", count))
 }
 
@@ -844,7 +844,7 @@ pub async fn build_shape_from_points(
         layer_id: args.layer_id,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Created '{}' from {} points (id: {})",
@@ -914,7 +914,7 @@ pub async fn reorder_node(state: &AppState, args: ReorderNodeArgs) -> ToolResult
         new_index,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Reordered node {} from z-index {} to {}",
@@ -956,7 +956,7 @@ pub async fn group_nodes(state: &AppState, args: GroupNodesArgs) -> ToolResult {
         children,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Grouped {} nodes into '{}' (id: {})",
@@ -993,7 +993,7 @@ pub async fn ungroup_nodes(state: &AppState, args: UngroupNodesArgs) -> ToolResu
         children,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Ungrouped {} into {} child node(s)",
@@ -1109,7 +1109,7 @@ pub async fn boolean_operation(state: &AppState, args: BooleanOperationArgs) -> 
     };
 
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Boolean {} complete — result '{}' (id: {})",
@@ -1229,7 +1229,7 @@ pub async fn apply_transform(state: &AppState, args: ApplyTransformArgs) -> Tool
     let cmd = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!("Transformed {} node(s)", node_count))
 }
@@ -1473,7 +1473,7 @@ pub async fn align_nodes(state: &AppState, args: AlignNodesArgs) -> ToolResult {
     let batch = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     let op_name = match args.operation {
         AlignOperation::Left => "left",
@@ -1767,7 +1767,7 @@ pub async fn duplicate_nodes(state: &AppState, args: DuplicateNodesArgs) -> Tool
     let cmd = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     let total_roots = root_ids.len();
     ToolResult::text(format!(
@@ -1925,7 +1925,7 @@ pub async fn create_array(state: &AppState, args: CreateArrayArgs) -> ToolResult
     let cmd = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     let mode_label = match args.mode {
         ArrayMode::Grid => "grid",
@@ -2035,7 +2035,7 @@ pub async fn style_transfer(state: &AppState, args: StyleTransferArgs) -> ToolRe
     let cmd = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Style transferred from '{}' to {} node(s)",
@@ -2300,7 +2300,7 @@ pub async fn set_node_size(state: &AppState, args: crate::protocol::SetNodeSizeA
     {
         let mut doc = state.document.lock().await;
         let mut history = state.history.lock().await;
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     let new_w = (cur_w * sx * 100.0).round() / 100.0;
@@ -2647,7 +2647,7 @@ pub async fn find_replace_style(state: &AppState, args: FindReplaceStyleArgs) ->
     {
         let mut doc = state.document.lock().await;
         let mut history = state.history.lock().await;
-        history.execute(Command::Batch(commands), &mut doc);
+        history.execute_discrete(Command::Batch(commands), &mut doc);
     }
 
     ToolResult::text(format!("Updated {} node(s)", count))
@@ -2743,7 +2743,7 @@ pub async fn find_replace_text(state: &AppState, args: FindReplaceTextArgs) -> T
     let count = commands.len();
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     history.schedule_mcp_checkpoint(format!("Find/replace text ({} nodes)", count));
 
     ToolResult::text(format!("Updated {} text node(s).", count))
@@ -3000,7 +3000,7 @@ pub async fn layout_nodes(state: &AppState, args: LayoutNodesArgs) -> ToolResult
     {
         let mut doc = state.document.lock().await;
         let mut history = state.history.lock().await;
-        history.execute(Command::Batch(commands), &mut doc);
+        history.execute_discrete(Command::Batch(commands), &mut doc);
     }
 
     ToolResult::text(format!(
@@ -3461,7 +3461,7 @@ pub async fn auto_name_nodes(state: &AppState, args: AutoNameNodesArgs) -> ToolR
     let batch = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!("Renamed {} node(s)", count)).with_data(serde_json::json!({
         "renamed": count,
@@ -4144,7 +4144,7 @@ pub async fn add_anchor_points(state: &AppState, args: AddAnchorPointsArgs) -> T
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     let summary = format!(
@@ -4243,7 +4243,7 @@ pub async fn delete_anchor_point(state: &AppState, args: DeleteAnchorPointArgs) 
 
     let removed_count = remove_set.len();
     let new_count = result.elements().len();
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -4324,7 +4324,7 @@ pub async fn zig_zag_path(state: &AppState, args: ZigZagPathArgs) -> ToolResult 
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -4545,7 +4545,7 @@ pub async fn pucker_bloat(state: &AppState, args: PuckerBloatArgs) -> ToolResult
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     let label = if strength >= 0.0 { "bloat" } else { "pucker" };
@@ -4684,7 +4684,7 @@ pub async fn roughen_path(state: &AppState, args: RoughenPathArgs) -> ToolResult
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -4858,7 +4858,7 @@ pub async fn twirl_path(state: &AppState, args: TwirlPathArgs) -> ToolResult {
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -5075,7 +5075,7 @@ pub async fn blend_objects(state: &AppState, args: BlendObjectsArgs) -> ToolResu
 
         let nid = node.id;
         created_ids.push(nid);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -5234,7 +5234,7 @@ pub async fn create_parametric_shape(
     };
     let node = SceneNode::new(shape_name, layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -5311,7 +5311,7 @@ pub async fn create_truchet_tiling(state: &AppState, args: CreateTruchetTilingAr
             bg_pn.stroke = photonic_core::style::Stroke::none();
             let bg_node = SceneNode::new("background", layer_id, SceneNodeKind::Path(bg_pn));
             let bg_id = bg_node.id;
-            history.execute(
+            history.execute_discrete(
                 photonic_core::history::Command::AddNode {
                     node: bg_node,
                     layer_id: Some(layer_id),
@@ -5422,7 +5422,7 @@ pub async fn create_truchet_tiling(state: &AppState, args: CreateTruchetTilingAr
             let label = format!("tile_{row}_{col}");
             let node = SceneNode::new(&label, layer_id, SceneNodeKind::Path(pn));
             let nid = node.id;
-            history.execute(
+            history.execute_discrete(
                 photonic_core::history::Command::AddNode {
                     node,
                     layer_id: Some(layer_id),
@@ -5440,7 +5440,7 @@ pub async fn create_truchet_tiling(state: &AppState, args: CreateTruchetTilingAr
         SceneNodeKind::Group(GroupNode::new()),
     );
     let group_id = group.id.to_string();
-    history.execute(
+    history.execute_discrete(
         photonic_core::history::Command::GroupNodes {
             group,
             layer_id,
@@ -5527,7 +5527,7 @@ pub async fn create_heart(state: &AppState, args: CreateHeartArgs) -> ToolResult
 
     let node = SceneNode::new("Heart", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -5612,7 +5612,7 @@ pub async fn create_gear(state: &AppState, args: CreateGearArgs) -> ToolResult {
 
     let node = SceneNode::new("Gear", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -5671,7 +5671,7 @@ pub async fn tag_nodes(state: &AppState, args: TagNodesArgs) -> ToolResult {
             }
         }
         if new_node.tags != node.tags {
-            history.execute(
+            history.execute_discrete(
                 Command::UpdateNode {
                     old: node,
                     new: new_node,
@@ -5807,7 +5807,7 @@ pub async fn move_to_layer(state: &AppState, args: MoveToLayerArgs) -> ToolResul
             .map(|l| l.node_ids.len())
             .unwrap_or(0);
 
-        history.execute(
+        history.execute_discrete(
             Command::MoveNodeToLayer {
                 node_id: *nid,
                 old_layer_id,
@@ -5882,7 +5882,7 @@ pub async fn add_dimension_line(state: &AppState, args: AddDimensionLineArgs) ->
         };
         let node = SceneNode::new("Dim Ext", layer_id, SceneNodeKind::Path(pn));
         child_ids.push(node.id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -5931,7 +5931,7 @@ pub async fn add_dimension_line(state: &AppState, args: AddDimensionLineArgs) ->
     };
     let node = SceneNode::new("Dim Line", layer_id, SceneNodeKind::Path(pn));
     child_ids.push(node.id);
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -5955,7 +5955,7 @@ pub async fn add_dimension_line(state: &AppState, args: AddDimensionLineArgs) ->
         mid_y - font_size * 0.7,
     );
     child_ids.push(node.id);
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -5970,7 +5970,7 @@ pub async fn add_dimension_line(state: &AppState, args: AddDimensionLineArgs) ->
         SceneNodeKind::Group(GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id,
@@ -6112,7 +6112,7 @@ pub async fn flatten_group(state: &AppState, args: FlattenGroupArgs) -> ToolResu
                 .and_then(|l| l.node_ids.iter().position(|id| id == group_id))
                 .unwrap_or(0);
 
-            history.execute(
+            history.execute_discrete(
                 Command::UngroupNodes {
                     group: node,
                     layer_id,
@@ -6205,7 +6205,7 @@ pub async fn center_on_canvas(state: &AppState, args: CenterOnCanvasArgs) -> Too
             let mut new_node = node.clone();
             new_node.transform.matrix[4] += dx;
             new_node.transform.matrix[5] += dy;
-            history.execute(
+            history.execute_discrete(
                 Command::UpdateNode {
                     old: node.clone(),
                     new: new_node,
@@ -6257,7 +6257,7 @@ pub async fn remove_fill(state: &AppState, args: RemoveStyleArgs) -> ToolResult 
             }
             _ => continue,
         }
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -6306,7 +6306,7 @@ pub async fn remove_stroke(state: &AppState, args: RemoveStyleArgs) -> ToolResul
             }
             _ => continue,
         }
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -6420,7 +6420,7 @@ pub async fn fit_to_canvas(state: &AppState, args: FitToCanvasArgs) -> ToolResul
                     np.path_data = PathData::from_bez_path(&new_bez);
                 }
                 new_node.transform = Transform::default();
-                history.execute(
+                history.execute_discrete(
                     Command::UpdateNode {
                         old: node.clone(),
                         new: new_node,
@@ -6497,7 +6497,7 @@ pub async fn create_scatter_plot(state: &AppState, args: CreateScatterPlotArgs) 
 
     let node = SceneNode::new("Scatter Plot", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -6568,7 +6568,7 @@ pub async fn scatter_copies(state: &AppState, args: ScatterCopiesArgs) -> ToolRe
 
         let nid = new_node.id;
         created_ids.push(nid);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: new_node,
                 layer_id: Some(layer_id),
@@ -6690,7 +6690,7 @@ pub async fn create_line_chart(state: &AppState, args: CreateLineChartArgs) -> T
                 SceneNodeKind::Path(pn),
             );
             child_ids.push(node.id);
-            history.execute(
+            history.execute_discrete(
                 Command::AddNode {
                     node,
                     layer_id: Some(layer_id),
@@ -6714,7 +6714,7 @@ pub async fn create_line_chart(state: &AppState, args: CreateLineChartArgs) -> T
             SceneNodeKind::Path(pn),
         );
         child_ids.push(node.id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -6729,7 +6729,7 @@ pub async fn create_line_chart(state: &AppState, args: CreateLineChartArgs) -> T
         SceneNodeKind::Group(photonic_core::node::GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id,
@@ -6822,7 +6822,7 @@ pub async fn create_bar_chart(state: &AppState, args: CreateBarChartArgs) -> Too
                 .unwrap_or_else(|| format!("Bar {}", i + 1));
             let node = SceneNode::new(&label, layer_id, SceneNodeKind::Path(pn));
             child_ids.push(node.id);
-            history.execute(
+            history.execute_discrete(
                 Command::AddNode {
                     node,
                     layer_id: Some(layer_id),
@@ -6855,7 +6855,7 @@ pub async fn create_bar_chart(state: &AppState, args: CreateBarChartArgs) -> Too
                 .unwrap_or_else(|| format!("Bar {}", i + 1));
             let node = SceneNode::new(&label, layer_id, SceneNodeKind::Path(pn));
             child_ids.push(node.id);
-            history.execute(
+            history.execute_discrete(
                 Command::AddNode {
                     node,
                     layer_id: Some(layer_id),
@@ -6871,7 +6871,7 @@ pub async fn create_bar_chart(state: &AppState, args: CreateBarChartArgs) -> Too
         SceneNodeKind::Group(photonic_core::node::GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id,
@@ -7001,7 +7001,7 @@ pub async fn create_stacked_bar_chart(
                     SceneNodeKind::Path(pn),
                 );
                 child_ids.push(node.id);
-                history.execute(
+                history.execute_discrete(
                     Command::AddNode {
                         node,
                         layer_id: Some(layer_id),
@@ -7048,7 +7048,7 @@ pub async fn create_stacked_bar_chart(
                     SceneNodeKind::Path(pn),
                 );
                 child_ids.push(node.id);
-                history.execute(
+                history.execute_discrete(
                     Command::AddNode {
                         node,
                         layer_id: Some(layer_id),
@@ -7070,7 +7070,7 @@ pub async fn create_stacked_bar_chart(
         SceneNodeKind::Group(photonic_core::node::GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id,
@@ -7201,7 +7201,7 @@ pub async fn create_pie_chart(state: &AppState, args: CreatePieChartArgs) -> Too
         let node = SceneNode::new(&label, layer_id, SceneNodeKind::Path(pn));
         let nid = node.id;
         child_ids.push(nid);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -7219,7 +7219,7 @@ pub async fn create_pie_chart(state: &AppState, args: CreatePieChartArgs) -> Too
         SceneNodeKind::Group(photonic_core::node::GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id,
@@ -7333,7 +7333,7 @@ pub async fn create_radar_chart(state: &AppState, args: CreateRadarChartArgs) ->
             SceneNodeKind::Path(pn),
         );
         child_ids.push(node.id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -7362,7 +7362,7 @@ pub async fn create_radar_chart(state: &AppState, args: CreateRadarChartArgs) ->
             .unwrap_or_else(|| format!("Axis {}", i + 1));
         let node = SceneNode::new(&format!("Axis {label}"), layer_id, SceneNodeKind::Path(pn));
         child_ids.push(node.id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -7411,7 +7411,7 @@ pub async fn create_radar_chart(state: &AppState, args: CreateRadarChartArgs) ->
             .unwrap_or_else(|| format!("Series {}", si + 1));
         let node = SceneNode::new(&series_name, layer_id, SceneNodeKind::Path(pn));
         child_ids.push(node.id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node,
                 layer_id: Some(layer_id),
@@ -7426,7 +7426,7 @@ pub async fn create_radar_chart(state: &AppState, args: CreateRadarChartArgs) ->
         SceneNodeKind::Group(photonic_core::node::GroupNode::new()),
     );
     let group_id = group.id;
-    history.execute(
+    history.execute_discrete(
         Command::GroupNodes {
             group,
             layer_id,
@@ -7604,7 +7604,7 @@ pub async fn create_speech_bubble(state: &AppState, args: CreateSpeechBubbleArgs
 
     let node = SceneNode::new("Speech Bubble", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -7650,7 +7650,7 @@ pub async fn set_visibility(state: &AppState, args: SetVisibilityArgs) -> ToolRe
         };
         let mut new_node = node.clone();
         new_node.visible = args.visible.unwrap_or(!node.visible);
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -7702,7 +7702,7 @@ pub async fn set_locked(state: &AppState, args: SetLockedArgs) -> ToolResult {
         };
         let mut new_node = node.clone();
         new_node.locked = args.locked.unwrap_or(!node.locked);
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -7817,7 +7817,7 @@ pub async fn set_blend_mode(state: &AppState, args: SetBlendModeArgs) -> ToolRes
         };
         let mut new_node = node.clone();
         new_node.blend_mode = mode;
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -7867,7 +7867,7 @@ pub async fn set_opacity(state: &AppState, args: SetOpacityArgs) -> ToolResult {
         };
         let mut new_node = node.clone();
         new_node.opacity = opacity;
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -7967,7 +7967,7 @@ pub async fn randomize_colors(state: &AppState, args: RandomizeColorsArgs) -> To
             _ => continue,
         }
 
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -8084,7 +8084,7 @@ pub async fn swap_fill_stroke(state: &AppState, args: SwapFillStrokeArgs) -> Too
             _ => continue,
         }
 
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -8182,7 +8182,7 @@ pub async fn flip_nodes(state: &AppState, args: FlipNodesArgs) -> ToolResult {
             }
         }
 
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -8258,7 +8258,7 @@ pub async fn create_cross(state: &AppState, args: CreateCrossArgs) -> ToolResult
 
     let node = SceneNode::new("Cross", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -8480,7 +8480,7 @@ pub async fn create_arrow_shape(state: &AppState, args: CreateArrowShapeArgs) ->
 
     let node = SceneNode::new("Arrow", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -8576,7 +8576,7 @@ pub async fn create_donut(state: &AppState, args: CreateDonutArgs) -> ToolResult
 
     let node = SceneNode::new("Donut", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -8683,7 +8683,7 @@ pub async fn create_sunburst(state: &AppState, args: CreateSunburstArgs) -> Tool
 
     let node = SceneNode::new("Sunburst", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -8779,7 +8779,7 @@ pub async fn create_wave_pattern(state: &AppState, args: CreateWavePatternArgs) 
 
     let node = SceneNode::new("Wave Pattern", layer_id, SceneNodeKind::Path(pn));
     let node_id = node.id;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: Some(layer_id),
@@ -8938,7 +8938,7 @@ pub async fn hatch_fill(state: &AppState, args: HatchFillArgs) -> ToolResult {
             layer_id,
             SceneNodeKind::Path(hatch_pn),
         );
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: hatch_node,
                 layer_id: Some(layer_id),
@@ -9075,7 +9075,7 @@ pub async fn stipple_fill(state: &AppState, args: StippleFillArgs) -> ToolResult
             layer_id,
             SceneNodeKind::Path(dot_pn),
         );
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: dot_node,
                 layer_id: Some(layer_id),
@@ -9174,7 +9174,7 @@ pub async fn add_drop_shadow(state: &AppState, args: AddDropShadowArgs) -> ToolR
             SceneNodeKind::Raster(_) => {}
         }
 
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: shadow,
                 layer_id: Some(node.layer_id),
@@ -9279,7 +9279,7 @@ pub async fn transform_copies(state: &AppState, args: TransformCopiesArgs) -> To
 
         let copy_id = new_node.id;
         created_ids.push(copy_id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: new_node,
                 layer_id: Some(layer_id),
@@ -9359,7 +9359,7 @@ pub async fn round_corners(state: &AppState, args: RoundCornersArgs) -> ToolResu
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -9446,9 +9446,26 @@ fn apply_round_corners(bez: &kurbo::BezPath, radius: f64) -> kurbo::BezPath {
                     continue;
                 }
 
-                // Clamp radius to half the shortest adjacent segment.
-                let max_r = (len_in / 2.0).min(len_out / 2.0);
-                let r = radius.min(max_r);
+                // Clamp radius so adjacent fillets never overlap. Corners here are
+                // interior vertices (endpoints handled by the is_endpoint branch),
+                // so a neighbour is rounded (and shares the edge 50/50) unless it is
+                // an open-run endpoint. For a closed subpath every neighbour is
+                // rounded, keeping the L/2 split; on an open run, a corner adjacent
+                // to an endpoint retreats (almost) the full edge instead.
+                let eps = 1e-3;
+                let prev_rounded = closed || i >= 2; // prev (i-1) is not endpoint 0
+                let next_rounded = closed || i < n - 2; // next (i+1) is not endpoint n-1
+                let max_in = if prev_rounded {
+                    len_in / 2.0
+                } else {
+                    len_in * (1.0 - eps)
+                };
+                let max_out = if next_rounded {
+                    len_out / 2.0
+                } else {
+                    len_out * (1.0 - eps)
+                };
+                let r = radius.min(max_in).min(max_out);
 
                 // Points on incoming and outgoing segments at distance r from corner.
                 let fillet_start =
@@ -9595,7 +9612,7 @@ pub async fn warp_envelope(state: &AppState, args: WarpEnvelopeArgs) -> ToolResu
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -9829,7 +9846,7 @@ pub async fn scallop_path(state: &AppState, args: ScallopPathArgs) -> ToolResult
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -10000,7 +10017,7 @@ pub async fn crystallize_path(state: &AppState, args: CrystallizePathArgs) -> To
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -10206,7 +10223,7 @@ pub async fn clean_up(state: &AppState, args: CleanUpArgs) -> ToolResult {
     );
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!("Cleaned up {} node(s)", count)).with_data(serde_json::json!({
         "dry_run": false,
@@ -10267,7 +10284,7 @@ pub async fn simplify_path(state: &AppState, args: SimplifyPathArgs) -> ToolResu
         new: new_node.clone(),
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Simplified '{}': {} → {} points ({:.0}% reduction)",
@@ -10364,7 +10381,7 @@ pub async fn invert_colors(state: &AppState, args: InvertColorsArgs) -> ToolResu
     // 3. Execute as a single undo-able batch
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     history.schedule_mcp_checkpoint(format!("Invert colors ({} nodes)", count));
 
     ToolResult::text(format!("Inverted colors on {} node(s).", count))
@@ -10473,7 +10490,7 @@ pub async fn adjust_colors(state: &AppState, args: AdjustColorsArgs) -> ToolResu
 
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     history.schedule_mcp_checkpoint(format!("Adjust colors ({} nodes)", count));
 
     ToolResult::text(format!("Adjusted colors on {} node(s).", count)).with_data(
@@ -10567,7 +10584,7 @@ pub async fn convert_to_grayscale(state: &AppState, args: ConvertToGrayscaleArgs
     // 3. Execute as a single undo-able batch
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     history.schedule_mcp_checkpoint(format!("Convert to grayscale ({} nodes)", count));
 
     ToolResult::text(format!("Converted {} node(s) to grayscale.", count))
@@ -10622,7 +10639,7 @@ pub async fn reverse_path_direction(
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     let summary = format!(
@@ -10694,7 +10711,7 @@ pub async fn average_anchor_points(state: &AppState, args: AverageAnchorPointsAr
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     let summary = format!(
@@ -10807,7 +10824,7 @@ pub async fn outline_stroke(state: &AppState, args: OutlineStrokeArgs) -> ToolRe
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     let summary = format!(
         "Outlined stroke on {} node(s){}",
@@ -10911,7 +10928,7 @@ pub async fn offset_path(state: &AppState, args: OffsetPathArgs) -> ToolResult {
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Offset {} path(s) by {}{:.1} units{}",
@@ -11039,7 +11056,7 @@ pub async fn split_into_grid(state: &AppState, args: SplitIntoGridArgs) -> ToolR
 
     let batch = Command::Batch(commands);
     let mut history = state.history.lock().await;
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     let count = created_ids.len();
     ToolResult::text(format!(
@@ -11189,7 +11206,7 @@ pub async fn blend_colors(state: &AppState, args: BlendColorsArgs) -> ToolResult
     let updated = commands.len();
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     history.schedule_mcp_checkpoint(format!("Blend colors ({} nodes)", n));
 
     ToolResult::text(format!(
@@ -11240,7 +11257,7 @@ pub async fn join_paths(state: &AppState, args: JoinPathsArgs) -> ToolResult {
         if let SceneNodeKind::Path(ref mut new_pn) = new_node.kind {
             new_pn.path_data = new_path;
         }
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node.clone(),
@@ -11281,7 +11298,7 @@ pub async fn join_paths(state: &AppState, args: JoinPathsArgs) -> ToolResult {
             new_pn.path_data = merged;
         }
 
-        history.execute(
+        history.execute_discrete(
             Command::Batch(vec![
                 Command::UpdateNode {
                     old: node_a,
@@ -11392,7 +11409,7 @@ pub async fn pathfinder_crop(state: &AppState, args: PathfinderCropArgs) -> Tool
         node_id: frontmost_id,
     });
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Cropped {} node(s) to the frontmost boundary.",
@@ -11494,7 +11511,7 @@ pub async fn pathfinder_minus_back(state: &AppState, args: PathfinderMinusBackAr
         }
     }
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Subtracted {} back node(s) from frontmost; back nodes removed.",
@@ -11597,7 +11614,7 @@ pub async fn pathfinder_minus_front(
         node_id: frontmost_id,
     });
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Subtracted frontmost from {} back node(s); frontmost removed.",
@@ -11692,7 +11709,7 @@ pub async fn pathfinder_trim(state: &AppState, args: PathfinderTrimArgs) -> Tool
         });
     }
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Trimmed {} node(s); hidden areas removed, strokes disabled.",
@@ -11776,7 +11793,7 @@ pub async fn pathfinder_outline(state: &AppState, args: PathfinderOutlineArgs) -
         return ToolResult::text("No path nodes found in node_ids; nothing changed.".to_string());
     }
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Outlined {} node(s); fills removed, strokes set.",
@@ -11864,7 +11881,7 @@ pub async fn pathfinder_divide(state: &AppState, args: PathfinderDivideArgs) -> 
         created_ids.push(new_id);
     }
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!("Divided into {} face(s).", created_ids.len())).with_data(
         serde_json::json!({
@@ -11963,13 +11980,13 @@ pub async fn divide_objects_below(state: &AppState, args: DivideObjectsBelowArgs
 
     if commands.len() == 1 {
         // Only the cutter removal — nothing actually overlapped.
-        history.execute(Command::Batch(commands), &mut doc);
+        history.execute_discrete(Command::Batch(commands), &mut doc);
         return ToolResult::text(
             "No overlapping objects found below the cutter; cutter removed.".to_string(),
         );
     }
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     ToolResult::text(format!(
         "Divided {} object(s) below; cutter removed.",
         split_count
@@ -12127,7 +12144,7 @@ pub async fn pathfinder_merge(state: &AppState, args: PathfinderMergeArgs) -> To
         created_count += 1;
     }
 
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Merged {} node(s) into {} result shape(s); strokes disabled.",
@@ -12439,7 +12456,7 @@ pub async fn make_compound_path(state: &AppState, args: MakeCompoundPathArgs) ->
         cmds.push(Command::RemoveNode { node_id: id });
     }
 
-    history.execute(Command::Batch(cmds), &mut doc);
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
     history.schedule_mcp_checkpoint(format!("Make compound path '{}'", compound_name));
 
     ToolResult::text(format!(
@@ -12493,7 +12510,7 @@ pub async fn release_compound_path(state: &AppState, args: ReleaseCompoundPathAr
         if let SceneNodeKind::Path(ref mut p) = updated.kind {
             p.is_compound = false;
         }
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: updated,
@@ -12555,7 +12572,7 @@ pub async fn release_compound_path(state: &AppState, args: ReleaseCompoundPathAr
         });
     }
 
-    history.execute(Command::Batch(cmds), &mut doc);
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
     history.schedule_mcp_checkpoint(format!("Release compound path '{}'", node.name));
 
     ToolResult::text(format!(
@@ -12721,7 +12738,7 @@ pub async fn distribute_no_overlap(state: &AppState, args: DistributeNoOverlapAr
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Distributed {moved} nodes in {iterations_done} iterations"
@@ -12770,7 +12787,7 @@ pub async fn snap_to_pixel(state: &AppState, args: SnapToPixelArgs) -> ToolResul
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Snapped {} of {} node(s) to pixel coordinates",
@@ -12856,7 +12873,7 @@ pub async fn distribute_on_path(state: &AppState, args: DistributeOnPathArgs) ->
     drop(doc);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Distributed {} node(s) across {} position(s) along path '{}'",
@@ -12965,7 +12982,7 @@ pub async fn recolor_artwork(state: &AppState, args: RecolorArtworkArgs) -> Tool
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Recolored {} node(s) to nearest palette colors",
@@ -13001,7 +13018,7 @@ pub async fn add_guide(state: &AppState, args: AddGuideArgs) -> ToolResult {
     new_guides.push(guide);
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::SetGuides {
             old: old_guides,
             new: new_guides,
@@ -13044,7 +13061,7 @@ pub async fn remove_guide(state: &AppState, args: RemoveGuideArgs) -> ToolResult
         .collect();
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::SetGuides {
             old: old_guides,
             new: new_guides,
@@ -13092,7 +13109,7 @@ pub async fn clear_guides(state: &AppState, _args: ClearGuidesArgs) -> ToolResul
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::SetGuides {
             old: old_guides,
             new: new_guides,
@@ -13167,7 +13184,7 @@ pub async fn scissors_cut(state: &AppState, args: ScissorsCutArgs) -> ToolResult
     let id_after = node_after.id;
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::Batch(vec![
             Command::RemoveNode {
                 node_id: args.node_id,
@@ -13387,7 +13404,7 @@ pub async fn convert_anchor_points(state: &AppState, args: ConvertAnchorPointsAr
     } else {
         Command::Batch(cmds)
     };
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     let mode_label = match args.mode {
         ConvertAnchorMode::Smooth => "smooth",
@@ -13535,7 +13552,7 @@ pub async fn create_freehand_path(state: &AppState, args: CreateFreehandPathArgs
             layer_id: None,
         };
         let mut history = state.history.lock().await;
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -13716,7 +13733,7 @@ pub async fn smooth_path(state: &AppState, args: SmoothPathArgs) -> ToolResult {
         Command::Batch(cmds)
     };
     let mut history = state.history.lock().await;
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Smoothed {} path node(s) with factor={:.2}, iterations={}.",
@@ -13824,7 +13841,7 @@ pub async fn noise_deform(state: &AppState, args: NoiseDeformArgs) -> ToolResult
     }
 
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
 
     ToolResult::text(format!(
@@ -13959,7 +13976,7 @@ pub async fn mirror_copy(state: &AppState, args: MirrorCopyArgs) -> ToolResult {
     } else {
         Command::Batch(all_commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Created {} mirrored cop{} ({}). New node IDs: {}",
@@ -14159,7 +14176,7 @@ pub async fn reverse_node_order(state: &AppState, args: ReverseNodeOrderArgs) ->
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Reversed child order in {} group node(s). Skipped: {}.",
@@ -14209,7 +14226,7 @@ pub async fn set_node_prompt(state: &AppState, args: SetNodePromptArgs) -> ToolR
     }
 
     let entry_count = new_node.prompt_history.len();
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -14552,7 +14569,7 @@ pub async fn tag_node_for_export(state: &AppState, args: TagNodeForExportArgs) -
     let mut new_node = node.clone();
     if args.name.trim().is_empty() {
         new_node.export_spec = None;
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: node,
                 new: new_node,
@@ -14582,7 +14599,7 @@ pub async fn tag_node_for_export(state: &AppState, args: TagNodeForExportArgs) -
         scales: scales.clone(),
     });
 
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -14886,7 +14903,7 @@ pub async fn apply_character_style(state: &AppState, args: ApplyCharacterStyleAr
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Applied character style '{}' to {applied} text node(s).",
@@ -15108,7 +15125,7 @@ pub async fn apply_paragraph_style(state: &AppState, args: ApplyParagraphStyleAr
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Applied paragraph style '{}' to {applied} text node(s).",
@@ -15187,7 +15204,7 @@ pub async fn make_clipping_mask(state: &AppState, args: MakeClippingMaskArgs) ->
         .map(|n| n.name.clone())
         .unwrap_or_else(|| clip_id.to_string());
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -15243,7 +15260,7 @@ pub async fn release_clipping_mask(state: &AppState, args: ReleaseClippingMaskAr
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -15311,7 +15328,7 @@ pub async fn set_text_path(state: &AppState, args: SetTextPathArgs) -> ToolResul
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: text_node,
             new: new_node,
@@ -15369,7 +15386,7 @@ pub async fn clear_text_path(state: &AppState, args: ClearTextPathArgs) -> ToolR
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: text_node,
             new: new_node,
@@ -15415,7 +15432,7 @@ pub async fn set_text_direction(state: &AppState, args: SetTextDirectionArgs) ->
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -15488,7 +15505,7 @@ pub async fn set_text_area(state: &AppState, args: SetTextAreaArgs) -> ToolResul
         .map(|n| n.name.clone())
         .unwrap_or_else(|| area_id.to_string());
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: text_node,
             new: new_node,
@@ -15540,7 +15557,7 @@ pub async fn clear_text_area(state: &AppState, args: ClearTextAreaArgs) -> ToolR
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: text_node,
             new: new_node,
@@ -15607,7 +15624,7 @@ pub async fn link_text_frames(state: &AppState, args: LinkTextFramesArgs) -> Too
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::Batch(vec![
             Command::UpdateNode {
                 old: from_node,
@@ -15704,7 +15721,7 @@ pub async fn unlink_text_frames(state: &AppState, args: UnlinkTextFramesArgs) ->
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!("Unlinked text frame '{}'.", args.node_id))
@@ -15748,7 +15765,7 @@ pub async fn bind_text_variable(state: &AppState, args: BindTextVariableArgs) ->
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -15801,7 +15818,7 @@ pub async fn unbind_text_variable(state: &AppState, args: UnbindTextVariableArgs
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -15846,7 +15863,7 @@ pub async fn set_font_style(state: &AppState, args: SetFontStyleArgs) -> ToolRes
         tn.font_style = font_style;
     }
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -15886,7 +15903,7 @@ pub async fn set_font_weight(state: &AppState, args: SetFontWeightArgs) -> ToolR
         tn.font_weight = weight;
     }
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16006,7 +16023,7 @@ pub async fn flatten_transparency(state: &AppState, args: FlattenTransparencyArg
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!("Flattened transparency on {} node(s).", processed))
@@ -16138,7 +16155,7 @@ pub async fn apply_flex_layout(state: &AppState, args: ApplyFlexLayoutArgs) -> T
 
     let arranged = commands.len();
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!(
@@ -16290,7 +16307,7 @@ pub async fn apply_stack_layout(state: &AppState, args: ApplyStackLayoutArgs) ->
         let mut new_child = child.clone();
         new_child.transform.matrix[4] = new_tx;
         new_child.transform.matrix[5] = new_ty;
-        history.execute(
+        history.execute_discrete(
             Command::UpdateNode {
                 old: child,
                 new: new_child,
@@ -16392,7 +16409,7 @@ pub async fn apply_grid_layout(state: &AppState, args: ApplyGridLayoutArgs) -> T
 
     let arranged = commands.len();
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!(
@@ -16461,7 +16478,7 @@ pub async fn set_opentype_features(state: &AppState, args: SetOpenTypeFeaturesAr
     };
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16546,7 +16563,7 @@ pub async fn set_text_decoration(state: &AppState, args: SetTextDecorationArgs) 
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16623,7 +16640,7 @@ pub async fn set_character_metrics(state: &AppState, args: SetCharacterMetricsAr
     };
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16688,7 +16705,7 @@ pub async fn set_paragraph_options(state: &AppState, args: SetParagraphOptionsAr
     };
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16742,7 +16759,7 @@ pub async fn set_tab_stops(state: &AppState, args: SetTabStopsArgs) -> ToolResul
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16789,7 +16806,7 @@ pub async fn clear_tab_stops(state: &AppState, args: ClearTabStopsArgs) -> ToolR
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -16846,7 +16863,7 @@ pub async fn set_blend_spine(state: &AppState, args: SetBlendSpineArgs) -> ToolR
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: group_node,
             new: new_group,
@@ -16898,7 +16915,7 @@ pub async fn clear_blend_spine(state: &AppState, args: ClearBlendSpineArgs) -> T
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: group_node,
             new: new_group,
@@ -16955,7 +16972,7 @@ pub async fn reverse_blend_spine(state: &AppState, args: ReverseBlendSpineArgs) 
     }
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: spine_node,
             new: new_spine,
@@ -17013,7 +17030,7 @@ pub async fn expand_blend(state: &AppState, args: ExpandBlendArgs) -> ToolResult
         children,
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!(
         "Expanded blend group '{}' into {} individual object(s).",
@@ -17059,7 +17076,7 @@ pub async fn set_symbol_override(state: &AppState, args: SetSymbolOverrideArgs) 
     let stroke_out = new_node.symbol_stroke_override.clone();
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -17112,7 +17129,7 @@ pub async fn clear_symbol_overrides(
     new_node.symbol_stroke_override = None;
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -17192,7 +17209,7 @@ pub async fn rotate_copies(state: &AppState, args: RotateCopiesArgs) -> ToolResu
         let all_ids = copy_ids.clone();
         let mut history = state.history.lock().await;
         for cmd in cmds {
-            history.execute(cmd, &mut doc);
+            history.execute_discrete(cmd, &mut doc);
         }
         // Group: create a group with all ids
         let group_node = photonic_core::node::SceneNode::new(
@@ -17210,7 +17227,7 @@ pub async fn rotate_copies(state: &AppState, args: RotateCopiesArgs) -> ToolResu
             layer_id,
             insert_index: 0,
         };
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
         ToolResult::text(format!(
             "Created {} rotational copies grouped as one node.",
             args.count - 1
@@ -17219,7 +17236,7 @@ pub async fn rotate_copies(state: &AppState, args: RotateCopiesArgs) -> ToolResu
     } else {
         let mut history = state.history.lock().await;
         let batch = Command::Batch(cmds);
-        history.execute(batch, &mut doc);
+        history.execute_discrete(batch, &mut doc);
         ToolResult::text(format!(
             "Created {} rotational copies of '{}'.",
             args.count - 1,
@@ -17329,7 +17346,7 @@ pub async fn copy_appearance(state: &AppState, args: CopyAppearanceArgs) -> Tool
     } else {
         Command::Batch(cmds)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
     ToolResult::text(format!(
         "Copied appearance from '{}' to {} node(s).",
         args.source_id, updated
@@ -17426,5 +17443,91 @@ mod create_shape_color_tests {
         .unwrap();
         let result = create_shape(&state, args).await;
         assert_eq!(result.is_error, Some(true), "invalid color should error");
+    }
+}
+
+#[cfg(test)]
+mod round_corners_tests {
+    use super::*;
+
+    fn end_vertices(bez: &kurbo::BezPath) -> Vec<kurbo::Point> {
+        bez.elements()
+            .iter()
+            .filter_map(|el| match el {
+                kurbo::PathEl::MoveTo(p) => Some(*p),
+                kurbo::PathEl::LineTo(p) => Some(*p),
+                kurbo::PathEl::QuadTo(_, p) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn open_run_corner_rounds_past_half_edge() {
+        // Open 3-vertex polyline: (0,0) → (10,0) → (10,10). The interior corner at
+        // (10,0) borders two endpoints, so it retreats almost the full edge rather
+        // than being capped at L/2 = 5.
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        let out = apply_round_corners(&bez, 8.0);
+
+        // fillet_start is the LineTo preceding the corner's QuadTo (control = corner).
+        let els: Vec<kurbo::PathEl> = out.elements().to_vec();
+        let mut fillet_start = None;
+        for (i, el) in els.iter().enumerate() {
+            if let kurbo::PathEl::QuadTo(ctrl, _) = el {
+                assert!(
+                    (ctrl.x - 10.0).abs() < 1e-6 && ctrl.y.abs() < 1e-6,
+                    "quad control should be the corner (10,0), got {ctrl:?}"
+                );
+                if let kurbo::PathEl::LineTo(p) = els[i - 1] {
+                    fillet_start = Some(p);
+                }
+            }
+        }
+        let p = fillet_start.expect("expected a rounded corner preceded by a LineTo");
+        // From (10,0) toward (0,0) by r=8 ⇒ x=2, past the midpoint x=5. The old
+        // unconditional L/2 clamp would have stopped at x=5.
+        assert!(
+            p.x < 5.0 - 1e-6,
+            "fillet_start x {} should be past the half-edge (5.0)",
+            p.x
+        );
+        assert!(
+            (p.x - 2.0).abs() < 1e-6,
+            "fillet_start x {} expected 2.0",
+            p.x
+        );
+    }
+
+    #[test]
+    fn closed_square_splits_edges_fifty_fifty() {
+        // Closed 10×10 square with an oversized radius. Every neighbour is rounded,
+        // so each corner stays clamped to L/2 = 5 and its fillet points land on the
+        // edge midpoints — adjacent fillets meet but never overlap.
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        bez.line_to((0.0, 10.0));
+        bez.close_path();
+        let out = apply_round_corners(&bez, 100.0);
+
+        for p in end_vertices(&out) {
+            if p.y.abs() < 1e-6 || (p.y - 10.0).abs() < 1e-6 {
+                assert!(
+                    (p.x - 5.0).abs() < 1e-6,
+                    "fillet point {p:?} on a horizontal edge crosses the midpoint x=5"
+                );
+            }
+            if p.x.abs() < 1e-6 || (p.x - 10.0).abs() < 1e-6 {
+                assert!(
+                    (p.y - 5.0).abs() < 1e-6,
+                    "fillet point {p:?} on a vertical edge crosses the midpoint y=5"
+                );
+            }
+        }
     }
 }

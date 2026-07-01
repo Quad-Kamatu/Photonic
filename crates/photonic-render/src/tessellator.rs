@@ -7,8 +7,10 @@ use photonic_core::style::{LineCap, LineJoin};
 /// by a cubic-bezier arc of the given radius, mirroring CSS `border-radius`.
 ///
 /// Only straight-segment junctions are rounded; bezier curves pass through
-/// unchanged.  The radius is clamped to half the shortest adjacent segment so
-/// adjacent arcs never overlap.
+/// unchanged.  The radius is clamped so adjacent fillets never overlap: a corner
+/// splits a shared edge 50/50 with a rounded neighbour, but may retreat the full
+/// edge toward an unrounded neighbour (an open-run endpoint, a concave corner, or
+/// a vertex bordering a curve junction).
 pub fn round_corners(bez: &kurbo::BezPath, radius: f64) -> kurbo::BezPath {
     if radius <= 0.0 {
         return bez.clone();
@@ -97,46 +99,12 @@ fn round_subpath(sp: &[kurbo::PathEl], is_closed: bool, radius: f64, out: &mut k
                 return;
             }
 
-            // For each corner i, compute the retreat point (on the incoming segment)
-            // and advance point (on the outgoing segment).
-            let clamped_r = |i: usize| -> f64 {
-                let prev = pts[(i + n - 1) % n];
-                let cur = pts[i];
-                let next = pts[(i + 1) % n];
-                let seg_in = (cur - prev).hypot();
-                let seg_out = (next - cur).hypot();
-                radius.min(seg_in * 0.5).min(seg_out * 0.5)
-            };
-
-            let retreat = |i: usize| -> kurbo::Point {
-                let r = clamped_r(i);
-                let prev = pts[(i + n - 1) % n];
-                let cur = pts[i];
-                let d = prev - cur;
-                let len = d.hypot();
-                if len > 1e-9 {
-                    cur + d * (r / len)
-                } else {
-                    cur
-                }
-            };
-
-            let advance = |i: usize| -> kurbo::Point {
-                let r = clamped_r(i);
-                let cur = pts[i];
-                let next = pts[(i + 1) % n];
-                let d = next - cur;
-                let len = d.hypot();
-                if len > 1e-9 {
-                    cur + d * (r / len)
-                } else {
-                    cur
-                }
-            };
-
             // Determine path winding from signed area so we can identify convex corners.
             // Only convex corners are rounded; concave corners are left sharp to avoid
             // inward arcs that produce overlapping stroke artifacts in the glow.
+            //
+            // Defined above `clamped_r` because the neighbour-aware clamp consults
+            // `is_convex` (Rust closures cannot forward-reference later closures).
             let signed_area: f64 = if closed && n >= 3 {
                 (0..n)
                     .map(|i| {
@@ -163,6 +131,72 @@ fn round_subpath(sp: &[kurbo::PathEl], is_closed: bool, radius: f64, out: &mut k
                 let d_out = next - cur;
                 let cross = d_in.x * d_out.y - d_in.y * d_out.x;
                 cross * winding > 0.0
+            };
+
+            // A neighbour vertex j is "rounded" iff it is a genuine filleted corner
+            // of this run and therefore consumes half of the shared edge. For a
+            // closed run that is any convex vertex; for an open run only interior
+            // convex vertices (endpoints keep their full vertex and take no edge).
+            let is_rounded = |j: usize| -> bool {
+                if closed {
+                    is_convex(j)
+                } else {
+                    j >= 1 && j < n - 1 && is_convex(j)
+                }
+            };
+
+            // For each corner i, compute the retreat point (on the incoming segment)
+            // and advance point (on the outgoing segment). The radius is clamped so
+            // adjacent fillets never overlap: a corner splits an edge 50/50 with a
+            // rounded neighbour, but retreats (almost) the full edge toward an
+            // unrounded neighbour (an open-run endpoint, a concave/unrounded corner,
+            // or a vertex bordering a curve junction).
+            let clamped_r = |i: usize| -> f64 {
+                let prev = pts[(i + n - 1) % n];
+                let cur = pts[i];
+                let next = pts[(i + 1) % n];
+                let seg_in = (cur - prev).hypot();
+                let seg_out = (next - cur).hypot();
+                let eps = 1e-3;
+                let prev_rounded = is_rounded((i + n - 1) % n);
+                let next_rounded = is_rounded((i + 1) % n);
+                let max_in = if prev_rounded {
+                    seg_in * 0.5
+                } else {
+                    seg_in * (1.0 - eps)
+                };
+                let max_out = if next_rounded {
+                    seg_out * 0.5
+                } else {
+                    seg_out * (1.0 - eps)
+                };
+                radius.min(max_in).min(max_out)
+            };
+
+            let retreat = |i: usize| -> kurbo::Point {
+                let r = clamped_r(i);
+                let prev = pts[(i + n - 1) % n];
+                let cur = pts[i];
+                let d = prev - cur;
+                let len = d.hypot();
+                if len > 1e-9 {
+                    cur + d * (r / len)
+                } else {
+                    cur
+                }
+            };
+
+            let advance = |i: usize| -> kurbo::Point {
+                let r = clamped_r(i);
+                let cur = pts[i];
+                let next = pts[(i + 1) % n];
+                let d = next - cur;
+                let len = d.hypot();
+                if len > 1e-9 {
+                    cur + d * (r / len)
+                } else {
+                    cur
+                }
             };
 
             if closed {
@@ -653,5 +687,91 @@ mod tests {
         let path = PathData::line(0.0, 0.0, 10.0, 0.0);
         assert!(tessellate_stroke_variable(&path, &[5.0]).is_empty());
         assert!(tessellate_stroke_variable(&path, &[]).is_empty());
+    }
+
+    // Extract the end point of each path element (start for MoveTo, end for
+    // LineTo/QuadTo), skipping control points and closes.
+    fn end_vertices(bez: &kurbo::BezPath) -> Vec<kurbo::Point> {
+        bez.elements()
+            .iter()
+            .filter_map(|el| match el {
+                kurbo::PathEl::MoveTo(p) => Some(*p),
+                kurbo::PathEl::LineTo(p) => Some(*p),
+                kurbo::PathEl::QuadTo(_, p) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn open_polyline_corner_rounds_past_half_edge() {
+        // Open 3-vertex polyline: (0,0) → (10,0) → (10,10). The single interior
+        // corner at (10,0) has two endpoint neighbours, so it may retreat almost
+        // the full edge instead of being capped at L/2 = 5.
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        let out = round_corners(&bez, 8.0);
+
+        // The retreat point is the LineTo immediately preceding the corner's QuadTo,
+        // whose control point is the original corner (10,0).
+        let els: Vec<kurbo::PathEl> = out.elements().to_vec();
+        let mut retreat = None;
+        for (i, el) in els.iter().enumerate() {
+            if let kurbo::PathEl::QuadTo(ctrl, _) = el {
+                assert!(
+                    (ctrl.x - 10.0).abs() < 1e-6 && ctrl.y.abs() < 1e-6,
+                    "quad control should be the corner (10,0), got {ctrl:?}"
+                );
+                if let kurbo::PathEl::LineTo(p) = els[i - 1] {
+                    retreat = Some(p);
+                }
+            }
+        }
+        let r = retreat.expect("expected a rounded corner with a preceding LineTo");
+        // Retreat from (10,0) toward (0,0) by r=8 ⇒ x=2, past the midpoint x=5.
+        // The old unconditional L/2 clamp would have stopped at x=5.
+        assert!(
+            r.x < 5.0 - 1e-6,
+            "retreat x {} should be past the half-edge (5.0)",
+            r.x
+        );
+        assert!((r.x - 2.0).abs() < 1e-6, "retreat x {} expected 2.0", r.x);
+    }
+
+    #[test]
+    fn closed_rect_adjacent_fillets_never_overlap() {
+        // A closed 10×10 square with an oversized radius. Every corner's neighbour
+        // is also rounded, so each fillet must still stay clamped to L/2 = 5 and
+        // meet its neighbour exactly at the edge midpoint — never crossing it.
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        bez.line_to((0.0, 10.0));
+        bez.close_path();
+        let out = round_corners(&bez, 100.0);
+
+        // Each fillet end point must sit at an edge midpoint (distance 5 from the
+        // corner), i.e. no point retreats past half of any 10-unit edge.
+        for p in end_vertices(&out) {
+            let on_bottom = p.y.abs() < 1e-6;
+            let on_top = (p.y - 10.0).abs() < 1e-6;
+            let on_left = p.x.abs() < 1e-6;
+            let on_right = (p.x - 10.0).abs() < 1e-6;
+            if on_bottom || on_top {
+                assert!(
+                    (p.x - 5.0).abs() < 1e-6,
+                    "fillet point {p:?} on a horizontal edge crosses the midpoint x=5"
+                );
+            }
+            if on_left || on_right {
+                assert!(
+                    (p.y - 5.0).abs() < 1e-6,
+                    "fillet point {p:?} on a vertical edge crosses the midpoint y=5"
+                );
+            }
+        }
     }
 }

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod color_edit;
 pub mod commands;
 pub mod disk_search;
 pub mod global_search;

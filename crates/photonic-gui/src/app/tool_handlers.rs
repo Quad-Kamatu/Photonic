@@ -4,6 +4,314 @@
 use super::*;
 
 impl PhotonicApp {
+    /// Finalize a completed object-move drag by recording it as a single,
+    /// **discrete** undoable History step (#11 / #183).
+    ///
+    /// Called on drag release from both the normal `drag_stopped_by(Primary)`
+    /// path and the #183 fallback (for when a competing overlay swallowed the
+    /// canvas response so `drag_stopped_by` never fired). The completed move is
+    /// pushed through [`CommandHistory::execute_discrete`] rather than
+    /// `execute`, so it is guaranteed to land as its own undo entry regardless
+    /// of any coalescing gesture (#182) that is still open on the shared history
+    /// — Ctrl+Z and the History timeline therefore always see exactly one step
+    /// per move.
+    ///
+    /// Idempotent: once `move_drag_origins` has been consumed this only clears
+    /// the transient drag/snap state, so calling it from either release path is
+    /// safe — whichever fires first records the move exactly once.
+    pub(crate) fn finalize_move(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        if !self.move_drag_origins.is_empty() {
+            if self.dup_drag {
+                // Alt-duplicate: the copies are already live in the doc. Remove
+                // them and re-add through history so the whole duplication is a
+                // single undoable step (undo deletes the copies).
+                let ids: Vec<NodeId> = self.move_drag_origins.iter().map(|n| n.id).collect();
+                self.move_drag_origins.clear();
+                let finals: Vec<SceneNode> = ids
+                    .iter()
+                    .filter_map(|id| doc.nodes.get(id).cloned())
+                    .collect();
+                for id in &ids {
+                    doc.remove_node(id);
+                }
+                let cmds: Vec<Command> = finals
+                    .into_iter()
+                    .map(|node| {
+                        let layer_id = Some(node.layer_id);
+                        Command::AddNode { node, layer_id }
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    history.execute_discrete(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            } else {
+                // The doc already holds the moved state, so re-applying
+                // UpdateNode is a no-op; it just captures the inverse for
+                // undo/redo. Only nodes whose transform actually changed are
+                // recorded.
+                let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
+                    .into_iter()
+                    .filter_map(|old| {
+                        doc.nodes.get(&old.id).and_then(|cur| {
+                            (cur.transform.matrix != old.transform.matrix).then(|| {
+                                Command::UpdateNode {
+                                    old,
+                                    new: cur.clone(),
+                                }
+                            })
+                        })
+                    })
+                    .collect();
+                if !cmds.is_empty() {
+                    history.execute_discrete(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
+        }
+        self.dup_drag = false;
+        self.move_snap_origins.clear();
+        self.move_snap_ref = None;
+        self.move_snap_bbox = None;
+        self.last_snap_result = None;
+        self.move_snap_press = None;
+    }
+
+    /// Tool-independent keyboard shortcuts that must fire regardless of which
+    /// tool is active (#192). Extracted from [`Self::handle_select_tool`] so
+    /// undo/redo, copy/paste, duplicate, select-all/deselect, flip H/V,
+    /// group/ungroup, z-order and the view-preview/guide toggles work while
+    /// Scissors, Pen, Knife, Eraser, MagicWand, Lasso, Pencil, Text, Direct
+    /// Select (any non-Select tool) is active — previously these were dead
+    /// unless the Select tool happened to be current.
+    ///
+    /// Dispatched unconditionally from the frame loop before per-tool handling.
+    /// Guarded by `viewport_kb` so typing into a focused text widget is never
+    /// intercepted. Returns whether the document was modified this frame.
+    pub(crate) fn handle_global_shortcuts(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        let mut doc_modified = false;
+
+        // Skip entirely when a text widget has focus so typing is unaffected.
+        if !viewport_kb(ctx) {
+            return doc_modified;
+        }
+
+        // ── Selection-anchored shortcuts (z-order, ungroup) ───────────────────
+        // These need a single anchor node from `self.selected_id`. They operate
+        // on `doc.selection` / the anchored node, so they are safe under any
+        // tool.
+        if let Some(sel_id) = self.selected_id {
+            let (ctrl, shift, bracket_right, bracket_left, key_g) = ctx.input(|i| {
+                (
+                    i.modifiers.ctrl,
+                    i.modifiers.shift,
+                    i.key_pressed(egui::Key::CloseBracket),
+                    i.key_pressed(egui::Key::OpenBracket),
+                    i.key_pressed(egui::Key::G),
+                )
+            });
+
+            // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
+            if ctrl && (bracket_right || bracket_left) {
+                if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
+                    let layer_len = doc
+                        .layers
+                        .get(&layer_id)
+                        .map(|l| l.node_ids.len())
+                        .unwrap_or(0);
+                    if layer_len > 0 {
+                        let new_index = if bracket_right && shift {
+                            layer_len - 1 // Bring to Front
+                        } else if bracket_left && shift {
+                            0 // Send to Back
+                        } else if bracket_right {
+                            (cur_idx + 1).min(layer_len - 1) // Bring Forward
+                        } else {
+                            cur_idx.saturating_sub(1) // Send Backward
+                        };
+                        if new_index != cur_idx {
+                            let cmd = Command::ReorderNode {
+                                layer_id,
+                                node_id: sel_id,
+                                old_index: cur_idx,
+                                new_index,
+                            };
+                            history.execute(cmd, doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+            }
+
+            // Ctrl+Shift+G: ungroup (only if selected node is a group)
+            if ctrl && shift && key_g {
+                if let Some(node) = doc.get_node(&sel_id) {
+                    if let SceneNodeKind::Group(g) = &node.kind {
+                        let children = g.children.clone();
+                        let node_clone = node.clone();
+                        if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id) {
+                            let first_child = children.first().copied();
+                            let cmd = Command::UngroupNodes {
+                                group: node_clone,
+                                layer_id,
+                                group_index,
+                                children,
+                            };
+                            history.execute(cmd, doc);
+                            self.selected_id = first_child;
+                            if let Some(fc) = first_child {
+                                doc.selection = Selection::single(fc);
+                            } else {
+                                doc.selection.clear();
+                            }
+                            doc_modified = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ctrl+G: group selected nodes (requires 2+ in selection)
+        let (ctrl_g, shift_g) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
+            )
+        });
+        if ctrl_g && !shift_g && doc.selection.count() >= 2 {
+            self.do_group_selected(doc, history, &mut doc_modified);
+        }
+
+        // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
+        // a user remap takes effect (#140). The three view-preview modes are
+        // mutually exclusive (#22).
+        if self.binding_pressed(ctx, "view.outline_mode") {
+            self.toggle_outline_mode();
+        }
+
+        // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
+        if self.binding_pressed(ctx, "view.pixel_preview") {
+            self.toggle_pixel_preview();
+        }
+
+        // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
+        if self.binding_pressed(ctx, "view.overprint_preview") {
+            self.toggle_overprint_preview();
+        }
+
+        // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
+        if self.binding_pressed(ctx, "view.toggle_guides") {
+            self.guides_visible = !self.guides_visible;
+        }
+
+        // Ctrl+C: copy selected nodes to in-process clipboard.
+        if ctx.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::C)) {
+            self.gui_clipboard.clear();
+            for nid in doc.selection.ids() {
+                if let Some(node) = doc.nodes.get(nid) {
+                    self.gui_clipboard.push(node.clone());
+                }
+            }
+        }
+
+        // Ctrl+V: paste from clipboard with +10px offset.
+        // Ctrl+Shift+V: paste in place (exact original coordinates).
+        let (paste, paste_in_place) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V),
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::V),
+            )
+        });
+        if (paste || paste_in_place) && !self.gui_clipboard.is_empty() {
+            let offset = if paste { 10.0_f64 } else { 0.0 };
+            if let Some(target_layer) = doc
+                .active_layer_id
+                .or_else(|| doc.layer_order.first().copied())
+            {
+                let mut cmds: Vec<Command> = Vec::new();
+                let mut new_ids: Vec<NodeId> = Vec::new();
+                for src in &self.gui_clipboard {
+                    let mut new_node = src.clone();
+                    new_node.id = uuid::Uuid::new_v4();
+                    new_node.layer_id = target_layer;
+                    if offset.abs() > 1e-9 {
+                        new_node.transform.matrix[4] += offset;
+                        new_node.transform.matrix[5] += offset;
+                    }
+                    new_ids.push(new_node.id);
+                    cmds.push(Command::AddNode {
+                        node: new_node,
+                        layer_id: Some(target_layer),
+                    });
+                }
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    doc.selection = Selection::from_ids(new_ids.iter().copied());
+                    if let Some(first) = new_ids.first() {
+                        self.selected_id = Some(*first);
+                    }
+                    doc_modified = true;
+                }
+            }
+        }
+
+        // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
+        // — keymap-resolved and routed through the shared flip helper (#140).
+        if self.binding_pressed(ctx, "object.flip_horizontal")
+            && self.flip_selection(doc, history, true)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "object.flip_vertical")
+            && self.flip_selection(doc, history, false)
+        {
+            doc_modified = true;
+        }
+
+        // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
+        if self.binding_pressed(ctx, "edit.undo")
+            && self.dispatch_command("edit.undo", doc, history)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "edit.redo")
+            && self.dispatch_command("edit.redo", doc, history)
+        {
+            doc_modified = true;
+        }
+
+        // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
+        // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
+        // remap actually fire on the canvas (#140).
+        if self.binding_pressed(ctx, "selection.select_all")
+            && self.dispatch_command("selection.select_all", doc, history)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "selection.deselect")
+            && self.dispatch_command("selection.deselect", doc, history)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "edit.duplicate")
+            && self.dispatch_command("edit.duplicate", doc, history)
+        {
+            doc_modified = true;
+        }
+
+        doc_modified
+    }
+
     pub(crate) fn handle_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -15,220 +323,34 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) {
         // ── Keyboard shortcuts (skipped when a text widget has focus) ─────────
-        if viewport_kb(ui.ctx()) {
-            if let Some(sel_id) = self.selected_id {
-                let (delete, ctrl, shift, bracket_right, bracket_left, key_g) = ui.input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                        i.modifiers.ctrl,
-                        i.modifiers.shift,
-                        i.key_pressed(egui::Key::CloseBracket),
-                        i.key_pressed(egui::Key::OpenBracket),
-                        i.key_pressed(egui::Key::G),
-                    )
-                });
-
-                // Delete / Backspace: remove all selected nodes
-                if delete {
-                    let ids_to_delete: Vec<NodeId> = doc.selection.ids().copied().collect();
-                    for id in ids_to_delete {
-                        doc.remove_node(&id);
-                    }
+        // Tool-independent shortcuts (undo/redo, copy/paste, duplicate,
+        // select-all/deselect, flip, group/ungroup, z-order, view toggles) live
+        // in `handle_global_shortcuts`, dispatched unconditionally from the
+        // frame loop (#192). Only Delete/Backspace of the live Select-tool
+        // selection remains here — it acts on the Select tool's selection UI and
+        // must short-circuit the rest of this handler.
+        if viewport_kb(ui.ctx()) && self.selected_id.is_some() {
+            // Delete / Backspace: remove all selected nodes as one undoable
+            // history step so Ctrl+Z restores them (#191). `execute` hydrates
+            // each bare RemoveNode into RemoveNodeFull, so undo re-adds every
+            // node into its original layer.
+            let delete = ui
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+            if delete {
+                let ids_to_delete: Vec<NodeId> = doc.selection.ids().copied().collect();
+                if !ids_to_delete.is_empty() {
+                    let cmds: Vec<Command> = ids_to_delete
+                        .iter()
+                        .map(|&node_id| Command::RemoveNode { node_id })
+                        .collect();
+                    history.execute(Command::Batch(cmds), doc);
                     doc.selection.clear();
                     self.selected_id = None;
                     *doc_modified = true;
-                    return;
                 }
-
-                // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
-                if ctrl && (bracket_right || bracket_left) {
-                    if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
-                        let layer_len = doc
-                            .layers
-                            .get(&layer_id)
-                            .map(|l| l.node_ids.len())
-                            .unwrap_or(0);
-                        if layer_len > 0 {
-                            let new_index = if bracket_right && shift {
-                                layer_len - 1 // Bring to Front
-                            } else if bracket_left && shift {
-                                0 // Send to Back
-                            } else if bracket_right {
-                                (cur_idx + 1).min(layer_len - 1) // Bring Forward
-                            } else {
-                                cur_idx.saturating_sub(1) // Send Backward
-                            };
-                            if new_index != cur_idx {
-                                let cmd = Command::ReorderNode {
-                                    layer_id,
-                                    node_id: sel_id,
-                                    old_index: cur_idx,
-                                    new_index,
-                                };
-                                history.execute(cmd, doc);
-                                *doc_modified = true;
-                            }
-                        }
-                    }
-                }
-
-                // Ctrl+Shift+G: ungroup (only if selected node is a group)
-                if ctrl && shift && key_g {
-                    if let Some(node) = doc.get_node(&sel_id) {
-                        if let SceneNodeKind::Group(g) = &node.kind {
-                            let children = g.children.clone();
-                            let node_clone = node.clone();
-                            if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id)
-                            {
-                                let first_child = children.first().copied();
-                                let cmd = Command::UngroupNodes {
-                                    group: node_clone,
-                                    layer_id,
-                                    group_index,
-                                    children,
-                                };
-                                history.execute(cmd, doc);
-                                self.selected_id = first_child;
-                                if let Some(fc) = first_child {
-                                    doc.selection = Selection::single(fc);
-                                } else {
-                                    doc.selection.clear();
-                                }
-                                *doc_modified = true;
-                            }
-                        }
-                    }
-                }
+                return;
             }
-
-            // Ctrl+G: group selected nodes (requires 2+ in selection)
-            let (ctrl_g, shift_g) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
-                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
-                )
-            });
-            if ctrl_g && !shift_g && doc.selection.count() >= 2 {
-                self.do_group_selected(doc, history, doc_modified);
-            }
-
-            // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
-            // a user remap takes effect (#140). The three view-preview modes are
-            // mutually exclusive (#22).
-            if self.binding_pressed(ui.ctx(), "view.outline_mode") {
-                self.toggle_outline_mode();
-            }
-
-            // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
-            if self.binding_pressed(ui.ctx(), "view.pixel_preview") {
-                self.toggle_pixel_preview();
-            }
-
-            // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
-            if self.binding_pressed(ui.ctx(), "view.overprint_preview") {
-                self.toggle_overprint_preview();
-            }
-
-            // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
-            if self.binding_pressed(ui.ctx(), "view.toggle_guides") {
-                self.guides_visible = !self.guides_visible;
-            }
-
-            // Ctrl+C: copy selected nodes to in-process clipboard.
-            if ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::C)) {
-                self.gui_clipboard.clear();
-                for nid in doc.selection.ids() {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        self.gui_clipboard.push(node.clone());
-                    }
-                }
-            }
-
-            // Ctrl+V: paste from clipboard with +10px offset.
-            // Ctrl+Shift+V: paste in place (exact original coordinates).
-            let (paste, paste_in_place) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V),
-                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::V),
-                )
-            });
-            if (paste || paste_in_place) && !self.gui_clipboard.is_empty() {
-                let offset = if paste { 10.0_f64 } else { 0.0 };
-                if let Some(target_layer) = doc
-                    .active_layer_id
-                    .or_else(|| doc.layer_order.first().copied())
-                {
-                    let mut cmds: Vec<Command> = Vec::new();
-                    let mut new_ids: Vec<NodeId> = Vec::new();
-                    for src in &self.gui_clipboard {
-                        let mut new_node = src.clone();
-                        new_node.id = uuid::Uuid::new_v4();
-                        new_node.layer_id = target_layer;
-                        if offset.abs() > 1e-9 {
-                            new_node.transform.matrix[4] += offset;
-                            new_node.transform.matrix[5] += offset;
-                        }
-                        new_ids.push(new_node.id);
-                        cmds.push(Command::AddNode {
-                            node: new_node,
-                            layer_id: Some(target_layer),
-                        });
-                    }
-                    if !cmds.is_empty() {
-                        history.execute(Command::Batch(cmds), doc);
-                        doc.selection = Selection::from_ids(new_ids.iter().copied());
-                        if let Some(first) = new_ids.first() {
-                            self.selected_id = Some(*first);
-                        }
-                        *doc_modified = true;
-                    }
-                }
-            }
-
-            // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
-            // — keymap-resolved and routed through the shared flip helper (#140).
-            if self.binding_pressed(ui.ctx(), "object.flip_horizontal")
-                && self.flip_selection(doc, history, true)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "object.flip_vertical")
-                && self.flip_selection(doc, history, false)
-            {
-                *doc_modified = true;
-            }
-
-            // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
-            if self.binding_pressed(ui.ctx(), "edit.undo")
-                && self.dispatch_command("edit.undo", doc, history)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "edit.redo")
-                && self.dispatch_command("edit.redo", doc, history)
-            {
-                *doc_modified = true;
-            }
-
-            // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
-            // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
-            // remap actually fire on the canvas (#140).
-            if self.binding_pressed(ui.ctx(), "selection.select_all")
-                && self.dispatch_command("selection.select_all", doc, history)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "selection.deselect")
-                && self.dispatch_command("selection.deselect", doc, history)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "edit.duplicate")
-                && self.dispatch_command("edit.duplicate", doc, history)
-            {
-                *doc_modified = true;
-            }
-        } // end viewport_kb
+        }
 
         // ── Isolation Mode: Escape exits ─────────────────────────────────────
         if self.isolated_group.is_some() {
@@ -620,61 +742,32 @@ impl PhotonicApp {
         }
 
         if response.drag_stopped_by(egui::PointerButton::Primary) {
+            let move_pending = !self.move_drag_origins.is_empty();
+            let was_moving = self.moving;
             self.moving = false;
-            // Record the completed move as a single undoable history step (#11).
-            // The doc already holds the moved state, so re-applying UpdateNode is
-            // a no-op; it just captures the inverse for undo/redo.
-            if !self.move_drag_origins.is_empty() {
-                if self.dup_drag {
-                    // Alt-duplicate: the copies are already live in the doc. Remove
-                    // them and re-add through history so the whole duplication is a
-                    // single undoable step (undo deletes the copies).
-                    let ids: Vec<NodeId> = self.move_drag_origins.iter().map(|n| n.id).collect();
-                    self.move_drag_origins.clear();
-                    let finals: Vec<SceneNode> = ids
-                        .iter()
-                        .filter_map(|id| doc.nodes.get(id).cloned())
-                        .collect();
-                    for id in &ids {
-                        doc.remove_node(id);
-                    }
-                    let cmds: Vec<Command> = finals
-                        .into_iter()
-                        .map(|node| {
-                            let layer_id = Some(node.layer_id);
-                            Command::AddNode { node, layer_id }
-                        })
-                        .collect();
-                    if !cmds.is_empty() {
-                        history.execute(Command::Batch(cmds), doc);
-                        *doc_modified = true;
-                    }
-                } else {
-                    let cmds: Vec<Command> = std::mem::take(&mut self.move_drag_origins)
-                        .into_iter()
-                        .filter_map(|old| {
-                            doc.nodes.get(&old.id).and_then(|cur| {
-                                (cur.transform.matrix != old.transform.matrix).then(|| {
-                                    Command::UpdateNode {
-                                        old,
-                                        new: cur.clone(),
-                                    }
-                                })
-                            })
-                        })
-                        .collect();
-                    if !cmds.is_empty() {
-                        history.execute(Command::Batch(cmds), doc);
-                        *doc_modified = true;
-                    }
-                }
+            // Record the completed move as a single, discrete undoable history
+            // step (#11 / #183). See `finalize_move`.
+            //
+            // Instrumentation (#183 root-cause A2 vs A1, see proposal): log which
+            // release branch actually recovered the move so the A2 hypothesis can
+            // be confirmed live. If we were in move mode but NO origins were
+            // captured, that is the A1 signature (origin capture / hit-test never
+            // ran) — the A2 fallback cannot help and a separate fix is required.
+            if move_pending {
+                tracing::debug!(
+                    target: "photonic::move",
+                    nodes = self.move_drag_origins.len(),
+                    "#183 move recorded via drag_stopped_by(Primary) path"
+                );
+            } else if was_moving {
+                tracing::warn!(
+                    target: "photonic::move",
+                    "#183 root-cause A1: drag stopped in move mode but no origins were captured \
+                     (origin capture / hit-test never ran) — the A2 release fallback cannot recover \
+                     this move; a hit-test / origin-capture fix is needed"
+                );
             }
-            self.dup_drag = false;
-            self.move_snap_origins.clear();
-            self.move_snap_ref = None;
-            self.move_snap_bbox = None;
-            self.last_snap_result = None;
-            self.move_snap_press = None;
+            self.finalize_move(doc, history, doc_modified);
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
@@ -747,6 +840,34 @@ impl PhotonicApp {
                     self.selected_id = Some(id);
                 }
             }
+        }
+        // Fallback move recorder (#183). A competing overlay allocated later in
+        // the frame — the artboard drag handle / name hit-target
+        // (`app/mod.rs`), or a full-canvas modal scrim — can consume the canvas
+        // `response`, so `drag_stopped_by(Primary)` never fires on it and the
+        // move above is never recorded (the regression of #11). If a move is
+        // still pending but the primary button is no longer held (and we are not
+        // mid-drag), finalize it here so a move always lands as exactly one
+        // undoable History step, undoable with Ctrl+Z and visible in the
+        // timeline. Idempotent with the `drag_stopped_by` path: whichever fires
+        // first consumes `move_drag_origins`, so the move is recorded once.
+        //
+        // The release decision itself lives in the pure, unit-tested predicate
+        // `should_finalize_move_fallback` (see tests at the bottom of this file)
+        // so the #183 fix path is exercised in CI, not only by manual GUI drags.
+        else if should_finalize_move_fallback(
+            !self.move_drag_origins.is_empty(),
+            ui.input(|i| i.pointer.primary_down()),
+            response.dragged_by(egui::PointerButton::Primary),
+        ) {
+            self.moving = false;
+            tracing::debug!(
+                target: "photonic::move",
+                nodes = self.move_drag_origins.len(),
+                "#183 move recorded via fallback path (canvas response swallowed; \
+                 drag_stopped_by(Primary) never fired)"
+            );
+            self.finalize_move(doc, history, doc_modified);
         }
 
         // Click on empty space to deselect (without shift)
@@ -843,7 +964,8 @@ impl PhotonicApp {
                 ResizeHandle::TopRight | ResizeHandle::BottomLeft => egui::CursorIcon::ResizeNeSw,
             }
         } else if self.moving {
-            egui::CursorIcon::Move
+            // Closed (grabbing) hand only while actively dragging a move
+            egui::CursorIcon::Grabbing
         } else if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
             // Use effective (combined) bounds for cursor feedback
             const HANDLE_HIT: f32 = 6.0;
@@ -896,7 +1018,8 @@ impl PhotonicApp {
                     })
                     .unwrap_or(false);
                 if on_body {
-                    egui::CursorIcon::Move
+                    // Open (grab) hand on hover to signal a draggable move
+                    egui::CursorIcon::Grab
                 } else {
                     egui::CursorIcon::Default
                 }
@@ -1567,5 +1690,86 @@ impl PhotonicApp {
         };
 
         Some(path)
+    }
+}
+
+/// Release-decision predicate for the #183 fallback move recorder.
+///
+/// On a frame where the normal `response.drag_stopped_by(Primary)` release did
+/// **not** fire — because a competing overlay allocated later in the frame
+/// (artboard drag-handle / name hit-target, or a full-canvas modal scrim)
+/// swallowed the canvas `response` (root-cause A2) — the completed move would
+/// otherwise be silently dropped (the regression of #11). Returns `true` when
+/// the pending move should still be finalized here:
+///
+/// * `move_pending` — origins were captured (`move_drag_origins` non-empty), so
+///   an object actually moved and there is something to record;
+/// * `!primary_down` — the primary button is no longer held, i.e. the gesture
+///   really has ended (not merely paused mid-drag with the button still down);
+/// * `!dragged_by_primary` — no primary drag is in progress this frame, so we do
+///   not fire while the `drag_stopped_by` path still owns the release.
+///
+/// Extracted as a pure function so the exact #183 fix condition is unit-tested
+/// (this crate cannot exercise a live egui drag headlessly).
+pub(crate) fn should_finalize_move_fallback(
+    move_pending: bool,
+    primary_down: bool,
+    dragged_by_primary: bool,
+) -> bool {
+    move_pending && !primary_down && !dragged_by_primary
+}
+
+#[cfg(test)]
+mod move_fallback_tests {
+    use super::should_finalize_move_fallback;
+
+    /// The core #183 recovery case: a move is pending, the primary button has
+    /// been released, and no drag is in progress this frame (the canvas response
+    /// was swallowed so `drag_stopped_by` never fired). The fallback MUST select
+    /// finalize — this is the branch that recovers the otherwise-lost move.
+    #[test]
+    fn swallowed_response_frame_finalizes() {
+        assert!(should_finalize_move_fallback(
+            /* move_pending */ true, /* primary_down */ false,
+            /* dragged_by_primary */ false,
+        ));
+    }
+
+    /// An in-progress drag (button held, dragging this frame) must NOT finalize.
+    #[test]
+    fn active_drag_does_not_finalize() {
+        assert!(!should_finalize_move_fallback(true, true, true));
+    }
+
+    /// Button still held but momentarily not dragging (a pause): the gesture is
+    /// not over, so do not finalize yet.
+    #[test]
+    fn paused_but_button_held_does_not_finalize() {
+        assert!(!should_finalize_move_fallback(true, true, false));
+    }
+
+    /// The `drag_stopped_by(Primary)` frame reports the drag as still ongoing on
+    /// the owning widget while the button is up; the normal release path handles
+    /// it, so the fallback must stand down to avoid double-recording.
+    #[test]
+    fn drag_stopped_frame_defers_to_primary_path() {
+        assert!(!should_finalize_move_fallback(true, false, true));
+    }
+
+    /// No move pending (nothing was captured / nothing moved): never finalize,
+    /// regardless of button or drag state — including the A1 root-cause shape
+    /// (origins empty at release), which this fallback intentionally cannot and
+    /// must not paper over.
+    #[test]
+    fn no_pending_move_never_finalizes() {
+        for &primary_down in &[false, true] {
+            for &dragging in &[false, true] {
+                assert!(!should_finalize_move_fallback(
+                    false,
+                    primary_down,
+                    dragging
+                ));
+            }
+        }
     }
 }

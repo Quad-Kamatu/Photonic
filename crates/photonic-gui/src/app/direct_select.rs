@@ -10,8 +10,10 @@ impl PhotonicApp {
     /// Also clears `point_edit_node` if its node no longer exists.
     pub(crate) fn invalidate_point_edit(&mut self, doc: &Document) {
         self.point_selected.clear();
+        self.point_context_anchor = None;
         self.point_drag_origin = None;
         self.point_drag_mode = None;
+        self.point_marquee_start = None;
         if let Some(nid) = self.point_edit_node {
             if !doc.nodes.contains_key(&nid) {
                 self.point_edit_node = None;
@@ -26,8 +28,10 @@ impl PhotonicApp {
     pub(crate) fn clear_point_edit(&mut self) {
         self.point_edit_node = None;
         self.point_selected.clear();
+        self.point_context_anchor = None;
         self.point_drag_origin = None;
         self.point_drag_mode = None;
+        self.point_marquee_start = None;
     }
 
     /// Seed Direct Select's point-edit state from the current object selection
@@ -60,6 +64,145 @@ impl PhotonicApp {
         self.point_selected = path_anchor_points(bez).iter().map(|(i, _)| *i).collect();
     }
 
+    /// Convert a single directly-selected anchor between corner and smooth
+    /// (curved) via the right-click context menu (#187). Builds one
+    /// `Command::UpdateNode` and pushes it through history — the same inline
+    /// pattern the delete-anchor block uses — so it undoes/redoes atomically.
+    ///
+    /// After the convert, the anchor is re-selected by matching its (unchanged)
+    /// local position: `bez_convert_anchors` can materialize a closed subpath's
+    /// implicit seam into an explicit `CurveTo`, renumbering element indices, so
+    /// the pre-convert index is not a reliable handle. Re-selecting keeps the
+    /// converted anchor highlighted and — for Smooth — makes its freshly
+    /// synthesized in/out handles render and drag immediately.
+    fn ds_convert_context_anchor(
+        &mut self,
+        idx: usize,
+        smooth: bool,
+        doc: &mut Document,
+        view: &CanvasView,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(nid) = self.point_edit_node else {
+            return;
+        };
+        let Some(old_node) = doc.nodes.get(&nid).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(pn) = &old_node.kind else {
+            return;
+        };
+        let bez = pn.path_data.to_bez_path();
+        // Snapshot the anchor's local point so it can be re-found after a possible
+        // element renumber (seam materialization).
+        let anchor_local: Option<Point> = path_anchor_points(&bez)
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, p)| *p);
+        let sel: std::collections::HashSet<usize> = std::iter::once(idx).collect();
+        let new_bez = bez_convert_anchors(&bez, &sel, smooth);
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(np) = &mut new_node.kind {
+            np.path_data = PathData::from_bez_path(&new_bez);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        *doc_modified = true;
+
+        // Re-select the (possibly renumbered) anchor at its unchanged position so
+        // its curvature handles surface and become draggable on the next frame.
+        self.point_selected.clear();
+        if let (Some(p), Some(node)) = (anchor_local, doc.nodes.get(&nid)) {
+            if let SceneNodeKind::Path(pn) = &node.kind {
+                let nb = pn.path_data.to_bez_path();
+                let (acx, acy) = node.transform.apply(p.x, p.y);
+                if let Some(new_idx) =
+                    nearest_anchor_screen(&nb, &node.transform, view, acx, acy, 12.0)
+                {
+                    self.point_selected = vec![new_idx];
+                }
+            }
+        }
+    }
+
+    /// Fillet a single directly-selected straight corner via the right-click
+    /// context menu (#187). Reuses `round_selected_corners` — the same helper the
+    /// inspector "Round corners" buttons and the on-canvas Live-Corners widget
+    /// use — restricted to genuine straight corners (rounding a curve-adjacent
+    /// anchor would flatten the curve). Rounding restructures element indices, so
+    /// the selection is dropped afterwards, matching the shared handler.
+    fn ds_round_context_anchor(
+        &mut self,
+        idx: usize,
+        radius: f64,
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(nid) = self.point_edit_node else {
+            return;
+        };
+        let Some(old_node) = doc.nodes.get(&nid).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(pn) = &old_node.kind else {
+            return;
+        };
+        let bez = pn.path_data.to_bez_path();
+        let straight = straight_corners(&bez);
+        if !straight.contains_key(&idx) {
+            // Not a straight corner — nothing to round.
+            return;
+        }
+        let sel: std::collections::HashSet<usize> = std::iter::once(idx).collect();
+        let new_bez = round_selected_corners(&bez, &sel, radius);
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(np) = &mut new_node.kind {
+            np.path_data = PathData::from_bez_path(&new_bez);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected.clear();
+        *doc_modified = true;
+    }
+
+    /// Hit-test the current point-edit node's anchors at canvas position
+    /// `(cx, cy)`, returning the nearest anchor's element index within the
+    /// grab radius. Shared by the tool handler and by the radial-wheel
+    /// suppression guard in `app/mod.rs` (#187): a right-click on a directly-
+    /// selected anchor must reach the point-type context menu rather than pop
+    /// the global selection wheel, so both paths must agree on "is there an
+    /// anchor here?" using the identical hit-test.
+    pub(crate) fn ds_anchor_at(
+        &self,
+        cx: f64,
+        cy: f64,
+        doc: &Document,
+        view: &CanvasView,
+    ) -> Option<usize> {
+        // Same generous radius the tool handler uses for anchor grabs.
+        const ANCHOR_RADIUS_PX: f64 = 12.0;
+        let nid = self.point_edit_node?;
+        let node = doc.nodes.get(&nid)?;
+        if let SceneNodeKind::Path(pn) = &node.kind {
+            let bez = pn.path_data.to_bez_path();
+            nearest_anchor_screen(&bez, &node.transform, view, cx, cy, ANCHOR_RADIUS_PX)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn handle_direct_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -81,8 +224,10 @@ impl PhotonicApp {
         if viewport_kb(ui.ctx()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.point_edit_node = None;
             self.point_selected.clear();
+            self.point_context_anchor = None;
             self.point_drag_origin = None;
             self.point_drag_mode = None;
+            self.point_marquee_start = None;
             return;
         }
 
@@ -105,18 +250,6 @@ impl PhotonicApp {
         let hover_canvas = ui
             .input(|i| i.pointer.hover_pos())
             .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
-
-        // Helper closure: hit-test anchors of the current edit node at canvas pos (cx, cy)
-        let find_anchor = |nid: NodeId, cx: f64, cy: f64, doc: &Document| -> Option<usize> {
-            doc.nodes.get(&nid).and_then(|node| {
-                if let SceneNodeKind::Path(pn) = &node.kind {
-                    let bez = pn.path_data.to_bez_path();
-                    nearest_anchor_screen(&bez, &node.transform, view, cx, cy, ANCHOR_RADIUS_PX)
-                } else {
-                    None
-                }
-            })
-        };
 
         // Roundable straight corners of the edit node, recomputed each frame for
         // Live-Corners widget hit-testing and rendering.
@@ -152,11 +285,7 @@ impl PhotonicApp {
                     .is_some()
                 {
                     egui::CursorIcon::Grab
-                } else if self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, hx, hy, doc))
-                    .is_some()
-                {
+                } else if self.ds_anchor_at(hx, hy, doc, view).is_some() {
                     egui::CursorIcon::PointingHand
                 } else {
                     egui::CursorIcon::Default
@@ -195,6 +324,77 @@ impl PhotonicApp {
             return;
         }
 
+        // ── Right-click an anchor → point-type / round context menu (#187) ────
+        // Discoverability: the geometry (bez_convert_anchors, round_selected_corners)
+        // and the on-canvas handle render/drag already exist; the missing piece was
+        // a right-click entry point. On secondary click, hit-test the anchor at the
+        // press location, select it, and record it as the menu target.
+        if response.secondary_clicked() {
+            if let Some(press_pos) = response.interact_pointer_pos() {
+                let (cx, cy) = view.screen_to_canvas(press_pos.x as f64, press_pos.y as f64);
+                let hit = self.ds_anchor_at(cx, cy, doc, view);
+                if let Some(idx) = hit {
+                    // Select the right-clicked anchor (replace unless Shift/Ctrl is
+                    // held to add) so the menu acts on a visible selection.
+                    if add_sel {
+                        if !self.point_selected.contains(&idx) {
+                            self.point_selected.push(idx);
+                        }
+                    } else if !self.point_selected.contains(&idx) {
+                        self.point_selected = vec![idx];
+                    }
+                    self.point_context_anchor = Some(idx);
+                } else {
+                    // Right-click missed every anchor — no anchor menu this time.
+                    self.point_context_anchor = None;
+                }
+            }
+        }
+
+        // Registered every frame so egui can keep the menu open across frames; the
+        // closure renders items only when an anchor is the active context target.
+        response.context_menu(|ui| {
+            let (Some(ctx_idx), Some(_nid)) = (self.point_context_anchor, self.point_edit_node)
+            else {
+                // No anchor was right-clicked (empty space / non-path) — close so no
+                // empty menu lingers.
+                ui.close_menu();
+                return;
+            };
+            ui.label(egui::RichText::new("Anchor point").weak().small());
+            if ui
+                .button("Corner")
+                .on_hover_text("Retract this anchor's handles → sharp corner")
+                .clicked()
+            {
+                self.ds_convert_context_anchor(ctx_idx, false, doc, view, doc_modified, history);
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
+            if ui
+                .button("Smooth / Curved")
+                .on_hover_text("Add collinear handles → smooth curve; drag the handles to shape it")
+                .clicked()
+            {
+                self.ds_convert_context_anchor(ctx_idx, true, doc, view, doc_modified, history);
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
+            ui.menu_button("Round corner", |ui| {
+                for r in [4.0_f64, 8.0, 16.0, 32.0] {
+                    if ui
+                        .button(format!("{r:.0} px"))
+                        .on_hover_text("Fillet this straight corner by this radius")
+                        .clicked()
+                    {
+                        self.ds_round_context_anchor(ctx_idx, r, doc, doc_modified, history);
+                        self.point_context_anchor = None;
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+
         // ── Drag start: use interact_pointer_pos() — the press location ───────
         // Priority: bezier handle > corner widget > anchor point > shape body.
         if response.drag_started_by(egui::PointerButton::Primary) {
@@ -217,9 +417,7 @@ impl PhotonicApp {
                         CORNER_WIDGET_PX,
                     )
                 });
-                let anchor_hit = self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
+                let anchor_hit = self.ds_anchor_at(cx, cy, doc, view);
                 let origin_bez = edit_node.and_then(|node| match &node.kind {
                     SceneNodeKind::Path(pn) => Some(pn.path_data.to_bez_path()),
                     _ => None,
@@ -250,12 +448,17 @@ impl PhotonicApp {
                         .point_edit_node
                         .and_then(|nid| doc.nodes.get(&nid).cloned());
                 } else if let Some(anchor_idx) = anchor_hit {
-                    // Select this anchor (replace unless Shift/Ctrl is held)
                     if add_sel {
+                        // Shift/Ctrl adds the pressed anchor to the selection.
                         if !self.point_selected.contains(&anchor_idx) {
                             self.point_selected.push(anchor_idx);
                         }
                     } else if !self.point_selected.contains(&anchor_idx) {
+                        // Only collapse to a single anchor when grabbing an
+                        // UNselected one; grabbing a member of the current
+                        // multi-selection keeps the whole set so the drag moves
+                        // every selected anchor together via DirectDrag::Anchors
+                        // + bez_move_anchors (#181 requirement 2).
                         self.point_selected = vec![anchor_idx];
                     }
                     self.point_drag_mode = Some(DirectDrag::Anchors);
@@ -270,12 +473,23 @@ impl PhotonicApp {
                         // Pressing the fill of the already-selected shape starts a
                         // whole-shape move (#164 requirement 2). Capture the node
                         // and its original translation so the drag is stable.
-                        if let Some(node) = self.point_edit_node.and_then(|nid| doc.nodes.get(&nid))
-                        {
-                            let start_e = node.transform.matrix[4];
-                            let start_f = node.transform.matrix[5];
-                            self.point_drag_origin = Some(node.clone());
-                            self.point_drag_mode = Some(DirectDrag::Shape { start_e, start_f });
+                        if let Some(nid) = self.point_edit_node {
+                            if let Some(node) = doc.nodes.get(&nid) {
+                                let start_e = node.transform.matrix[4];
+                                let start_f = node.transform.matrix[5];
+                                self.point_drag_origin = Some(node.clone());
+                                // Capture a canvas-space reference point (bbox
+                                // top-left) so grid snap aligns the shape's edge
+                                // to the grid, matching the Move tool's
+                                // move_snap_ref (#181 requirement 3).
+                                let ref_pt = selection_canvas_bounds(doc, &[nid], renderer)
+                                    .map(|(x0, y0, _, _)| (x0, y0));
+                                self.point_drag_mode = Some(DirectDrag::Shape {
+                                    start_e,
+                                    start_f,
+                                    ref_pt,
+                                });
+                            }
                         }
                     } else if let Some(nid) = hit_shape {
                         // A different (or first) shape — select it and show all of
@@ -292,8 +506,17 @@ impl PhotonicApp {
                         }
                         self.point_drag_origin = None;
                         self.point_drag_mode = None;
+                    } else if self.point_edit_node.is_some() {
+                        // Empty canvas while a path is being point-edited: begin a
+                        // rubber-band marquee to select the enclosed anchors of the
+                        // edit path (#181 requirement 1). Tracked separately from
+                        // point_drag_mode — a marquee changes only the selection, so
+                        // no drag origin / undo is recorded.
+                        self.point_marquee_start = Some(press_pos);
+                        self.point_drag_origin = None;
+                        self.point_drag_mode = None;
                     } else {
-                        // Empty canvas — deselect.
+                        // Empty canvas with nothing being edited — deselect.
                         self.point_edit_node = None;
                         self.point_selected.clear();
                         self.point_drag_origin = None;
@@ -392,8 +615,12 @@ impl PhotonicApp {
                         }
                     }
                 }
-                Some(DirectDrag::Shape { start_e, start_f }) => {
-                    let (start_e, start_f) = (*start_e, *start_f);
+                Some(DirectDrag::Shape {
+                    start_e,
+                    start_f,
+                    ref_pt,
+                }) => {
+                    let (start_e, start_f, ref_pt) = (*start_e, *start_f, *ref_pt);
                     // Total canvas-space delta from the press point, mirroring the
                     // Move tool (tool_handlers.rs). Writes translation directly.
                     if let (Some(nid), Some(press), Some(cursor)) = (
@@ -401,16 +628,95 @@ impl PhotonicApp {
                         ui.input(|i| i.pointer.press_origin()),
                         response.interact_pointer_pos(),
                     ) {
-                        let dx = (cursor.x - press.x) as f64 / view.zoom;
-                        let dy = (cursor.y - press.y) as f64 / view.zoom;
+                        let raw_dx = (cursor.x - press.x) as f64 / view.zoom;
+                        let raw_dy = (cursor.y - press.y) as f64 / view.zoom;
+                        // Shift locks the move to 8 directions (axis-lock beats
+                        // grid snap); otherwise snap a canvas-space reference
+                        // point (the shape's bbox top-left) to the grid so the
+                        // shape's edge lands ON grid lines, exactly like the Move
+                        // tool's `self.snap(rx + raw_dx) - rx` (#181 requirement
+                        // 3). Snapping the reference point instead of the raw
+                        // target is what makes the shape align to the grid rather
+                        // than merely stepping in grid-sized increments. No-op
+                        // unless prefs.snap_to_grid is enabled.
+                        let (dx, dy) = if shift {
+                            axis_lock_8(raw_dx, raw_dy)
+                        } else {
+                            match ref_pt {
+                                Some((rx, ry)) => {
+                                    (self.snap(rx + raw_dx) - rx, self.snap(ry + raw_dy) - ry)
+                                }
+                                None => (raw_dx, raw_dy),
+                            }
+                        };
+                        let (te, tf) = (start_e + dx, start_f + dy);
                         if let Some(node) = doc.nodes.get_mut(&nid) {
-                            node.transform.matrix[4] = start_e + dx;
-                            node.transform.matrix[5] = start_f + dy;
+                            node.transform.matrix[4] = te;
+                            node.transform.matrix[5] = tf;
                             *doc_modified = true;
                         }
                     }
                 }
                 None => {}
+            }
+        }
+
+        // ── Marquee complete: select the enclosed anchors ─────────────────────
+        // Runs independently of the geometry-drag history block below: a marquee
+        // only changes the anchor selection, records no undo (#181 requirement 1).
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some(start_pos) = self.point_marquee_start.take() {
+                let end_pos = response
+                    .interact_pointer_pos()
+                    .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                    .unwrap_or(start_pos);
+                let rect = egui::Rect::from_two_pos(start_pos, end_pos);
+                // Collect every anchor of the edit path whose screen position lies
+                // inside the marquee rect. Mapping matches the anchor-square overlay:
+                // node.transform.apply (local→canvas) then view.canvas_to_screen.
+                let hits: Vec<usize> = self
+                    .point_edit_node
+                    .and_then(|nid| doc.nodes.get(&nid))
+                    .and_then(|node| match &node.kind {
+                        SceneNodeKind::Path(pn) => {
+                            let bez = pn.path_data.to_bez_path();
+                            Some(
+                                path_anchor_points(&bez)
+                                    .into_iter()
+                                    .filter_map(|(idx, p)| {
+                                        let (cx, cy) = node.transform.apply(p.x, p.y);
+                                        let (sx, sy) = view.canvas_to_screen(cx, cy);
+                                        rect.contains(egui::pos2(sx as f32, sy as f32))
+                                            .then_some(idx)
+                                    })
+                                    .collect::<Vec<usize>>(),
+                            )
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                if rect.area() < 1.0 && hits.is_empty() {
+                    // Zero-area marquee (a click-through on empty canvas) with no
+                    // enclosed anchors falls back to a plain deselect.
+                    if !add_sel {
+                        self.point_selected.clear();
+                    }
+                } else if add_sel {
+                    // Shift/Ctrl unions the marquee hits with the current selection.
+                    for idx in hits {
+                        if !self.point_selected.contains(&idx) {
+                            self.point_selected.push(idx);
+                        }
+                    }
+                } else {
+                    // Plain marquee replaces the selection with the enclosed anchors.
+                    self.point_selected = hits;
+                }
+                // A marquee never carries a geometry drag; make sure the drag-end
+                // history block below sees no stale origin/mode.
+                self.point_drag_origin = None;
+                self.point_drag_mode = None;
             }
         }
 
@@ -454,9 +760,7 @@ impl PhotonicApp {
             if let Some(click_pos) = response.interact_pointer_pos() {
                 let (cx, cy) = view.screen_to_canvas(click_pos.x as f64, click_pos.y as f64);
 
-                let hit_anchor = self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
+                let hit_anchor = self.ds_anchor_at(cx, cy, doc, view);
 
                 if let Some(anchor_idx) = hit_anchor {
                     if add_sel {
@@ -496,6 +800,20 @@ impl PhotonicApp {
                     }
                 }
             }
+        }
+
+        // ── Marquee rubber-band overlay ───────────────────────────────────────
+        // Mirrors the Move tool's marquee (tool_handlers.rs): a translucent accent
+        // rectangle from the press point to the current cursor while dragging (#181).
+        if let Some(start_pos) = self.point_marquee_start {
+            let current_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(start_pos);
+            let rect = egui::Rect::from_two_pos(start_pos, current_pos);
+            ui.painter().rect(
+                rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(110, 86, 207, 30),
+                egui::Stroke::new(1.0, accent),
+            );
         }
 
         // ── Visual overlay ────────────────────────────────────────────────────

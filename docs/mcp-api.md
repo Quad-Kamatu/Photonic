@@ -2602,7 +2602,7 @@ Use detail > 0 to add intermediate points before roughening — this creates fin
 
 ## `round_corners`
 
-Round sharp corners of path nodes by replacing each corner with a smooth quadratic bezier arc. The radius is automatically clamped to half the shortest adjacent segment to prevent overlap.
+Round sharp corners of path nodes by replacing each corner with a smooth quadratic bezier arc. The radius is automatically clamped so adjacent fillets never overlap.
 
 Different from smooth_path (Chaikin): round_corners inserts precise arc fillets at corners while preserving straight segments. Useful for UI element shapes, rounded rectangles, and softening angular artwork. Destructive — modifies path data. Single undoable step.
 

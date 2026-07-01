@@ -261,7 +261,7 @@ pub async fn set_active_layer(state: &AppState, args: SetActiveLayerArgs) -> Too
     }
 
     let old_id = doc.active_layer_id;
-    history.execute(
+    history.execute_discrete(
         Command::SetActiveLayer {
             old_id,
             new_id: Some(lid),
@@ -314,7 +314,7 @@ pub async fn delete_layer(state: &AppState, args: DeleteLayerArgs) -> ToolResult
         cmds.push(Command::RemoveLayerFull {
             layer: layer.clone(),
         });
-        history.execute(Command::Batch(cmds), &mut doc);
+        history.execute_discrete(Command::Batch(cmds), &mut doc);
     } else {
         // Move nodes to first remaining layer, then delete the empty layer.
         let target_lid = doc
@@ -342,7 +342,7 @@ pub async fn delete_layer(state: &AppState, args: DeleteLayerArgs) -> ToolResult
         cmds.push(Command::RemoveLayerFull {
             layer: layer.clone(),
         });
-        history.execute(Command::Batch(cmds), &mut doc);
+        history.execute_discrete(Command::Batch(cmds), &mut doc);
     }
 
     let action = if args.delete_nodes {
@@ -386,7 +386,7 @@ pub async fn reorder_layers(state: &AppState, args: ReorderLayersArgs) -> ToolRe
     }
 
     let old_order = doc.layer_order.clone();
-    history.execute(
+    history.execute_discrete(
         Command::ReorderLayers {
             old_order,
             new_order: new_order.clone(),
@@ -451,7 +451,7 @@ pub async fn duplicate_layer(state: &AppState, args: DuplicateLayerArgs) -> Tool
     }
 
     let node_count = src_layer.node_ids.len();
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Duplicated layer '{}' → '{}' ({node_count} nodes)",
@@ -477,7 +477,7 @@ pub async fn resize_canvas(state: &AppState, args: ResizeCanvasArgs) -> ToolResu
     let old_w = doc.width;
     let old_h = doc.height;
 
-    history.execute(
+    history.execute_discrete(
         Command::ResizeCanvas {
             old_width: old_w,
             old_height: old_h,
@@ -1400,7 +1400,7 @@ pub async fn apply_document_template(
 
     // Execute canvas resize early so subsequent operations see correct size.
     if !commands.is_empty() {
-        history.execute(Command::Batch(commands.clone()), &mut doc);
+        history.execute_discrete(Command::Batch(commands.clone()), &mut doc);
         commands.clear();
     }
 
@@ -1445,7 +1445,7 @@ pub async fn apply_document_template(
         }
     }
     if !commands.is_empty() {
-        history.execute(Command::Batch(commands), &mut doc);
+        history.execute_discrete(Command::Batch(commands), &mut doc);
     }
 
     ToolResult::text(format!(
@@ -1611,7 +1611,7 @@ pub async fn apply_color_swatch(state: &AppState, args: ApplyColorSwatchArgs) ->
     } else {
         Command::Batch(commands)
     };
-    history.execute(batch, &mut doc);
+    history.execute_discrete(batch, &mut doc);
 
     ToolResult::text(format!(
         "Applied swatch '{}' ({}) to {} node(s).",
@@ -1731,7 +1731,7 @@ pub async fn update_color_swatch(state: &AppState, args: UpdateColorSwatchArgs) 
             } else {
                 Command::Batch(commands)
             };
-            history.execute(batch, &mut doc);
+            history.execute_discrete(batch, &mut doc);
         }
     }
 
@@ -1990,7 +1990,7 @@ pub async fn apply_graphic_style(state: &AppState, args: ApplyGraphicStyleArgs) 
     drop(doc);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!(
@@ -2112,7 +2112,7 @@ pub async fn apply_width_profile(state: &AppState, args: ApplyWidthProfileArgs) 
     drop(doc);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!(
@@ -2313,7 +2313,7 @@ pub async fn apply_pattern_fill(state: &AppState, args: ApplyPatternFillArgs) ->
     drop(doc);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(Command::Batch(commands), &mut doc);
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     drop(history);
 
     ToolResult::text(format!(
@@ -2541,7 +2541,7 @@ pub async fn apply_variables(state: &AppState) -> ToolResult {
     }
 
     if !commands.is_empty() {
-        history.execute(Command::Batch(commands), &mut doc);
+        history.execute_discrete(Command::Batch(commands), &mut doc);
     }
     drop(history);
 
@@ -2647,7 +2647,7 @@ pub async fn place_symbol(state: &AppState, args: PlaceSymbolArgs) -> ToolResult
 
     let instance_id = instance.id;
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node: instance,
             layer_id: Some(layer_id),
@@ -2697,7 +2697,7 @@ pub async fn break_link_to_symbol(state: &AppState, args: BreakLinkToSymbolArgs)
     new_node.symbol_stroke_override = None;
 
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::UpdateNode {
             old: node,
             new: new_node,
@@ -2972,7 +2972,7 @@ pub async fn apply_gradient_swatch(state: &AppState, args: ApplyGradientSwatchAr
 
     let mut history = state.history.lock().await;
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
     drop(history);
 
@@ -4343,7 +4343,7 @@ pub async fn apply_spot_color(state: &AppState, args: ApplySpotColorArgs) -> Too
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
     for cmd in commands {
-        history.execute(cmd, &mut doc);
+        history.execute_discrete(cmd, &mut doc);
     }
     drop(history);
 
@@ -4792,7 +4792,7 @@ pub async fn spray_symbol_instances(
         instance.transform = Transform::translate(ix, iy);
         instance.symbol_ref = Some(symbol.id);
         instance_ids.push(instance.id);
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: instance,
                 layer_id: Some(layer_id),
@@ -4939,7 +4939,7 @@ pub async fn load_symbol_library(state: &AppState, args: LoadSymbolLibraryArgs) 
         master.visible = false;
 
         let master_id = master.id;
-        history.execute(
+        history.execute_discrete(
             Command::AddNode {
                 node: master,
                 layer_id: Some(layer_id),
@@ -5081,7 +5081,7 @@ pub async fn fit_to_margins(state: &AppState, args: FitToMarginsArgs) -> ToolRes
     }
 
     let moved = cmds.len();
-    history.execute(Command::Batch(cmds), &mut doc);
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
 
     ToolResult::text(format!(
         "Fitted {} node(s) to safe area ({:.1}×{:.1}) with scale ×{:.3}.",

@@ -12,6 +12,7 @@ use photonic_core::{
 };
 use uuid::Uuid;
 
+use crate::color_edit::{srgb_color_edit, srgb_f32_color_edit};
 use crate::radial_wheel::WheelAction;
 use crate::tools::Tool;
 
@@ -94,6 +95,8 @@ pub enum PanelAction {
     AddAnchorPoints { node_id: NodeId },
     /// Open the Simplify Path dialog for a path node.
     OpenSimplifyDialog { node_id: NodeId },
+    /// Open the Merge Vertices by Distance (weld) dialog for a path node.
+    OpenMergeVerticesDialog { node_id: NodeId },
     /// Convert the stroke of a path node into a new filled outline path.
     OutlineStroke { node_id: NodeId },
     /// Invert the fill/stroke colors of the given nodes. Empty vec = use selection.
@@ -748,6 +751,7 @@ impl PanelAction {
             WheelAction::CopyAsSvgSelection => Self::CopyAsSvg { node_ids: vec![] },
             WheelAction::AddAnchorPoints(id) => Self::AddAnchorPoints { node_id: id },
             WheelAction::SimplifyPath(id) => Self::OpenSimplifyDialog { node_id: id },
+            WheelAction::MergeVertices(id) => Self::OpenMergeVerticesDialog { node_id: id },
             WheelAction::OutlineStroke(id) => Self::OutlineStroke { node_id: id },
             WheelAction::ReversePathDirection(id) => Self::ReversePathDirection { node_id: id },
             WheelAction::AverageAnchorPoints(id) => Self::AverageAnchorPoints { node_id: id },
@@ -1377,8 +1381,10 @@ fn draw_vertex_panel(
             });
         }
         if ui
-            .button("Smooth")
-            .on_hover_text("Make this anchor's handles collinear → smooth curve")
+            .button("Smooth / Curved")
+            .on_hover_text(
+                "Make this anchor's handles collinear → smooth curve (also on right-click)",
+            )
             .clicked()
         {
             *action = Some(PanelAction::ConvertAnchorType {
@@ -4873,7 +4879,10 @@ fn draw_tool_shape_options(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             .open(forced_open)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.color_edit_button_rgba_unmultiplied(fill_color);
+                    // `fill_color` is gamma-sRGB `[f32; 4]` (maps 1:1 into
+                    // `Color`), so route it through the shared sRGBA picker to
+                    // avoid the linear-`Rgba` swatch shift (issue #185).
+                    srgb_f32_color_edit(ui, fill_color);
                     if eyedropper_btn(ui) {
                         action = Some(PanelAction::StartEyedropper(EyedropperTarget::NewShapeFill));
                     }
@@ -6870,22 +6879,21 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             ui.label(RichText::new("(no fill)").weak().small());
         }
         FillKind::Solid(col) => {
-            let mut rgba = [col.r, col.g, col.b, col.a];
+            // `Color` is stored as gamma-encoded sRGB, so drive the shared
+            // sRGBA picker — which interprets bytes as gamma sRGB — rather than
+            // the linear `Rgba` picker (issue #185).
+            let mut new_col = *col;
+            let mut changed = false;
             ui.horizontal(|ui| {
-                if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
-                    // handled below after horizontal
+                if srgb_color_edit(ui, &mut new_col).changed() {
+                    changed = true;
                 }
                 if eyedropper_btn(ui) {
                     *dropper = Some(FillColorSlot::Solid);
                 }
             });
-            if rgba != [col.r, col.g, col.b, col.a] {
-                return Some(Fill::solid(Color {
-                    r: rgba[0],
-                    g: rgba[1],
-                    b: rgba[2],
-                    a: rgba[3],
-                }));
+            if changed {
+                return Some(Fill::solid(new_col));
             }
         }
 
@@ -6982,14 +6990,11 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             let mut remove_idx: Option<usize> = None;
             let stop_count = new_g.stops.len();
             for i in 0..stop_count {
-                let mut rgba = {
-                    let s = &new_g.stops[i];
-                    [s.color.r, s.color.g, s.color.b, s.color.a]
-                };
                 let mut off = new_g.stops[i].offset;
                 let can_remove = stop_count > 2;
                 ui.horizontal(|ui| {
-                    if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                    // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
+                    if srgb_color_edit(ui, &mut new_g.stops[i].color).changed() {
                         stop_changed = true;
                     }
                     if eyedropper_btn(ui) {
@@ -7006,12 +7011,6 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     }
                 });
                 if stop_changed {
-                    new_g.stops[i].color = Color {
-                        r: rgba[0],
-                        g: rgba[1],
-                        b: rgba[2],
-                        a: rgba[3],
-                    };
                     new_g.stops[i].offset = off;
                 }
             }
@@ -7044,16 +7043,13 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
             ui.label(RichText::new("Control Points").small().weak());
             let pt_count = new_fg.points.len();
             for i in 0..pt_count {
-                let mut rgba = {
-                    let p = &new_fg.points[i];
-                    [p.color.r, p.color.g, p.color.b, p.color.a]
-                };
                 let mut x = new_fg.points[i].x as f32;
                 let mut y = new_fg.points[i].y as f32;
                 let can_remove = pt_count > 1;
                 let mut pt_changed = false;
                 ui.horizontal(|ui| {
-                    if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                    // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
+                    if srgb_color_edit(ui, &mut new_fg.points[i].color).changed() {
                         pt_changed = true;
                     }
                     if eyedropper_btn(ui) {
@@ -7076,12 +7072,6 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                     }
                 });
                 if pt_changed {
-                    new_fg.points[i].color = Color {
-                        r: rgba[0],
-                        g: rgba[1],
-                        b: rgba[2],
-                        a: rgba[3],
-                    };
                     new_fg.points[i].x = x as f64;
                     new_fg.points[i].y = y as f64;
                     fg_changed = true;
@@ -7135,18 +7125,11 @@ fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<FillColorSlot
                             for col in 0..new_mg.cols {
                                 let idx = (row * new_mg.cols + col) as usize;
                                 if let Some(v) = new_mg.vertices.get_mut(idx) {
-                                    let mut rgba = [v.color.r, v.color.g, v.color.b, v.color.a];
-                                    if ui
-                                        .color_edit_button_rgba_unmultiplied(&mut rgba)
+                                    // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
+                                    if srgb_color_edit(ui, &mut v.color)
                                         .on_hover_text(format!("({},{})", row, col))
                                         .changed()
                                     {
-                                        v.color = Color {
-                                            r: rgba[0],
-                                            g: rgba[1],
-                                            b: rgba[2],
-                                            a: rgba[3],
-                                        };
                                         mg_changed = true;
                                     }
                                     if eyedropper_btn(ui) {
@@ -7343,25 +7326,15 @@ fn draw_stroke_editor(ui: &mut Ui, stroke: &Stroke, dropper: &mut bool) -> Optio
     }
 
     if new_stroke.enabled {
-        // Color
-        let c = &new_stroke.color;
-        let mut rgba = [c.r, c.g, c.b, c.a];
+        // Color — gamma-sRGB `Color` → shared sRGBA picker (issue #185).
         ui.horizontal(|ui| {
-            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+            if srgb_color_edit(ui, &mut new_stroke.color).changed() {
                 changed = true;
             }
             if eyedropper_btn(ui) {
                 *dropper = true;
             }
         });
-        if changed {
-            new_stroke.color = Color {
-                r: rgba[0],
-                g: rgba[1],
-                b: rgba[2],
-                a: rgba[3],
-            };
-        }
 
         // Width
         ui.horizontal(|ui| {
@@ -7624,19 +7597,8 @@ fn draw_glow_editor(ui: &mut Ui, glow: &GlowEffect, dropper: &mut bool) -> Optio
     if new_glow.enabled {
         ui.horizontal(|ui| {
             ui.label("Color");
-            let mut rgba = [
-                new_glow.color.r,
-                new_glow.color.g,
-                new_glow.color.b,
-                new_glow.color.a,
-            ];
-            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
-                new_glow.color = Color {
-                    r: rgba[0],
-                    g: rgba[1],
-                    b: rgba[2],
-                    a: rgba[3],
-                };
+            // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
+            if srgb_color_edit(ui, &mut new_glow.color).changed() {
                 changed = true;
             }
             if eyedropper_btn(ui) {
@@ -7708,19 +7670,8 @@ fn draw_gaussian_glow_editor(
     if new_glow.enabled {
         ui.horizontal(|ui| {
             ui.label("Color");
-            let mut rgba = [
-                new_glow.color.r,
-                new_glow.color.g,
-                new_glow.color.b,
-                new_glow.color.a,
-            ];
-            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
-                new_glow.color = Color {
-                    r: rgba[0],
-                    g: rgba[1],
-                    b: rgba[2],
-                    a: rgba[3],
-                };
+            // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
+            if srgb_color_edit(ui, &mut new_glow.color).changed() {
                 changed = true;
             }
             if eyedropper_btn(ui) {

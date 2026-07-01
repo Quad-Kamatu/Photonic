@@ -120,7 +120,16 @@ pub enum DirectDrag {
     /// Moving the whole shape by dragging its fill/interior. `start_e`/`start_f`
     /// are the node transform's original translation (`matrix[4]`/`matrix[5]`),
     /// captured at press so the per-frame delta stays stable (#164).
-    Shape { start_e: f64, start_f: f64 },
+    /// `ref_x`/`ref_y` are a canvas-space reference point (the node's bbox
+    /// top-left) captured at press, so grid snap aligns the shape's edge to the
+    /// grid instead of quantizing the raw displacement — mirroring the Move
+    /// tool's `move_snap_ref` (#181 requirement 3). `None` when bounds are
+    /// unavailable, in which case snap falls back to the raw target.
+    Shape {
+        start_e: f64,
+        start_f: f64,
+        ref_pt: Option<(f64, f64)>,
+    },
 }
 
 // ─── Diff highlight ────────────────────────────────────────────────────────────
@@ -235,6 +244,22 @@ struct SimplifyDialog {
     /// Tolerance the cached `preview` was built for. `NaN` means "not built
     /// yet" so the first comparison always misses and forces a build.
     cached_tol: f64,
+}
+
+// ─── Merge Vertices by Distance dialog ────────────────────────────────────────
+
+struct MergeVerticesDialog {
+    node_id: NodeId,
+    node_name: String,
+    threshold: f64,
+    /// Anchor-point count of the original path, captured when the dialog opens.
+    orig_points: usize,
+    /// Welded result cached for `cached_thr`, so the weld runs only on a
+    /// threshold change (or first build), not every frame.
+    preview: Option<PathData>,
+    /// Threshold the cached `preview` was built for. `NaN` means "not built
+    /// yet" so the first comparison always misses and forces a build.
+    cached_thr: f64,
 }
 
 struct FindReplaceTextDialog {
@@ -471,12 +496,22 @@ pub struct PhotonicApp {
     point_edit_node: Option<NodeId>,
     /// Indices into the BezPath element array that are currently selected.
     point_selected: Vec<usize>,
+    /// The anchor element index most recently right-clicked in Direct Select,
+    /// i.e. the target of the anchor context menu. `None` when no anchor menu is
+    /// active (right-click missed all anchors). Persisted across frames because
+    /// egui keeps the context menu open and re-runs its closure each frame.
+    point_context_anchor: Option<usize>,
     /// Snapshot of the node captured at drag-start (None when not dragging).
     /// Used to build the UpdateNode undo command on drag release.
     point_drag_origin: Option<SceneNode>,
     /// What the current Direct Selection drag is manipulating (None = anchors
     /// or no active drag). Set on drag-start, cleared on release.
     point_drag_mode: Option<DirectDrag>,
+    /// Screen-space position where a Direct Select anchor marquee (rubber-band
+    /// vertex select) began; `None` when no marquee is in progress. Tracked
+    /// separately from `point_drag_mode` because a marquee changes only the
+    /// anchor selection, not geometry (no undo). #181.
+    point_marquee_start: Option<egui::Pos2>,
 
     // ── Shape Builder tool state ──────────────────────────────────────────────
     /// Node under cursor in Shape Builder mode (for highlight preview).
@@ -528,6 +563,8 @@ pub struct PhotonicApp {
     export_dialog: Option<ExportDialog>,
     /// Simplify Path dialog — Some while open.
     simplify_dialog: Option<SimplifyDialog>,
+    /// Merge Vertices by Distance dialog — Some while open.
+    merge_vertices_dialog: Option<MergeVerticesDialog>,
     /// Find / Replace Text dialog — Some while open.
     find_replace_text_dialog: Option<FindReplaceTextDialog>,
 
@@ -895,8 +932,10 @@ impl Default for PhotonicApp {
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),
+            point_context_anchor: None,
             point_drag_origin: None,
             point_drag_mode: None,
+            point_marquee_start: None,
             shape_builder_hovered: None,
             shape_builder_drag_ids: Vec::new(),
             shape_builder_subtract_mode: false,
@@ -922,6 +961,7 @@ impl Default for PhotonicApp {
             file_status: None,
             export_dialog: None,
             simplify_dialog: None,
+            merge_vertices_dialog: None,
             find_replace_text_dialog: None,
             smooth: SmoothViewState::default(),
             prefs: AppPreferences::default(),
@@ -1971,9 +2011,33 @@ impl PhotonicApp {
             self.file_status = Some(msg);
         }
 
+        // ── Gesture coalescing (#182) ─────────────────────────────────────────
+        // While the pointer is down, collapse a continuous drag's per-tick edits
+        // into a single undo step. Opened here (before any tool/panel handler can
+        // call `history.execute` this frame) and closed on release in the
+        // post-loop `any_released` block below. `begin_coalescing` is idempotent,
+        // so it simply stays open across every frame of the gesture; the very
+        // first `execute` of the gesture pushes an anchor and subsequent
+        // same-target ticks fold into it. This fixes the fill/stroke color
+        // picker (#180) and shields any future slider/handle that streams
+        // `execute` from flooding the history.
+        if ctx.input(|i| i.pointer.any_down()) {
+            history.begin_coalescing();
+        }
+
         // ── Command palette (Ctrl/Cmd+K) — drawn on top of everything ─────────
         // Handled before tool dispatch so a chosen command runs this frame.
         if self.command_palette(ctx, doc, history) {
+            doc_modified = true;
+        }
+
+        // ── Tool-independent keyboard shortcuts (#192) ────────────────────────
+        // Undo/redo, copy/paste, duplicate, select-all/deselect, flip,
+        // group/ungroup, z-order and the view-preview/guide toggles must fire
+        // regardless of the active tool. Dispatched here, before per-tool
+        // handling, so a shortcut applies the same frame. Internally guarded by
+        // `viewport_kb` so typing into a text field is unaffected.
+        if self.handle_global_shortcuts(ctx, doc, history) {
             doc_modified = true;
         }
 
@@ -2238,6 +2302,8 @@ impl PhotonicApp {
 
         // ── Simplify Path dialog ──────────────────────────────────────────────
         self.draw_simplify_dialog(ctx, doc, history);
+        // ── Merge Vertices by Distance dialog ─────────────────────────────────
+        self.draw_merge_vertices_dialog(ctx, doc, history);
 
         // ── Find / Replace Text dialog ────────────────────────────────────────
         self.draw_find_replace_text_dialog(ctx, doc, history);
@@ -2601,7 +2667,8 @@ impl PhotonicApp {
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Default Fill");
-                                            if ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.default_fill_color).changed() {
+                                            // Gamma-sRGB store → shared sRGBA picker (issue #185).
+                                            if crate::color_edit::srgb_f32_color_edit(ui, &mut self.prefs.default_fill_color).changed() {
                                                 self.fill_color = self.prefs.default_fill_color;
                                             }
                                         });
@@ -2609,7 +2676,8 @@ impl PhotonicApp {
                                         ui.add_enabled_ui(self.prefs.default_stroke_enabled, |ui| {
                                             ui.horizontal(|ui| {
                                                 ui.label("Stroke Color");
-                                                ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.default_stroke_color);
+                                                // Gamma-sRGB store → shared sRGBA picker (issue #185).
+                                                crate::color_edit::srgb_f32_color_edit(ui, &mut self.prefs.default_stroke_color);
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Stroke Width");
@@ -3248,8 +3316,11 @@ impl PhotonicApp {
                     // Keep the swatch a fixed, glanceable 26×26 that fits the
                     // 40 px rail rather than the default wide color button.
                     ui.spacing_mut().interact_size = egui::vec2(26.0, 26.0);
-                    let resp = ui
-                        .color_edit_button_rgba_unmultiplied(&mut self.fill_color)
+                    // `self.fill_color` is gamma-sRGB `[f32; 4]` (maps 1:1 into
+                    // `Color`), so route it through the shared sRGBA picker to
+                    // match the renderer instead of egui's linear `Rgba` control
+                    // (issue #185).
+                    let resp = crate::color_edit::srgb_f32_color_edit(ui, &mut self.fill_color)
                         .on_hover_text("Active fill color — click to change");
                     if resp.changed() {
                         // Mirror in-memory every frame (cheap) so the active
@@ -3292,14 +3363,16 @@ impl PhotonicApp {
         let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
         if t > 0.001 {
             let fully_open = drawer_open && t >= 0.999;
-            // Remove the drawer's left inner margin so its content starts flush
-            // against the rail (pairs with the rail's trimmed right margin above
-            // to close the #168 gap). Set on the base binding so it carries
-            // through both the resizable and the exact-width tween branches.
+            // Give the drawer a small left inner margin (#186 follow-up to #168):
+            // #168 zeroed this to close a ~16 px dead band, but that left the
+            // content touching the rail. Restore a modest 6 px gutter so the
+            // content breathes without reopening the old gap. Set on the base
+            // binding so it carries through both the resizable and the
+            // exact-width tween branches.
             let drawer_frame = {
                 let mut f = egui::Frame::side_top_panel(&ctx.style());
                 f.inner_margin = egui::Margin {
-                    left: 0.0,
+                    left: 6.0,
                     right: 8.0,
                     top: 2.0,
                     bottom: 2.0,
@@ -3628,6 +3701,45 @@ impl PhotonicApp {
                                 if pts.len() >= 2 {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(110, 86, 207);
+                                    painter.add(egui::Shape::line(
+                                        pts.clone(),
+                                        egui::Stroke::new(1.5, accent),
+                                    ));
+                                    for p in &pts {
+                                        painter.circle_filled(*p, 2.0, accent);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Merge Vertices live preview overlay (#189) ────────────────
+                // While the Merge Vertices dialog is open, paint the welded
+                // result as a non-destructive accent wireframe (plus anchor dots)
+                // over the artwork so the threshold can be judged before Apply.
+                // The welded PathData is cached per-threshold, so welding runs
+                // only when the threshold changes, not every frame.
+                if let Some(dlg) = self.merge_vertices_dialog.as_mut() {
+                    if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            if dlg.preview.is_none() || dlg.cached_thr != dlg.threshold {
+                                dlg.preview =
+                                    Some(photonic_core::ops::merge::merge_vertices_by_distance(
+                                        &pn.path_data,
+                                        dlg.threshold,
+                                    ));
+                                dlg.cached_thr = dlg.threshold;
+                            }
+                            if let Some(preview) = &dlg.preview {
+                                let pts = bez_to_screen_points_xf(
+                                    &preview.to_bez_path(),
+                                    view,
+                                    &node.transform,
+                                );
+                                if pts.len() >= 2 {
+                                    let painter = ui.painter_at(rect);
+                                    let accent = egui::Color32::from_rgb(86, 170, 207);
                                     painter.add(egui::Shape::line(
                                         pts.clone(),
                                         egui::Stroke::new(1.5, accent),
@@ -4650,40 +4762,54 @@ impl PhotonicApp {
                 if response.secondary_clicked() {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                        let hit = hit_test(doc, cx, cy, renderer);
-                        let wheel_ctx = match hit {
-                            Some(id)
-                                if doc.selection.contains(&id) && doc.selection.count() > 1 =>
-                            {
-                                WheelContext::MultiNode {
+                        // #187: In Direct Select, a right-click that lands on a
+                        // directly-selected anchor must reach that tool's point-type
+                        // context menu (Corner / Smooth-Curved / Round corner), which
+                        // handle_direct_select_tool registers via response.context_menu.
+                        // The radial wheel below early-returns on the same frame, so if
+                        // we opened it here the menu closure would never run. Suppress
+                        // the wheel when an anchor is under the click (using the same
+                        // hit-test the tool uses) and fall through to the tool handler.
+                        // Right-clicking empty canvas in Direct Select still opens the
+                        // wheel, matching every other tool.
+                        let ds_anchor_menu = self.active_tool == Tool::DirectSelect
+                            && self.ds_anchor_at(cx, cy, doc, view).is_some();
+                        if !ds_anchor_menu {
+                            let hit = hit_test(doc, cx, cy, renderer);
+                            let wheel_ctx = match hit {
+                                Some(id)
+                                    if doc.selection.contains(&id) && doc.selection.count() > 1 =>
+                                {
+                                    WheelContext::MultiNode {
+                                        node_ids: doc.selection.ids().copied().collect(),
+                                    }
+                                }
+                                Some(id) => {
+                                    let kind = match doc.get_node(&id).map(|n| &n.kind) {
+                                        Some(SceneNodeKind::Group(_)) => WheelNodeKind::Group,
+                                        Some(SceneNodeKind::Text(_)) => WheelNodeKind::Text,
+                                        _ => WheelNodeKind::Path,
+                                    };
+                                    WheelContext::SingleNode {
+                                        node_id: id,
+                                        node_kind: kind,
+                                    }
+                                }
+                                None if doc.selection.count() > 1 => WheelContext::MultiNode {
                                     node_ids: doc.selection.ids().copied().collect(),
-                                }
-                            }
-                            Some(id) => {
-                                let kind = match doc.get_node(&id).map(|n| &n.kind) {
-                                    Some(SceneNodeKind::Group(_)) => WheelNodeKind::Group,
-                                    Some(SceneNodeKind::Text(_)) => WheelNodeKind::Text,
-                                    _ => WheelNodeKind::Path,
-                                };
-                                WheelContext::SingleNode {
-                                    node_id: id,
-                                    node_kind: kind,
-                                }
-                            }
-                            None if doc.selection.count() > 1 => WheelContext::MultiNode {
-                                node_ids: doc.selection.ids().copied().collect(),
-                            },
-                            _ => WheelContext::EmptyCanvas {
-                                canvas_x: cx,
-                                canvas_y: cy,
-                            },
-                        };
-                        self.radial_wheel = Some(WheelState::new(
-                            pos,
-                            (cx, cy),
-                            &wheel_ctx,
-                            self.prefs.reduced_motion,
-                        ));
+                                },
+                                _ => WheelContext::EmptyCanvas {
+                                    canvas_x: cx,
+                                    canvas_y: cy,
+                                },
+                            };
+                            self.radial_wheel = Some(WheelState::new(
+                                pos,
+                                (cx, cy),
+                                &wheel_ctx,
+                                self.prefs.reduced_motion,
+                            ));
+                        }
                     }
                 }
 
@@ -7247,6 +7373,29 @@ impl PhotonicApp {
                         orig_points,
                         preview: None,
                         cached_tol: f64::NAN,
+                    });
+                }
+
+                PanelAction::OpenMergeVerticesDialog { node_id } => {
+                    let node = doc.nodes.get(&node_id);
+                    let name = node
+                        .map(|n| n.name.clone())
+                        .unwrap_or_else(|| node_id.to_string());
+                    let orig_points = node
+                        .and_then(|n| match &n.kind {
+                            SceneNodeKind::Path(pn) => {
+                                Some(photonic_core::ops::simplify::count_points(&pn.path_data))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    self.merge_vertices_dialog = Some(MergeVerticesDialog {
+                        node_id,
+                        node_name: name,
+                        threshold: 1.0,
+                        orig_points,
+                        preview: None,
+                        cached_thr: f64::NAN,
                     });
                 }
 
@@ -11190,8 +11339,8 @@ impl PhotonicApp {
                         if let SceneNodeKind::Path(pn) = &node.kind {
                             let sel: std::collections::HashSet<usize> =
                                 indices.iter().copied().collect();
-                            let new_bez =
-                                bez_convert_anchors(&pn.path_data.to_bez_path(), &sel, smooth);
+                            let old_bez = pn.path_data.to_bez_path();
+                            let new_bez = bez_convert_anchors(&old_bez, &sel, smooth);
                             let mut new_node = node.clone();
                             if let SceneNodeKind::Path(ref mut np) = new_node.kind {
                                 np.path_data = PathData::from_bez_path(&new_bez);
@@ -11203,6 +11352,15 @@ impl PhotonicApp {
                                 },
                                 doc,
                             );
+                            // Converting anchors reunifies subpaths and can
+                            // materialize seams, restructuring element indices; drop
+                            // the stale selection. The total element count is not a
+                            // sound proxy for "indices unchanged" — in compound paths
+                            // a reunify shrink and a seam grow can cancel while later
+                            // subpath anchors still shift — so clear unconditionally,
+                            // matching the sibling RoundSelectedCorners / DeleteAnchors
+                            // handlers.
+                            self.point_selected.clear();
                             doc_modified = true;
                         }
                     }
@@ -11951,6 +12109,14 @@ impl PhotonicApp {
                 doc.record_recent_color(c);
                 doc_modified = true;
             }
+        }
+
+        // ── Close the gesture-coalescing window on pointer release (#182) ─────
+        // Runs after this frame's edit handlers, so a final same-frame edit still
+        // folds into the single undo step before the gesture is sealed. Between
+        // gestures the history pushes each command normally.
+        if ctx.input(|i| i.pointer.any_released()) {
+            history.end_coalescing();
         }
 
         // ── Eyedropper overlay ────────────────────────────────────────────────
@@ -13057,6 +13223,148 @@ impl PhotonicApp {
                         });
                         let mut new_path = pn.clone();
                         new_path.path_data = simplified;
+                        let mut new_node = node.clone();
+                        new_node.kind = SceneNodeKind::Path(new_path);
+                        let cmd = Command::UpdateNode {
+                            old: node.clone(),
+                            new: new_node,
+                        };
+                        history.execute(cmd, doc);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_merge_vertices_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.merge_vertices_dialog.is_none() {
+            return;
+        }
+
+        #[derive(PartialEq)]
+        enum Action {
+            None,
+            Cancel,
+            Apply,
+        }
+        let mut action = Action::None;
+        let mut open = true;
+
+        let node_name = self
+            .merge_vertices_dialog
+            .as_ref()
+            .unwrap()
+            .node_name
+            .clone();
+        let node_id = self.merge_vertices_dialog.as_ref().unwrap().node_id;
+
+        // Refresh the per-threshold preview cache (shared with the canvas
+        // overlay) so the "Points: N → M" readout is always in sync, regardless
+        // of draw order. The weld still runs only when the threshold changes.
+        let orig_points = self.merge_vertices_dialog.as_ref().unwrap().orig_points;
+        let new_points = {
+            let dlg = self.merge_vertices_dialog.as_mut().unwrap();
+            if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    if dlg.preview.is_none() || dlg.cached_thr != dlg.threshold {
+                        dlg.preview = Some(photonic_core::ops::merge::merge_vertices_by_distance(
+                            &pn.path_data,
+                            dlg.threshold,
+                        ));
+                        dlg.cached_thr = dlg.threshold;
+                    }
+                }
+            }
+            dlg.preview
+                .as_ref()
+                .map(photonic_core::ops::simplify::count_points)
+        };
+
+        egui::Window::new("Merge Vertices by Distance")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([260.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Node: {}", node_name));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Distance");
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut self.merge_vertices_dialog.as_mut().unwrap().threshold,
+                        )
+                        .range(0.01..=100.0)
+                        .speed(0.05)
+                        .max_decimals(2),
+                    );
+                });
+                ui.label(
+                    RichText::new("Larger = weld anchors farther apart")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(4.0);
+                match new_points {
+                    Some(new) => {
+                        ui.label(format!("Points: {} → {}", orig_points, new));
+                    }
+                    None => {
+                        ui.label(format!("Points: {}", orig_points));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = Action::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Apply").clicked() {
+                            action = Action::Apply;
+                        }
+                    });
+                });
+            });
+
+        let threshold = self
+            .merge_vertices_dialog
+            .as_ref()
+            .map(|d| d.threshold)
+            .unwrap_or(1.0);
+
+        if !open {
+            self.merge_vertices_dialog = None;
+            return;
+        }
+
+        match action {
+            Action::None => {}
+            Action::Cancel => {
+                self.merge_vertices_dialog = None;
+            }
+            Action::Apply => {
+                // Reuse the preview the dialog/overlay already computed for this
+                // threshold instead of re-running the weld.
+                let cached = self
+                    .merge_vertices_dialog
+                    .as_mut()
+                    .and_then(|d| d.preview.take());
+                self.merge_vertices_dialog = None;
+                if let Some(node) = doc.nodes.get(&node_id) {
+                    if let SceneNodeKind::Path(pn) = &node.kind {
+                        let welded = cached.unwrap_or_else(|| {
+                            photonic_core::ops::merge::merge_vertices_by_distance(
+                                &pn.path_data,
+                                threshold,
+                            )
+                        });
+                        let mut new_path = pn.clone();
+                        new_path.path_data = welded;
                         let mut new_node = node.clone();
                         new_node.kind = SceneNodeKind::Path(new_path);
                         let cmd = Command::UpdateNode {
