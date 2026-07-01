@@ -237,6 +237,22 @@ struct SimplifyDialog {
     cached_tol: f64,
 }
 
+// ─── Merge Vertices by Distance dialog ────────────────────────────────────────
+
+struct MergeVerticesDialog {
+    node_id: NodeId,
+    node_name: String,
+    threshold: f64,
+    /// Anchor-point count of the original path, captured when the dialog opens.
+    orig_points: usize,
+    /// Welded result cached for `cached_thr`, so the weld runs only on a
+    /// threshold change (or first build), not every frame.
+    preview: Option<PathData>,
+    /// Threshold the cached `preview` was built for. `NaN` means "not built
+    /// yet" so the first comparison always misses and forces a build.
+    cached_thr: f64,
+}
+
 struct FindReplaceTextDialog {
     find: String,
     replace: String,
@@ -528,6 +544,8 @@ pub struct PhotonicApp {
     export_dialog: Option<ExportDialog>,
     /// Simplify Path dialog — Some while open.
     simplify_dialog: Option<SimplifyDialog>,
+    /// Merge Vertices by Distance dialog — Some while open.
+    merge_vertices_dialog: Option<MergeVerticesDialog>,
     /// Find / Replace Text dialog — Some while open.
     find_replace_text_dialog: Option<FindReplaceTextDialog>,
 
@@ -922,6 +940,7 @@ impl Default for PhotonicApp {
             file_status: None,
             export_dialog: None,
             simplify_dialog: None,
+            merge_vertices_dialog: None,
             find_replace_text_dialog: None,
             smooth: SmoothViewState::default(),
             prefs: AppPreferences::default(),
@@ -2262,6 +2281,8 @@ impl PhotonicApp {
 
         // ── Simplify Path dialog ──────────────────────────────────────────────
         self.draw_simplify_dialog(ctx, doc, history);
+        // ── Merge Vertices by Distance dialog ─────────────────────────────────
+        self.draw_merge_vertices_dialog(ctx, doc, history);
 
         // ── Find / Replace Text dialog ────────────────────────────────────────
         self.draw_find_replace_text_dialog(ctx, doc, history);
@@ -3657,6 +3678,45 @@ impl PhotonicApp {
                                 if pts.len() >= 2 {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(110, 86, 207);
+                                    painter.add(egui::Shape::line(
+                                        pts.clone(),
+                                        egui::Stroke::new(1.5, accent),
+                                    ));
+                                    for p in &pts {
+                                        painter.circle_filled(*p, 2.0, accent);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Merge Vertices live preview overlay (#189) ────────────────
+                // While the Merge Vertices dialog is open, paint the welded
+                // result as a non-destructive accent wireframe (plus anchor dots)
+                // over the artwork so the threshold can be judged before Apply.
+                // The welded PathData is cached per-threshold, so welding runs
+                // only when the threshold changes, not every frame.
+                if let Some(dlg) = self.merge_vertices_dialog.as_mut() {
+                    if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            if dlg.preview.is_none() || dlg.cached_thr != dlg.threshold {
+                                dlg.preview =
+                                    Some(photonic_core::ops::merge::merge_vertices_by_distance(
+                                        &pn.path_data,
+                                        dlg.threshold,
+                                    ));
+                                dlg.cached_thr = dlg.threshold;
+                            }
+                            if let Some(preview) = &dlg.preview {
+                                let pts = bez_to_screen_points_xf(
+                                    &preview.to_bez_path(),
+                                    view,
+                                    &node.transform,
+                                );
+                                if pts.len() >= 2 {
+                                    let painter = ui.painter_at(rect);
+                                    let accent = egui::Color32::from_rgb(86, 170, 207);
                                     painter.add(egui::Shape::line(
                                         pts.clone(),
                                         egui::Stroke::new(1.5, accent),
@@ -7276,6 +7336,29 @@ impl PhotonicApp {
                         orig_points,
                         preview: None,
                         cached_tol: f64::NAN,
+                    });
+                }
+
+                PanelAction::OpenMergeVerticesDialog { node_id } => {
+                    let node = doc.nodes.get(&node_id);
+                    let name = node
+                        .map(|n| n.name.clone())
+                        .unwrap_or_else(|| node_id.to_string());
+                    let orig_points = node
+                        .and_then(|n| match &n.kind {
+                            SceneNodeKind::Path(pn) => {
+                                Some(photonic_core::ops::simplify::count_points(&pn.path_data))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    self.merge_vertices_dialog = Some(MergeVerticesDialog {
+                        node_id,
+                        node_name: name,
+                        threshold: 1.0,
+                        orig_points,
+                        preview: None,
+                        cached_thr: f64::NAN,
                     });
                 }
 
@@ -13103,6 +13186,148 @@ impl PhotonicApp {
                         });
                         let mut new_path = pn.clone();
                         new_path.path_data = simplified;
+                        let mut new_node = node.clone();
+                        new_node.kind = SceneNodeKind::Path(new_path);
+                        let cmd = Command::UpdateNode {
+                            old: node.clone(),
+                            new: new_node,
+                        };
+                        history.execute(cmd, doc);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_merge_vertices_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.merge_vertices_dialog.is_none() {
+            return;
+        }
+
+        #[derive(PartialEq)]
+        enum Action {
+            None,
+            Cancel,
+            Apply,
+        }
+        let mut action = Action::None;
+        let mut open = true;
+
+        let node_name = self
+            .merge_vertices_dialog
+            .as_ref()
+            .unwrap()
+            .node_name
+            .clone();
+        let node_id = self.merge_vertices_dialog.as_ref().unwrap().node_id;
+
+        // Refresh the per-threshold preview cache (shared with the canvas
+        // overlay) so the "Points: N → M" readout is always in sync, regardless
+        // of draw order. The weld still runs only when the threshold changes.
+        let orig_points = self.merge_vertices_dialog.as_ref().unwrap().orig_points;
+        let new_points = {
+            let dlg = self.merge_vertices_dialog.as_mut().unwrap();
+            if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    if dlg.preview.is_none() || dlg.cached_thr != dlg.threshold {
+                        dlg.preview = Some(photonic_core::ops::merge::merge_vertices_by_distance(
+                            &pn.path_data,
+                            dlg.threshold,
+                        ));
+                        dlg.cached_thr = dlg.threshold;
+                    }
+                }
+            }
+            dlg.preview
+                .as_ref()
+                .map(photonic_core::ops::simplify::count_points)
+        };
+
+        egui::Window::new("Merge Vertices by Distance")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([260.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Node: {}", node_name));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Distance");
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut self.merge_vertices_dialog.as_mut().unwrap().threshold,
+                        )
+                        .range(0.01..=100.0)
+                        .speed(0.05)
+                        .max_decimals(2),
+                    );
+                });
+                ui.label(
+                    RichText::new("Larger = weld anchors farther apart")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(4.0);
+                match new_points {
+                    Some(new) => {
+                        ui.label(format!("Points: {} → {}", orig_points, new));
+                    }
+                    None => {
+                        ui.label(format!("Points: {}", orig_points));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = Action::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Apply").clicked() {
+                            action = Action::Apply;
+                        }
+                    });
+                });
+            });
+
+        let threshold = self
+            .merge_vertices_dialog
+            .as_ref()
+            .map(|d| d.threshold)
+            .unwrap_or(1.0);
+
+        if !open {
+            self.merge_vertices_dialog = None;
+            return;
+        }
+
+        match action {
+            Action::None => {}
+            Action::Cancel => {
+                self.merge_vertices_dialog = None;
+            }
+            Action::Apply => {
+                // Reuse the preview the dialog/overlay already computed for this
+                // threshold instead of re-running the weld.
+                let cached = self
+                    .merge_vertices_dialog
+                    .as_mut()
+                    .and_then(|d| d.preview.take());
+                self.merge_vertices_dialog = None;
+                if let Some(node) = doc.nodes.get(&node_id) {
+                    if let SceneNodeKind::Path(pn) = &node.kind {
+                        let welded = cached.unwrap_or_else(|| {
+                            photonic_core::ops::merge::merge_vertices_by_distance(
+                                &pn.path_data,
+                                threshold,
+                            )
+                        });
+                        let mut new_path = pn.clone();
+                        new_path.path_data = welded;
                         let mut new_node = node.clone();
                         new_node.kind = SceneNodeKind::Path(new_path);
                         let cmd = Command::UpdateNode {

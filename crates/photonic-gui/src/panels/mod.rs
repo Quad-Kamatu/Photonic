@@ -95,6 +95,8 @@ pub enum PanelAction {
     AddAnchorPoints { node_id: NodeId },
     /// Open the Simplify Path dialog for a path node.
     OpenSimplifyDialog { node_id: NodeId },
+    /// Open the Merge Vertices by Distance (weld) dialog for a path node.
+    OpenMergeVerticesDialog { node_id: NodeId },
     /// Convert the stroke of a path node into a new filled outline path.
     OutlineStroke { node_id: NodeId },
     /// Invert the fill/stroke colors of the given nodes. Empty vec = use selection.
@@ -749,6 +751,7 @@ impl PanelAction {
             WheelAction::CopyAsSvgSelection => Self::CopyAsSvg { node_ids: vec![] },
             WheelAction::AddAnchorPoints(id) => Self::AddAnchorPoints { node_id: id },
             WheelAction::SimplifyPath(id) => Self::OpenSimplifyDialog { node_id: id },
+            WheelAction::MergeVertices(id) => Self::OpenMergeVerticesDialog { node_id: id },
             WheelAction::OutlineStroke(id) => Self::OutlineStroke { node_id: id },
             WheelAction::ReversePathDirection(id) => Self::ReversePathDirection { node_id: id },
             WheelAction::AverageAnchorPoints(id) => Self::AverageAnchorPoints { node_id: id },

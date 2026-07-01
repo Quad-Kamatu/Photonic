@@ -76,6 +76,7 @@ pub enum WheelAction {
     CopyAsSvgSelection, // multi-node context
     AddAnchorPoints(NodeId),
     SimplifyPath(NodeId),         // path nodes only
+    MergeVertices(NodeId),        // path nodes only — weld near-coincident anchors
     OutlineStroke(NodeId),        // path nodes only
     ReversePathDirection(NodeId), // path nodes only
     AverageAnchorPoints(NodeId),  // path nodes only
@@ -233,6 +234,10 @@ pub fn build_wheel_categories(ctx: &WheelContext) -> Vec<WheelCategory> {
                         RadialMenuItem {
                             label: "Simplify",
                             action: WheelAction::SimplifyPath(id),
+                        },
+                        RadialMenuItem {
+                            label: "Merge Verts",
+                            action: WheelAction::MergeVertices(id),
                         },
                         RadialMenuItem {
                             label: "Outline Stroke",
