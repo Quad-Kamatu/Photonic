@@ -86,8 +86,18 @@ pub(crate) fn text_aware_canvas_bounds(
 ) -> Option<(f64, f64, f64, f64)> {
     let local = match &node.kind {
         SceneNodeKind::Text(t) => {
-            let (w, h) = renderer.measure_text(&t.content, &t.font_family, t.font_size);
-            kurbo::Rect::new(0.0, 0.0, w, h)
+            // Mirror the renderer's advanced character metrics so the selection
+            // rectangle / hit-zone tracks the drawn glyphs. Super/subscript shrinks
+            // the node (size_scale) and offsets its baseline; an explicit baseline
+            // shift raises (positive) or lowers it. The local Y offset matches the
+            // renderer's `top_offset` sign convention (Y grows downward → a raise
+            // is negative) with zoom factored out. For Normal nodes with no shift
+            // this is size_scale()=1.0 and offset=0, leaving bounds byte-identical.
+            let effective_font_size = t.font_size * t.script_position.size_scale();
+            let (w, h) = renderer.measure_text(&t.content, &t.font_family, effective_font_size);
+            let offset_y =
+                -(t.script_position.baseline_offset_em() * t.font_size) - t.baseline_shift;
+            kurbo::Rect::new(0.0, offset_y, w, offset_y + h)
         }
         _ => node.local_bounds()?,
     };

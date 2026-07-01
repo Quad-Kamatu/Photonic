@@ -1960,6 +1960,13 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::set_text_decoration(state, a).await,
             ))
         }
+        "set_character_metrics" => {
+            let a: SetCharacterMetricsArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::nodes::set_character_metrics(state, a).await,
+            ))
+        }
         "set_opentype_features" => {
             let a: SetOpenTypeFeaturesArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -6302,6 +6309,19 @@ pub fn tool_list() -> Value {
                     "decoration": { "type": "string", "enum": ["none", "underline", "line-through", "overline"], "description": "Decoration to apply." }
                 },
                 "required": ["node_id", "decoration"]
+            }
+        },
+        {
+            "name": "set_character_metrics",
+            "description": "Set advanced node-level character metrics on a text node: baseline shift and super/subscript position. baseline_shift is in document units (positive raises text above the baseline, negative lowers it). script_position is 'normal', 'superscript' (renders smaller and raised), or 'subscript' (renders smaller and lowered). Both fields are optional — pass only those you want to change. Applies to the whole node (per-character ranges are not yet supported). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id":         { "type": "string", "description": "Text node ID or name." },
+                    "baseline_shift":  { "type": "number", "description": "Baseline shift in document units (positive = up). Default: unchanged." },
+                    "script_position": { "type": "string", "enum": ["normal", "superscript", "subscript"], "description": "Script position. Default: unchanged." }
+                },
+                "required": ["node_id"]
             }
         },
         {

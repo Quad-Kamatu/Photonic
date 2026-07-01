@@ -566,6 +566,8 @@ fn import_element(
                         paragraph_spacing_after: 0.0,
                         text_indent: 0.0,
                         tab_stops: Vec::new(),
+                        baseline_shift: 0.0,
+                        script_position: crate::node::ScriptPosition::Normal,
                     }),
                     transform: combined_transform,
                     opacity: style.opacity,

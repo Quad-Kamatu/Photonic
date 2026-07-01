@@ -13,8 +13,8 @@ use std::sync::mpsc::{channel, Receiver};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const REPO_OWNER: &str = "Quad-Kamatu";
-const REPO_NAME: &str = "Photonic";
+pub const REPO_OWNER: &str = "Quad-Kamatu";
+pub const REPO_NAME: &str = "Photonic";
 const BIN_NAME: &str = "photonic";
 
 /// ed25519 public key (zipsign) that release archives are signed with. The

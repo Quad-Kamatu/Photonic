@@ -1,6 +1,7 @@
 pub mod annotation;
 pub mod audit;
 pub mod color;
+pub mod diagnostics;
 pub mod document;
 pub mod export;
 pub mod history;
@@ -21,6 +22,7 @@ pub mod units;
 pub use annotation::{Annotation, AnnotationId};
 pub use audit::{audit_timestamp, AuditEntry, AuditLog};
 pub use color::Color;
+pub use diagnostics::{crash_dir, CrashReport};
 pub use document::{
     sample_fill_at, ActionSet, Artboard, ArtboardId, CharacterStyle, ColorSwatch,
     DimensionAnnotation, Document, DocumentId, DocumentVariable, EventTrigger, ExportProfile,

@@ -33,10 +33,10 @@ use crate::protocol::{
     ReversePathDirectionArgs, RotateCopiesArgs, RoughenPathArgs, RoundCornersArgs,
     SampleColorAtArgs, ScallopPathArgs, ScatterCopiesArgs, ScissorsCutArgs, SelectAllArgs,
     SelectByKindArgs, SelectInsideGroupArgs, SelectSameArgs, SelectSameAttribute,
-    SelectSimilarArgs, SetBlendModeArgs, SetBlendSpineArgs, SetFontStyleArgs, SetFontWeightArgs,
-    SetLockedArgs, SetNodePromptArgs, SetOpacityArgs, SetOpenTypeFeaturesArgs,
-    SetParagraphOptionsArgs, SetSelectionArgs, SetSymbolOverrideArgs, SetTabStopsArgs,
-    SetTextAreaArgs, SetTextDecorationArgs, SetTextDirectionArgs, SetTextPathArgs,
+    SelectSimilarArgs, SetBlendModeArgs, SetBlendSpineArgs, SetCharacterMetricsArgs,
+    SetFontStyleArgs, SetFontWeightArgs, SetLockedArgs, SetNodePromptArgs, SetOpacityArgs,
+    SetOpenTypeFeaturesArgs, SetParagraphOptionsArgs, SetSelectionArgs, SetSymbolOverrideArgs,
+    SetTabStopsArgs, SetTextAreaArgs, SetTextDecorationArgs, SetTextDirectionArgs, SetTextPathArgs,
     SetVisibilityArgs, ShapeType, SimplifyPathArgs, SmoothPathArgs, SnapToPixelArgs,
     SplitIntoGridArgs, StippleFillArgs, StrokeArg, StyleTransferArgs, SwapFillStrokeArgs,
     TagNodeForExportArgs, TagNodesArgs, ToolResult, TransformCopiesArgs, TwirlPathArgs,
@@ -3222,6 +3222,8 @@ pub async fn inspect_node(state: &AppState, args: InspectNodeArgs) -> ToolResult
                 "font_family": text_node.font_family,
                 "font_size": text_node.font_size,
                 "font_weight": text_node.font_weight,
+                "baseline_shift": text_node.baseline_shift,
+                "script_position": text_node.script_position.as_str(),
             });
 
             ToolResult::text(format!(
@@ -16562,6 +16564,84 @@ pub async fn set_text_decoration(state: &AppState, args: SetTextDecorationArgs) 
         }
     ))
     .with_data(serde_json::json!({ "node_id": node_id.to_string(), "decoration": decoration }))
+}
+
+/// Set advanced node-level character metrics: baseline shift and super/subscript.
+pub async fn set_character_metrics(state: &AppState, args: SetCharacterMetricsArgs) -> ToolResult {
+    use photonic_core::node::ScriptPosition;
+    tracing::debug!("tool: set_character_metrics");
+
+    // Validate script_position up front so a bad value fails before mutating.
+    let parsed_script = match args.script_position.as_deref() {
+        Some(s) => match ScriptPosition::from_str_opt(s) {
+            Some(sp) => Some(sp),
+            None => {
+                return ToolResult::error(format!(
+                    "Unknown script_position '{}'. Valid values: normal, superscript, subscript.",
+                    s
+                ))
+            }
+        },
+        None => None,
+    };
+
+    if args.baseline_shift.is_none() && parsed_script.is_none() {
+        return ToolResult::error(
+            "Nothing to change: provide baseline_shift and/or script_position.".to_string(),
+        );
+    }
+
+    let mut doc = state.document.lock().await;
+
+    let node_id = uuid::Uuid::parse_str(&args.node_id)
+        .ok()
+        .or_else(|| doc.find_node_by_name(&args.node_id).map(|n| n.id));
+    let node_id = match node_id {
+        Some(id) => id,
+        None => return ToolResult::error(format!("Node '{}' not found.", args.node_id)),
+    };
+
+    let node = match doc.nodes.get(&node_id) {
+        Some(n) if matches!(n.kind, SceneNodeKind::Text(_)) => n.clone(),
+        Some(_) => {
+            return ToolResult::error(format!("Node '{}' is not a text node.", args.node_id))
+        }
+        None => return ToolResult::error(format!("Node '{}' not found.", args.node_id)),
+    };
+
+    let mut new_node = node.clone();
+    let (baseline_shift, script_position) = if let SceneNodeKind::Text(ref mut tn) = new_node.kind {
+        if let Some(bs) = args.baseline_shift {
+            tn.baseline_shift = bs;
+        }
+        if let Some(sp) = parsed_script {
+            tn.script_position = sp;
+        }
+        (tn.baseline_shift, tn.script_position)
+    } else {
+        (0.0, ScriptPosition::Normal)
+    };
+
+    let mut history = state.history.lock().await;
+    history.execute(
+        Command::UpdateNode {
+            old: node,
+            new: new_node,
+        },
+        &mut doc,
+    );
+
+    ToolResult::text(format!(
+        "Character metrics on '{}' set: baseline_shift={}, script_position={}.",
+        args.node_id,
+        baseline_shift,
+        script_position.as_str()
+    ))
+    .with_data(serde_json::json!({
+        "node_id": node_id.to_string(),
+        "baseline_shift": baseline_shift,
+        "script_position": script_position.as_str(),
+    }))
 }
 
 /// Set paragraph-level text options: spacing before/after paragraphs and first-line indent.

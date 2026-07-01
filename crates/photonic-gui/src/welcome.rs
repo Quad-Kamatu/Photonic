@@ -1937,20 +1937,11 @@ fn load_doc(path: &Path) -> Result<Document, String> {
 
 /// Cross-platform Photonic config directory.
 ///
-/// Prefers `%APPDATA%\Photonic` on Windows (matching the rest of the app), then
-/// falls back to `$XDG_CONFIG_HOME/Photonic` / `~/.config/Photonic` so recent
-/// documents load on Linux and macOS too.
+/// Single source of truth lives in `photonic_core::crash_dir` (shared with the
+/// crash-report subsystem): `%APPDATA%\Photonic` on Windows, then
+/// `$XDG_CONFIG_HOME/Photonic` / `~/.config/Photonic` on Linux and macOS.
 pub(crate) fn config_dir() -> Option<PathBuf> {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        return Some(PathBuf::from(appdata).join("Photonic"));
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("Photonic"));
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home).join(".config").join("Photonic"));
-    }
-    None
+    photonic_core::crash_dir()
 }
 
 fn recent_docs_path() -> Option<PathBuf> {

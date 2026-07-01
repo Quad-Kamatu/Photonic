@@ -148,6 +148,10 @@ struct TextSnapshot {
     color: [u8; 4],
     screen_x: f32,
     screen_y: f32,
+    /// Vertical offset in physical pixels added to the text's top, encoding the
+    /// node's baseline shift and super/subscript position. Positive moves the
+    /// glyphs down; negative (raised, e.g. superscript) moves them up.
+    top_offset: f32,
 }
 
 struct GaussianGlowJob {
@@ -382,7 +386,7 @@ impl PhotonicRenderer {
         let mut buf = Buffer::new(&mut self.font_system, Metrics::new(fs, line_height));
         buf.set_size(&mut self.font_system, None, None);
         let attrs = Attrs::new().family(Family::Name(font_family));
-        buf.set_text(&mut self.font_system, content, attrs, Shaping::Basic);
+        buf.set_text(&mut self.font_system, content, attrs, Shaping::Advanced);
         buf.shape_until_scroll(&mut self.font_system, false);
         let width = buf.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
         let height = buf
@@ -505,7 +509,12 @@ impl PhotonicRenderer {
                 .family(Family::Name(&snap.font_family))
                 .weight(Weight(snap.font_weight))
                 .style(glyph_style);
-            buf.set_text(&mut self.font_system, &snap.content, attrs, Shaping::Basic);
+            buf.set_text(
+                &mut self.font_system,
+                &snap.content,
+                attrs,
+                Shaping::Advanced,
+            );
             buf.shape_until_scroll(&mut self.font_system, false);
             buffers.push(buf);
         }
@@ -516,7 +525,7 @@ impl PhotonicRenderer {
             .map(|(snap, buf)| TextArea {
                 buffer: buf,
                 left: snap.screen_x,
-                top: snap.screen_y,
+                top: snap.screen_y + snap.top_offset,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: i32::MIN,
@@ -898,16 +907,27 @@ impl PhotonicRenderer {
                             photonic_core::node::FontStyle::Italic => 1,
                             photonic_core::node::FontStyle::Oblique => 2,
                         };
+                        // Advanced character metrics (node-level): super/subscript
+                        // shrinks the whole node and offsets its baseline; an
+                        // explicit baseline shift raises (positive) or lowers it.
+                        let script = text_node.script_position;
+                        let base_font_screen = text_node.font_size * zoom;
+                        let effective_font_screen = base_font_screen * script.size_scale();
+                        // Screen Y grows downward, so a *raise* is a negative offset.
+                        let top_offset = (-(script.baseline_offset_em() * base_font_screen)
+                            - text_node.baseline_shift * zoom)
+                            as f32;
                         self.pending_texts.push(TextSnapshot {
                             content: text_node.content.clone(),
                             font_family: text_node.font_family.clone(),
-                            font_size: (text_node.font_size * zoom) as f32,
+                            font_size: effective_font_screen as f32,
                             line_height_mul: text_node.line_height as f32,
                             font_weight: text_node.font_weight,
                             font_style: font_style_u8,
                             color,
                             screen_x,
                             screen_y,
+                            top_offset,
                         });
                     }
                     SceneNodeKind::Path(path_node) => {
@@ -1988,8 +2008,21 @@ impl PhotonicRenderer {
                 let mut buf =
                     Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
                 buf.set_size(&mut self.font_system, None, None);
-                let attrs = Attrs::new().family(Family::Name(&snap.font_family));
-                buf.set_text(&mut self.font_system, &snap.content, attrs, Shaping::Basic);
+                let glyph_style = match snap.font_style {
+                    1 => GlyphonStyle::Italic,
+                    2 => GlyphonStyle::Oblique,
+                    _ => GlyphonStyle::Normal,
+                };
+                let attrs = Attrs::new()
+                    .family(Family::Name(&snap.font_family))
+                    .weight(Weight(snap.font_weight))
+                    .style(glyph_style);
+                buf.set_text(
+                    &mut self.font_system,
+                    &snap.content,
+                    attrs,
+                    Shaping::Advanced,
+                );
                 buf.shape_until_scroll(&mut self.font_system, false);
                 buffers.push(buf);
             }
@@ -2001,7 +2034,7 @@ impl PhotonicRenderer {
                 .map(|(snap, buf)| TextArea {
                     buffer: buf,
                     left: snap.screen_x,
-                    top: snap.screen_y,
+                    top: snap.screen_y + snap.top_offset,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: i32::MIN,
