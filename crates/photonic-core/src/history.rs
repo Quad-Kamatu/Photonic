@@ -615,6 +615,230 @@ mod tests {
         assert!(history.list_checkpoints().is_empty());
         assert!(!history.can_undo());
     }
+
+    // ── RemoveNode / RemoveLayer deletion undo (#153) ────────────────────────
+    //
+    // Regression: `RemoveNode`/`RemoveLayer` computed their inverse by reading
+    // the entity out of the current document, but `undo()` runs `inverse()`
+    // *after* `apply()` has already deleted it — so the lookup returned `None`
+    // and undo silently no-oped. `execute` now hydrates bare deletes into their
+    // self-contained `*Full` form (while the entity still exists) so the pushed
+    // undo entry is always invertible.
+
+    #[test]
+    fn delete_node_undo_redo_round_trip() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+        let layer_id = node.layer_id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        // Delete via the *bare* RemoveNode — this is what all ~40 call sites emit.
+        history.execute(Command::RemoveNode { node_id }, &mut doc);
+        assert!(!doc.nodes.contains_key(&node_id), "node not deleted");
+        assert!(!doc.layers[&layer_id].node_ids.contains(&node_id));
+
+        // Undo must actually restore the node (previously a silent no-op).
+        let undone = history.undo(&mut doc);
+        assert!(undone, "undo of node deletion no-oped (#153)");
+        assert!(
+            doc.nodes.contains_key(&node_id),
+            "node not restored on undo"
+        );
+        assert!(
+            doc.layers[&layer_id].node_ids.contains(&node_id),
+            "node not restored into its original layer"
+        );
+        // Secondary bug: restored node must keep its ORIGINAL layer, not the
+        // active layer.
+        assert_eq!(doc.nodes[&node_id].layer_id, layer_id);
+
+        // Redo must delete it again.
+        let redone = history.redo(&mut doc);
+        assert!(redone, "redo of node deletion failed");
+        assert!(!doc.nodes.contains_key(&node_id));
+    }
+
+    #[test]
+    fn delete_node_into_non_active_layer_restores_original_layer() {
+        // Reproduces the secondary defect: the old inverse used
+        // `layer_id: None`, re-homing the undeleted node to the *active* layer.
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let original_layer = doc.active_layer_id.unwrap();
+
+        let node = make_node(&doc);
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        // Add a second layer and make IT active, so "active" != node's layer.
+        let layer2 = Layer::new("layer2");
+        let layer2_id = layer2.id;
+        history.execute(Command::AddLayer { layer: layer2 }, &mut doc);
+        history.execute(
+            Command::SetActiveLayer {
+                old_id: Some(original_layer),
+                new_id: Some(layer2_id),
+            },
+            &mut doc,
+        );
+        assert_eq!(doc.active_layer_id, Some(layer2_id));
+
+        history.execute(Command::RemoveNode { node_id }, &mut doc);
+        assert!(history.undo(&mut doc));
+
+        assert_eq!(
+            doc.nodes[&node_id].layer_id, original_layer,
+            "restored node re-homed to active layer instead of original"
+        );
+        assert!(doc.layers[&original_layer].node_ids.contains(&node_id));
+        assert!(!doc.layers[&layer2_id].node_ids.contains(&node_id));
+    }
+
+    #[test]
+    fn delete_layer_undo_redo_round_trip() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let layer = Layer::new("layer2");
+        let layer_id = layer.id;
+        history.execute(Command::AddLayer { layer }, &mut doc);
+        assert!(doc.layers.contains_key(&layer_id));
+
+        history.execute(Command::RemoveLayer { layer_id }, &mut doc);
+        assert!(!doc.layers.contains_key(&layer_id), "layer not deleted");
+
+        let undone = history.undo(&mut doc);
+        assert!(undone, "undo of layer deletion no-oped (#153)");
+        assert!(
+            doc.layers.contains_key(&layer_id),
+            "layer not restored on undo"
+        );
+
+        let redone = history.redo(&mut doc);
+        assert!(redone, "redo of layer deletion failed");
+        assert!(!doc.layers.contains_key(&layer_id));
+    }
+
+    #[test]
+    fn delete_node_in_batch_undo_redo_round_trip() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node_a = make_node(&doc);
+        let node_b = make_node(&doc);
+        let node_a_id = node_a.id;
+        let node_b_id = node_b.id;
+        let layer_id = node_a.layer_id;
+        history.execute(
+            Command::Batch(vec![
+                Command::AddNode {
+                    node: node_a,
+                    layer_id: None,
+                },
+                Command::AddNode {
+                    node: node_b,
+                    layer_id: None,
+                },
+            ]),
+            &mut doc,
+        );
+
+        // Delete both nodes in a single batch of bare RemoveNode commands.
+        history.execute(
+            Command::Batch(vec![
+                Command::RemoveNode { node_id: node_a_id },
+                Command::RemoveNode { node_id: node_b_id },
+            ]),
+            &mut doc,
+        );
+        assert!(!doc.nodes.contains_key(&node_a_id));
+        assert!(!doc.nodes.contains_key(&node_b_id));
+
+        // Previously the batch inverse propagated the None and no-oped.
+        let undone = history.undo(&mut doc);
+        assert!(undone, "undo of batched node deletion no-oped (#153)");
+        assert!(doc.nodes.contains_key(&node_a_id));
+        assert!(doc.nodes.contains_key(&node_b_id));
+        assert!(doc.layers[&layer_id].node_ids.contains(&node_a_id));
+        assert!(doc.layers[&layer_id].node_ids.contains(&node_b_id));
+
+        let redone = history.redo(&mut doc);
+        assert!(redone, "redo of batched node deletion failed");
+        assert!(!doc.nodes.contains_key(&node_a_id));
+        assert!(!doc.nodes.contains_key(&node_b_id));
+    }
+
+    #[test]
+    fn execute_hydrates_bare_deletes_into_self_contained_forms() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+
+        // Node delete → pushed entry must be RemoveNodeFull.
+        let node = make_node(&doc);
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        history.execute(Command::RemoveNode { node_id }, &mut doc);
+        assert!(
+            matches!(
+                history.undo_stack.last(),
+                Some(Command::RemoveNodeFull { node }) if node.id == node_id
+            ),
+            "RemoveNode was not hydrated into RemoveNodeFull on the undo stack"
+        );
+
+        // Layer delete → pushed entry must be RemoveLayerFull.
+        let layer = Layer::new("layer2");
+        let layer_id = layer.id;
+        history.execute(Command::AddLayer { layer }, &mut doc);
+        history.execute(Command::RemoveLayer { layer_id }, &mut doc);
+        assert!(
+            matches!(
+                history.undo_stack.last(),
+                Some(Command::RemoveLayerFull { layer }) if layer.id == layer_id
+            ),
+            "RemoveLayer was not hydrated into RemoveLayerFull on the undo stack"
+        );
+
+        // Batch delete → each element hydrated recursively.
+        let n2 = make_node(&doc);
+        let n2_id = n2.id;
+        history.execute(
+            Command::AddNode {
+                node: n2,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        history.execute(
+            Command::Batch(vec![Command::RemoveNode { node_id: n2_id }]),
+            &mut doc,
+        );
+        match history.undo_stack.last() {
+            Some(Command::Batch(cmds)) => assert!(
+                matches!(cmds.as_slice(), [Command::RemoveNodeFull { node }] if node.id == n2_id),
+                "RemoveNode inside Batch was not hydrated"
+            ),
+            other => panic!("expected Batch on undo stack, got {other:?}"),
+        }
+    }
 }
 
 /// A reversible command that can be applied to a Document.
@@ -692,6 +916,18 @@ pub enum Command {
     /// at undo-inverse-computation time.
     RemoveLayerFull { layer: Layer },
 
+    /// Remove a node, storing the full `SceneNode` so the inverse (`AddNode`)
+    /// can be computed without a document lookup. Mirrors `RemoveLayerFull`.
+    ///
+    /// Bare `RemoveNode { node_id }` computes its inverse by reading the node
+    /// out of the current document, but `undo()` runs `inverse()` *after*
+    /// `apply()` has already deleted the node, so the lookup returns `None`
+    /// and undo silently no-ops. `hydrate` rewrites `RemoveNode` into this
+    /// self-contained form at `execute` time (while the node still exists),
+    /// so the pushed undo entry — and the persisted `.photon` history — is
+    /// always invertible.
+    RemoveNodeFull { node: SceneNode },
+
     /// Update mutable layer metadata (name, visible, locked, color).
     /// Stores old and new values so the inverse is self-contained.
     UpdateLayer {
@@ -762,6 +998,7 @@ impl Command {
             Command::GroupNodes { group, .. } => format!("Group → {}", group.name),
             Command::UngroupNodes { group, .. } => format!("Ungroup {}", group.name),
             Command::RemoveLayerFull { layer } => format!("Remove layer \"{}\"", layer.name),
+            Command::RemoveNodeFull { node } => format!("Remove {}", node.name),
             Command::UpdateLayer { new_name, .. } => format!("Update layer \"{}\"", new_name),
             Command::MoveNodeToLayer { .. } => "Move node to layer".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
@@ -789,6 +1026,43 @@ impl Command {
                             .unwrap_or_else(|| "Batch".to_string())
                     })
             }
+        }
+    }
+
+    /// Normalize deletion commands into their self-contained `*Full` forms
+    /// **while the target entity still exists** in `doc`.
+    ///
+    /// This is called once at the single choke point [`History::execute`],
+    /// immediately before `apply`, so the command pushed onto the undo stack
+    /// (and later persisted into the `.photon` history) always carries the full
+    /// payload needed to invert itself. Without this, a bare
+    /// `RemoveNode`/`RemoveLayer` would try to read the entity out of the
+    /// document during `undo()` — but `apply()` has already deleted it, so the
+    /// lookup returns `None` and undo silently no-ops.
+    ///
+    /// Rewrites performed:
+    /// - `RemoveNode { node_id }`   → `RemoveNodeFull { node }`  (if present)
+    /// - `RemoveLayer { layer_id }` → `RemoveLayerFull { layer }` (if present)
+    /// - `Batch(cmds)`              → recurse into each element
+    ///
+    /// If the entity is already absent the command is returned unchanged
+    /// (its `apply` is then a harmless no-op). All other variants pass through.
+    pub fn hydrate(self, doc: &Document) -> Command {
+        match self {
+            Command::RemoveNode { node_id } => match doc.nodes.get(&node_id) {
+                Some(node) => Command::RemoveNodeFull { node: node.clone() },
+                None => Command::RemoveNode { node_id },
+            },
+            Command::RemoveLayer { layer_id } => match doc.layers.get(&layer_id) {
+                Some(layer) => Command::RemoveLayerFull {
+                    layer: layer.clone(),
+                },
+                None => Command::RemoveLayer { layer_id },
+            },
+            Command::Batch(cmds) => {
+                Command::Batch(cmds.into_iter().map(|c| c.hydrate(doc)).collect())
+            }
+            other => other,
         }
     }
 
@@ -872,6 +1146,10 @@ impl Command {
 
             Command::RemoveLayerFull { layer } => {
                 doc.remove_layer(&layer.id);
+            }
+
+            Command::RemoveNodeFull { node } => {
+                doc.remove_node(&node.id);
             }
 
             Command::UpdateLayer {
@@ -1019,6 +1297,14 @@ impl Command {
 
             Command::RemoveLayerFull { layer } => Some(Command::AddLayer {
                 layer: layer.clone(),
+            }),
+
+            // Self-contained inverse: restore the node into its *original*
+            // layer (not the active layer — that was the secondary bug in the
+            // bare `RemoveNode` inverse, which passed `layer_id: None`).
+            Command::RemoveNodeFull { node } => Some(Command::AddNode {
+                node: node.clone(),
+                layer_id: Some(node.layer_id),
             }),
 
             Command::UpdateLayer {
@@ -1443,6 +1729,11 @@ impl CommandHistory {
     /// inactivity via [`tick_checkpoint`], so burst operations (e.g. drag) do
     /// not produce a checkpoint on every frame.
     pub fn execute(&mut self, cmd: Command, doc: &mut Document) {
+        // Normalize deletion commands into their self-contained `*Full` forms
+        // while the target entity still exists, so the pushed undo entry (and
+        // the persisted `.photon` history) is always invertible. See
+        // [`Command::hydrate`].
+        let cmd = cmd.hydrate(doc);
         let desc = cmd.description();
         cmd.apply(doc);
         reevaluate_constraints(doc);
