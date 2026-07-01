@@ -424,6 +424,9 @@ pub(crate) fn bez_move_anchors(bez: &BezPath, selected: &[usize], dx: f64, dy: f
 ///   arriving at this anchor).
 /// - `Out` → the `c1` control of the `CurveTo` element *after* `i` (the curve
 ///   leaving this anchor).
+// Retained as a small seam-unaware handle accessor exercised by the anchor
+// conversion tests; the conversion path itself now decomposes handles directly.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn anchor_handle_point(els: &[PathEl], i: usize, kind: HandleKind) -> Option<Point> {
     match kind {
         HandleKind::In => match els.get(i) {
@@ -870,71 +873,280 @@ pub(crate) fn bez_convert_anchors(
     selected: &std::collections::HashSet<usize>,
     smooth: bool,
 ) -> BezPath {
-    let mut els: Vec<PathEl> = bez.elements().to_vec();
-    let n = els.len();
-    let anchors = path_anchor_points(bez);
+    // One decomposed anchor: its endpoint element index (for matching against
+    // `selected`), its local-space point, the incoming (`c2`) and outgoing (`c1`)
+    // cubic handles as `Option`s, and the original element that *arrives* at it
+    // (kept so `QuadTo` and other segments we don't touch re-emit verbatim).
+    struct Anchor {
+        el_idx: usize,
+        p: Point,
+        in_h: Option<Point>,
+        out_h: Option<Point>,
+        arriving: PathEl,
+    }
+    struct Sub {
+        anchors: Vec<Anchor>,
+        closed: bool,
+    }
 
-    for &(i, anchor) in &anchors {
-        if !selected.contains(&i) {
-            continue;
-        }
-        let in_pt = anchor_handle_point(&els, i, HandleKind::In);
-        let out_pt = anchor_handle_point(&els, i, HandleKind::Out);
-
-        if !smooth {
-            // Corner: retract both handles to the anchor → straight segments.
-            if in_pt.is_some() {
-                if let Some(PathEl::CurveTo(c1, _, p)) = els.get(i).copied() {
-                    els[i] = PathEl::CurveTo(c1, anchor, p);
+    // --- Decompose the path into per-subpath anchor records. ---------------
+    // A closed subpath's final seam edge (last geometric anchor → start anchor)
+    // is *implicit* in kurbo's `ClosePath` form, so it carries no handles here;
+    // synthesizing them materializes the seam as an explicit `CurveTo` on
+    // re-emit, with no index bookkeeping.
+    let mut subs: Vec<Sub> = Vec::new();
+    let mut cur: Option<Sub> = None;
+    for (i, el) in bez.elements().iter().enumerate() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if let Some(s) = cur.take() {
+                    subs.push(s);
+                }
+                cur = Some(Sub {
+                    anchors: vec![Anchor {
+                        el_idx: i,
+                        p,
+                        in_h: None,
+                        out_h: None,
+                        arriving: *el,
+                    }],
+                    closed: false,
+                });
+            }
+            PathEl::LineTo(p) => {
+                if let Some(s) = cur.as_mut() {
+                    s.anchors.push(Anchor {
+                        el_idx: i,
+                        p,
+                        in_h: None,
+                        out_h: None,
+                        arriving: *el,
+                    });
                 }
             }
-            if out_pt.is_some() && i + 1 < n {
-                if let Some(PathEl::CurveTo(_, c2, p)) = els.get(i + 1).copied() {
-                    els[i + 1] = PathEl::CurveTo(anchor, c2, p);
+            PathEl::CurveTo(c1, c2, p) => {
+                if let Some(s) = cur.as_mut() {
+                    if let Some(prev) = s.anchors.last_mut() {
+                        prev.out_h = Some(c1);
+                    }
+                    s.anchors.push(Anchor {
+                        el_idx: i,
+                        p,
+                        in_h: Some(c2),
+                        out_h: None,
+                        arriving: *el,
+                    });
                 }
             }
+            PathEl::QuadTo(_, p) => {
+                // Quadratic segments are preserved verbatim; we never smooth
+                // across them (the previous implementation ignored them too).
+                if let Some(s) = cur.as_mut() {
+                    s.anchors.push(Anchor {
+                        el_idx: i,
+                        p,
+                        in_h: None,
+                        out_h: None,
+                        arriving: *el,
+                    });
+                }
+            }
+            PathEl::ClosePath => {
+                if let Some(s) = cur.as_mut() {
+                    s.closed = true;
+                }
+            }
+        }
+    }
+    if let Some(s) = cur.take() {
+        subs.push(s);
+    }
+
+    // Epsilon for treating two seam points as coincident.
+    const SEAM_EPS: f64 = 1e-6;
+    let coincident = |a: Point, b: Point| -> bool {
+        (a.x - b.x).abs() < SEAM_EPS && (a.y - b.y).abs() < SEAM_EPS
+    };
+
+    // --- Reunify the explicit-close seam form. -----------------------------
+    // A closed subpath may arrive in kurbo's implicit-close form (start point
+    // appears once, as the `MoveTo`) or in the *explicit-close* form where the
+    // closing edge is a real `CurveTo`/`LineTo` whose endpoint equals the start,
+    // so the start point appears as TWO anchor records. This feature's own seam
+    // materialization (and round-tripping through SVG) produces the explicit
+    // form. Left as-is, the closed-wrap neighbour lookup for the seam anchor
+    // (k == 0) would pick this coincident duplicate as `prev_p` (length 0 → a
+    // collapsed handle) instead of the true incoming neighbour, and a second
+    // smooth would append a degenerate zero-length `CurveTo`. Fold the trailing
+    // duplicate back onto the implicit seam — drop it and carry its incoming
+    // handle onto `anchors[0]` — exactly as `logical_handles` reunifies the seam
+    // for rendering and hit-testing.
+    for s in &mut subs {
+        if !s.closed {
             continue;
         }
+        let n = s.anchors.len();
+        if n < 2 {
+            continue;
+        }
+        if coincident(s.anchors[n - 1].p, s.anchors[0].p) {
+            let dup = s.anchors.pop().expect("n >= 2");
+            // The dropped closing curve's `c2` is the seam's true incoming
+            // handle; fold it onto the implicit-seam start anchor.
+            s.anchors[0].in_h = dup.in_h;
+        }
+    }
 
-        // Smooth: make the two handles collinear through the anchor. Needs both
-        // sides curved; if only one is, reflect it to synthesise the other.
-        match (in_pt, out_pt) {
-            (Some(ip), Some(op)) => {
-                // Average the two handle directions, keep individual lengths.
-                let ilen = ((ip.x - anchor.x).powi(2) + (ip.y - anchor.y).powi(2)).sqrt();
-                let olen = ((op.x - anchor.x).powi(2) + (op.y - anchor.y).powi(2)).sqrt();
-                // Tangent points from incoming (anchor->ip reversed) and outgoing.
-                let tin = (anchor.x - ip.x, anchor.y - ip.y);
-                let tout = (op.x - anchor.x, op.y - anchor.y);
-                let mut tx = tin.0 + tout.0;
-                let mut ty = tin.1 + tout.1;
-                let tl = (tx * tx + ty * ty).sqrt();
-                if tl < 1e-9 {
-                    continue;
-                }
-                tx /= tl;
-                ty /= tl;
-                let new_in = Point::new(anchor.x - tx * ilen, anchor.y - ty * ilen);
-                let new_out = Point::new(anchor.x + tx * olen, anchor.y + ty * olen);
-                if let Some(PathEl::CurveTo(c1, _, p)) = els.get(i).copied() {
-                    els[i] = PathEl::CurveTo(c1, new_in, p);
-                }
-                if i + 1 < n {
-                    if let Some(PathEl::CurveTo(_, c2, p)) = els.get(i + 1).copied() {
-                        els[i + 1] = PathEl::CurveTo(new_out, c2, p);
+    let norm = |dx: f64, dy: f64| -> Option<(f64, f64)> {
+        let l = (dx * dx + dy * dy).sqrt();
+        (l > 1e-9).then(|| (dx / l, dy / l))
+    };
+
+    // --- Synthesize handles on the selected anchors. -----------------------
+    for s in &mut subs {
+        let count = s.anchors.len();
+        let closed = s.closed;
+        for k in 0..count {
+            if !selected.contains(&s.anchors[k].el_idx) {
+                continue;
+            }
+            let p = s.anchors[k].p;
+
+            if !smooth {
+                // Corner: retract both handles to the anchor. Re-emit turns a
+                // retracted side into `CurveTo(anchor, …)` when the neighbour
+                // stays curved, or a straight `LineTo` when both sides are flat
+                // — matching the previous surgical behaviour exactly.
+                s.anchors[k].in_h = None;
+                s.anchors[k].out_h = None;
+                continue;
+            }
+
+            // Seam-aware neighbours (wrap across the seam only when closed).
+            let prev_p = if k > 0 {
+                Some(s.anchors[k - 1].p)
+            } else if closed {
+                Some(s.anchors[count - 1].p)
+            } else {
+                None
+            };
+            let next_p = if k + 1 < count {
+                Some(s.anchors[k + 1].p)
+            } else if closed {
+                Some(s.anchors[0].p)
+            } else {
+                None
+            };
+
+            // A side is writable when it has a real (line/curve/seam) edge that
+            // we can reconstruct — never a `QuadTo`.
+            let in_quad = k > 0 && matches!(s.anchors[k].arriving, PathEl::QuadTo(..));
+            let out_quad = k + 1 < count && matches!(s.anchors[k + 1].arriving, PathEl::QuadTo(..));
+            let can_in = prev_p.is_some() && (k > 0 || closed) && !in_quad;
+            let can_out = next_p.is_some() && (k + 1 < count || closed) && !out_quad;
+
+            match (s.anchors[k].in_h, s.anchors[k].out_h) {
+                (Some(ip), Some(op)) => {
+                    // Both sides already curved: average the two handle
+                    // directions, keeping each handle's own length (unchanged
+                    // legacy smooth-point behaviour).
+                    let ilen = ((ip.x - p.x).powi(2) + (ip.y - p.y).powi(2)).sqrt();
+                    let olen = ((op.x - p.x).powi(2) + (op.y - p.y).powi(2)).sqrt();
+                    let tin = (p.x - ip.x, p.y - ip.y);
+                    let tout = (op.x - p.x, op.y - p.y);
+                    if let Some((tx, ty)) = norm(tin.0 + tout.0, tin.1 + tout.1) {
+                        s.anchors[k].in_h = Some(Point::new(p.x - tx * ilen, p.y - ty * ilen));
+                        s.anchors[k].out_h = Some(Point::new(p.x + tx * olen, p.y + ty * olen));
                     }
                 }
-            }
-            _ => {
-                // Not enough curvature to smooth without restructuring segments;
-                // leave the anchor unchanged (whole-path To Smooth handles this).
+                (Some(ip), None) => {
+                    // Reflect the existing incoming handle onto the outgoing
+                    // side (collinear), length = 1/3 of the outgoing edge.
+                    if can_out {
+                        if let (Some(b), Some((tx, ty))) = (next_p, norm(p.x - ip.x, p.y - ip.y)) {
+                            let len = ((b.x - p.x).powi(2) + (b.y - p.y).powi(2)).sqrt() / 3.0;
+                            s.anchors[k].out_h = Some(Point::new(p.x + tx * len, p.y + ty * len));
+                        }
+                    }
+                }
+                (None, Some(op)) => {
+                    // Reflect the existing outgoing handle onto the incoming side.
+                    if can_in {
+                        if let (Some(a), Some((tx, ty))) = (prev_p, norm(p.x - op.x, p.y - op.y)) {
+                            let len = ((a.x - p.x).powi(2) + (a.y - p.y).powi(2)).sqrt() / 3.0;
+                            s.anchors[k].in_h = Some(Point::new(p.x + tx * len, p.y + ty * len));
+                        }
+                    }
+                }
+                (None, None) => {
+                    // Straight corner: synthesize a Catmull-Rom tangent from the
+                    // two neighbours and pull 1/3-length handles along it.
+                    if can_in && can_out {
+                        if let (Some(a), Some(b)) = (prev_p, next_p) {
+                            if let Some((tx, ty)) = norm(b.x - a.x, b.y - a.y) {
+                                let len_in =
+                                    ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt() / 3.0;
+                                let len_out =
+                                    ((b.x - p.x).powi(2) + (b.y - p.y).powi(2)).sqrt() / 3.0;
+                                s.anchors[k].in_h =
+                                    Some(Point::new(p.x - tx * len_in, p.y - ty * len_in));
+                                s.anchors[k].out_h =
+                                    Some(Point::new(p.x + tx * len_out, p.y + ty * len_out));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
+    // --- Re-emit. ----------------------------------------------------------
+    // An edge with no handles on either end is a straight `LineTo`; a `QuadTo`
+    // is copied verbatim; otherwise a `CurveTo` whose missing control retracts
+    // to the shared anchor.
     let mut result = BezPath::new();
-    for el in els {
-        result.push(el);
+    for s in &subs {
+        let count = s.anchors.len();
+        if count == 0 {
+            continue;
+        }
+        result.move_to(s.anchors[0].p);
+        let emit_edge = |result: &mut BezPath, prev: &Anchor, cur: &Anchor| {
+            if let PathEl::QuadTo(..) = cur.arriving {
+                result.push(cur.arriving);
+                return;
+            }
+            match (prev.out_h, cur.in_h) {
+                (None, None) => result.line_to(cur.p),
+                (c1, c2) => result.curve_to(c1.unwrap_or(prev.p), c2.unwrap_or(cur.p), cur.p),
+            }
+        };
+        for k in 1..count {
+            let (a, b) = (&s.anchors[k - 1], &s.anchors[k]);
+            emit_edge(&mut result, a, b);
+        }
+        if s.closed {
+            let last = &s.anchors[count - 1];
+            let first = &s.anchors[0];
+            match (last.out_h, first.in_h) {
+                (None, None) => {}
+                (c1, c2) => {
+                    let sc1 = c1.unwrap_or(last.p);
+                    let sc2 = c2.unwrap_or(first.p);
+                    // Skip a degenerate zero-length closing curve — endpoints and
+                    // both controls all coincident. `ClosePath` already draws the
+                    // straight seam back to the start, so emitting this cubic would
+                    // only inject an invalid zero-length segment.
+                    let degenerate = coincident(last.p, first.p)
+                        && coincident(sc1, last.p)
+                        && coincident(sc2, first.p);
+                    if !degenerate {
+                        result.curve_to(sc1, sc2, first.p);
+                    }
+                }
+            }
+            result.close_path();
+        }
     }
     result
 }
@@ -1740,4 +1952,233 @@ pub(crate) fn bez_remove_elements(bez: &BezPath, indices: &[usize]) -> BezPath {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod convert_anchor_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// A closed unit-ish rectangle in kurbo's implicit-close form:
+    /// `MoveTo, LineTo, LineTo, LineTo, ClosePath` (indices 0..=4).
+    fn rect() -> BezPath {
+        let mut b = BezPath::new();
+        b.move_to(Point::new(0.0, 0.0)); // idx 0
+        b.line_to(Point::new(100.0, 0.0)); // idx 1
+        b.line_to(Point::new(100.0, 100.0)); // idx 2
+        b.line_to(Point::new(0.0, 100.0)); // idx 3
+        b.close_path(); // idx 4
+        b
+    }
+
+    fn sel(indices: &[usize]) -> HashSet<usize> {
+        indices.iter().copied().collect()
+    }
+
+    /// Cosine of the angle between the In and Out handle directions at anchor
+    /// `i` (seam-aware). ~-1 means the handles are collinear → a smooth point.
+    fn handle_collinearity(bez: &BezPath, i: usize) -> f64 {
+        let anchor = path_anchor_points(bez)
+            .into_iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, p)| p)
+            .expect("anchor exists");
+        let (in_h, out_h) = anchor_handle_pair(bez, i);
+        let (_, ip) = in_h.expect("in handle present");
+        let (_, op) = out_h.expect("out handle present");
+        let v1 = (ip.x - anchor.x, ip.y - anchor.y);
+        let v2 = (op.x - anchor.x, op.y - anchor.y);
+        let l1 = (v1.0 * v1.0 + v1.1 * v1.1).sqrt();
+        let l2 = (v2.0 * v2.0 + v2.1 * v2.1).sqrt();
+        (v1.0 * v2.0 + v1.1 * v2.1) / (l1 * l2)
+    }
+
+    #[test]
+    fn smooth_straight_corner_synthesizes_handles() {
+        // Select the interior vertex at (100,0); both adjacent LineTo edges
+        // must become CurveTo and the synthesized handles must be collinear.
+        let out = bez_convert_anchors(&rect(), &sel(&[1]), true);
+        let els = out.elements();
+        assert!(
+            matches!(els[1], PathEl::CurveTo(..)),
+            "incoming edge should be a curve, got {:?}",
+            els[1]
+        );
+        assert!(
+            matches!(els[2], PathEl::CurveTo(..)),
+            "outgoing edge should be a curve, got {:?}",
+            els[2]
+        );
+        // Untouched sides stay straight.
+        assert!(matches!(els[3], PathEl::LineTo(_)));
+        assert!((handle_collinearity(&out, 1) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smooth_seam_corner_synthesizes_handles() {
+        // Select the MoveTo start vertex (idx 0) and the last pre-ClosePath
+        // vertex (idx 3). The implicit closing edge must be materialized as an
+        // explicit CurveTo, and both corners must become smooth.
+        let out = bez_convert_anchors(&rect(), &sel(&[0, 3]), true);
+        let els = out.elements();
+        // One extra element: the seam CurveTo inserted before ClosePath.
+        assert_eq!(els.len(), 6, "seam should be materialized, got {els:?}");
+        assert!(matches!(els[0], PathEl::MoveTo(_)));
+        assert!(
+            matches!(els[4], PathEl::CurveTo(..)),
+            "closing seam edge should be an explicit curve, got {:?}",
+            els[4]
+        );
+        assert!(matches!(els[5], PathEl::ClosePath));
+        // Both selected corners are smooth (seam-aware handle pair collinear).
+        assert!((handle_collinearity(&out, 0) + 1.0).abs() < 1e-6);
+        assert!((handle_collinearity(&out, 3) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn corner_is_noop_on_straight() {
+        // Corner on an already-straight vertex must leave the path identical.
+        let before = rect();
+        let after = bez_convert_anchors(&before, &sel(&[1]), false);
+        assert_eq!(before.elements(), after.elements());
+    }
+
+    #[test]
+    fn smooth_then_corner_roundtrips() {
+        // Smooth a corner, then Corner it: the handles adjacent to that anchor
+        // must retract back to the anchor point (geometrically straight again).
+        let smoothed = bez_convert_anchors(&rect(), &sel(&[1]), true);
+        let cornered = bez_convert_anchors(&smoothed, &sel(&[1]), false);
+        let anchor = Point::new(100.0, 0.0);
+        let (in_h, out_h) = anchor_handle_pair(&cornered, 1);
+        let (_, ip) = in_h.expect("in control present (retracted CurveTo)");
+        let (_, op) = out_h.expect("out control present (retracted CurveTo)");
+        assert!((ip.x - anchor.x).abs() < 1e-6 && (ip.y - anchor.y).abs() < 1e-6);
+        assert!((op.x - anchor.x).abs() < 1e-6 && (op.y - anchor.y).abs() < 1e-6);
+        assert!(!is_smooth_anchor(&cornered, 1));
+    }
+
+    #[test]
+    fn some_some_averaging_preserved() {
+        // A vertex that already has both handles keeps the legacy averaging:
+        // handles stay curved and are made collinear, lengths preserved.
+        let mut b = BezPath::new();
+        b.move_to(Point::new(0.0, 0.0));
+        // Arrive at (100,0) with an incoming handle, leave toward (100,100).
+        b.curve_to(
+            Point::new(20.0, 30.0),
+            Point::new(60.0, 20.0),
+            Point::new(100.0, 0.0),
+        );
+        b.curve_to(
+            Point::new(140.0, -10.0),
+            Point::new(110.0, 60.0),
+            Point::new(100.0, 100.0),
+        );
+        b.line_to(Point::new(0.0, 100.0));
+        b.close_path();
+        let in_len_before = ((60.0 - 100.0f64).powi(2) + (20.0 - 0.0f64).powi(2)).sqrt();
+        let out_len_before = ((140.0 - 100.0f64).powi(2) + (-10.0 - 0.0f64).powi(2)).sqrt();
+        let out = bez_convert_anchors(&b, &sel(&[1]), true);
+        assert!(matches!(out.elements()[1], PathEl::CurveTo(..)));
+        assert!(matches!(out.elements()[2], PathEl::CurveTo(..)));
+        assert!((handle_collinearity(&out, 1) + 1.0).abs() < 1e-6);
+        let anchor = Point::new(100.0, 0.0);
+        let (in_h, out_h) = anchor_handle_pair(&out, 1);
+        let (_, ip) = in_h.unwrap();
+        let (_, op) = out_h.unwrap();
+        let in_len_after = ((ip.x - anchor.x).powi(2) + (ip.y - anchor.y).powi(2)).sqrt();
+        let out_len_after = ((op.x - anchor.x).powi(2) + (op.y - anchor.y).powi(2)).sqrt();
+        assert!((in_len_after - in_len_before).abs() < 1e-6);
+        assert!((out_len_after - out_len_before).abs() < 1e-6);
+    }
+
+    /// True if any `CurveTo` in `bez` is a degenerate zero-length cubic — its
+    /// endpoint coincides with the previous point and both controls collapse to
+    /// it. Such elements are invalid geometry the seam path must never emit.
+    fn has_degenerate_curve(bez: &BezPath) -> bool {
+        let close = |a: Point, b: Point| (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6;
+        let mut prev = Point::ZERO;
+        for el in bez.elements() {
+            match *el {
+                PathEl::MoveTo(p) => prev = p,
+                PathEl::LineTo(p) => prev = p,
+                PathEl::QuadTo(_, p) => prev = p,
+                PathEl::CurveTo(c1, c2, p) => {
+                    if close(p, prev) && close(c1, prev) && close(c2, prev) {
+                        return true;
+                    }
+                    prev = p;
+                }
+                PathEl::ClosePath => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn smooth_seam_is_idempotent() {
+        // Regression (blocker): smoothing the seam anchor materializes an
+        // explicit closing `CurveTo` whose endpoint equals the `MoveTo` start
+        // (start listed twice). Feeding that back and smoothing the same seam
+        // anchor again must NOT append a degenerate zero-length cubic or collapse
+        // the seam in-handle — Smooth is idempotent on an already-smooth point.
+        let once = bez_convert_anchors(&rect(), &sel(&[0]), true);
+        assert!(
+            !has_degenerate_curve(&once),
+            "first smooth degenerate: {once:?}"
+        );
+        assert!(
+            is_smooth_anchor(&once, 0),
+            "seam not smooth after 1st: {once:?}"
+        );
+
+        // Second application on the explicit-close (duplicate-start) form.
+        let twice = bez_convert_anchors(&once, &sel(&[0]), true);
+        assert!(
+            !has_degenerate_curve(&twice),
+            "second smooth produced a degenerate zero-length CurveTo: {twice:?}"
+        );
+        assert!(
+            is_smooth_anchor(&twice, 0),
+            "seam anchor lost smoothness on re-smooth: {twice:?}"
+        );
+        // No element growth on the idempotent re-application.
+        assert_eq!(
+            once.elements().len(),
+            twice.elements().len(),
+            "re-smoothing the seam must not grow the element count: {twice:?}"
+        );
+    }
+
+    #[test]
+    fn seam_materialization_shifts_compound_indices() {
+        // Regression (major): materializing a seam in an EARLIER subpath of a
+        // compound path inserts an element, shifting every later subpath's
+        // element indices. The GUI handler relies on detecting this count change
+        // to drop the now-stale point selection. Assert the count grows so that
+        // signal is reliable.
+        let mut b = BezPath::new();
+        // Subpath A (indices 0..=4): a closed rect.
+        b.move_to(Point::new(0.0, 0.0)); // 0
+        b.line_to(Point::new(100.0, 0.0)); // 1
+        b.line_to(Point::new(100.0, 100.0)); // 2
+        b.line_to(Point::new(0.0, 100.0)); // 3
+        b.close_path(); // 4
+                        // Subpath B (indices 5..=9): a second closed rect.
+        b.move_to(Point::new(200.0, 0.0)); // 5
+        b.line_to(Point::new(300.0, 0.0)); // 6
+        b.line_to(Point::new(300.0, 100.0)); // 7
+        b.line_to(Point::new(200.0, 100.0)); // 8
+        b.close_path(); // 9
+
+        let before = b.elements().len();
+        // Smooth the seam anchor of subpath A (idx 0).
+        let out = bez_convert_anchors(&b, &sel(&[0]), true);
+        assert!(
+            out.elements().len() > before,
+            "seam materialization must grow the element count so the caller can \
+             detect the index shift and clear the stale selection: {out:?}"
+        );
+    }
 }

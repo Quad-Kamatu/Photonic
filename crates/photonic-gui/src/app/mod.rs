@@ -11214,8 +11214,8 @@ impl PhotonicApp {
                         if let SceneNodeKind::Path(pn) = &node.kind {
                             let sel: std::collections::HashSet<usize> =
                                 indices.iter().copied().collect();
-                            let new_bez =
-                                bez_convert_anchors(&pn.path_data.to_bez_path(), &sel, smooth);
+                            let old_bez = pn.path_data.to_bez_path();
+                            let new_bez = bez_convert_anchors(&old_bez, &sel, smooth);
                             let mut new_node = node.clone();
                             if let SceneNodeKind::Path(ref mut np) = new_node.kind {
                                 np.path_data = PathData::from_bez_path(&new_bez);
@@ -11227,6 +11227,15 @@ impl PhotonicApp {
                                 },
                                 doc,
                             );
+                            // Converting anchors reunifies subpaths and can
+                            // materialize seams, restructuring element indices; drop
+                            // the stale selection. The total element count is not a
+                            // sound proxy for "indices unchanged" — in compound paths
+                            // a reunify shrink and a seam grow can cancel while later
+                            // subpath anchors still shift — so clear unconditionally,
+                            // matching the sibling RoundSelectedCorners / DeleteAnchors
+                            // handlers.
+                            self.point_selected.clear();
                             doc_modified = true;
                         }
                     }
