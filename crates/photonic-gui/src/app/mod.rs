@@ -117,6 +117,10 @@ pub enum DirectDrag {
         origin_bez: kurbo::BezPath,
         grab_dist: f64,
     },
+    /// Moving the whole shape by dragging its fill/interior. `start_e`/`start_f`
+    /// are the node transform's original translation (`matrix[4]`/`matrix[5]`),
+    /// captured at press so the per-frame delta stays stable (#164).
+    Shape { start_e: f64, start_f: f64 },
 }
 
 // ─── Diff highlight ────────────────────────────────────────────────────────────
@@ -317,6 +321,10 @@ struct ArtboardDrag {
 
 pub struct PhotonicApp {
     pub active_tool: Tool,
+    /// The tool that was active on the previous frame. Used to edge-detect
+    /// switching *into* a tool (e.g. seeding Direct Select's point-edit state
+    /// from the current object selection — #164).
+    last_tool: Tool,
     pub fill_color: [f32; 4],
     pub polygon_sides: u32,
     pub star_points: u32,
@@ -800,6 +808,7 @@ impl Default for PhotonicApp {
     fn default() -> Self {
         Self {
             active_tool: Tool::Select,
+            last_tool: Tool::Select,
             fill_color: [0.22, 0.47, 0.87, 1.0],
             polygon_sides: 6,
             star_points: 5,
@@ -1785,10 +1794,7 @@ impl PhotonicApp {
                 self.pencil_points.clear();
                 self.lasso_points.clear();
                 self.isolated_group = None;
-                self.point_edit_node = None;
-                self.point_selected.clear();
-                self.point_drag_origin = None;
-                self.point_drag_mode = None;
+                self.clear_point_edit();
                 self.active_tool = tool;
             }
             HotbarEffect::Action(action) => {
@@ -1913,6 +1919,19 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // ── Direct Select entry seed (#164) ───────────────────────────────────
+        // Edge-detect switching *into* the Direct Selection tool: when it becomes
+        // active while a path object is selected, seed its point-edit state so
+        // every anchor of that path shows up filled ("whole object selected")
+        // without requiring an extra click. Edge-triggered (not every frame) so a
+        // deliberate click-to-deselect isn't immediately undone.
+        let entered_direct_select =
+            self.active_tool == Tool::DirectSelect && self.last_tool != Tool::DirectSelect;
+        self.last_tool = self.active_tool;
+        if entered_direct_select {
+            self.seed_direct_select_from_selection(doc);
+        }
 
         // ── Apply the configured history-retention limits ─────────────────────
         // Cheap and idempotent when unchanged, so it's safe every frame. In
@@ -3056,10 +3075,7 @@ impl PhotonicApp {
                                 self.pencil_points.clear();
                                 self.lasso_points.clear();
                                 self.isolated_group = None;
-                                self.point_edit_node = None;
-                                self.point_selected.clear();
-                                self.point_drag_origin = None;
-                                self.point_drag_mode = None;
+                                self.clear_point_edit();
                                 self.active_tool = tool;
                                 self.active_drawer = None;
                                 self.selected_drawer_option = None;
@@ -3230,10 +3246,7 @@ impl PhotonicApp {
                             self.pencil_points.clear();
                             self.lasso_points.clear();
                             self.isolated_group = None;
-                            self.point_edit_node = None;
-                            self.point_selected.clear();
-                            self.point_drag_origin = None;
-                            self.point_drag_mode = None;
+                            self.clear_point_edit();
                             self.active_tool = tool;
                             if tool != Tool::Select && tool != Tool::DirectSelect {
                                 self.selected_id = None;
@@ -12045,7 +12058,12 @@ impl PhotonicApp {
     ) {
         use crate::global_search::SearchAction as A;
         match action {
-            A::Tool(t) => self.active_tool = t,
+            A::Tool(t) => {
+                // Clear stale point-edit state so entering Direct Select via global
+                // search re-seeds from the current selection (#164 finding 1).
+                self.clear_point_edit();
+                self.active_tool = t;
+            }
             A::ToggleGrid => self.prefs.show_grid = !self.prefs.show_grid,
             A::ToggleGuides => self.guides_visible = !self.guides_visible,
             A::ToggleAudit => self.audit.panel_open = !self.audit.panel_open,

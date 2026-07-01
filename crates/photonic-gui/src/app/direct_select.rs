@@ -19,6 +19,47 @@ impl PhotonicApp {
         }
     }
 
+    /// Fully drop Direct Select's point-edit state. Called on every tool switch
+    /// so re-entering Direct Select re-seeds from the *current* object selection
+    /// rather than resurrecting a stale `point_edit_node` (#164 finding 1).
+    /// Centralizes the block that was copy-pasted across the tool-switch sites.
+    pub(crate) fn clear_point_edit(&mut self) {
+        self.point_edit_node = None;
+        self.point_selected.clear();
+        self.point_drag_origin = None;
+        self.point_drag_mode = None;
+    }
+
+    /// Seed Direct Select's point-edit state from the current object selection
+    /// so switching into the tool shows every anchor of the selected path
+    /// (rendered filled, as if the whole path were selected). #164 requirement 1.
+    /// No-op if a node is already being point-edited or nothing suitable is
+    /// selected. Only single Path nodes are seeded (see proposal "Out/deferred").
+    pub(crate) fn seed_direct_select_from_selection(&mut self, doc: &Document) {
+        if self.point_edit_node.is_some() {
+            return;
+        }
+        // Prefer the primary selection id, else the first node in the selection.
+        let candidate = self
+            .selected_id
+            .or_else(|| doc.selection.ids().next().copied());
+        if let Some(nid) = candidate {
+            if let Some(node) = doc.nodes.get(&nid) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    let bez = pn.path_data.to_bez_path();
+                    self.point_edit_node = Some(nid);
+                    self.select_all_anchors(&bez);
+                }
+            }
+        }
+    }
+
+    /// Fill `point_selected` with every anchor element index of `bez` so the
+    /// whole path renders as selected (filled). #164 requirement 1.
+    fn select_all_anchors(&mut self, bez: &kurbo::BezPath) {
+        self.point_selected = path_anchor_points(bez).iter().map(|(i, _)| *i).collect();
+    }
+
     pub(crate) fn handle_direct_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -222,13 +263,42 @@ impl PhotonicApp {
                         .point_edit_node
                         .and_then(|nid| doc.nodes.get(&nid).cloned());
                 } else {
-                    // Missed everything — select the shape under the cursor.
+                    // Missed anchors/handles/corners — this is a body press.
                     // direct_select_hit selects on a body click even when unfilled.
                     let hit_shape = direct_select_hit(doc, cx, cy, renderer);
-                    self.point_edit_node = hit_shape;
-                    self.point_selected.clear();
-                    self.point_drag_origin = None;
-                    self.point_drag_mode = None;
+                    if hit_shape.is_some() && hit_shape == self.point_edit_node {
+                        // Pressing the fill of the already-selected shape starts a
+                        // whole-shape move (#164 requirement 2). Capture the node
+                        // and its original translation so the drag is stable.
+                        if let Some(node) = self.point_edit_node.and_then(|nid| doc.nodes.get(&nid))
+                        {
+                            let start_e = node.transform.matrix[4];
+                            let start_f = node.transform.matrix[5];
+                            self.point_drag_origin = Some(node.clone());
+                            self.point_drag_mode = Some(DirectDrag::Shape { start_e, start_f });
+                        }
+                    } else if let Some(nid) = hit_shape {
+                        // A different (or first) shape — select it and show all of
+                        // its anchors filled. No move on this press: select first,
+                        // then a subsequent fill drag moves it (#164 requirement 1).
+                        self.point_edit_node = Some(nid);
+                        let bez = match doc.nodes.get(&nid).map(|n| &n.kind) {
+                            Some(SceneNodeKind::Path(pn)) => Some(pn.path_data.to_bez_path()),
+                            _ => None,
+                        };
+                        match bez {
+                            Some(bez) => self.select_all_anchors(&bez),
+                            None => self.point_selected.clear(),
+                        }
+                        self.point_drag_origin = None;
+                        self.point_drag_mode = None;
+                    } else {
+                        // Empty canvas — deselect.
+                        self.point_edit_node = None;
+                        self.point_selected.clear();
+                        self.point_drag_origin = None;
+                        self.point_drag_mode = None;
+                    }
                 }
             }
         }
@@ -322,6 +392,24 @@ impl PhotonicApp {
                         }
                     }
                 }
+                Some(DirectDrag::Shape { start_e, start_f }) => {
+                    let (start_e, start_f) = (*start_e, *start_f);
+                    // Total canvas-space delta from the press point, mirroring the
+                    // Move tool (tool_handlers.rs). Writes translation directly.
+                    if let (Some(nid), Some(press), Some(cursor)) = (
+                        nid,
+                        ui.input(|i| i.pointer.press_origin()),
+                        response.interact_pointer_pos(),
+                    ) {
+                        let dx = (cursor.x - press.x) as f64 / view.zoom;
+                        let dy = (cursor.y - press.y) as f64 / view.zoom;
+                        if let Some(node) = doc.nodes.get_mut(&nid) {
+                            node.transform.matrix[4] = start_e + dx;
+                            node.transform.matrix[5] = start_f + dy;
+                            *doc_modified = true;
+                        }
+                    }
+                }
                 None => {}
             }
         }
@@ -332,12 +420,14 @@ impl PhotonicApp {
             if let Some(old_node) = self.point_drag_origin.take() {
                 if let Some(nid) = self.point_edit_node {
                     if let Some(new_node) = doc.nodes.get(&nid).cloned() {
+                        // A whole-shape move changes only the transform, so the
+                        // path_data-only check would miss it — compare both (#164).
                         let changed = match (&old_node.kind, &new_node.kind) {
                             (SceneNodeKind::Path(op), SceneNodeKind::Path(np)) => {
                                 op.path_data != np.path_data
                             }
                             _ => false,
-                        };
+                        } || old_node.transform.matrix != new_node.transform.matrix;
                         if changed {
                             history.execute(
                                 Command::UpdateNode {
@@ -384,8 +474,19 @@ impl PhotonicApp {
                     let hit_shape = direct_select_hit(doc, cx, cy, renderer);
                     if let Some(nid) = hit_shape {
                         if Some(nid) != self.point_edit_node {
+                            // A plain click on a shape body newly selects it — fill
+                            // every anchor so it renders "whole path selected", same
+                            // as the drag_started body branch (#164 finding 2). Without
+                            // this a clean click leaves anchors white/unfilled.
                             self.point_edit_node = Some(nid);
-                            self.point_selected.clear();
+                            let bez = match doc.nodes.get(&nid).map(|n| &n.kind) {
+                                Some(SceneNodeKind::Path(pn)) => Some(pn.path_data.to_bez_path()),
+                                _ => None,
+                            };
+                            match bez {
+                                Some(bez) => self.select_all_anchors(&bez),
+                                None => self.point_selected.clear(),
+                            }
                         } else if !add_sel {
                             self.point_selected.clear();
                         }

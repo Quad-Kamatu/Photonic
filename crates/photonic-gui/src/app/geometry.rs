@@ -369,53 +369,50 @@ pub(crate) fn ds_find_corner_widget(
 
 /// Move the selected anchor points in a `BezPath` by `(dx, dy)` in local space.
 ///
-/// For each selected element:
-/// - The element's endpoint is shifted by `(dx, dy)`.
-/// - If the element is `CurveTo`, its incoming handle (c2) is also shifted.
-/// - The next element's outgoing handle (c1 for `CurveTo`, c for `QuadTo`) is
-///   shifted only if the next anchor is NOT also in the selection (prevents
-///   double-moving shared handles).
+/// Implemented as a single membership pass over the elements so that each point
+/// is written exactly once — this makes rigidly translating a *set* of adjacent
+/// (or all) anchors correct, which the old two-write approach corrupted via
+/// overwrites and its `!sel_set.contains(&next)` guard.
+///
+/// For each element `j`, a point moves iff the anchor it belongs to is selected:
+/// - endpoint `p` and incoming handle `c2` belong to anchor `j` — move iff `j`
+///   is selected;
+/// - outgoing handle `c1` belongs to the *previous* anchor `j-1` (the segment
+///   leaves that anchor) — move iff `j-1` is selected (and `j-1` is a real
+///   anchor, i.e. not a `ClosePath`);
+/// - a `QuadTo`'s single control is shared by both endpoints, so it moves iff
+///   *either* `j` or `j-1` is selected.
+///
+/// Single-anchor behaviour is identical to before (the outgoing handle of the
+/// selected anchor lives on the next element, which sees `j-1` selected).
 pub(crate) fn bez_move_anchors(bez: &BezPath, selected: &[usize], dx: f64, dy: f64) -> BezPath {
     let els: Vec<PathEl> = bez.elements().iter().copied().collect();
-    let n = els.len();
     let sel_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
-    let mut new_els = els.clone();
+    let shift = |p: Point| Point::new(p.x + dx, p.y + dy);
 
-    for &i in selected {
-        if i >= n {
-            continue;
-        }
-        // Move endpoint (and incoming handle for curved elements)
-        new_els[i] = match els[i] {
-            PathEl::MoveTo(p) => PathEl::MoveTo(Point::new(p.x + dx, p.y + dy)),
-            PathEl::LineTo(p) => PathEl::LineTo(Point::new(p.x + dx, p.y + dy)),
+    let mut result = BezPath::new();
+    for (j, el) in els.iter().enumerate() {
+        // This element's own anchor (owns endpoint + incoming handle).
+        let anchor_sel = sel_set.contains(&j);
+        // The previous anchor (owns this element's outgoing handle `c1`), unless
+        // the previous element is a `ClosePath` (no anchor there).
+        let prev_sel =
+            j > 0 && !matches!(els[j - 1], PathEl::ClosePath) && sel_set.contains(&(j - 1));
+        let new_el = match *el {
+            PathEl::MoveTo(p) => PathEl::MoveTo(if anchor_sel { shift(p) } else { p }),
+            PathEl::LineTo(p) => PathEl::LineTo(if anchor_sel { shift(p) } else { p }),
             PathEl::CurveTo(c1, c2, p) => PathEl::CurveTo(
-                c1,
-                Point::new(c2.x + dx, c2.y + dy),
-                Point::new(p.x + dx, p.y + dy),
+                if prev_sel { shift(c1) } else { c1 },
+                if anchor_sel { shift(c2) } else { c2 },
+                if anchor_sel { shift(p) } else { p },
             ),
             PathEl::QuadTo(c, p) => PathEl::QuadTo(
-                Point::new(c.x + dx, c.y + dy),
-                Point::new(p.x + dx, p.y + dy),
+                if anchor_sel || prev_sel { shift(c) } else { c },
+                if anchor_sel { shift(p) } else { p },
             ),
             PathEl::ClosePath => PathEl::ClosePath,
         };
-        // Move outgoing handle (on the NEXT element) only if next anchor isn't also selected
-        let j = i + 1;
-        if j < n && !sel_set.contains(&j) {
-            new_els[j] = match els[j] {
-                PathEl::CurveTo(c1, c2, p) => {
-                    PathEl::CurveTo(Point::new(c1.x + dx, c1.y + dy), c2, p)
-                }
-                PathEl::QuadTo(c, p) => PathEl::QuadTo(Point::new(c.x + dx, c.y + dy), p),
-                other => other,
-            };
-        }
-    }
-
-    let mut result = BezPath::new();
-    for el in new_els {
-        result.push(el);
+        result.push(new_el);
     }
     result
 }
