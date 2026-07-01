@@ -72,7 +72,7 @@ impl Tool {
     pub const fn icon(self) -> &'static str {
         match self {
             Tool::Select => ph::CURSOR,
-            Tool::DirectSelect => ph::BEZIER_CURVE,
+            Tool::DirectSelect => ph::VECTOR_TWO,
             Tool::Pan => ph::HAND,
             Tool::Rectangle => ph::RECTANGLE,
             Tool::RoundedRect => ph::RECTANGLE,
