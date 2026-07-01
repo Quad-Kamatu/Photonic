@@ -13251,6 +13251,108 @@ mod direct_select_geometry_tests {
     }
 
     #[test]
+    fn rounding_isolated_corner_rounds_past_half_edge() {
+        // An isolated selected corner (neighbours not selected) must be allowed
+        // to retreat past half its shorter edge — the old unconditional
+        // `lin/2` clamp artificially capped it there (issue #165).
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize].into_iter().collect();
+        let r = 60.0; // > half of the 100-unit edge
+        let out = round_selected_corners(&bez, &sel, r);
+        let els = out.elements();
+        // Single fillet → single quad; the point before it is the retreat start.
+        let qpos = els
+            .iter()
+            .position(|e| matches!(e, PathEl::QuadTo(_, _)))
+            .expect("one rounded corner → one quad");
+        let fs = match els[qpos - 1] {
+            PathEl::LineTo(p) | PathEl::MoveTo(p) => p,
+            _ => panic!("expected a line/move endpoint before the fillet quad"),
+        };
+        // Corner 1 sits at (100,0) with its incoming edge running from (0,0).
+        let corner = Point::new(100.0, 0.0);
+        let retreat = ((corner.x - fs.x).powi(2) + (corner.y - fs.y).powi(2)).sqrt();
+        assert!(
+            retreat > 50.0 + 1e-6,
+            "isolated corner should round past half-edge, retreat was {retreat}"
+        );
+    }
+
+    #[test]
+    fn rounding_two_adjacent_corners_never_overlap() {
+        // Two adjacent selected corners share an edge; their fillets must split
+        // it (meet at most at the midpoint) rather than overrun each other.
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize, 2usize].into_iter().collect();
+        // Large radius vs the 100-unit shared edge (100,0)->(100,100).
+        let out = round_selected_corners(&bez, &sel, 90.0);
+        let els: Vec<PathEl> = out.elements().to_vec();
+        let quads: Vec<usize> = els
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, PathEl::QuadTo(_, _)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(quads.len(), 2, "two rounded corners → two quads");
+        let fe1 = match els[quads[0]] {
+            PathEl::QuadTo(_, p) => p, // corner 1 exit toward corner 2
+            _ => unreachable!(),
+        };
+        let fs2 = match els[quads[1] - 1] {
+            PathEl::LineTo(p) => p, // corner 2 entry coming from corner 1
+            _ => panic!("expected a line endpoint before the second fillet quad"),
+        };
+        let c1 = Point::new(100.0, 0.0);
+        let c2 = Point::new(100.0, 100.0);
+        let rout = ((fe1.x - c1.x).powi(2) + (fe1.y - c1.y).powi(2)).sqrt();
+        let rin = ((fs2.x - c2.x).powi(2) + (fs2.y - c2.y).powi(2)).sqrt();
+        // No overlap ⟺ the two retreats along the shared edge sum to at most its
+        // length; and corner 1's exit never passes corner 2's entry.
+        assert!(
+            rout + rin <= 100.0 + 1e-6,
+            "adjacent fillets overlap on the shared edge: {rout} + {rin}"
+        );
+        assert!(
+            fe1.y <= fs2.y + 1e-6,
+            "corner 1 fillet crosses corner 2 fillet ({} vs {})",
+            fe1.y,
+            fs2.y
+        );
+    }
+
+    #[test]
+    fn rounding_non_adjacent_corners_round_independently() {
+        // Opposite corners of the square share no edge, so each should round
+        // freely (past half-edge) without the shared-edge 50/50 split.
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize, 3usize].into_iter().collect();
+        let r = 60.0; // > half-edge; the old lin/2 clamp would have capped it
+        let out = round_selected_corners(&bez, &sel, r);
+        let els: Vec<PathEl> = out.elements().to_vec();
+        let quads: Vec<usize> = els
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, PathEl::QuadTo(_, _)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(quads.len(), 2, "two rounded corners → two quads");
+        for (&q, corner) in quads
+            .iter()
+            .zip([Point::new(100.0, 0.0), Point::new(0.0, 100.0)])
+        {
+            let fs = match els[q - 1] {
+                PathEl::LineTo(p) | PathEl::MoveTo(p) => p,
+                _ => panic!("expected a line/move endpoint before a fillet quad"),
+            };
+            let retreat = ((corner.x - fs.x).powi(2) + (corner.y - fs.y).powi(2)).sqrt();
+            assert!(
+                retreat > 50.0 + 1e-6,
+                "non-adjacent corner should round independently past half-edge, retreat was {retreat}"
+            );
+        }
+    }
+
+    #[test]
     fn rounding_zero_radius_is_noop() {
         let bez = rect();
         let sel: std::collections::HashSet<usize> = [0, 1, 2, 3].into_iter().collect();

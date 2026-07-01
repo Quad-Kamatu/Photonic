@@ -738,22 +738,6 @@ pub(crate) fn round_selected_corners(
     let subs = corner_subpaths(bez);
     let mut result = BezPath::new();
 
-    // Fillet endpoints for a corner: retreat `r` along each adjacent edge,
-    // clamping to half the shorter edge so neighbouring fillets never overlap.
-    let fillet = |prev: Point, curr: Point, next: Point| -> Option<(Point, Point)> {
-        let din = (curr.x - prev.x, curr.y - prev.y);
-        let dout = (next.x - curr.x, next.y - curr.y);
-        let lin = (din.0 * din.0 + din.1 * din.1).sqrt();
-        let lout = (dout.0 * dout.0 + dout.1 * dout.1).sqrt();
-        if lin < 1e-9 || lout < 1e-9 {
-            return None;
-        }
-        let r = radius.min(lin / 2.0).min(lout / 2.0);
-        let fs = Point::new(curr.x - din.0 / lin * r, curr.y - din.1 / lin * r);
-        let fe = Point::new(curr.x + dout.0 / lout * r, curr.y + dout.1 / lout * r);
-        Some((fs, fe))
-    };
-
     for s in &subs {
         let n = s.verts.len();
         if n == 0 {
@@ -783,13 +767,67 @@ pub(crate) fn round_selected_corners(
             }
         };
 
+        // A position is a *roundable straight corner* when both adjacent
+        // segments are straight lines (`straight_corners` uses the same rule).
+        // `straight[0]` is unused, so the arriving side of vertex 0 is the
+        // closing segment, which is straight iff the subpath is closed.
+        let is_straight_corner = |k: usize| -> bool {
+            let in_straight = if k > 0 { s.straight[k] } else { s.closed };
+            let out_straight = if k + 1 < n {
+                s.straight[k + 1]
+            } else {
+                s.closed
+            };
+            in_straight && out_straight
+        };
+
+        // Per-position predicate: this corner will actually be filleted. Used
+        // both to emit the fillet and to make each side's retreat clamp aware of
+        // whether the neighbour sharing that edge is being rounded too.
+        let rounded: Vec<bool> = (0..n)
+            .map(|k| {
+                let (idx, _) = s.verts[k];
+                selected.contains(&idx) && is_straight_corner(k) && neighbours(k).is_some()
+            })
+            .collect();
+
+        // Fillet endpoints for corner `k`: retreat `r` along each adjacent edge.
+        // The retreat on each side is bounded by whether that side's neighbour
+        // is itself being rounded — if so the shared edge is split 50/50 so the
+        // two fillets never overlap (deterministic for multi-select); otherwise
+        // the retreat may reach up to the full edge (minus a tiny epsilon so a
+        // degenerate zero-length segment is never emitted at the adjacent
+        // vertex). This removes the artificial per-corner half-edge cap.
         let do_round = |k: usize| -> Option<(Point, Point)> {
-            let (idx, curr) = s.verts[k];
-            if !selected.contains(&idx) {
+            if !rounded[k] {
                 return None;
             }
+            let (_, curr) = s.verts[k];
             let (prev, next) = neighbours(k)?;
-            fillet(prev, curr, next)
+            let din = (curr.x - prev.x, curr.y - prev.y);
+            let dout = (next.x - curr.x, next.y - curr.y);
+            let lin = (din.0 * din.0 + din.1 * din.1).sqrt();
+            let lout = (dout.0 * dout.0 + dout.1 * dout.1).sqrt();
+            if lin < 1e-9 || lout < 1e-9 {
+                return None;
+            }
+            let kprev = if k > 0 { k - 1 } else { n - 1 };
+            let knext = if k + 1 < n { k + 1 } else { 0 };
+            const EPS: f64 = 1e-3;
+            let max_in = if rounded[kprev] {
+                lin / 2.0
+            } else {
+                lin * (1.0 - EPS)
+            };
+            let max_out = if rounded[knext] {
+                lout / 2.0
+            } else {
+                lout * (1.0 - EPS)
+            };
+            let r = radius.min(max_in).min(max_out);
+            let fs = Point::new(curr.x - din.0 / lin * r, curr.y - din.1 / lin * r);
+            let fe = Point::new(curr.x + dout.0 / lout * r, curr.y + dout.1 / lout * r);
+            Some((fs, fe))
         };
 
         let mut started = false;
