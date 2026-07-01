@@ -1025,6 +1025,131 @@ mod tests {
         assert_eq!(doc.nodes[&node_id].name, "mcp-edit");
     }
 
+    /// Core invariant the #183 GUI fix *relies on* — NOT the fix itself.
+    ///
+    /// A `Command::Batch` of `UpdateNode`s (the shape a completed move records)
+    /// pushed while a coalescing gesture is open — with a primed same-target
+    /// anchor, the adversarial fold case — must land as exactly ONE undo step,
+    /// and a single `undo()` must restore every node's pre-move transform. This
+    /// holds for both `execute` and `execute_discrete` because `Command::Batch`
+    /// is never a mergeable `coalesce` target.
+    ///
+    /// NOTE (scope, per adversarial review): this locks pre-existing core
+    /// behavior and would pass identically with the GUI #183 fix reverted. It
+    /// does NOT exercise `PhotonicApp::finalize_move` or the release-time
+    /// fallback branch — those are the actual #183 change and are covered by the
+    /// pure predicate test `photonic-gui` `move_fallback_tests::*` plus manual
+    /// GUI confirmation. Keep this as a core guardrail, not the #183 regression
+    /// contract.
+    #[test]
+    fn batch_never_coalesces_into_open_gesture() {
+        for discrete in [false, true] {
+            let mut doc = make_doc();
+            let mut history = CommandHistory::new(200);
+
+            // Two nodes, moved together as a multi-selection.
+            let a = make_node(&doc);
+            let b = make_node(&doc);
+            let a_id = a.id;
+            let b_id = b.id;
+            history.execute(
+                Command::AddNode {
+                    node: a,
+                    layer_id: None,
+                },
+                &mut doc,
+            );
+            history.execute(
+                Command::AddNode {
+                    node: b,
+                    layer_id: None,
+                },
+                &mut doc,
+            );
+            let base = history.undo_depth();
+
+            // What the GUI snapshots at drag start: full pre-move nodes.
+            let a_old = doc.nodes[&a_id].clone();
+            let b_old = doc.nodes[&b_id].clone();
+            let a0 = a_old.transform.matrix;
+            let b0 = b_old.transform.matrix;
+
+            // A pointer gesture is open (as it is on release, before
+            // `end_coalescing`), and a prior same-target tick (e.g. a color
+            // swatch drag on node A) has already armed the coalesce anchor — the
+            // adversarial case where a naive push could fold the move into it.
+            history.begin_coalescing();
+            let mut primed = doc.nodes[&a_id].clone();
+            primed.name = "primed".into();
+            history.execute(
+                Command::UpdateNode {
+                    old: doc.nodes[&a_id].clone(),
+                    new: primed,
+                },
+                &mut doc,
+            );
+            assert!(
+                history.is_coalescing(),
+                "gesture must still be open when the move is finalized"
+            );
+            let after_prime = history.undo_depth();
+
+            // Perform the move on the doc (mirrors the GUI dragging both nodes),
+            // then build the release-time Batch of UpdateNodes.
+            for id in [a_id, b_id] {
+                let n = doc.nodes.get_mut(&id).unwrap();
+                n.transform.matrix[4] += 25.0;
+                n.transform.matrix[5] += 40.0;
+            }
+            let move_batch = Command::Batch(vec![
+                Command::UpdateNode {
+                    old: a_old,
+                    new: doc.nodes[&a_id].clone(),
+                },
+                Command::UpdateNode {
+                    old: b_old,
+                    new: doc.nodes[&b_id].clone(),
+                },
+            ]);
+
+            if discrete {
+                history.execute_discrete(move_batch, &mut doc);
+            } else {
+                history.execute(move_batch, &mut doc);
+            }
+            history.end_coalescing();
+
+            // The move Batch is exactly one new step — never folded into the
+            // primed anchor.
+            assert_eq!(
+                history.undo_depth(),
+                after_prime + 1,
+                "move Batch must record exactly one undo step (discrete={discrete})"
+            );
+
+            // One undo restores BOTH nodes' pre-move transforms in a single step.
+            assert!(
+                history.undo(&mut doc),
+                "single Ctrl+Z must undo the move (discrete={discrete})"
+            );
+            assert_eq!(
+                doc.nodes[&a_id].transform.matrix, a0,
+                "undo must restore node A's pre-move transform (discrete={discrete})"
+            );
+            assert_eq!(
+                doc.nodes[&b_id].transform.matrix, b0,
+                "undo must restore node B's pre-move transform (discrete={discrete})"
+            );
+            // Exactly one step was peeled: the nodes still exist (the Add steps
+            // below the move were not touched).
+            assert!(
+                history.undo_depth() >= base,
+                "undo removed more than the single move step (discrete={discrete})"
+            );
+            assert!(doc.nodes.contains_key(&a_id) && doc.nodes.contains_key(&b_id));
+        }
+    }
+
     /// Two separate gestures produce two independent undo steps.
     #[test]
     fn coalesce_two_gestures_two_steps() {
