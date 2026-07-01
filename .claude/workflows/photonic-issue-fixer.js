@@ -220,7 +220,7 @@ for (let i = 0; i < issueNums.length; i++) {
       `1. \`cd ${REPO} && gh issue view ${n}\` — read title, body, labels.\n` +
       `2. Look for an existing plan at docs/proposals/${n}-*.md. If it exists, READ it and base your approach on it (set planExists=true, planPath to that file).\n` +
       `3. If no plan exists, study the relevant crates to ground a real approach, then WRITE a concise plan to docs/proposals/${n}-<slug>.md following the style of the existing proposals (Summary / Scope (In/Out) / approach). Set planExists=false and planPath to the new file.\n` +
-      `4. Decide tractable: false if this genuinely needs a large multi-session greenfield effort (big new GPU pipeline, new file format, installers) — be honest. Identify target crates, files to touch, and anything you will defer.`,
+      `4. Decide tractable HONESTLY. This workflow does ONE focused single-agent implementation pass per issue, so it fits well-scoped bugs and small self-contained features. Set tractable=false when the issue is greenfield or infrastructure-scale — a new GPU pipeline, a new file format, installers, a test/regression HARNESS, i18n frameworks, or anything spanning many crates or needing a new subsystem. When an issue is large but has a genuinely self-contained tractable SLICE, set tractable=true and scope 'approach' to just that slice, deferring the rest (document it). Better to skip or slice than to attempt-and-revert. Identify target crates, files to touch, and anything you will defer.`,
     { label: `plan:#${n}`, phase: 'Plan', schema: PLAN_SCHEMA },
   )
 
@@ -245,10 +245,14 @@ for (let i = 0; i < issueNums.length; i++) {
       `- Write production-quality code that genuinely delivers the capability — NO stubs, TODO-as-done, fake returns, or orphaned code that nothing calls. Wire it end-to-end.\n` +
       `- Stay in scope for this issue; do not refactor unrelated areas.\n` +
       `- After editing, run \`cargo build --release\` and \`cargo test -p <each affected crate>\` plus \`cargo check --workspace\`. Report pass/fail honestly.\n` +
-      `- If a sub-part is genuinely out of scope, implement the rest and DOCUMENT the deferral in the proposal md's "Remaining work" section + return it in deferred.\n` +
+      `- If a sub-part is genuinely out of scope, implement the rest and DOCUMENT the deferral in the proposal md's "Remaining work" section + note it in your final summary.\n` +
       `- Update docs/proposals/${n}-*.md header from a design scaffold into an honest "What this PR implements / Remaining work" status. If the fix touches MCP tools, regenerate docs/mcp-api.md if the repo has a generator.\n` +
-      `Do NOT commit — a later step lands it. Leave changes in the working tree.`,
-    { label: `impl:#${n}`, phase: 'Implement', schema: IMPL_SCHEMA, agentType: 'arcwright-dev' },
+      `Do NOT commit — a later step lands it. Leave changes in the working tree.\n` +
+      `Return a short plain-text summary of what you implemented and anything you deferred.`,
+    // No schema: the adversarial reviewers (which read the git diff) are the real
+    // gate, so impl output is informational. Forcing IMPL_SCHEMA here made large
+    // issues crash on the StructuredOutput retry cap (#20, #54). Free text can't.
+    { label: `impl:#${n}`, phase: 'Implement', agentType: 'arcwright-dev' },
   )
 
   if (!impl) {
@@ -318,8 +322,9 @@ for (let i = 0; i < issueNums.length; i++) {
     impl = await agent(
       `${CTX}\n\nFix round ${round} for issue #${n}: "${plan.title}". Adversarial reviewers raised these major/blocker findings:\n\n${findingsText}\n\n` +
         `Address every one of them in the working tree (do not commit). Re-run \`cargo build --release\` and the affected \`cargo test\`. ` +
-        `Keep deferrals documented in the proposal md. Report the updated state honestly.`,
-      { label: `fix:#${n} r${round}`, phase: 'Fix', schema: IMPL_SCHEMA, agentType: 'arcwright-dev' },
+        `Keep deferrals documented in the proposal md. Return a short plain-text summary of what you changed.`,
+      // No schema — same reason as the impl agent above (avoid StructuredOutput crash).
+      { label: `fix:#${n} r${round}`, phase: 'Fix', agentType: 'arcwright-dev' },
     )
     if (!impl) {
       log(`#${n} fix agent died in round ${round}.`)
@@ -357,7 +362,7 @@ for (let i = 0; i < issueNums.length; i++) {
     issue: n,
     status: land?.landed ? 'landed' : 'land-failed',
     title: plan.title,
-    deferred: impl.deferred,
+    deferred: plan.deferred,
     sha: land?.sha,
     prNumber: land?.prNumber,
     rounds: round,
