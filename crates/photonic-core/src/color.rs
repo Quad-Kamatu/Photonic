@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-/// A color in linear sRGB with alpha.
-/// All values are in [0.0, 1.0].
+/// A color stored as gamma-encoded (non-linear) sRGB with alpha.
+/// All values are in [0.0, 1.0]. Channels are sRGB-encoded — the same
+/// convention used by `from_hex`/`to_hex`/`to_rgba8` (plain `u8 / 255.0`,
+/// no gamma decode) and by the renderer/document swatch pickers. Feeding
+/// these floats into an egui `Rgba` (linear) control produces a shifted
+/// swatch; use the sRGBA (`[u8; 4]`) picker path instead.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Color {
     pub r: f32,

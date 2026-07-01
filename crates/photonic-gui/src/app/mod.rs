@@ -2625,7 +2625,8 @@ impl PhotonicApp {
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
                                             ui.label("Default Fill");
-                                            if ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.default_fill_color).changed() {
+                                            // Gamma-sRGB store → shared sRGBA picker (issue #185).
+                                            if crate::color_edit::srgb_f32_color_edit(ui, &mut self.prefs.default_fill_color).changed() {
                                                 self.fill_color = self.prefs.default_fill_color;
                                             }
                                         });
@@ -2633,7 +2634,8 @@ impl PhotonicApp {
                                         ui.add_enabled_ui(self.prefs.default_stroke_enabled, |ui| {
                                             ui.horizontal(|ui| {
                                                 ui.label("Stroke Color");
-                                                ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.default_stroke_color);
+                                                // Gamma-sRGB store → shared sRGBA picker (issue #185).
+                                                crate::color_edit::srgb_f32_color_edit(ui, &mut self.prefs.default_stroke_color);
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Stroke Width");
@@ -3272,8 +3274,11 @@ impl PhotonicApp {
                     // Keep the swatch a fixed, glanceable 26×26 that fits the
                     // 40 px rail rather than the default wide color button.
                     ui.spacing_mut().interact_size = egui::vec2(26.0, 26.0);
-                    let resp = ui
-                        .color_edit_button_rgba_unmultiplied(&mut self.fill_color)
+                    // `self.fill_color` is gamma-sRGB `[f32; 4]` (maps 1:1 into
+                    // `Color`), so route it through the shared sRGBA picker to
+                    // match the renderer instead of egui's linear `Rgba` control
+                    // (issue #185).
+                    let resp = crate::color_edit::srgb_f32_color_edit(ui, &mut self.fill_color)
                         .on_hover_text("Active fill color — click to change");
                     if resp.changed() {
                         // Mirror in-memory every frame (cheap) so the active
