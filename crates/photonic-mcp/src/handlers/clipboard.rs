@@ -347,7 +347,7 @@ pub async fn paste_from_history(state: &AppState, args: PasteFromHistoryArgs) ->
     let cmd = Command::Batch(commands);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     let count = new_root_ids.len();
     ToolResult::text(format!(

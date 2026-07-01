@@ -1971,6 +1971,20 @@ impl PhotonicApp {
             self.file_status = Some(msg);
         }
 
+        // ── Gesture coalescing (#182) ─────────────────────────────────────────
+        // While the pointer is down, collapse a continuous drag's per-tick edits
+        // into a single undo step. Opened here (before any tool/panel handler can
+        // call `history.execute` this frame) and closed on release in the
+        // post-loop `any_released` block below. `begin_coalescing` is idempotent,
+        // so it simply stays open across every frame of the gesture; the very
+        // first `execute` of the gesture pushes an anchor and subsequent
+        // same-target ticks fold into it. This fixes the fill/stroke color
+        // picker (#180) and shields any future slider/handle that streams
+        // `execute` from flooding the history.
+        if ctx.input(|i| i.pointer.any_down()) {
+            history.begin_coalescing();
+        }
+
         // ── Command palette (Ctrl/Cmd+K) — drawn on top of everything ─────────
         // Handled before tool dispatch so a chosen command runs this frame.
         if self.command_palette(ctx, doc, history) {
@@ -11951,6 +11965,14 @@ impl PhotonicApp {
                 doc.record_recent_color(c);
                 doc_modified = true;
             }
+        }
+
+        // ── Close the gesture-coalescing window on pointer release (#182) ─────
+        // Runs after this frame's edit handlers, so a final same-frame edit still
+        // folds into the single undo step before the gesture is sealed. Between
+        // gestures the history pushes each command normally.
+        if ctx.input(|i| i.pointer.any_released()) {
+            history.end_coalescing();
         }
 
         // ── Eyedropper overlay ────────────────────────────────────────────────

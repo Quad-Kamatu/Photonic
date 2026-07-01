@@ -16,7 +16,7 @@ pub async fn create_layer(state: &AppState, args: CreateLayerArgs) -> ToolResult
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
 
-    history.execute(Command::AddLayer { layer }, &mut doc);
+    history.execute_discrete(Command::AddLayer { layer }, &mut doc);
 
     // Optionally reposition the layer.
     // position 0 = top of stack (highest z-order); position 1 = just below top; etc.
@@ -32,7 +32,7 @@ pub async fn create_layer(state: &AppState, args: CreateLayerArgs) -> ToolResult
                 old_order,
                 new_order: doc.layer_order.clone(),
             };
-            history.execute(cmd, &mut doc);
+            history.execute_discrete(cmd, &mut doc);
         }
     }
 
@@ -84,7 +84,7 @@ pub async fn collect_in_new_layer(state: &AppState, args: CollectInNewLayerArgs)
             new_index: i,
         });
     }
-    history.execute(Command::Batch(cmds), &mut doc);
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
 
     // Optionally reposition the new layer.
     // position 0 = top of stack (highest z-order); position 1 = just below top; etc.
@@ -94,7 +94,7 @@ pub async fn collect_in_new_layer(state: &AppState, args: CollectInNewLayerArgs)
             doc.layer_order.remove(cur);
             let insert_at = doc.layer_order.len().saturating_sub(pos);
             doc.layer_order.insert(insert_at, new_layer_id);
-            history.execute(
+            history.execute_discrete(
                 Command::ReorderLayers {
                     old_order,
                     new_order: doc.layer_order.clone(),
@@ -168,7 +168,7 @@ pub async fn release_to_layers(state: &AppState, args: ReleaseToLayersArgs) -> T
         });
     }
 
-    history.execute(Command::Batch(cmds), &mut doc);
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
     history.schedule_mcp_checkpoint(format!("Release {} node(s) to layers", resolved.len()));
 
     ToolResult::text(format!(
@@ -273,7 +273,7 @@ pub async fn merge_layers(state: &AppState, args: MergeLayersArgs) -> ToolResult
         ));
     }
 
-    history.execute(Command::Batch(cmds), &mut doc);
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
     history.schedule_mcp_checkpoint(format!(
         "Merge {} layers into '{}'",
         source_ids.len() + 1,
@@ -342,7 +342,7 @@ pub async fn flatten_artwork(state: &AppState, args: FlattenArtworkArgs) -> Tool
     }
 
     if !cmds.is_empty() {
-        history.execute(Command::Batch(cmds), &mut doc);
+        history.execute_discrete(Command::Batch(cmds), &mut doc);
     }
     history.schedule_mcp_checkpoint(format!("Flatten artwork into '{}'", target_name));
 
@@ -372,7 +372,7 @@ pub async fn set_active_layer(state: &AppState, layer_id: uuid::Uuid) -> ToolRes
         new_id: Some(layer_id),
     };
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
 
     ToolResult::text(format!("Active layer set to {}", layer_id))
 }
@@ -415,7 +415,7 @@ pub async fn update_layer(state: &AppState, args: UpdateLayerArgs) -> ToolResult
     };
 
     let mut history = state.history.lock().await;
-    history.execute(cmd, &mut doc);
+    history.execute_discrete(cmd, &mut doc);
     history.schedule_mcp_checkpoint(format!("Update layer '{}'", new_name));
 
     ToolResult::text(format!(

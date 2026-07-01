@@ -875,6 +875,421 @@ mod tests {
         );
     }
 
+    // ── #182: gesture coalescing (one drag → one undo step) ──────────────────
+    //
+    // Continuous edits (the fill/stroke RGBA color picker, #180) used to call
+    // `history.execute(UpdateNode { .. })` on every pointer tick, so one drag
+    // became dozens of undo steps. The GUI now opens a coalescing gesture while
+    // the pointer is down; mergeable same-target commands fold into one anchor
+    // entry. These tests lock that behavior at the `CommandHistory` layer.
+
+    /// Streamed `UpdateNode`s for the same node during one gesture collapse to a
+    /// single undo step, and one undo restores the pre-gesture state.
+    #[test]
+    fn coalesce_streamed_updates_into_one_step() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node: node.clone(),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        assert_eq!(history.undo_depth(), 1, "baseline: AddNode is one step");
+
+        // Simulate a drag: many UpdateNode ticks inside one open gesture.
+        history.begin_coalescing();
+        let mut prev = node.clone();
+        for i in 1..=20u32 {
+            let mut next = prev.clone();
+            next.name = format!("frame-{i}");
+            history.execute(
+                Command::UpdateNode {
+                    old: prev.clone(),
+                    new: next.clone(),
+                },
+                &mut doc,
+            );
+            prev = next;
+        }
+        history.end_coalescing();
+
+        // The whole gesture is exactly one step on top of the AddNode.
+        assert_eq!(
+            history.undo_depth(),
+            2,
+            "20 streamed updates should coalesce into a single undo step"
+        );
+        assert_eq!(doc.nodes[&node_id].name, "frame-20");
+
+        // One undo restores the pre-gesture state (the original node name).
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.nodes[&node_id].name, "rect",
+            "single undo must restore the state from before the gesture"
+        );
+        // And redo re-applies the whole gesture in one step.
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.nodes[&node_id].name, "frame-20");
+    }
+
+    /// #182 fix round 1: an external (MCP/REPL/script) edit routed through
+    /// `execute_discrete` must land as its OWN undo step even while a GUI pointer
+    /// gesture is open on the shared history, and must not be folded into — nor
+    /// swallow a later tick of — that gesture's anchor. The GUI and MCP server
+    /// share one `Arc<Mutex<CommandHistory>>`, so this concurrency is realistic.
+    #[test]
+    fn execute_discrete_does_not_fold_into_open_gesture() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node: node.clone(),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        let base = history.undo_depth();
+
+        // GUI opens a gesture and streams two ticks → one coalesced anchor step.
+        history.begin_coalescing();
+        let mut prev = node.clone();
+        for i in 1..=2u32 {
+            let mut next = prev.clone();
+            next.name = format!("gui-{i}");
+            history.execute(
+                Command::UpdateNode {
+                    old: prev.clone(),
+                    new: next.clone(),
+                },
+                &mut doc,
+            );
+            prev = next;
+        }
+        assert_eq!(
+            history.undo_depth(),
+            base + 1,
+            "the GUI gesture so far is a single coalesced anchor step"
+        );
+
+        // An external caller (simulated MCP tool) edits the SAME node mid-gesture.
+        let mut ext = prev.clone();
+        ext.name = "mcp-edit".into();
+        history.execute_discrete(
+            Command::UpdateNode {
+                old: prev.clone(),
+                new: ext.clone(),
+            },
+            &mut doc,
+        );
+        prev = ext;
+        assert_eq!(
+            history.undo_depth(),
+            base + 2,
+            "an external execute_discrete must push a SEPARATE undo step, not fold \
+             into the open GUI gesture"
+        );
+        assert!(
+            history.is_coalescing(),
+            "execute_discrete must leave the GUI gesture open"
+        );
+
+        // The next GUI tick must NOT merge into the external command (its anchor is
+        // no longer undo_stack.last()); it re-anchors as a fresh step.
+        let mut resume = prev.clone();
+        resume.name = "gui-3".into();
+        history.execute(
+            Command::UpdateNode {
+                old: prev.clone(),
+                new: resume.clone(),
+            },
+            &mut doc,
+        );
+        assert_eq!(
+            history.undo_depth(),
+            base + 3,
+            "a GUI tick after an interleaved external edit must re-anchor, not fold \
+             into the external command's step"
+        );
+
+        history.end_coalescing();
+
+        // One undo peels off only the external edit — proving the AI edit and the
+        // user's drag are independent, granular steps.
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.nodes[&node_id].name, "mcp-edit");
+    }
+
+    /// Two separate gestures produce two independent undo steps.
+    #[test]
+    fn coalesce_two_gestures_two_steps() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node: node.clone(),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        // Gesture 1.
+        history.begin_coalescing();
+        for i in 1..=5u32 {
+            let mut next = doc.nodes[&node_id].clone();
+            next.name = format!("g1-{i}");
+            history.execute(
+                Command::UpdateNode {
+                    old: doc.nodes[&node_id].clone(),
+                    new: next,
+                },
+                &mut doc,
+            );
+        }
+        history.end_coalescing();
+
+        // Gesture 2.
+        history.begin_coalescing();
+        for i in 1..=5u32 {
+            let mut next = doc.nodes[&node_id].clone();
+            next.name = format!("g2-{i}");
+            history.execute(
+                Command::UpdateNode {
+                    old: doc.nodes[&node_id].clone(),
+                    new: next,
+                },
+                &mut doc,
+            );
+        }
+        history.end_coalescing();
+
+        // AddNode + gesture1 + gesture2 = 3 steps.
+        assert_eq!(
+            history.undo_depth(),
+            3,
+            "two gestures must record two distinct undo steps"
+        );
+    }
+
+    /// Updates to *different* nodes never merge, even inside one gesture.
+    #[test]
+    fn coalesce_different_node_ids_do_not_merge() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node_a = make_node(&doc);
+        let node_b = make_node(&doc);
+        let a_id = node_a.id;
+        let b_id = node_b.id;
+        history.execute(
+            Command::AddNode {
+                node: node_a.clone(),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        history.execute(
+            Command::AddNode {
+                node: node_b.clone(),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        let base_depth = history.undo_depth();
+
+        history.begin_coalescing();
+        // Update A, then B, then A again — A/B alternate so neither B-vs-A nor
+        // A-vs-B ever merges; each is its own step.
+        let mut a_new = doc.nodes[&a_id].clone();
+        a_new.name = "a1".into();
+        history.execute(
+            Command::UpdateNode {
+                old: doc.nodes[&a_id].clone(),
+                new: a_new,
+            },
+            &mut doc,
+        );
+        let mut b_new = doc.nodes[&b_id].clone();
+        b_new.name = "b1".into();
+        history.execute(
+            Command::UpdateNode {
+                old: doc.nodes[&b_id].clone(),
+                new: b_new,
+            },
+            &mut doc,
+        );
+        let mut a_new2 = doc.nodes[&a_id].clone();
+        a_new2.name = "a2".into();
+        history.execute(
+            Command::UpdateNode {
+                old: doc.nodes[&a_id].clone(),
+                new: a_new2,
+            },
+            &mut doc,
+        );
+        history.end_coalescing();
+
+        assert_eq!(
+            history.undo_depth(),
+            base_depth + 3,
+            "edits to different nodes must not coalesce"
+        );
+    }
+
+    /// Consecutive same-node updates DO merge even when interleaved with the
+    /// anchor rule: an edit that follows a mergeable anchor folds, but the anchor
+    /// only exists within the gesture that pushed it.
+    #[test]
+    fn coalesce_only_within_the_same_gesture() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node: node.clone(),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        // A pre-gesture UpdateNode pushes a normal step.
+        let mut pre = doc.nodes[&node_id].clone();
+        pre.name = "pre".into();
+        history.execute(
+            Command::UpdateNode {
+                old: doc.nodes[&node_id].clone(),
+                new: pre,
+            },
+            &mut doc,
+        );
+        let depth_before = history.undo_depth();
+
+        // Opening a gesture must NOT fold the very first edit into the leftover
+        // pre-gesture step — coalesce_started is false until this gesture pushes
+        // its own anchor.
+        history.begin_coalescing();
+        let mut g1 = doc.nodes[&node_id].clone();
+        g1.name = "g-1".into();
+        history.execute(
+            Command::UpdateNode {
+                old: doc.nodes[&node_id].clone(),
+                new: g1,
+            },
+            &mut doc,
+        );
+        assert_eq!(
+            history.undo_depth(),
+            depth_before + 1,
+            "first edit of a gesture must push a fresh anchor, not fold into a prior step"
+        );
+        // Subsequent edits in the same gesture fold into that anchor.
+        let mut g2 = doc.nodes[&node_id].clone();
+        g2.name = "g-2".into();
+        history.execute(
+            Command::UpdateNode {
+                old: doc.nodes[&node_id].clone(),
+                new: g2,
+            },
+            &mut doc,
+        );
+        assert_eq!(
+            history.undo_depth(),
+            depth_before + 1,
+            "later edits of the same gesture must fold into the anchor"
+        );
+        history.end_coalescing();
+    }
+
+    /// `Command::coalesce` merges same-target value-replace commands and refuses
+    /// everything else.
+    #[test]
+    fn command_coalesce_merge_matrix() {
+        let doc = make_doc();
+        let n1 = make_node(&doc);
+        let mut n1b = n1.clone();
+        n1b.name = "b".into();
+        let mut n1c = n1.clone();
+        n1c.name = "c".into();
+
+        // Same node id → merges, keeping first `old` and last `new`.
+        let last = Command::UpdateNode {
+            old: n1.clone(),
+            new: n1b.clone(),
+        };
+        let next = Command::UpdateNode {
+            old: n1b.clone(),
+            new: n1c.clone(),
+        };
+        match Command::coalesce(&last, &next) {
+            Some(Command::UpdateNode { old, new }) => {
+                assert_eq!(old.name, "rect");
+                assert_eq!(new.name, "c");
+            }
+            other => panic!("expected merged UpdateNode, got {other:?}"),
+        }
+
+        // Different node ids → no merge.
+        let n2 = make_node(&doc);
+        let mut n2b = n2.clone();
+        n2b.name = "z".into();
+        let other = Command::UpdateNode {
+            old: n2.clone(),
+            new: n2b,
+        };
+        assert!(Command::coalesce(&last, &other).is_none());
+
+        // SetWidthProfiles merges.
+        let w = Command::SetWidthProfiles {
+            old: vec![],
+            new: vec![],
+        };
+        assert!(matches!(
+            Command::coalesce(&w, &w),
+            Some(Command::SetWidthProfiles { .. })
+        ));
+
+        // ResizeCanvas merges, keeping first old dims + last new dims.
+        let r1 = Command::ResizeCanvas {
+            old_width: 10.0,
+            old_height: 10.0,
+            new_width: 20.0,
+            new_height: 20.0,
+        };
+        let r2 = Command::ResizeCanvas {
+            old_width: 20.0,
+            old_height: 20.0,
+            new_width: 30.0,
+            new_height: 30.0,
+        };
+        match Command::coalesce(&r1, &r2) {
+            Some(Command::ResizeCanvas {
+                old_width,
+                new_width,
+                ..
+            }) => {
+                assert_eq!(old_width, 10.0);
+                assert_eq!(new_width, 30.0);
+            }
+            other => panic!("expected merged ResizeCanvas, got {other:?}"),
+        }
+
+        // Non-value-replace command → never merges.
+        let add = Command::AddNode {
+            node: n1.clone(),
+            layer_id: None,
+        };
+        assert!(Command::coalesce(&add, &add).is_none());
+        // Mismatched variants → no merge.
+        assert!(Command::coalesce(&last, &w).is_none());
+    }
+
     #[test]
     fn execute_hydrates_bare_deletes_into_self_contained_forms() {
         let mut doc = make_doc();
@@ -1313,6 +1728,76 @@ impl Command {
         }
     }
 
+    /// Fold a freshly-issued command `new` into the current gesture's anchor
+    /// command `last`, producing a single merged command that keeps `last`'s
+    /// before-state and adopts `new`'s after-state. Returns `None` when the two
+    /// commands are not the same-target value-replace kind (in which case the
+    /// caller pushes `new` as its own undo step).
+    ///
+    /// Only same-target "replace the whole value" commands merge, so that a
+    /// continuous drag (fill/stroke color picker, a streamed slider, …) collapses
+    /// to one undo step spanning the whole gesture while distinct edits stay
+    /// separate:
+    ///
+    /// - `UpdateNode` merges only with another `UpdateNode` targeting the **same**
+    ///   node id (`new.id`); the merged `old` is the anchor's `old` (the state
+    ///   before the gesture began) and the merged `new` is the incoming `new`.
+    /// - `SetWidthProfiles`, `SetGuides`, `SetArtboards`, `ResizeCanvas`: whole-
+    ///   document value replacements — keep `old` from the anchor, `new` from the
+    ///   incoming.
+    ///
+    /// Everything else (adds, removes, reorders, grouping, layer moves, batches,
+    /// mismatched variants, different node ids) returns `None`.
+    pub fn coalesce(last: &Command, new: &Command) -> Option<Command> {
+        match (last, new) {
+            (
+                Command::UpdateNode { old, new: last_new },
+                Command::UpdateNode {
+                    new: incoming_new, ..
+                },
+            ) if last_new.id == incoming_new.id => Some(Command::UpdateNode {
+                old: old.clone(),
+                new: incoming_new.clone(),
+            }),
+            (Command::SetWidthProfiles { old, .. }, Command::SetWidthProfiles { new, .. }) => {
+                Some(Command::SetWidthProfiles {
+                    old: old.clone(),
+                    new: new.clone(),
+                })
+            }
+            (Command::SetGuides { old, .. }, Command::SetGuides { new, .. }) => {
+                Some(Command::SetGuides {
+                    old: old.clone(),
+                    new: new.clone(),
+                })
+            }
+            (Command::SetArtboards { old, .. }, Command::SetArtboards { new, .. }) => {
+                Some(Command::SetArtboards {
+                    old: old.clone(),
+                    new: new.clone(),
+                })
+            }
+            (
+                Command::ResizeCanvas {
+                    old_width,
+                    old_height,
+                    ..
+                },
+                Command::ResizeCanvas {
+                    new_width,
+                    new_height,
+                    ..
+                },
+            ) => Some(Command::ResizeCanvas {
+                old_width: *old_width,
+                old_height: *old_height,
+                new_width: *new_width,
+                new_height: *new_height,
+            }),
+            _ => None,
+        }
+    }
+
     /// Compute the inverse command (for undo).
     /// Returns None if the inverse cannot be computed without document state.
     pub fn inverse(&self, doc: &Document) -> Option<Command> {
@@ -1608,6 +2093,16 @@ pub struct CommandHistory {
     /// changes cheaply without re-serializing the whole document each frame.
     /// Never reset, so it cannot collide across document replacements.
     revision: u64,
+    /// A pointer gesture is open (set by [`begin_coalescing`]): mergeable
+    /// same-target edits streamed through [`execute`] fold into the current
+    /// gesture's anchor undo entry instead of pushing a new step, so one
+    /// continuous drag becomes a single undo step (#182).
+    coalescing: bool,
+    /// Set once the first command of the current gesture has been pushed, so the
+    /// anchor entry (`undo_stack.last()`) is only ever merged into within the
+    /// gesture that created it — never into a step left over from before the
+    /// gesture began.
+    coalesce_started: bool,
 }
 
 /// Serialized byte length of a single history entry (a `Command` or
@@ -1637,7 +2132,37 @@ impl CommandHistory {
             gui_debounce: DebounceCheckpoint::new(30),
             mcp_debounce: DebounceCheckpoint::new(60),
             revision: 0,
+            coalescing: false,
+            coalesce_started: false,
         }
+    }
+
+    // ── Gesture coalescing (#182) ────────────────────────────────────────────
+
+    /// Open a coalescing gesture. While open, mergeable same-target commands
+    /// streamed through [`execute`] fold into a single undo step instead of
+    /// pushing one entry per pointer tick. Idempotent: the GUI calls this every
+    /// frame the pointer is down, and only the first call (per gesture) arms it —
+    /// re-calling while already open must NOT reset `coalesce_started`, or a mid-
+    /// gesture edit would start a fresh anchor and stop folding.
+    pub fn begin_coalescing(&mut self) {
+        if !self.coalescing {
+            self.coalescing = true;
+            self.coalesce_started = false;
+        }
+    }
+
+    /// Close the current coalescing gesture. Called on pointer release, after
+    /// that frame's edit handlers have run, so a final same-frame edit still
+    /// folds into the one step. Between gestures normal per-command pushes resume.
+    pub fn end_coalescing(&mut self) {
+        self.coalescing = false;
+        self.coalesce_started = false;
+    }
+
+    /// Whether a coalescing gesture is currently open (test/introspection).
+    pub fn is_coalescing(&self) -> bool {
+        self.coalescing
     }
 
     // ── Configurable history limits ──────────────────────────────────────────
@@ -1830,6 +2355,26 @@ impl CommandHistory {
         // [`Command::hydrate`].
         let cmd = cmd.hydrate(doc);
         let desc = cmd.description();
+
+        // Gesture coalescing (#182): during an open pointer gesture, fold a
+        // mergeable same-target command into the gesture's anchor undo entry
+        // instead of pushing a new step, so one continuous drag records a single
+        // undo step. Only merges once the gesture has pushed its anchor
+        // (`coalesce_started`), and only when `Command::coalesce` accepts the
+        // pair. Redo was already cleared by the anchor push, and `enforce_steps`
+        // trims from the front, so mutating `undo_stack.last()` is safe.
+        if self.coalescing && self.coalesce_started {
+            if let Some(last) = self.undo_stack.last() {
+                if let Some(merged) = Command::coalesce(last, &cmd) {
+                    cmd.apply(doc);
+                    reevaluate_constraints(doc);
+                    *self.undo_stack.last_mut().unwrap() = merged;
+                    self.gui_debounce.schedule(desc);
+                    return;
+                }
+            }
+        }
+
         cmd.apply(doc);
         reevaluate_constraints(doc);
         self.undo_stack.push(cmd);
@@ -1838,7 +2383,41 @@ impl CommandHistory {
         // cap is enforced separately via `enforce_size` (off the hot path,
         // since it must serialize the history to measure it).
         self.enforce_steps();
+        // While a gesture is open, the entry just pushed becomes the anchor that
+        // subsequent mergeable ticks fold into.
+        if self.coalescing {
+            self.coalesce_started = true;
+        }
         self.gui_debounce.schedule(desc);
+    }
+
+    /// Apply a command as a **discrete** undo step, bypassing gesture coalescing
+    /// (#182 fix round 1).
+    ///
+    /// Gesture coalescing (`coalescing` / `coalesce_started`) is armed purely by
+    /// GUI pointer state, but the GUI and the MCP server share one
+    /// `Arc<Mutex<CommandHistory>>`. If an external caller (the MCP tool server,
+    /// the Lua REPL, or a script) went through the plain [`execute`] while a GUI
+    /// pointer happened to be held down (dragging a swatch, panning, an in-progress
+    /// marquee, …), its edit would silently fold into — or be absorbed by — the
+    /// GUI gesture's anchor entry, collapsing multiple independent AI/script edits
+    /// (or an AI edit + the user's own drag) into a single, non-granular undo step.
+    ///
+    /// Every non-GUI edit source must therefore call this instead of [`execute`].
+    /// It snapshots the gesture flags, forces coalescing off for the push so the
+    /// command always lands as its own step, then restores the gesture-open flag.
+    /// `coalesce_started` is deliberately left `false` afterwards: the pushed
+    /// command is now `undo_stack.last()`, so the GUI gesture must re-anchor on its
+    /// next tick rather than fold a later pointer tick into this external command.
+    pub fn execute_discrete(&mut self, cmd: Command, doc: &mut Document) {
+        let was_coalescing = self.coalescing;
+        self.coalescing = false;
+        self.coalesce_started = false;
+        self.execute(cmd, doc);
+        // Restore only the gesture-open flag; leave `coalesce_started` false so an
+        // in-progress GUI gesture starts a fresh anchor instead of merging into
+        // this externally-sourced step.
+        self.coalescing = was_coalescing;
     }
 
     /// Call once per frame from the render loop.  If a user action was recorded

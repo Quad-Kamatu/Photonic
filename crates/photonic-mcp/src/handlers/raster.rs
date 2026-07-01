@@ -246,7 +246,7 @@ pub async fn place_image(state: &AppState, args: PlaceImageArgs) -> ToolResult {
 
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: args.layer_id,
@@ -297,7 +297,7 @@ pub async fn create_raster_layer(state: &AppState, args: CreateRasterLayerArgs) 
 
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: args.layer_id,
@@ -348,7 +348,7 @@ pub async fn apply_adjustment(state: &AppState, args: ApplyAdjustmentArgs) -> To
     spec.apply(img, sel);
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("Applied {} to {}", args.adjustment, nid))
         .with_data(json!({ "node_id": nid, "adjustment": args.adjustment }))
 }
@@ -507,7 +507,7 @@ pub async fn create_adjustment_layer(
 
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute(
+    history.execute_discrete(
         Command::AddNode {
             node,
             layer_id: args.layer_id,
@@ -595,7 +595,7 @@ pub async fn apply_filter(state: &AppState, args: ApplyFilterArgs) -> ToolResult
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("Applied {} to {}", args.filter, nid))
         .with_data(json!({ "node_id": nid, "filter": args.filter }))
 }
@@ -671,7 +671,7 @@ pub async fn brush_stroke(state: &AppState, args: BrushStrokeArgs) -> ToolResult
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("Painted stroke ({} points) on {}", pts.len(), nid))
         .with_data(json!({ "node_id": nid }))
 }
@@ -700,7 +700,7 @@ pub async fn bucket_fill(state: &AppState, args: BucketFillArgs) -> ToolResult {
     brush::bucket_fill(&mut rn.image, args.x, args.y, color, args.tolerance);
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!(
         "Filled region at ({},{}) on {}",
         args.x, args.y, nid
@@ -750,7 +750,7 @@ pub async fn gradient_fill(state: &AppState, args: GradientFillArgs) -> ToolResu
     );
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("Filled gradient on {}", nid)).with_data(json!({ "node_id": nid }))
 }
 
@@ -828,7 +828,7 @@ pub async fn transform_image(state: &AppState, args: TransformImageArgs) -> Tool
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("{} → {}×{} on {}", args.op, w, h, nid))
         .with_data(json!({ "node_id": nid, "width": w, "height": h }))
 }
@@ -869,7 +869,7 @@ pub async fn set_layer_mask(state: &AppState, args: SetLayerMaskArgs) -> ToolRes
     rn.mask = Some(mask);
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("Set layer mask on {}", nid)).with_data(json!({ "node_id": nid }))
 }
 
@@ -891,7 +891,7 @@ pub async fn clear_layer_mask(state: &AppState, args: ClearLayerMaskArgs) -> Too
     rn.mask = None;
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("Cleared layer mask on {}", nid)).with_data(json!({ "node_id": nid }))
 }
 
@@ -1009,7 +1009,7 @@ pub async fn retouch(state: &AppState, args: RetouchArgs) -> ToolResult {
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("{} on {}", args.op, nid)).with_data(json!({ "node_id": nid }))
 }
 
@@ -1106,6 +1106,6 @@ pub async fn liquify(state: &AppState, args: LiquifyArgs) -> ToolResult {
     }
 
     let mut history = state.history.lock().await;
-    history.execute(Command::UpdateNode { old, new: new_node }, &mut doc);
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("{} on {}", args.op, nid)).with_data(json!({ "node_id": nid }))
 }

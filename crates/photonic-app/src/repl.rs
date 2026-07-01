@@ -240,7 +240,7 @@ fn register_live_api(
                 if let Ok(uuid) = id.parse::<uuid::Uuid>() {
                     let mut doc = d.blocking_lock();
                     let mut h = hist.blocking_lock();
-                    h.execute(Command::RemoveNode { node_id: uuid }, &mut *doc);
+                    h.execute_discrete(Command::RemoveNode { node_id: uuid }, &mut *doc);
                 }
                 Ok(())
             })?,
@@ -260,7 +260,7 @@ fn register_live_api(
                     .collect();
                 if !cmds.is_empty() {
                     hist.blocking_lock()
-                        .execute(Command::Batch(cmds), &mut *doc);
+                        .execute_discrete(Command::Batch(cmds), &mut *doc);
                 }
                 Ok(())
             })?,
@@ -332,7 +332,7 @@ fn register_live_api(
                 let n = doc.node_count() + 1;
                 let node = SceneNode::new(format!("Boolean {n}"), Default::default(), kind);
                 let node_id = node.id;
-                hist.blocking_lock().execute(
+                hist.blocking_lock().execute_discrete(
                     Command::AddNode {
                         node,
                         layer_id: None,
@@ -461,7 +461,7 @@ fn add_live_shape(
         node.opacity = op.clamp(0.0, 1.0) as f32;
     }
     let node_id = node.id;
-    hist.blocking_lock().execute(
+    hist.blocking_lock().execute_discrete(
         Command::AddNode {
             node,
             layer_id: None,
