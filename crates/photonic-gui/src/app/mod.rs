@@ -1991,6 +1991,16 @@ impl PhotonicApp {
             doc_modified = true;
         }
 
+        // ── Tool-independent keyboard shortcuts (#192) ────────────────────────
+        // Undo/redo, copy/paste, duplicate, select-all/deselect, flip,
+        // group/ungroup, z-order and the view-preview/guide toggles must fire
+        // regardless of the active tool. Dispatched here, before per-tool
+        // handling, so a shortcut applies the same frame. Internally guarded by
+        // `viewport_kb` so typing into a text field is unaffected.
+        if self.handle_global_shortcuts(ctx, doc, history) {
+            doc_modified = true;
+        }
+
         // ── Poll an in-flight self-update check ───────────────────────────────
         if let Some(rx) = &self.update_rx {
             if let Ok(status) = rx.try_recv() {

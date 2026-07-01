@@ -82,6 +82,236 @@ impl PhotonicApp {
         self.move_snap_press = None;
     }
 
+    /// Tool-independent keyboard shortcuts that must fire regardless of which
+    /// tool is active (#192). Extracted from [`Self::handle_select_tool`] so
+    /// undo/redo, copy/paste, duplicate, select-all/deselect, flip H/V,
+    /// group/ungroup, z-order and the view-preview/guide toggles work while
+    /// Scissors, Pen, Knife, Eraser, MagicWand, Lasso, Pencil, Text, Direct
+    /// Select (any non-Select tool) is active — previously these were dead
+    /// unless the Select tool happened to be current.
+    ///
+    /// Dispatched unconditionally from the frame loop before per-tool handling.
+    /// Guarded by `viewport_kb` so typing into a focused text widget is never
+    /// intercepted. Returns whether the document was modified this frame.
+    pub(crate) fn handle_global_shortcuts(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        let mut doc_modified = false;
+
+        // Skip entirely when a text widget has focus so typing is unaffected.
+        if !viewport_kb(ctx) {
+            return doc_modified;
+        }
+
+        // ── Selection-anchored shortcuts (z-order, ungroup) ───────────────────
+        // These need a single anchor node from `self.selected_id`. They operate
+        // on `doc.selection` / the anchored node, so they are safe under any
+        // tool.
+        if let Some(sel_id) = self.selected_id {
+            let (ctrl, shift, bracket_right, bracket_left, key_g) = ctx.input(|i| {
+                (
+                    i.modifiers.ctrl,
+                    i.modifiers.shift,
+                    i.key_pressed(egui::Key::CloseBracket),
+                    i.key_pressed(egui::Key::OpenBracket),
+                    i.key_pressed(egui::Key::G),
+                )
+            });
+
+            // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
+            if ctrl && (bracket_right || bracket_left) {
+                if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
+                    let layer_len = doc
+                        .layers
+                        .get(&layer_id)
+                        .map(|l| l.node_ids.len())
+                        .unwrap_or(0);
+                    if layer_len > 0 {
+                        let new_index = if bracket_right && shift {
+                            layer_len - 1 // Bring to Front
+                        } else if bracket_left && shift {
+                            0 // Send to Back
+                        } else if bracket_right {
+                            (cur_idx + 1).min(layer_len - 1) // Bring Forward
+                        } else {
+                            cur_idx.saturating_sub(1) // Send Backward
+                        };
+                        if new_index != cur_idx {
+                            let cmd = Command::ReorderNode {
+                                layer_id,
+                                node_id: sel_id,
+                                old_index: cur_idx,
+                                new_index,
+                            };
+                            history.execute(cmd, doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+            }
+
+            // Ctrl+Shift+G: ungroup (only if selected node is a group)
+            if ctrl && shift && key_g {
+                if let Some(node) = doc.get_node(&sel_id) {
+                    if let SceneNodeKind::Group(g) = &node.kind {
+                        let children = g.children.clone();
+                        let node_clone = node.clone();
+                        if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id) {
+                            let first_child = children.first().copied();
+                            let cmd = Command::UngroupNodes {
+                                group: node_clone,
+                                layer_id,
+                                group_index,
+                                children,
+                            };
+                            history.execute(cmd, doc);
+                            self.selected_id = first_child;
+                            if let Some(fc) = first_child {
+                                doc.selection = Selection::single(fc);
+                            } else {
+                                doc.selection.clear();
+                            }
+                            doc_modified = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ctrl+G: group selected nodes (requires 2+ in selection)
+        let (ctrl_g, shift_g) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
+            )
+        });
+        if ctrl_g && !shift_g && doc.selection.count() >= 2 {
+            self.do_group_selected(doc, history, &mut doc_modified);
+        }
+
+        // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
+        // a user remap takes effect (#140). The three view-preview modes are
+        // mutually exclusive (#22).
+        if self.binding_pressed(ctx, "view.outline_mode") {
+            self.toggle_outline_mode();
+        }
+
+        // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
+        if self.binding_pressed(ctx, "view.pixel_preview") {
+            self.toggle_pixel_preview();
+        }
+
+        // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
+        if self.binding_pressed(ctx, "view.overprint_preview") {
+            self.toggle_overprint_preview();
+        }
+
+        // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
+        if self.binding_pressed(ctx, "view.toggle_guides") {
+            self.guides_visible = !self.guides_visible;
+        }
+
+        // Ctrl+C: copy selected nodes to in-process clipboard.
+        if ctx.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::C)) {
+            self.gui_clipboard.clear();
+            for nid in doc.selection.ids() {
+                if let Some(node) = doc.nodes.get(nid) {
+                    self.gui_clipboard.push(node.clone());
+                }
+            }
+        }
+
+        // Ctrl+V: paste from clipboard with +10px offset.
+        // Ctrl+Shift+V: paste in place (exact original coordinates).
+        let (paste, paste_in_place) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V),
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::V),
+            )
+        });
+        if (paste || paste_in_place) && !self.gui_clipboard.is_empty() {
+            let offset = if paste { 10.0_f64 } else { 0.0 };
+            if let Some(target_layer) = doc
+                .active_layer_id
+                .or_else(|| doc.layer_order.first().copied())
+            {
+                let mut cmds: Vec<Command> = Vec::new();
+                let mut new_ids: Vec<NodeId> = Vec::new();
+                for src in &self.gui_clipboard {
+                    let mut new_node = src.clone();
+                    new_node.id = uuid::Uuid::new_v4();
+                    new_node.layer_id = target_layer;
+                    if offset.abs() > 1e-9 {
+                        new_node.transform.matrix[4] += offset;
+                        new_node.transform.matrix[5] += offset;
+                    }
+                    new_ids.push(new_node.id);
+                    cmds.push(Command::AddNode {
+                        node: new_node,
+                        layer_id: Some(target_layer),
+                    });
+                }
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    doc.selection = Selection::from_ids(new_ids.iter().copied());
+                    if let Some(first) = new_ids.first() {
+                        self.selected_id = Some(*first);
+                    }
+                    doc_modified = true;
+                }
+            }
+        }
+
+        // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
+        // — keymap-resolved and routed through the shared flip helper (#140).
+        if self.binding_pressed(ctx, "object.flip_horizontal")
+            && self.flip_selection(doc, history, true)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "object.flip_vertical")
+            && self.flip_selection(doc, history, false)
+        {
+            doc_modified = true;
+        }
+
+        // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
+        if self.binding_pressed(ctx, "edit.undo")
+            && self.dispatch_command("edit.undo", doc, history)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "edit.redo")
+            && self.dispatch_command("edit.redo", doc, history)
+        {
+            doc_modified = true;
+        }
+
+        // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
+        // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
+        // remap actually fire on the canvas (#140).
+        if self.binding_pressed(ctx, "selection.select_all")
+            && self.dispatch_command("selection.select_all", doc, history)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "selection.deselect")
+            && self.dispatch_command("selection.deselect", doc, history)
+        {
+            doc_modified = true;
+        }
+        if self.binding_pressed(ctx, "edit.duplicate")
+            && self.dispatch_command("edit.duplicate", doc, history)
+        {
+            doc_modified = true;
+        }
+
+        doc_modified
+    }
+
     pub(crate) fn handle_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -93,227 +323,34 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) {
         // ── Keyboard shortcuts (skipped when a text widget has focus) ─────────
-        if viewport_kb(ui.ctx()) {
-            if let Some(sel_id) = self.selected_id {
-                let (delete, ctrl, shift, bracket_right, bracket_left, key_g) = ui.input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                        i.modifiers.ctrl,
-                        i.modifiers.shift,
-                        i.key_pressed(egui::Key::CloseBracket),
-                        i.key_pressed(egui::Key::OpenBracket),
-                        i.key_pressed(egui::Key::G),
-                    )
-                });
-
-                // Delete / Backspace: remove all selected nodes as one
-                // undoable history step so Ctrl+Z restores them (#191).
-                // `execute` hydrates each bare RemoveNode into RemoveNodeFull,
-                // so undo re-adds every node into its original layer.
-                if delete {
-                    let ids_to_delete: Vec<NodeId> = doc.selection.ids().copied().collect();
-                    if !ids_to_delete.is_empty() {
-                        let cmds: Vec<Command> = ids_to_delete
-                            .iter()
-                            .map(|&node_id| Command::RemoveNode { node_id })
-                            .collect();
-                        history.execute(Command::Batch(cmds), doc);
-                        doc.selection.clear();
-                        self.selected_id = None;
-                        *doc_modified = true;
-                    }
-                    return;
+        // Tool-independent shortcuts (undo/redo, copy/paste, duplicate,
+        // select-all/deselect, flip, group/ungroup, z-order, view toggles) live
+        // in `handle_global_shortcuts`, dispatched unconditionally from the
+        // frame loop (#192). Only Delete/Backspace of the live Select-tool
+        // selection remains here — it acts on the Select tool's selection UI and
+        // must short-circuit the rest of this handler.
+        if viewport_kb(ui.ctx()) && self.selected_id.is_some() {
+            // Delete / Backspace: remove all selected nodes as one undoable
+            // history step so Ctrl+Z restores them (#191). `execute` hydrates
+            // each bare RemoveNode into RemoveNodeFull, so undo re-adds every
+            // node into its original layer.
+            let delete = ui
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+            if delete {
+                let ids_to_delete: Vec<NodeId> = doc.selection.ids().copied().collect();
+                if !ids_to_delete.is_empty() {
+                    let cmds: Vec<Command> = ids_to_delete
+                        .iter()
+                        .map(|&node_id| Command::RemoveNode { node_id })
+                        .collect();
+                    history.execute(Command::Batch(cmds), doc);
+                    doc.selection.clear();
+                    self.selected_id = None;
+                    *doc_modified = true;
                 }
-
-                // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
-                if ctrl && (bracket_right || bracket_left) {
-                    if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
-                        let layer_len = doc
-                            .layers
-                            .get(&layer_id)
-                            .map(|l| l.node_ids.len())
-                            .unwrap_or(0);
-                        if layer_len > 0 {
-                            let new_index = if bracket_right && shift {
-                                layer_len - 1 // Bring to Front
-                            } else if bracket_left && shift {
-                                0 // Send to Back
-                            } else if bracket_right {
-                                (cur_idx + 1).min(layer_len - 1) // Bring Forward
-                            } else {
-                                cur_idx.saturating_sub(1) // Send Backward
-                            };
-                            if new_index != cur_idx {
-                                let cmd = Command::ReorderNode {
-                                    layer_id,
-                                    node_id: sel_id,
-                                    old_index: cur_idx,
-                                    new_index,
-                                };
-                                history.execute(cmd, doc);
-                                *doc_modified = true;
-                            }
-                        }
-                    }
-                }
-
-                // Ctrl+Shift+G: ungroup (only if selected node is a group)
-                if ctrl && shift && key_g {
-                    if let Some(node) = doc.get_node(&sel_id) {
-                        if let SceneNodeKind::Group(g) = &node.kind {
-                            let children = g.children.clone();
-                            let node_clone = node.clone();
-                            if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id)
-                            {
-                                let first_child = children.first().copied();
-                                let cmd = Command::UngroupNodes {
-                                    group: node_clone,
-                                    layer_id,
-                                    group_index,
-                                    children,
-                                };
-                                history.execute(cmd, doc);
-                                self.selected_id = first_child;
-                                if let Some(fc) = first_child {
-                                    doc.selection = Selection::single(fc);
-                                } else {
-                                    doc.selection.clear();
-                                }
-                                *doc_modified = true;
-                            }
-                        }
-                    }
-                }
+                return;
             }
-
-            // Ctrl+G: group selected nodes (requires 2+ in selection)
-            let (ctrl_g, shift_g) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
-                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
-                )
-            });
-            if ctrl_g && !shift_g && doc.selection.count() >= 2 {
-                self.do_group_selected(doc, history, doc_modified);
-            }
-
-            // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
-            // a user remap takes effect (#140). The three view-preview modes are
-            // mutually exclusive (#22).
-            if self.binding_pressed(ui.ctx(), "view.outline_mode") {
-                self.toggle_outline_mode();
-            }
-
-            // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
-            if self.binding_pressed(ui.ctx(), "view.pixel_preview") {
-                self.toggle_pixel_preview();
-            }
-
-            // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
-            if self.binding_pressed(ui.ctx(), "view.overprint_preview") {
-                self.toggle_overprint_preview();
-            }
-
-            // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
-            if self.binding_pressed(ui.ctx(), "view.toggle_guides") {
-                self.guides_visible = !self.guides_visible;
-            }
-
-            // Ctrl+C: copy selected nodes to in-process clipboard.
-            if ui.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::C)) {
-                self.gui_clipboard.clear();
-                for nid in doc.selection.ids() {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        self.gui_clipboard.push(node.clone());
-                    }
-                }
-            }
-
-            // Ctrl+V: paste from clipboard with +10px offset.
-            // Ctrl+Shift+V: paste in place (exact original coordinates).
-            let (paste, paste_in_place) = ui.input(|i| {
-                (
-                    i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V),
-                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::V),
-                )
-            });
-            if (paste || paste_in_place) && !self.gui_clipboard.is_empty() {
-                let offset = if paste { 10.0_f64 } else { 0.0 };
-                if let Some(target_layer) = doc
-                    .active_layer_id
-                    .or_else(|| doc.layer_order.first().copied())
-                {
-                    let mut cmds: Vec<Command> = Vec::new();
-                    let mut new_ids: Vec<NodeId> = Vec::new();
-                    for src in &self.gui_clipboard {
-                        let mut new_node = src.clone();
-                        new_node.id = uuid::Uuid::new_v4();
-                        new_node.layer_id = target_layer;
-                        if offset.abs() > 1e-9 {
-                            new_node.transform.matrix[4] += offset;
-                            new_node.transform.matrix[5] += offset;
-                        }
-                        new_ids.push(new_node.id);
-                        cmds.push(Command::AddNode {
-                            node: new_node,
-                            layer_id: Some(target_layer),
-                        });
-                    }
-                    if !cmds.is_empty() {
-                        history.execute(Command::Batch(cmds), doc);
-                        doc.selection = Selection::from_ids(new_ids.iter().copied());
-                        if let Some(first) = new_ids.first() {
-                            self.selected_id = Some(*first);
-                        }
-                        *doc_modified = true;
-                    }
-                }
-            }
-
-            // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
-            // — keymap-resolved and routed through the shared flip helper (#140).
-            if self.binding_pressed(ui.ctx(), "object.flip_horizontal")
-                && self.flip_selection(doc, history, true)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "object.flip_vertical")
-                && self.flip_selection(doc, history, false)
-            {
-                *doc_modified = true;
-            }
-
-            // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
-            if self.binding_pressed(ui.ctx(), "edit.undo")
-                && self.dispatch_command("edit.undo", doc, history)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "edit.redo")
-                && self.dispatch_command("edit.redo", doc, history)
-            {
-                *doc_modified = true;
-            }
-
-            // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
-            // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
-            // remap actually fire on the canvas (#140).
-            if self.binding_pressed(ui.ctx(), "selection.select_all")
-                && self.dispatch_command("selection.select_all", doc, history)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "selection.deselect")
-                && self.dispatch_command("selection.deselect", doc, history)
-            {
-                *doc_modified = true;
-            }
-            if self.binding_pressed(ui.ctx(), "edit.duplicate")
-                && self.dispatch_command("edit.duplicate", doc, history)
-            {
-                *doc_modified = true;
-            }
-        } // end viewport_kb
+        }
 
         // ── Isolation Mode: Escape exits ─────────────────────────────────────
         if self.isolated_group.is_some() {
