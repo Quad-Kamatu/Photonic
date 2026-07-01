@@ -369,53 +369,50 @@ pub(crate) fn ds_find_corner_widget(
 
 /// Move the selected anchor points in a `BezPath` by `(dx, dy)` in local space.
 ///
-/// For each selected element:
-/// - The element's endpoint is shifted by `(dx, dy)`.
-/// - If the element is `CurveTo`, its incoming handle (c2) is also shifted.
-/// - The next element's outgoing handle (c1 for `CurveTo`, c for `QuadTo`) is
-///   shifted only if the next anchor is NOT also in the selection (prevents
-///   double-moving shared handles).
+/// Implemented as a single membership pass over the elements so that each point
+/// is written exactly once — this makes rigidly translating a *set* of adjacent
+/// (or all) anchors correct, which the old two-write approach corrupted via
+/// overwrites and its `!sel_set.contains(&next)` guard.
+///
+/// For each element `j`, a point moves iff the anchor it belongs to is selected:
+/// - endpoint `p` and incoming handle `c2` belong to anchor `j` — move iff `j`
+///   is selected;
+/// - outgoing handle `c1` belongs to the *previous* anchor `j-1` (the segment
+///   leaves that anchor) — move iff `j-1` is selected (and `j-1` is a real
+///   anchor, i.e. not a `ClosePath`);
+/// - a `QuadTo`'s single control is shared by both endpoints, so it moves iff
+///   *either* `j` or `j-1` is selected.
+///
+/// Single-anchor behaviour is identical to before (the outgoing handle of the
+/// selected anchor lives on the next element, which sees `j-1` selected).
 pub(crate) fn bez_move_anchors(bez: &BezPath, selected: &[usize], dx: f64, dy: f64) -> BezPath {
     let els: Vec<PathEl> = bez.elements().iter().copied().collect();
-    let n = els.len();
     let sel_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
-    let mut new_els = els.clone();
+    let shift = |p: Point| Point::new(p.x + dx, p.y + dy);
 
-    for &i in selected {
-        if i >= n {
-            continue;
-        }
-        // Move endpoint (and incoming handle for curved elements)
-        new_els[i] = match els[i] {
-            PathEl::MoveTo(p) => PathEl::MoveTo(Point::new(p.x + dx, p.y + dy)),
-            PathEl::LineTo(p) => PathEl::LineTo(Point::new(p.x + dx, p.y + dy)),
+    let mut result = BezPath::new();
+    for (j, el) in els.iter().enumerate() {
+        // This element's own anchor (owns endpoint + incoming handle).
+        let anchor_sel = sel_set.contains(&j);
+        // The previous anchor (owns this element's outgoing handle `c1`), unless
+        // the previous element is a `ClosePath` (no anchor there).
+        let prev_sel =
+            j > 0 && !matches!(els[j - 1], PathEl::ClosePath) && sel_set.contains(&(j - 1));
+        let new_el = match *el {
+            PathEl::MoveTo(p) => PathEl::MoveTo(if anchor_sel { shift(p) } else { p }),
+            PathEl::LineTo(p) => PathEl::LineTo(if anchor_sel { shift(p) } else { p }),
             PathEl::CurveTo(c1, c2, p) => PathEl::CurveTo(
-                c1,
-                Point::new(c2.x + dx, c2.y + dy),
-                Point::new(p.x + dx, p.y + dy),
+                if prev_sel { shift(c1) } else { c1 },
+                if anchor_sel { shift(c2) } else { c2 },
+                if anchor_sel { shift(p) } else { p },
             ),
             PathEl::QuadTo(c, p) => PathEl::QuadTo(
-                Point::new(c.x + dx, c.y + dy),
-                Point::new(p.x + dx, p.y + dy),
+                if anchor_sel || prev_sel { shift(c) } else { c },
+                if anchor_sel { shift(p) } else { p },
             ),
             PathEl::ClosePath => PathEl::ClosePath,
         };
-        // Move outgoing handle (on the NEXT element) only if next anchor isn't also selected
-        let j = i + 1;
-        if j < n && !sel_set.contains(&j) {
-            new_els[j] = match els[j] {
-                PathEl::CurveTo(c1, c2, p) => {
-                    PathEl::CurveTo(Point::new(c1.x + dx, c1.y + dy), c2, p)
-                }
-                PathEl::QuadTo(c, p) => PathEl::QuadTo(Point::new(c.x + dx, c.y + dy), p),
-                other => other,
-            };
-        }
-    }
-
-    let mut result = BezPath::new();
-    for el in new_els {
-        result.push(el);
+        result.push(new_el);
     }
     result
 }
@@ -741,22 +738,6 @@ pub(crate) fn round_selected_corners(
     let subs = corner_subpaths(bez);
     let mut result = BezPath::new();
 
-    // Fillet endpoints for a corner: retreat `r` along each adjacent edge,
-    // clamping to half the shorter edge so neighbouring fillets never overlap.
-    let fillet = |prev: Point, curr: Point, next: Point| -> Option<(Point, Point)> {
-        let din = (curr.x - prev.x, curr.y - prev.y);
-        let dout = (next.x - curr.x, next.y - curr.y);
-        let lin = (din.0 * din.0 + din.1 * din.1).sqrt();
-        let lout = (dout.0 * dout.0 + dout.1 * dout.1).sqrt();
-        if lin < 1e-9 || lout < 1e-9 {
-            return None;
-        }
-        let r = radius.min(lin / 2.0).min(lout / 2.0);
-        let fs = Point::new(curr.x - din.0 / lin * r, curr.y - din.1 / lin * r);
-        let fe = Point::new(curr.x + dout.0 / lout * r, curr.y + dout.1 / lout * r);
-        Some((fs, fe))
-    };
-
     for s in &subs {
         let n = s.verts.len();
         if n == 0 {
@@ -786,13 +767,67 @@ pub(crate) fn round_selected_corners(
             }
         };
 
+        // A position is a *roundable straight corner* when both adjacent
+        // segments are straight lines (`straight_corners` uses the same rule).
+        // `straight[0]` is unused, so the arriving side of vertex 0 is the
+        // closing segment, which is straight iff the subpath is closed.
+        let is_straight_corner = |k: usize| -> bool {
+            let in_straight = if k > 0 { s.straight[k] } else { s.closed };
+            let out_straight = if k + 1 < n {
+                s.straight[k + 1]
+            } else {
+                s.closed
+            };
+            in_straight && out_straight
+        };
+
+        // Per-position predicate: this corner will actually be filleted. Used
+        // both to emit the fillet and to make each side's retreat clamp aware of
+        // whether the neighbour sharing that edge is being rounded too.
+        let rounded: Vec<bool> = (0..n)
+            .map(|k| {
+                let (idx, _) = s.verts[k];
+                selected.contains(&idx) && is_straight_corner(k) && neighbours(k).is_some()
+            })
+            .collect();
+
+        // Fillet endpoints for corner `k`: retreat `r` along each adjacent edge.
+        // The retreat on each side is bounded by whether that side's neighbour
+        // is itself being rounded — if so the shared edge is split 50/50 so the
+        // two fillets never overlap (deterministic for multi-select); otherwise
+        // the retreat may reach up to the full edge (minus a tiny epsilon so a
+        // degenerate zero-length segment is never emitted at the adjacent
+        // vertex). This removes the artificial per-corner half-edge cap.
         let do_round = |k: usize| -> Option<(Point, Point)> {
-            let (idx, curr) = s.verts[k];
-            if !selected.contains(&idx) {
+            if !rounded[k] {
                 return None;
             }
+            let (_, curr) = s.verts[k];
             let (prev, next) = neighbours(k)?;
-            fillet(prev, curr, next)
+            let din = (curr.x - prev.x, curr.y - prev.y);
+            let dout = (next.x - curr.x, next.y - curr.y);
+            let lin = (din.0 * din.0 + din.1 * din.1).sqrt();
+            let lout = (dout.0 * dout.0 + dout.1 * dout.1).sqrt();
+            if lin < 1e-9 || lout < 1e-9 {
+                return None;
+            }
+            let kprev = if k > 0 { k - 1 } else { n - 1 };
+            let knext = if k + 1 < n { k + 1 } else { 0 };
+            const EPS: f64 = 1e-3;
+            let max_in = if rounded[kprev] {
+                lin / 2.0
+            } else {
+                lin * (1.0 - EPS)
+            };
+            let max_out = if rounded[knext] {
+                lout / 2.0
+            } else {
+                lout * (1.0 - EPS)
+            };
+            let r = radius.min(max_in).min(max_out);
+            let fs = Point::new(curr.x - din.0 / lin * r, curr.y - din.1 / lin * r);
+            let fe = Point::new(curr.x + dout.0 / lout * r, curr.y + dout.1 / lout * r);
+            Some((fs, fe))
         };
 
         let mut started = false;

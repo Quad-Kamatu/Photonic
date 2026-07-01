@@ -19,6 +19,43 @@ pub(crate) fn gui_apply_affine_to_path(path: &PathData, affine: kurbo::Affine) -
     PathData::from_bez_path(&result)
 }
 
+/// Return a copy of `bez` with every open subpath explicitly closed, so a
+/// winding-based `contains` test matches how a fill is actually rasterised.
+///
+/// kurbo's winding iterator only emits a closing edge for an **explicit**
+/// [`kurbo::PathEl::ClosePath`]; an open subpath contributes no closing segment,
+/// so `contains` reports `false` for points that are visually inside the fill.
+/// A fill, however, always renders as if each contour is closed. This helper
+/// inserts a `ClosePath` before each `MoveTo` that follows an open subpath (and
+/// at the end), mirroring render semantics without mutating stored geometry. It
+/// is idempotent for already-closed subpaths — kurbo skips a zero-length closing
+/// edge when the contour already returned to its start point.
+fn closed_for_fill(bez: &BezPath) -> BezPath {
+    use kurbo::PathEl;
+    let mut out = BezPath::new();
+    let mut open = false;
+    for el in bez.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if open {
+                    out.close_path();
+                }
+                out.move_to(p);
+                open = true;
+            }
+            PathEl::ClosePath => {
+                out.close_path();
+                open = false;
+            }
+            other => out.push(other),
+        }
+    }
+    if open {
+        out.close_path();
+    }
+    out
+}
+
 /// Return the topmost node (reverse draw order) whose bounding box contains (cx, cy).
 /// Tests whether the canvas-space point `(cx, cy)` lands on a path node's
 /// actual geometry: inside its filled area (non-zero winding) or within a small
@@ -43,7 +80,7 @@ pub(crate) fn path_geometry_hit(node: &SceneNode, cx: f64, cy: f64) -> Option<bo
     // Filled interior: only a *filled* shape should be selectable through its
     // body — an unfilled outline is clickable only on its edge, matching the
     // "click through transparent areas" behaviour requested in #3.
-    if pn.fill.enabled && canvas_bez.contains(pt) {
+    if pn.fill.enabled && closed_for_fill(&canvas_bez).contains(pt) {
         return Some(true);
     }
 
@@ -88,8 +125,9 @@ pub(crate) fn direct_select_hit(
         }
         let canvas_bez = node.transform.to_kurbo() * bez;
         let pt = kurbo::Point::new(cx, cy);
-        // Interior — selectable regardless of fill state.
-        if canvas_bez.contains(pt) {
+        // Interior — selectable regardless of fill state. Close open subpaths so
+        // the winding test matches how the shape's fill actually rasterises.
+        if closed_for_fill(&canvas_bez).contains(pt) {
             return Some(node.id);
         }
         // Or near the outline.
@@ -336,4 +374,113 @@ pub(crate) fn lasso_point_in_polygon(px: f64, py: f64, poly: &[[f64; 2]]) -> boo
         j = i;
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurbo::Point;
+    use photonic_core::style::{Fill, Stroke};
+
+    /// Build a single-path SceneNode from a BezPath with the given fill state.
+    fn path_node(bez: &BezPath, fill_enabled: bool) -> SceneNode {
+        let mut pn = PathNode::new(PathData::from_bez_path(bez));
+        pn.fill = if fill_enabled {
+            Fill::solid(Color::new(0.2, 0.4, 0.8, 1.0))
+        } else {
+            Fill::none()
+        };
+        pn.stroke = Stroke::none();
+        SceneNode::new("test", uuid::Uuid::new_v4(), SceneNodeKind::Path(pn))
+    }
+
+    /// An axis-aligned quad (100,100)-(200,200) authored **without** a closing
+    /// `ClosePath` — the pen-tool-with-fill / imported-SVG failure case.
+    fn open_quad() -> BezPath {
+        let mut b = BezPath::new();
+        b.move_to(Point::new(100.0, 100.0));
+        b.line_to(Point::new(200.0, 100.0));
+        b.line_to(Point::new(200.0, 200.0));
+        b.line_to(Point::new(100.0, 200.0));
+        // deliberately no close_path()
+        b
+    }
+
+    #[test]
+    fn closed_for_fill_closes_open_subpath() {
+        use kurbo::{PathEl, Shape};
+        let closed = closed_for_fill(&open_quad());
+        assert!(
+            matches!(closed.elements().last(), Some(PathEl::ClosePath)),
+            "open subpath should gain a trailing ClosePath"
+        );
+        // The closed copy now contains its interior under winding.
+        assert!(closed.contains(Point::new(150.0, 150.0)));
+    }
+
+    #[test]
+    fn closed_for_fill_is_idempotent_on_closed_subpath() {
+        use kurbo::PathEl;
+        let mut b = open_quad();
+        b.close_path();
+        let closed = closed_for_fill(&b);
+        let close_count = closed
+            .elements()
+            .iter()
+            .filter(|e| matches!(e, PathEl::ClosePath))
+            .count();
+        assert_eq!(
+            close_count, 1,
+            "already-closed subpath must not gain a second ClosePath"
+        );
+    }
+
+    #[test]
+    fn open_filled_quad_selects_on_interior_click() {
+        // Regression for #163: an open-but-filled shape must select on a body click.
+        let node = path_node(&open_quad(), true);
+        assert_eq!(path_geometry_hit(&node, 150.0, 150.0), Some(true));
+    }
+
+    #[test]
+    fn closed_filled_shape_still_selects() {
+        // No regression for shapes that were already closed.
+        let mut b = open_quad();
+        b.close_path();
+        let node = path_node(&b, true);
+        assert_eq!(path_geometry_hit(&node, 150.0, 150.0), Some(true));
+    }
+
+    #[test]
+    fn compound_path_unclosed_first_subpath_selects_inside_it() {
+        // Two subpaths, the first left open, the second closed. A click inside
+        // the first (open) subpath must still select.
+        let mut b = BezPath::new();
+        // First subpath: open quad (100,100)-(200,200)
+        b.move_to(Point::new(100.0, 100.0));
+        b.line_to(Point::new(200.0, 100.0));
+        b.line_to(Point::new(200.0, 200.0));
+        b.line_to(Point::new(100.0, 200.0));
+        // Second subpath: closed quad (300,100)-(400,200)
+        b.move_to(Point::new(300.0, 100.0));
+        b.line_to(Point::new(400.0, 100.0));
+        b.line_to(Point::new(400.0, 200.0));
+        b.line_to(Point::new(300.0, 200.0));
+        b.close_path();
+        let node = path_node(&b, true);
+        // Inside the first, unclosed subpath.
+        assert_eq!(path_geometry_hit(&node, 150.0, 150.0), Some(true));
+        // Inside the second, closed subpath.
+        assert_eq!(path_geometry_hit(&node, 350.0, 150.0), Some(true));
+    }
+
+    #[test]
+    fn unfilled_open_path_not_selected_on_interior_body_click() {
+        // Preserves the #3 "click through transparent areas" contract: an
+        // unfilled open path is clickable only on its stroke, never its body.
+        let node = path_node(&open_quad(), false);
+        assert_eq!(path_geometry_hit(&node, 150.0, 150.0), Some(false));
+        // But a click on the edge (top segment y=100) still registers.
+        assert_eq!(path_geometry_hit(&node, 150.0, 100.0), Some(true));
+    }
 }

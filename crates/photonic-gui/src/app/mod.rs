@@ -117,6 +117,10 @@ pub enum DirectDrag {
         origin_bez: kurbo::BezPath,
         grab_dist: f64,
     },
+    /// Moving the whole shape by dragging its fill/interior. `start_e`/`start_f`
+    /// are the node transform's original translation (`matrix[4]`/`matrix[5]`),
+    /// captured at press so the per-frame delta stays stable (#164).
+    Shape { start_e: f64, start_f: f64 },
 }
 
 // ─── Diff highlight ────────────────────────────────────────────────────────────
@@ -223,6 +227,14 @@ struct SimplifyDialog {
     node_id: NodeId,
     node_name: String,
     tolerance: f64,
+    /// Anchor-point count of the original path, captured when the dialog opens.
+    orig_points: usize,
+    /// Simplified result cached for `cached_tol`, so RDP runs only on a
+    /// tolerance change (or first build), not every frame.
+    preview: Option<PathData>,
+    /// Tolerance the cached `preview` was built for. `NaN` means "not built
+    /// yet" so the first comparison always misses and forces a build.
+    cached_tol: f64,
 }
 
 struct FindReplaceTextDialog {
@@ -317,6 +329,10 @@ struct ArtboardDrag {
 
 pub struct PhotonicApp {
     pub active_tool: Tool,
+    /// The tool that was active on the previous frame. Used to edge-detect
+    /// switching *into* a tool (e.g. seeding Direct Select's point-edit state
+    /// from the current object selection — #164).
+    last_tool: Tool,
     pub fill_color: [f32; 4],
     pub polygon_sides: u32,
     pub star_points: u32,
@@ -476,6 +492,16 @@ pub struct PhotonicApp {
     /// Actions queued by panel widgets (z-order, boolean ops) to be processed
     /// after all panels have finished drawing, with access to doc + history.
     pub pending_panel_actions: Vec<PanelAction>,
+    /// Color chosen via the Fill/Stroke picker this interaction, recorded into
+    /// `recent_colors` only once the pointer is released (#171) — avoids
+    /// streaming the whole drag path into the Recent swatch list.
+    pending_recent_color: Option<Color>,
+    /// Set when the persistent rail fill swatch (#172) mutates the active
+    /// color, so the full `prefs.save()` disk write is deferred to the frame
+    /// the picker interaction settles (pointer released) instead of firing on
+    /// every dragged slider frame — same commit-on-release discipline as
+    /// `pending_recent_color` (#171).
+    fill_swatch_dirty: bool,
     /// Cached adaptive-hotbar ordering for the current context (see
     /// [`HotbarCacheState`]). `None` until first built.
     hotbar_cache: Option<HotbarCacheState>,
@@ -800,6 +826,7 @@ impl Default for PhotonicApp {
     fn default() -> Self {
         Self {
             active_tool: Tool::Select,
+            last_tool: Tool::Select,
             fill_color: [0.22, 0.47, 0.87, 1.0],
             polygon_sides: 6,
             star_points: 5,
@@ -882,6 +909,8 @@ impl Default for PhotonicApp {
             },
 
             pending_panel_actions: Vec::new(),
+            pending_recent_color: None,
+            fill_swatch_dirty: false,
             hotbar_cache: None,
             last_canvas_rect: None,
             last_history_size_check: 0.0,
@@ -1785,10 +1814,7 @@ impl PhotonicApp {
                 self.pencil_points.clear();
                 self.lasso_points.clear();
                 self.isolated_group = None;
-                self.point_edit_node = None;
-                self.point_selected.clear();
-                self.point_drag_origin = None;
-                self.point_drag_mode = None;
+                self.clear_point_edit();
                 self.active_tool = tool;
             }
             HotbarEffect::Action(action) => {
@@ -1913,6 +1939,19 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // ── Direct Select entry seed (#164) ───────────────────────────────────
+        // Edge-detect switching *into* the Direct Selection tool: when it becomes
+        // active while a path object is selected, seed its point-edit state so
+        // every anchor of that path shows up filled ("whole object selected")
+        // without requiring an extra click. Edge-triggered (not every frame) so a
+        // deliberate click-to-deselect isn't immediately undone.
+        let entered_direct_select =
+            self.active_tool == Tool::DirectSelect && self.last_tool != Tool::DirectSelect;
+        self.last_tool = self.active_tool;
+        if entered_direct_select {
+            self.seed_direct_select_from_selection(doc);
+        }
 
         // ── Apply the configured history-retention limits ─────────────────────
         // Cheap and idempotent when unchanged, so it's safe every frame. In
@@ -3056,10 +3095,7 @@ impl PhotonicApp {
                                 self.pencil_points.clear();
                                 self.lasso_points.clear();
                                 self.isolated_group = None;
-                                self.point_edit_node = None;
-                                self.point_selected.clear();
-                                self.point_drag_origin = None;
-                                self.point_drag_mode = None;
+                                self.clear_point_edit();
                                 self.active_tool = tool;
                                 self.active_drawer = None;
                                 self.selected_drawer_option = None;
@@ -3147,9 +3183,24 @@ impl PhotonicApp {
         // when the context returns) via `effective_open` — no state churn.
         let sel_count = doc.selection.node_ids.len();
         let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        // Trim the rail's right inner margin to 0 so its buttons hug the drawer
+        // edge — the default `Frame::side_top_panel` uses `symmetric(8, 2)`,
+        // whose 8 px right margin (plus the drawer's 8 px left margin below)
+        // read as a dead ~16 px band between rail and drawer (#168).
+        let rail_frame = {
+            let mut f = egui::Frame::side_top_panel(&ctx.style());
+            f.inner_margin = egui::Margin {
+                left: 5.0,
+                right: 0.0,
+                top: 2.0,
+                bottom: 2.0,
+            };
+            f
+        };
         egui::SidePanel::left("drawer_rail")
             .resizable(false)
             .exact_width(40.0)
+            .frame(rail_frame)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.vertical_centered(|ui| {
@@ -3180,6 +3231,44 @@ impl PhotonicApp {
                         ui.add_space(4.0);
                     }
                 });
+
+                // ── Persistent active fill-color swatch (#172) ────────────────
+                // Pinned to the bottom of the rail via a bottom-up layout so it
+                // hugs the rail floor no matter how many group buttons show. This
+                // is the always-visible readout of "what color my next fill will
+                // be" — editing it opens egui's color popup on `fill_color` and
+                // mirrors the change into `prefs.default_fill_color`, the mirror
+                // image of the Tool Defaults handler (mod.rs ~2597) which edits
+                // `prefs.default_fill_color` and mirrors back into `fill_color`.
+                // Unlike that sibling this control also persists the default, but
+                // it does so on interaction-end (see below) — never on every
+                // dragged-slider frame — so a color pick doesn't thrash the disk.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    // Keep the swatch a fixed, glanceable 26×26 that fits the
+                    // 40 px rail rather than the default wide color button.
+                    ui.spacing_mut().interact_size = egui::vec2(26.0, 26.0);
+                    let resp = ui
+                        .color_edit_button_rgba_unmultiplied(&mut self.fill_color)
+                        .on_hover_text("Active fill color — click to change");
+                    if resp.changed() {
+                        // Mirror in-memory every frame (cheap) so the active
+                        // color is always live, but only mark the persisted
+                        // default dirty — the disk write is deferred.
+                        self.prefs.default_fill_color = self.fill_color;
+                        self.fill_swatch_dirty = true;
+                    }
+                    // Flush the single `prefs.save()` once the picker interaction
+                    // settles (pointer released), matching the #171 recent-colors
+                    // commit-on-release idiom. `color_edit_button` drives an RGBA
+                    // slider popup whose `.changed()` fires on every drag frame;
+                    // gating the write on pointer-release collapses dozens of
+                    // synchronous serialize+fs::write cycles into one per edit.
+                    if self.fill_swatch_dirty && ui.input(|i| i.pointer.any_released()) {
+                        self.prefs.save();
+                        self.fill_swatch_dirty = false;
+                    }
+                });
             });
 
         // ── Animated drawer host ──────────────────────────────────────────────
@@ -3203,7 +3292,21 @@ impl PhotonicApp {
         let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
         if t > 0.001 {
             let fully_open = drawer_open && t >= 0.999;
-            let mut panel = egui::SidePanel::left("properties");
+            // Remove the drawer's left inner margin so its content starts flush
+            // against the rail (pairs with the rail's trimmed right margin above
+            // to close the #168 gap). Set on the base binding so it carries
+            // through both the resizable and the exact-width tween branches.
+            let drawer_frame = {
+                let mut f = egui::Frame::side_top_panel(&ctx.style());
+                f.inner_margin = egui::Margin {
+                    left: 0.0,
+                    right: 8.0,
+                    top: 2.0,
+                    bottom: 2.0,
+                };
+                f
+            };
+            let mut panel = egui::SidePanel::left("properties").frame(drawer_frame);
             panel = if fully_open {
                 // Fully open: let the user drag-resize within range.
                 panel
@@ -3230,10 +3333,7 @@ impl PhotonicApp {
                             self.pencil_points.clear();
                             self.lasso_points.clear();
                             self.isolated_group = None;
-                            self.point_edit_node = None;
-                            self.point_selected.clear();
-                            self.point_drag_origin = None;
-                            self.point_drag_mode = None;
+                            self.clear_point_edit();
                             self.active_tool = tool;
                             if tool != Tool::Select && tool != Tool::DirectSelect {
                                 self.selected_id = None;
@@ -3246,6 +3346,11 @@ impl PhotonicApp {
                     let selection_count = doc.selection.node_ids.len();
                     let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();
                     let branch_names = self.branch_names.clone();
+                    // Keep the Edit History list live — recompute from the current
+                    // undo stack each frame so it never goes stale after an edit.
+                    // history_entries(20) is cheap (<=20 items); the mutable write
+                    // lands before the immutable &self.history_entries borrow below.
+                    self.history_entries = history.history_entries(20);
                     let mut ctx = panels::PropPanelCtx {
                         doc: doc,
                         active_tool: self.active_tool,
@@ -3327,15 +3432,12 @@ impl PhotonicApp {
             }
         }
 
-        // ── Right panel: layers + change log + AI chat ──────────────────────
+        // ── Right panel: layers + AI chat ───────────────────────────────────
         egui::SidePanel::right("right_panel")
             .default_width(280.0)
             .min_width(220.0)
             .max_width(400.0)
             .show(ctx, |ui| {
-                let total_h = ui.available_height();
-                let changelog_h = (total_h * 0.38).max(120.0).min(total_h - 330.0);
-
                 // ── Layers panel (top) ────────────────────────────────────────
                 egui::ScrollArea::vertical()
                     .id_salt("layers_scroll")
@@ -3350,14 +3452,6 @@ impl PhotonicApp {
                             self.pending_panel_actions.push(action);
                         }
                     });
-
-                ui.separator();
-
-                // ── Change log (middle) ───────────────────────────────────────
-                let checkpoints = history.list_checkpoints();
-                if let Some(action) = panels::draw_changelog_panel(ui, &checkpoints, changelog_h) {
-                    self.pending_panel_actions.push(action);
-                }
 
                 ui.separator();
 
@@ -3504,6 +3598,44 @@ impl PhotonicApp {
                             );
                             if pts.len() >= 2 {
                                 painter.add(egui::Shape::line(pts, outline_stroke));
+                            }
+                        }
+                    }
+                }
+
+                // ── Simplify Path live preview overlay (#166) ─────────────────
+                // While the Simplify dialog is open, paint the simplified result
+                // as a non-destructive accent wireframe (plus anchor dots) over
+                // the artwork so the tolerance can be judged before Apply. The
+                // simplified PathData is cached per-tolerance, so Ramer-Douglas-
+                // Peucker runs only when the tolerance changes, not every frame.
+                if let Some(dlg) = self.simplify_dialog.as_mut() {
+                    if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                        if let SceneNodeKind::Path(pn) = &node.kind {
+                            if dlg.preview.is_none() || dlg.cached_tol != dlg.tolerance {
+                                dlg.preview = Some(photonic_core::ops::simplify::simplify_path(
+                                    &pn.path_data,
+                                    dlg.tolerance,
+                                ));
+                                dlg.cached_tol = dlg.tolerance;
+                            }
+                            if let Some(preview) = &dlg.preview {
+                                let pts = bez_to_screen_points_xf(
+                                    &preview.to_bez_path(),
+                                    view,
+                                    &node.transform,
+                                );
+                                if pts.len() >= 2 {
+                                    let painter = ui.painter_at(rect);
+                                    let accent = egui::Color32::from_rgb(110, 86, 207);
+                                    painter.add(egui::Shape::line(
+                                        pts.clone(),
+                                        egui::Stroke::new(1.5, accent),
+                                    ));
+                                    for p in &pts {
+                                        painter.circle_filled(*p, 2.0, accent);
+                                    }
+                                }
                             }
                         }
                     }
@@ -5660,9 +5792,11 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::UpdateNodeFill { node_id, fill } => {
-                    // Record solid fill color in recent-colors list.
+                    // #171: defer recording the solid fill color into the Recent
+                    // list until the pointer is released (see post-loop commit),
+                    // so dragging inside the picker doesn't stream the whole path.
                     if let photonic_core::style::FillKind::Solid(c) = &fill.kind {
-                        doc.record_recent_color(*c);
+                        self.pending_recent_color = Some(*c);
                     }
                     if let Some(node) = doc.nodes.get(&node_id) {
                         let mut new_node = node.clone();
@@ -5678,9 +5812,11 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::UpdateNodeStroke { node_id, stroke } => {
-                    // Record stroke color in recent-colors list.
+                    // #171: defer recording the stroke color into the Recent list
+                    // until the pointer is released (see post-loop commit), so
+                    // dragging inside the picker doesn't stream the whole path.
                     if stroke.enabled {
-                        doc.record_recent_color(stroke.color);
+                        self.pending_recent_color = Some(stroke.color);
                     }
                     if let Some(node) = doc.nodes.get(&node_id) {
                         let mut new_node = node.clone();
@@ -7092,15 +7228,25 @@ impl PhotonicApp {
                 }
 
                 PanelAction::OpenSimplifyDialog { node_id } => {
-                    let name = doc
-                        .nodes
-                        .get(&node_id)
+                    let node = doc.nodes.get(&node_id);
+                    let name = node
                         .map(|n| n.name.clone())
                         .unwrap_or_else(|| node_id.to_string());
+                    let orig_points = node
+                        .and_then(|n| match &n.kind {
+                            SceneNodeKind::Path(pn) => {
+                                Some(photonic_core::ops::simplify::count_points(&pn.path_data))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(0);
                     self.simplify_dialog = Some(SimplifyDialog {
                         node_id,
                         node_name: name,
                         tolerance: 1.0,
+                        orig_points,
+                        preview: None,
+                        cached_tol: f64::NAN,
                     });
                 }
 
@@ -11795,6 +11941,18 @@ impl PhotonicApp {
             }
         }
 
+        // #171: commit the picked Fill/Stroke color to the Recent list only once
+        // the drag ends, so the intermediate colors dragged through the picker
+        // don't flood the list. Discrete-click recolor paths (Recent swatch,
+        // Color Guide, Recolor) fire on a frame where the pointer also releases,
+        // so they still record exactly one color (record_recent_color dedups).
+        if self.pending_recent_color.is_some() && ctx.input(|i| i.pointer.any_released()) {
+            if let Some(c) = self.pending_recent_color.take() {
+                doc.record_recent_color(c);
+                doc_modified = true;
+            }
+        }
+
         // ── Eyedropper overlay ────────────────────────────────────────────────
         if self.eyedropper.active() {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -12045,7 +12203,12 @@ impl PhotonicApp {
     ) {
         use crate::global_search::SearchAction as A;
         match action {
-            A::Tool(t) => self.active_tool = t,
+            A::Tool(t) => {
+                // Clear stale point-edit state so entering Direct Select via global
+                // search re-seeds from the current selection (#164 finding 1).
+                self.clear_point_edit();
+                self.active_tool = t;
+            }
             A::ToggleGrid => self.prefs.show_grid = !self.prefs.show_grid,
             A::ToggleGuides => self.guides_visible = !self.guides_visible,
             A::ToggleAudit => self.audit.panel_open = !self.audit.panel_open,
@@ -12800,6 +12963,28 @@ impl PhotonicApp {
         let node_name = self.simplify_dialog.as_ref().unwrap().node_name.clone();
         let node_id = self.simplify_dialog.as_ref().unwrap().node_id;
 
+        // Refresh the per-tolerance preview cache (shared with the canvas
+        // overlay) so the "Points: N → M" readout is always in sync, regardless
+        // of draw order. RDP still runs only when the tolerance changes.
+        let orig_points = self.simplify_dialog.as_ref().unwrap().orig_points;
+        let new_points = {
+            let dlg = self.simplify_dialog.as_mut().unwrap();
+            if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    if dlg.preview.is_none() || dlg.cached_tol != dlg.tolerance {
+                        dlg.preview = Some(photonic_core::ops::simplify::simplify_path(
+                            &pn.path_data,
+                            dlg.tolerance,
+                        ));
+                        dlg.cached_tol = dlg.tolerance;
+                    }
+                }
+            }
+            dlg.preview
+                .as_ref()
+                .map(photonic_core::ops::simplify::count_points)
+        };
+
         egui::Window::new("Simplify Path")
             .collapsible(false)
             .resizable(false)
@@ -12822,6 +13007,15 @@ impl PhotonicApp {
                         .weak()
                         .small(),
                 );
+                ui.add_space(4.0);
+                match new_points {
+                    Some(new) => {
+                        ui.label(format!("Points: {} → {}", orig_points, new));
+                    }
+                    None => {
+                        ui.label(format!("Points: {}", orig_points));
+                    }
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
@@ -12852,11 +13046,15 @@ impl PhotonicApp {
                 self.simplify_dialog = None;
             }
             Action::Apply => {
+                // Reuse the preview the dialog/overlay already computed for this
+                // tolerance instead of re-running RDP.
+                let cached = self.simplify_dialog.as_mut().and_then(|d| d.preview.take());
                 self.simplify_dialog = None;
                 if let Some(node) = doc.nodes.get(&node_id) {
                     if let SceneNodeKind::Path(pn) = &node.kind {
-                        let simplified =
-                            photonic_core::ops::simplify::simplify_path(&pn.path_data, tolerance);
+                        let simplified = cached.unwrap_or_else(|| {
+                            photonic_core::ops::simplify::simplify_path(&pn.path_data, tolerance)
+                        });
                         let mut new_path = pn.clone();
                         new_path.path_data = simplified;
                         let mut new_node = node.clone();
@@ -13230,6 +13428,108 @@ mod direct_select_geometry_tests {
             .elements()
             .iter()
             .any(|e| matches!(e, PathEl::ClosePath)));
+    }
+
+    #[test]
+    fn rounding_isolated_corner_rounds_past_half_edge() {
+        // An isolated selected corner (neighbours not selected) must be allowed
+        // to retreat past half its shorter edge — the old unconditional
+        // `lin/2` clamp artificially capped it there (issue #165).
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize].into_iter().collect();
+        let r = 60.0; // > half of the 100-unit edge
+        let out = round_selected_corners(&bez, &sel, r);
+        let els = out.elements();
+        // Single fillet → single quad; the point before it is the retreat start.
+        let qpos = els
+            .iter()
+            .position(|e| matches!(e, PathEl::QuadTo(_, _)))
+            .expect("one rounded corner → one quad");
+        let fs = match els[qpos - 1] {
+            PathEl::LineTo(p) | PathEl::MoveTo(p) => p,
+            _ => panic!("expected a line/move endpoint before the fillet quad"),
+        };
+        // Corner 1 sits at (100,0) with its incoming edge running from (0,0).
+        let corner = Point::new(100.0, 0.0);
+        let retreat = ((corner.x - fs.x).powi(2) + (corner.y - fs.y).powi(2)).sqrt();
+        assert!(
+            retreat > 50.0 + 1e-6,
+            "isolated corner should round past half-edge, retreat was {retreat}"
+        );
+    }
+
+    #[test]
+    fn rounding_two_adjacent_corners_never_overlap() {
+        // Two adjacent selected corners share an edge; their fillets must split
+        // it (meet at most at the midpoint) rather than overrun each other.
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize, 2usize].into_iter().collect();
+        // Large radius vs the 100-unit shared edge (100,0)->(100,100).
+        let out = round_selected_corners(&bez, &sel, 90.0);
+        let els: Vec<PathEl> = out.elements().to_vec();
+        let quads: Vec<usize> = els
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, PathEl::QuadTo(_, _)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(quads.len(), 2, "two rounded corners → two quads");
+        let fe1 = match els[quads[0]] {
+            PathEl::QuadTo(_, p) => p, // corner 1 exit toward corner 2
+            _ => unreachable!(),
+        };
+        let fs2 = match els[quads[1] - 1] {
+            PathEl::LineTo(p) => p, // corner 2 entry coming from corner 1
+            _ => panic!("expected a line endpoint before the second fillet quad"),
+        };
+        let c1 = Point::new(100.0, 0.0);
+        let c2 = Point::new(100.0, 100.0);
+        let rout = ((fe1.x - c1.x).powi(2) + (fe1.y - c1.y).powi(2)).sqrt();
+        let rin = ((fs2.x - c2.x).powi(2) + (fs2.y - c2.y).powi(2)).sqrt();
+        // No overlap ⟺ the two retreats along the shared edge sum to at most its
+        // length; and corner 1's exit never passes corner 2's entry.
+        assert!(
+            rout + rin <= 100.0 + 1e-6,
+            "adjacent fillets overlap on the shared edge: {rout} + {rin}"
+        );
+        assert!(
+            fe1.y <= fs2.y + 1e-6,
+            "corner 1 fillet crosses corner 2 fillet ({} vs {})",
+            fe1.y,
+            fs2.y
+        );
+    }
+
+    #[test]
+    fn rounding_non_adjacent_corners_round_independently() {
+        // Opposite corners of the square share no edge, so each should round
+        // freely (past half-edge) without the shared-edge 50/50 split.
+        let bez = rect();
+        let sel: std::collections::HashSet<usize> = [1usize, 3usize].into_iter().collect();
+        let r = 60.0; // > half-edge; the old lin/2 clamp would have capped it
+        let out = round_selected_corners(&bez, &sel, r);
+        let els: Vec<PathEl> = out.elements().to_vec();
+        let quads: Vec<usize> = els
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, PathEl::QuadTo(_, _)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(quads.len(), 2, "two rounded corners → two quads");
+        for (&q, corner) in quads
+            .iter()
+            .zip([Point::new(100.0, 0.0), Point::new(0.0, 100.0)])
+        {
+            let fs = match els[q - 1] {
+                PathEl::LineTo(p) | PathEl::MoveTo(p) => p,
+                _ => panic!("expected a line/move endpoint before a fillet quad"),
+            };
+            let retreat = ((corner.x - fs.x).powi(2) + (corner.y - fs.y).powi(2)).sqrt();
+            assert!(
+                retreat > 50.0 + 1e-6,
+                "non-adjacent corner should round independently past half-edge, retreat was {retreat}"
+            );
+        }
     }
 
     #[test]
