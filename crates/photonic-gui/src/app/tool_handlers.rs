@@ -964,7 +964,8 @@ impl PhotonicApp {
                 ResizeHandle::TopRight | ResizeHandle::BottomLeft => egui::CursorIcon::ResizeNeSw,
             }
         } else if self.moving {
-            egui::CursorIcon::Move
+            // Closed (grabbing) hand only while actively dragging a move
+            egui::CursorIcon::Grabbing
         } else if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
             // Use effective (combined) bounds for cursor feedback
             const HANDLE_HIT: f32 = 6.0;
@@ -1017,7 +1018,8 @@ impl PhotonicApp {
                     })
                     .unwrap_or(false);
                 if on_body {
-                    egui::CursorIcon::Move
+                    // Open (grab) hand on hover to signal a draggable move
+                    egui::CursorIcon::Grab
                 } else {
                     egui::CursorIcon::Default
                 }
