@@ -496,6 +496,12 @@ pub struct PhotonicApp {
     /// `recent_colors` only once the pointer is released (#171) — avoids
     /// streaming the whole drag path into the Recent swatch list.
     pending_recent_color: Option<Color>,
+    /// Set when the persistent rail fill swatch (#172) mutates the active
+    /// color, so the full `prefs.save()` disk write is deferred to the frame
+    /// the picker interaction settles (pointer released) instead of firing on
+    /// every dragged slider frame — same commit-on-release discipline as
+    /// `pending_recent_color` (#171).
+    fill_swatch_dirty: bool,
     /// Cached adaptive-hotbar ordering for the current context (see
     /// [`HotbarCacheState`]). `None` until first built.
     hotbar_cache: Option<HotbarCacheState>,
@@ -904,6 +910,7 @@ impl Default for PhotonicApp {
 
             pending_panel_actions: Vec::new(),
             pending_recent_color: None,
+            fill_swatch_dirty: false,
             hotbar_cache: None,
             last_canvas_rect: None,
             last_history_size_check: 0.0,
@@ -3222,6 +3229,44 @@ impl PhotonicApp {
                             self.prefs.save();
                         }
                         ui.add_space(4.0);
+                    }
+                });
+
+                // ── Persistent active fill-color swatch (#172) ────────────────
+                // Pinned to the bottom of the rail via a bottom-up layout so it
+                // hugs the rail floor no matter how many group buttons show. This
+                // is the always-visible readout of "what color my next fill will
+                // be" — editing it opens egui's color popup on `fill_color` and
+                // mirrors the change into `prefs.default_fill_color`, the mirror
+                // image of the Tool Defaults handler (mod.rs ~2597) which edits
+                // `prefs.default_fill_color` and mirrors back into `fill_color`.
+                // Unlike that sibling this control also persists the default, but
+                // it does so on interaction-end (see below) — never on every
+                // dragged-slider frame — so a color pick doesn't thrash the disk.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    // Keep the swatch a fixed, glanceable 26×26 that fits the
+                    // 40 px rail rather than the default wide color button.
+                    ui.spacing_mut().interact_size = egui::vec2(26.0, 26.0);
+                    let resp = ui
+                        .color_edit_button_rgba_unmultiplied(&mut self.fill_color)
+                        .on_hover_text("Active fill color — click to change");
+                    if resp.changed() {
+                        // Mirror in-memory every frame (cheap) so the active
+                        // color is always live, but only mark the persisted
+                        // default dirty — the disk write is deferred.
+                        self.prefs.default_fill_color = self.fill_color;
+                        self.fill_swatch_dirty = true;
+                    }
+                    // Flush the single `prefs.save()` once the picker interaction
+                    // settles (pointer released), matching the #171 recent-colors
+                    // commit-on-release idiom. `color_edit_button` drives an RGBA
+                    // slider popup whose `.changed()` fires on every drag frame;
+                    // gating the write on pointer-release collapses dozens of
+                    // synchronous serialize+fs::write cycles into one per edit.
+                    if self.fill_swatch_dirty && ui.input(|i| i.pointer.any_released()) {
+                        self.prefs.save();
+                        self.fill_swatch_dirty = false;
                     }
                 });
             });
