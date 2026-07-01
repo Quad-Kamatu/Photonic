@@ -3372,7 +3372,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "round_corners",
-            "description": "Round sharp corners of path nodes by replacing each corner with a smooth quadratic bezier arc. The radius is automatically clamped to half the shortest adjacent segment to prevent overlap.\n\nDifferent from smooth_path (Chaikin): round_corners inserts precise arc fillets at corners while preserving straight segments. Useful for UI element shapes, rounded rectangles, and softening angular artwork. Destructive — modifies path data. Single undoable step.",
+            "description": "Round sharp corners of path nodes by replacing each corner with a smooth quadratic bezier arc. The radius is automatically clamped so adjacent fillets never overlap.\n\nDifferent from smooth_path (Chaikin): round_corners inserts precise arc fillets at corners while preserving straight segments. Useful for UI element shapes, rounded rectangles, and softening angular artwork. Destructive — modifies path data. Single undoable step.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

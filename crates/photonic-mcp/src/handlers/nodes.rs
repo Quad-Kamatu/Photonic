@@ -9446,9 +9446,26 @@ fn apply_round_corners(bez: &kurbo::BezPath, radius: f64) -> kurbo::BezPath {
                     continue;
                 }
 
-                // Clamp radius to half the shortest adjacent segment.
-                let max_r = (len_in / 2.0).min(len_out / 2.0);
-                let r = radius.min(max_r);
+                // Clamp radius so adjacent fillets never overlap. Corners here are
+                // interior vertices (endpoints handled by the is_endpoint branch),
+                // so a neighbour is rounded (and shares the edge 50/50) unless it is
+                // an open-run endpoint. For a closed subpath every neighbour is
+                // rounded, keeping the L/2 split; on an open run, a corner adjacent
+                // to an endpoint retreats (almost) the full edge instead.
+                let eps = 1e-3;
+                let prev_rounded = closed || i >= 2; // prev (i-1) is not endpoint 0
+                let next_rounded = closed || i < n - 2; // next (i+1) is not endpoint n-1
+                let max_in = if prev_rounded {
+                    len_in / 2.0
+                } else {
+                    len_in * (1.0 - eps)
+                };
+                let max_out = if next_rounded {
+                    len_out / 2.0
+                } else {
+                    len_out * (1.0 - eps)
+                };
+                let r = radius.min(max_in).min(max_out);
 
                 // Points on incoming and outgoing segments at distance r from corner.
                 let fillet_start =
@@ -17426,5 +17443,91 @@ mod create_shape_color_tests {
         .unwrap();
         let result = create_shape(&state, args).await;
         assert_eq!(result.is_error, Some(true), "invalid color should error");
+    }
+}
+
+#[cfg(test)]
+mod round_corners_tests {
+    use super::*;
+
+    fn end_vertices(bez: &kurbo::BezPath) -> Vec<kurbo::Point> {
+        bez.elements()
+            .iter()
+            .filter_map(|el| match el {
+                kurbo::PathEl::MoveTo(p) => Some(*p),
+                kurbo::PathEl::LineTo(p) => Some(*p),
+                kurbo::PathEl::QuadTo(_, p) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn open_run_corner_rounds_past_half_edge() {
+        // Open 3-vertex polyline: (0,0) → (10,0) → (10,10). The interior corner at
+        // (10,0) borders two endpoints, so it retreats almost the full edge rather
+        // than being capped at L/2 = 5.
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        let out = apply_round_corners(&bez, 8.0);
+
+        // fillet_start is the LineTo preceding the corner's QuadTo (control = corner).
+        let els: Vec<kurbo::PathEl> = out.elements().to_vec();
+        let mut fillet_start = None;
+        for (i, el) in els.iter().enumerate() {
+            if let kurbo::PathEl::QuadTo(ctrl, _) = el {
+                assert!(
+                    (ctrl.x - 10.0).abs() < 1e-6 && ctrl.y.abs() < 1e-6,
+                    "quad control should be the corner (10,0), got {ctrl:?}"
+                );
+                if let kurbo::PathEl::LineTo(p) = els[i - 1] {
+                    fillet_start = Some(p);
+                }
+            }
+        }
+        let p = fillet_start.expect("expected a rounded corner preceded by a LineTo");
+        // From (10,0) toward (0,0) by r=8 ⇒ x=2, past the midpoint x=5. The old
+        // unconditional L/2 clamp would have stopped at x=5.
+        assert!(
+            p.x < 5.0 - 1e-6,
+            "fillet_start x {} should be past the half-edge (5.0)",
+            p.x
+        );
+        assert!(
+            (p.x - 2.0).abs() < 1e-6,
+            "fillet_start x {} expected 2.0",
+            p.x
+        );
+    }
+
+    #[test]
+    fn closed_square_splits_edges_fifty_fifty() {
+        // Closed 10×10 square with an oversized radius. Every neighbour is rounded,
+        // so each corner stays clamped to L/2 = 5 and its fillet points land on the
+        // edge midpoints — adjacent fillets meet but never overlap.
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        bez.line_to((0.0, 10.0));
+        bez.close_path();
+        let out = apply_round_corners(&bez, 100.0);
+
+        for p in end_vertices(&out) {
+            if p.y.abs() < 1e-6 || (p.y - 10.0).abs() < 1e-6 {
+                assert!(
+                    (p.x - 5.0).abs() < 1e-6,
+                    "fillet point {p:?} on a horizontal edge crosses the midpoint x=5"
+                );
+            }
+            if p.x.abs() < 1e-6 || (p.x - 10.0).abs() < 1e-6 {
+                assert!(
+                    (p.y - 5.0).abs() < 1e-6,
+                    "fillet point {p:?} on a vertical edge crosses the midpoint y=5"
+                );
+            }
+        }
     }
 }
