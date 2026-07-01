@@ -61,11 +61,17 @@ impl PhotonicApp {
             "edit.paste_in_place" => modified = self.paste_clipboard(doc, history, 0.0),
             "edit.duplicate" => modified = self.duplicate_selection(doc, history),
             "edit.delete" => {
+                // Route the whole multi-select delete through history as one
+                // undoable step so Ctrl+Z restores the removed nodes (#191).
+                // `execute` hydrates each bare RemoveNode into RemoveNodeFull,
+                // so undo re-adds the node into its original layer.
                 let ids: Vec<NodeId> = doc.selection.ids().copied().collect();
                 if !ids.is_empty() {
-                    for nid in ids {
-                        doc.remove_node(&nid);
-                    }
+                    let cmds: Vec<Command> = ids
+                        .iter()
+                        .map(|&node_id| Command::RemoveNode { node_id })
+                        .collect();
+                    history.execute(Command::Batch(cmds), doc);
                     doc.selection.clear();
                     self.selected_id = None;
                     modified = true;

@@ -780,6 +780,101 @@ mod tests {
         assert!(!doc.nodes.contains_key(&node_b_id));
     }
 
+    // ── #191: Ctrl+Z must undo GUI delete (delete now recorded) ──────────────
+    //
+    // The two GUI delete entry points (command palette / Delete key `edit.delete`
+    // and the Select-tool Delete/Backspace handler) used to mutate the doc
+    // directly via `doc.remove_node`, bypassing `CommandHistory` — so `undo()`
+    // returned `false` with nothing to revert. Both now emit a
+    // `Command::Batch(vec![Command::RemoveNode { .. }])` through `history.execute`.
+    // These tests lock that exact code path (single- and multi-node selection).
+
+    #[test]
+    fn gui_delete_single_node_batch_undo_restores_node() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+        let layer_id = node.layer_id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+
+        // Exactly what the GUI delete paths now emit for a single selection.
+        history.execute(
+            Command::Batch(vec![Command::RemoveNode { node_id }]),
+            &mut doc,
+        );
+        assert!(!doc.nodes.contains_key(&node_id), "node not deleted");
+        assert!(!doc.layers[&layer_id].node_ids.contains(&node_id));
+
+        // Ctrl+Z: undo must report success and bring the node back into its layer.
+        let undone = history.undo(&mut doc);
+        assert!(undone, "Ctrl+Z of a GUI delete no-oped (#191)");
+        assert!(
+            doc.nodes.contains_key(&node_id),
+            "node not restored on undo (#191)"
+        );
+        assert_eq!(doc.nodes[&node_id].layer_id, layer_id);
+        assert!(
+            doc.layers[&layer_id].node_ids.contains(&node_id),
+            "node not restored into its original layer (#191)"
+        );
+    }
+
+    #[test]
+    fn gui_delete_multi_node_batch_undo_restores_all() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node_a = make_node(&doc);
+        let node_b = make_node(&doc);
+        let node_a_id = node_a.id;
+        let node_b_id = node_b.id;
+        let layer_id = node_a.layer_id;
+        history.execute(
+            Command::Batch(vec![
+                Command::AddNode {
+                    node: node_a,
+                    layer_id: None,
+                },
+                Command::AddNode {
+                    node: node_b,
+                    layer_id: None,
+                },
+            ]),
+            &mut doc,
+        );
+
+        // Multi-select delete: one Batch of bare RemoveNode, exactly like the GUI.
+        history.execute(
+            Command::Batch(vec![
+                Command::RemoveNode { node_id: node_a_id },
+                Command::RemoveNode { node_id: node_b_id },
+            ]),
+            &mut doc,
+        );
+        assert!(!doc.nodes.contains_key(&node_a_id));
+        assert!(!doc.nodes.contains_key(&node_b_id));
+
+        // A single Ctrl+Z restores the whole multi-select delete as one step.
+        let undone = history.undo(&mut doc);
+        assert!(undone, "Ctrl+Z of a multi-select GUI delete no-oped (#191)");
+        assert!(doc.nodes.contains_key(&node_a_id));
+        assert!(doc.nodes.contains_key(&node_b_id));
+        assert!(
+            doc.layers[&layer_id].node_ids.contains(&node_a_id),
+            "node A not restored into its original layer (#191)"
+        );
+        assert!(
+            doc.layers[&layer_id].node_ids.contains(&node_b_id),
+            "node B not restored into its original layer (#191)"
+        );
+    }
+
     #[test]
     fn execute_hydrates_bare_deletes_into_self_contained_forms() {
         let mut doc = make_doc();

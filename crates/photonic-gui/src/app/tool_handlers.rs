@@ -28,15 +28,22 @@ impl PhotonicApp {
                     )
                 });
 
-                // Delete / Backspace: remove all selected nodes
+                // Delete / Backspace: remove all selected nodes as one
+                // undoable history step so Ctrl+Z restores them (#191).
+                // `execute` hydrates each bare RemoveNode into RemoveNodeFull,
+                // so undo re-adds every node into its original layer.
                 if delete {
                     let ids_to_delete: Vec<NodeId> = doc.selection.ids().copied().collect();
-                    for id in ids_to_delete {
-                        doc.remove_node(&id);
+                    if !ids_to_delete.is_empty() {
+                        let cmds: Vec<Command> = ids_to_delete
+                            .iter()
+                            .map(|&node_id| Command::RemoveNode { node_id })
+                            .collect();
+                        history.execute(Command::Batch(cmds), doc);
+                        doc.selection.clear();
+                        self.selected_id = None;
+                        *doc_modified = true;
                     }
-                    doc.selection.clear();
-                    self.selected_id = None;
-                    *doc_modified = true;
                     return;
                 }
 
