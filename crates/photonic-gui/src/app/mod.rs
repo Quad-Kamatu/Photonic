@@ -492,6 +492,10 @@ pub struct PhotonicApp {
     /// Actions queued by panel widgets (z-order, boolean ops) to be processed
     /// after all panels have finished drawing, with access to doc + history.
     pub pending_panel_actions: Vec<PanelAction>,
+    /// Color chosen via the Fill/Stroke picker this interaction, recorded into
+    /// `recent_colors` only once the pointer is released (#171) — avoids
+    /// streaming the whole drag path into the Recent swatch list.
+    pending_recent_color: Option<Color>,
     /// Cached adaptive-hotbar ordering for the current context (see
     /// [`HotbarCacheState`]). `None` until first built.
     hotbar_cache: Option<HotbarCacheState>,
@@ -899,6 +903,7 @@ impl Default for PhotonicApp {
             },
 
             pending_panel_actions: Vec::new(),
+            pending_recent_color: None,
             hotbar_cache: None,
             last_canvas_rect: None,
             last_history_size_check: 0.0,
@@ -5748,9 +5753,11 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::UpdateNodeFill { node_id, fill } => {
-                    // Record solid fill color in recent-colors list.
+                    // #171: defer recording the solid fill color into the Recent
+                    // list until the pointer is released (see post-loop commit),
+                    // so dragging inside the picker doesn't stream the whole path.
                     if let photonic_core::style::FillKind::Solid(c) = &fill.kind {
-                        doc.record_recent_color(*c);
+                        self.pending_recent_color = Some(*c);
                     }
                     if let Some(node) = doc.nodes.get(&node_id) {
                         let mut new_node = node.clone();
@@ -5766,9 +5773,11 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::UpdateNodeStroke { node_id, stroke } => {
-                    // Record stroke color in recent-colors list.
+                    // #171: defer recording the stroke color into the Recent list
+                    // until the pointer is released (see post-loop commit), so
+                    // dragging inside the picker doesn't stream the whole path.
                     if stroke.enabled {
-                        doc.record_recent_color(stroke.color);
+                        self.pending_recent_color = Some(stroke.color);
                     }
                     if let Some(node) = doc.nodes.get(&node_id) {
                         let mut new_node = node.clone();
@@ -11890,6 +11899,18 @@ impl PhotonicApp {
                         }
                     }
                 }
+            }
+        }
+
+        // #171: commit the picked Fill/Stroke color to the Recent list only once
+        // the drag ends, so the intermediate colors dragged through the picker
+        // don't flood the list. Discrete-click recolor paths (Recent swatch,
+        // Color Guide, Recolor) fire on a frame where the pointer also releases,
+        // so they still record exactly one color (record_recent_color dedups).
+        if self.pending_recent_color.is_some() && ctx.input(|i| i.pointer.any_released()) {
+            if let Some(c) = self.pending_recent_color.take() {
+                doc.record_recent_color(c);
+                doc_modified = true;
             }
         }
 
