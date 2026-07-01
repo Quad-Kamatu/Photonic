@@ -487,6 +487,11 @@ pub struct PhotonicApp {
     point_edit_node: Option<NodeId>,
     /// Indices into the BezPath element array that are currently selected.
     point_selected: Vec<usize>,
+    /// The anchor element index most recently right-clicked in Direct Select,
+    /// i.e. the target of the anchor context menu. `None` when no anchor menu is
+    /// active (right-click missed all anchors). Persisted across frames because
+    /// egui keeps the context menu open and re-runs its closure each frame.
+    point_context_anchor: Option<usize>,
     /// Snapshot of the node captured at drag-start (None when not dragging).
     /// Used to build the UpdateNode undo command on drag release.
     point_drag_origin: Option<SceneNode>,
@@ -913,6 +918,7 @@ impl Default for PhotonicApp {
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),
+            point_context_anchor: None,
             point_drag_origin: None,
             point_drag_mode: None,
             shape_builder_hovered: None,
@@ -4739,40 +4745,54 @@ impl PhotonicApp {
                 if response.secondary_clicked() {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                        let hit = hit_test(doc, cx, cy, renderer);
-                        let wheel_ctx = match hit {
-                            Some(id)
-                                if doc.selection.contains(&id) && doc.selection.count() > 1 =>
-                            {
-                                WheelContext::MultiNode {
+                        // #187: In Direct Select, a right-click that lands on a
+                        // directly-selected anchor must reach that tool's point-type
+                        // context menu (Corner / Smooth-Curved / Round corner), which
+                        // handle_direct_select_tool registers via response.context_menu.
+                        // The radial wheel below early-returns on the same frame, so if
+                        // we opened it here the menu closure would never run. Suppress
+                        // the wheel when an anchor is under the click (using the same
+                        // hit-test the tool uses) and fall through to the tool handler.
+                        // Right-clicking empty canvas in Direct Select still opens the
+                        // wheel, matching every other tool.
+                        let ds_anchor_menu = self.active_tool == Tool::DirectSelect
+                            && self.ds_anchor_at(cx, cy, doc, view).is_some();
+                        if !ds_anchor_menu {
+                            let hit = hit_test(doc, cx, cy, renderer);
+                            let wheel_ctx = match hit {
+                                Some(id)
+                                    if doc.selection.contains(&id) && doc.selection.count() > 1 =>
+                                {
+                                    WheelContext::MultiNode {
+                                        node_ids: doc.selection.ids().copied().collect(),
+                                    }
+                                }
+                                Some(id) => {
+                                    let kind = match doc.get_node(&id).map(|n| &n.kind) {
+                                        Some(SceneNodeKind::Group(_)) => WheelNodeKind::Group,
+                                        Some(SceneNodeKind::Text(_)) => WheelNodeKind::Text,
+                                        _ => WheelNodeKind::Path,
+                                    };
+                                    WheelContext::SingleNode {
+                                        node_id: id,
+                                        node_kind: kind,
+                                    }
+                                }
+                                None if doc.selection.count() > 1 => WheelContext::MultiNode {
                                     node_ids: doc.selection.ids().copied().collect(),
-                                }
-                            }
-                            Some(id) => {
-                                let kind = match doc.get_node(&id).map(|n| &n.kind) {
-                                    Some(SceneNodeKind::Group(_)) => WheelNodeKind::Group,
-                                    Some(SceneNodeKind::Text(_)) => WheelNodeKind::Text,
-                                    _ => WheelNodeKind::Path,
-                                };
-                                WheelContext::SingleNode {
-                                    node_id: id,
-                                    node_kind: kind,
-                                }
-                            }
-                            None if doc.selection.count() > 1 => WheelContext::MultiNode {
-                                node_ids: doc.selection.ids().copied().collect(),
-                            },
-                            _ => WheelContext::EmptyCanvas {
-                                canvas_x: cx,
-                                canvas_y: cy,
-                            },
-                        };
-                        self.radial_wheel = Some(WheelState::new(
-                            pos,
-                            (cx, cy),
-                            &wheel_ctx,
-                            self.prefs.reduced_motion,
-                        ));
+                                },
+                                _ => WheelContext::EmptyCanvas {
+                                    canvas_x: cx,
+                                    canvas_y: cy,
+                                },
+                            };
+                            self.radial_wheel = Some(WheelState::new(
+                                pos,
+                                (cx, cy),
+                                &wheel_ctx,
+                                self.prefs.reduced_motion,
+                            ));
+                        }
                     }
                 }
 

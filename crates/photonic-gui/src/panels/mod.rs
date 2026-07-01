@@ -1381,8 +1381,10 @@ fn draw_vertex_panel(
             });
         }
         if ui
-            .button("Smooth")
-            .on_hover_text("Make this anchor's handles collinear → smooth curve")
+            .button("Smooth / Curved")
+            .on_hover_text(
+                "Make this anchor's handles collinear → smooth curve (also on right-click)",
+            )
             .clicked()
         {
             *action = Some(PanelAction::ConvertAnchorType {

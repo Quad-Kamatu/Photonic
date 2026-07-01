@@ -10,6 +10,7 @@ impl PhotonicApp {
     /// Also clears `point_edit_node` if its node no longer exists.
     pub(crate) fn invalidate_point_edit(&mut self, doc: &Document) {
         self.point_selected.clear();
+        self.point_context_anchor = None;
         self.point_drag_origin = None;
         self.point_drag_mode = None;
         if let Some(nid) = self.point_edit_node {
@@ -26,6 +27,7 @@ impl PhotonicApp {
     pub(crate) fn clear_point_edit(&mut self) {
         self.point_edit_node = None;
         self.point_selected.clear();
+        self.point_context_anchor = None;
         self.point_drag_origin = None;
         self.point_drag_mode = None;
     }
@@ -60,6 +62,145 @@ impl PhotonicApp {
         self.point_selected = path_anchor_points(bez).iter().map(|(i, _)| *i).collect();
     }
 
+    /// Convert a single directly-selected anchor between corner and smooth
+    /// (curved) via the right-click context menu (#187). Builds one
+    /// `Command::UpdateNode` and pushes it through history — the same inline
+    /// pattern the delete-anchor block uses — so it undoes/redoes atomically.
+    ///
+    /// After the convert, the anchor is re-selected by matching its (unchanged)
+    /// local position: `bez_convert_anchors` can materialize a closed subpath's
+    /// implicit seam into an explicit `CurveTo`, renumbering element indices, so
+    /// the pre-convert index is not a reliable handle. Re-selecting keeps the
+    /// converted anchor highlighted and — for Smooth — makes its freshly
+    /// synthesized in/out handles render and drag immediately.
+    fn ds_convert_context_anchor(
+        &mut self,
+        idx: usize,
+        smooth: bool,
+        doc: &mut Document,
+        view: &CanvasView,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(nid) = self.point_edit_node else {
+            return;
+        };
+        let Some(old_node) = doc.nodes.get(&nid).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(pn) = &old_node.kind else {
+            return;
+        };
+        let bez = pn.path_data.to_bez_path();
+        // Snapshot the anchor's local point so it can be re-found after a possible
+        // element renumber (seam materialization).
+        let anchor_local: Option<Point> = path_anchor_points(&bez)
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, p)| *p);
+        let sel: std::collections::HashSet<usize> = std::iter::once(idx).collect();
+        let new_bez = bez_convert_anchors(&bez, &sel, smooth);
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(np) = &mut new_node.kind {
+            np.path_data = PathData::from_bez_path(&new_bez);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        *doc_modified = true;
+
+        // Re-select the (possibly renumbered) anchor at its unchanged position so
+        // its curvature handles surface and become draggable on the next frame.
+        self.point_selected.clear();
+        if let (Some(p), Some(node)) = (anchor_local, doc.nodes.get(&nid)) {
+            if let SceneNodeKind::Path(pn) = &node.kind {
+                let nb = pn.path_data.to_bez_path();
+                let (acx, acy) = node.transform.apply(p.x, p.y);
+                if let Some(new_idx) =
+                    nearest_anchor_screen(&nb, &node.transform, view, acx, acy, 12.0)
+                {
+                    self.point_selected = vec![new_idx];
+                }
+            }
+        }
+    }
+
+    /// Fillet a single directly-selected straight corner via the right-click
+    /// context menu (#187). Reuses `round_selected_corners` — the same helper the
+    /// inspector "Round corners" buttons and the on-canvas Live-Corners widget
+    /// use — restricted to genuine straight corners (rounding a curve-adjacent
+    /// anchor would flatten the curve). Rounding restructures element indices, so
+    /// the selection is dropped afterwards, matching the shared handler.
+    fn ds_round_context_anchor(
+        &mut self,
+        idx: usize,
+        radius: f64,
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(nid) = self.point_edit_node else {
+            return;
+        };
+        let Some(old_node) = doc.nodes.get(&nid).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(pn) = &old_node.kind else {
+            return;
+        };
+        let bez = pn.path_data.to_bez_path();
+        let straight = straight_corners(&bez);
+        if !straight.contains_key(&idx) {
+            // Not a straight corner — nothing to round.
+            return;
+        }
+        let sel: std::collections::HashSet<usize> = std::iter::once(idx).collect();
+        let new_bez = round_selected_corners(&bez, &sel, radius);
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(np) = &mut new_node.kind {
+            np.path_data = PathData::from_bez_path(&new_bez);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected.clear();
+        *doc_modified = true;
+    }
+
+    /// Hit-test the current point-edit node's anchors at canvas position
+    /// `(cx, cy)`, returning the nearest anchor's element index within the
+    /// grab radius. Shared by the tool handler and by the radial-wheel
+    /// suppression guard in `app/mod.rs` (#187): a right-click on a directly-
+    /// selected anchor must reach the point-type context menu rather than pop
+    /// the global selection wheel, so both paths must agree on "is there an
+    /// anchor here?" using the identical hit-test.
+    pub(crate) fn ds_anchor_at(
+        &self,
+        cx: f64,
+        cy: f64,
+        doc: &Document,
+        view: &CanvasView,
+    ) -> Option<usize> {
+        // Same generous radius the tool handler uses for anchor grabs.
+        const ANCHOR_RADIUS_PX: f64 = 12.0;
+        let nid = self.point_edit_node?;
+        let node = doc.nodes.get(&nid)?;
+        if let SceneNodeKind::Path(pn) = &node.kind {
+            let bez = pn.path_data.to_bez_path();
+            nearest_anchor_screen(&bez, &node.transform, view, cx, cy, ANCHOR_RADIUS_PX)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn handle_direct_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -81,6 +222,7 @@ impl PhotonicApp {
         if viewport_kb(ui.ctx()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.point_edit_node = None;
             self.point_selected.clear();
+            self.point_context_anchor = None;
             self.point_drag_origin = None;
             self.point_drag_mode = None;
             return;
@@ -105,18 +247,6 @@ impl PhotonicApp {
         let hover_canvas = ui
             .input(|i| i.pointer.hover_pos())
             .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
-
-        // Helper closure: hit-test anchors of the current edit node at canvas pos (cx, cy)
-        let find_anchor = |nid: NodeId, cx: f64, cy: f64, doc: &Document| -> Option<usize> {
-            doc.nodes.get(&nid).and_then(|node| {
-                if let SceneNodeKind::Path(pn) = &node.kind {
-                    let bez = pn.path_data.to_bez_path();
-                    nearest_anchor_screen(&bez, &node.transform, view, cx, cy, ANCHOR_RADIUS_PX)
-                } else {
-                    None
-                }
-            })
-        };
 
         // Roundable straight corners of the edit node, recomputed each frame for
         // Live-Corners widget hit-testing and rendering.
@@ -152,11 +282,7 @@ impl PhotonicApp {
                     .is_some()
                 {
                     egui::CursorIcon::Grab
-                } else if self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, hx, hy, doc))
-                    .is_some()
-                {
+                } else if self.ds_anchor_at(hx, hy, doc, view).is_some() {
                     egui::CursorIcon::PointingHand
                 } else {
                     egui::CursorIcon::Default
@@ -195,6 +321,77 @@ impl PhotonicApp {
             return;
         }
 
+        // ── Right-click an anchor → point-type / round context menu (#187) ────
+        // Discoverability: the geometry (bez_convert_anchors, round_selected_corners)
+        // and the on-canvas handle render/drag already exist; the missing piece was
+        // a right-click entry point. On secondary click, hit-test the anchor at the
+        // press location, select it, and record it as the menu target.
+        if response.secondary_clicked() {
+            if let Some(press_pos) = response.interact_pointer_pos() {
+                let (cx, cy) = view.screen_to_canvas(press_pos.x as f64, press_pos.y as f64);
+                let hit = self.ds_anchor_at(cx, cy, doc, view);
+                if let Some(idx) = hit {
+                    // Select the right-clicked anchor (replace unless Shift/Ctrl is
+                    // held to add) so the menu acts on a visible selection.
+                    if add_sel {
+                        if !self.point_selected.contains(&idx) {
+                            self.point_selected.push(idx);
+                        }
+                    } else if !self.point_selected.contains(&idx) {
+                        self.point_selected = vec![idx];
+                    }
+                    self.point_context_anchor = Some(idx);
+                } else {
+                    // Right-click missed every anchor — no anchor menu this time.
+                    self.point_context_anchor = None;
+                }
+            }
+        }
+
+        // Registered every frame so egui can keep the menu open across frames; the
+        // closure renders items only when an anchor is the active context target.
+        response.context_menu(|ui| {
+            let (Some(ctx_idx), Some(_nid)) = (self.point_context_anchor, self.point_edit_node)
+            else {
+                // No anchor was right-clicked (empty space / non-path) — close so no
+                // empty menu lingers.
+                ui.close_menu();
+                return;
+            };
+            ui.label(egui::RichText::new("Anchor point").weak().small());
+            if ui
+                .button("Corner")
+                .on_hover_text("Retract this anchor's handles → sharp corner")
+                .clicked()
+            {
+                self.ds_convert_context_anchor(ctx_idx, false, doc, view, doc_modified, history);
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
+            if ui
+                .button("Smooth / Curved")
+                .on_hover_text("Add collinear handles → smooth curve; drag the handles to shape it")
+                .clicked()
+            {
+                self.ds_convert_context_anchor(ctx_idx, true, doc, view, doc_modified, history);
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
+            ui.menu_button("Round corner", |ui| {
+                for r in [4.0_f64, 8.0, 16.0, 32.0] {
+                    if ui
+                        .button(format!("{r:.0} px"))
+                        .on_hover_text("Fillet this straight corner by this radius")
+                        .clicked()
+                    {
+                        self.ds_round_context_anchor(ctx_idx, r, doc, doc_modified, history);
+                        self.point_context_anchor = None;
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+
         // ── Drag start: use interact_pointer_pos() — the press location ───────
         // Priority: bezier handle > corner widget > anchor point > shape body.
         if response.drag_started_by(egui::PointerButton::Primary) {
@@ -217,9 +414,7 @@ impl PhotonicApp {
                         CORNER_WIDGET_PX,
                     )
                 });
-                let anchor_hit = self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
+                let anchor_hit = self.ds_anchor_at(cx, cy, doc, view);
                 let origin_bez = edit_node.and_then(|node| match &node.kind {
                     SceneNodeKind::Path(pn) => Some(pn.path_data.to_bez_path()),
                     _ => None,
@@ -454,9 +649,7 @@ impl PhotonicApp {
             if let Some(click_pos) = response.interact_pointer_pos() {
                 let (cx, cy) = view.screen_to_canvas(click_pos.x as f64, click_pos.y as f64);
 
-                let hit_anchor = self
-                    .point_edit_node
-                    .and_then(|nid| find_anchor(nid, cx, cy, doc));
+                let hit_anchor = self.ds_anchor_at(cx, cy, doc, view);
 
                 if let Some(anchor_idx) = hit_anchor {
                     if add_sel {
