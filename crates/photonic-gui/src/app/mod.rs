@@ -2675,6 +2675,16 @@ impl PhotonicApp {
                                     if let Some((w, h)) = dims {
                                         doc.width = w;
                                         doc.height = h;
+                                        // The artboard is a spatial rect of its
+                                        // own — size it to the photo as well,
+                                        // or the visible board (and Crop to
+                                        // Artboard) would still be A4.
+                                        if let Some(ab) = doc.artboards.first_mut() {
+                                            ab.x = 0.0;
+                                            ab.y = 0.0;
+                                            ab.width = w;
+                                            ab.height = h;
+                                        }
                                         if let Some(node) = doc.get_node_mut(&nid) {
                                             node.transform =
                                                 photonic_core::Transform::translate(0.0, 0.0);
@@ -6716,8 +6726,27 @@ impl PhotonicApp {
                             _ => (0, 0),
                         };
                         let before = (dims(node), node.transform.matrix);
+                        // Crop to the artboard the image is actually on (the
+                        // one it overlaps most — spatial multi-artboard model),
+                        // not the document rect at the origin.
+                        let (iw, ih) = dims(node);
+                        let [a, _, _, d, tx, ty] = node.transform.matrix;
+                        let (ax0, ay0, ax1, ay1) = match doc.artboard_for_rect(
+                            tx,
+                            ty,
+                            tx + a * iw as f64,
+                            ty + d * ih as f64,
+                        ) {
+                            Some(ab) => ab.rect(),
+                            None => {
+                                self.file_status = Some(
+                                    "Crop failed: image does not overlap any artboard".into(),
+                                );
+                                continue 'actions;
+                            }
+                        };
                         let mut updated = node.clone();
-                        match updated.crop_raster_to_rect(0.0, 0.0, doc.width, doc.height) {
+                        match updated.crop_raster_to_rect(ax0, ay0, ax1, ay1) {
                             Ok(()) => {
                                 if (dims(&updated), updated.transform.matrix) != before {
                                     let (w, h) = dims(&updated);

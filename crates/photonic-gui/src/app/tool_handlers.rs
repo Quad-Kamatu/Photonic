@@ -510,41 +510,62 @@ impl PhotonicApp {
                                 raw
                             }
                         };
+                        let alt = ui.input(|i| i.modifiers.alt);
+                        // Group selection: clicking any member of a group acts
+                        // on every object in its outermost group (Illustrator
+                        // behavior). Alt+click bypasses this to grab just the
+                        // clicked member; isolation mode is already editing
+                        // inside one group, so no expansion there either.
+                        let in_isolation = self.isolated_group.is_some();
+                        let group_members = move |doc: &Document, id: NodeId| -> Vec<NodeId> {
+                            if alt || in_isolation {
+                                return vec![id];
+                            }
+                            match doc.outermost_group_of(&id) {
+                                Some(gid) => {
+                                    let m = doc.group_member_ids(&gid);
+                                    if m.is_empty() {
+                                        vec![id]
+                                    } else {
+                                        m
+                                    }
+                                }
+                                None => vec![id],
+                            }
+                        };
                         if shift {
                             if let Some(id) = hit {
-                                doc.selection.toggle(id);
-                                self.selected_id = Some(id);
+                                // Toggle the whole group as a unit: any member
+                                // already selected → deselect all of them,
+                                // otherwise add all.
+                                let members = group_members(doc, id);
+                                if members.iter().any(|m| doc.selection.contains(m)) {
+                                    for m in &members {
+                                        doc.selection.remove(m);
+                                    }
+                                    self.selected_id = doc.selection.ids().next().copied();
+                                } else {
+                                    for m in &members {
+                                        doc.selection.add(*m);
+                                    }
+                                    self.selected_id = Some(id);
+                                }
                             } else {
                                 // Shift+drag on empty space → additive marquee
                                 self.marquee_start = Some(pos);
                             }
                         } else {
-                            let alt = ui.input(|i| i.modifiers.alt);
-                            // Alt+click: if the hit node is a group, select the
-                            // topmost child of that group instead (Group Selection behavior).
-                            let effective_hit = if alt {
-                                hit.and_then(|id| {
-                                    if let Some(SceneNodeKind::Group(g)) =
-                                        doc.nodes.get(&id).map(|n| &n.kind)
-                                    {
-                                        // Return topmost (last) child that exists in the document.
-                                        g.children
-                                            .iter()
-                                            .rev()
-                                            .find(|cid| doc.nodes.contains_key(*cid))
-                                            .copied()
-                                    } else {
-                                        Some(id)
-                                    }
-                                })
-                            } else {
-                                hit
-                            };
-                            self.selected_id = effective_hit;
-                            self.moving = effective_hit.is_some() && !alt;
-                            match self.selected_id {
-                                Some(id) => doc.selection = Selection::single(id),
+                            match hit {
+                                Some(id) => {
+                                    let members = group_members(doc, id);
+                                    doc.selection =
+                                        Selection::from_ids(members.iter().copied());
+                                    self.selected_id = Some(id);
+                                    self.moving = !alt;
+                                }
                                 None => {
+                                    self.selected_id = None;
+                                    self.moving = false;
                                     doc.selection.clear();
                                     // Drag on empty space → begin marquee selection
                                     self.marquee_start = Some(pos);

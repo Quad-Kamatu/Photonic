@@ -892,6 +892,85 @@ impl Document {
         }
     }
 
+    /// The immediate parent group of `id`, if any (scan over all group nodes).
+    pub fn parent_group_of(&self, id: &NodeId) -> Option<NodeId> {
+        self.nodes.values().find_map(|n| match &n.kind {
+            SceneNodeKind::Group(g) if g.children.contains(id) => Some(n.id),
+            _ => None,
+        })
+    }
+
+    /// The outermost group containing `id`, walking nested groups upward.
+    /// `None` when the node is not in any group. Bounded by a depth cap so a
+    /// malformed document with a group-parent cycle cannot hang the UI.
+    pub fn outermost_group_of(&self, id: &NodeId) -> Option<NodeId> {
+        let mut cur = self.parent_group_of(id)?;
+        for _ in 0..64 {
+            match self.parent_group_of(&cur) {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        Some(cur)
+    }
+
+    /// All non-group descendant node ids of a group, recursively (the group's
+    /// selectable/movable members). Group nodes themselves are not included —
+    /// child transforms are absolute, so translating both a group node and its
+    /// members would double-move. Cycle-safe via a visited set.
+    pub fn group_member_ids(&self, group_id: &NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![*group_id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(gid) = stack.pop() {
+            if !seen.insert(gid) {
+                continue;
+            }
+            let Some(SceneNodeKind::Group(g)) = self.nodes.get(&gid).map(|n| &n.kind) else {
+                continue;
+            };
+            for cid in &g.children {
+                match self.nodes.get(cid).map(|n| &n.kind) {
+                    Some(SceneNodeKind::Group(_)) => stack.push(*cid),
+                    Some(_) => out.push(*cid),
+                    None => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// The artboard "owning" the canvas-space rectangle `(x0, y0)..(x1, y1)`:
+    /// the one with the largest overlap area, preferring the active artboard on
+    /// ties. `None` when no artboard overlaps the rect at all.
+    pub fn artboard_for_rect(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Option<&Artboard> {
+        let (rx0, rx1) = (x0.min(x1), x0.max(x1));
+        let (ry0, ry1) = (y0.min(y1), y0.max(y1));
+        let mut best: Option<(&Artboard, f64)> = None;
+        for a in &self.artboards {
+            let (ax0, ay0, ax1, ay1) = a.rect();
+            let w = (rx1.min(ax1) - rx0.max(ax0)).max(0.0);
+            let h = (ry1.min(ay1) - ry0.max(ay0)).max(0.0);
+            let overlap = w * h;
+            if overlap <= 0.0 {
+                continue;
+            }
+            let wins = match best {
+                None => true,
+                Some((cur, cur_overlap)) => {
+                    overlap > cur_overlap
+                        || (overlap == cur_overlap
+                            && Some(a.id) == self.active_artboard
+                            && Some(cur.id) != self.active_artboard)
+                }
+            };
+            if wins {
+                best = Some((a, overlap));
+            }
+        }
+        best.map(|(a, _)| a)
+    }
+
     /// Bounding box of all artboards as `(min_x, min_y, max_x, max_y)`.
     /// Falls back to `(0, 0, width, height)` when there are no artboards.
     pub fn artboards_bounds(&self) -> (f64, f64, f64, f64) {
@@ -1353,6 +1432,61 @@ mod tests {
             doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
         }
         doc
+    }
+
+    #[test]
+    fn group_helpers_resolve_nested_membership() {
+        use crate::node::GroupNode;
+        let path = PathData::rect(0.0, 0.0, 10.0, 10.0);
+        let mut doc = doc_with_nodes(vec![
+            (path.clone(), Color::RED),
+            (path.clone(), Color::BLUE),
+            (path, Color::GREEN),
+        ]);
+        let layer_id = doc.layer_order[0];
+        let ids: Vec<NodeId> = doc.layers[&layer_id].node_ids.clone();
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+        // inner = group(a, b); outer = group(inner, c)
+        let mut inner = GroupNode::new();
+        inner.children = vec![a, b];
+        let inner_node = SceneNode::new("inner", layer_id, SceneNodeKind::Group(inner));
+        let inner_id = inner_node.id;
+        doc.add_node(inner_node, Some(layer_id));
+        let mut outer = GroupNode::new();
+        outer.children = vec![inner_id, c];
+        let outer_node = SceneNode::new("outer", layer_id, SceneNodeKind::Group(outer));
+        let outer_id = outer_node.id;
+        doc.add_node(outer_node, Some(layer_id));
+
+        assert_eq!(doc.parent_group_of(&a), Some(inner_id));
+        assert_eq!(doc.parent_group_of(&inner_id), Some(outer_id));
+        assert_eq!(doc.outermost_group_of(&a), Some(outer_id));
+        assert_eq!(doc.outermost_group_of(&c), Some(outer_id));
+        assert_eq!(doc.outermost_group_of(&outer_id), None);
+
+        // Members = the three leaves, never the group nodes themselves.
+        let mut members = doc.group_member_ids(&outer_id);
+        members.sort();
+        let mut expected = vec![a, b, c];
+        expected.sort();
+        assert_eq!(members, expected);
+    }
+
+    #[test]
+    fn artboard_for_rect_picks_max_overlap() {
+        let mut doc = Document::new("test", 100.0, 100.0);
+        // Default artboard covers (0,0,100,100); add a second to its right.
+        let second = Artboard::new("Artboard 2", 150.0, 0.0, 100.0, 100.0);
+        let second_id = doc.add_artboard(second);
+        // Rect mostly over the second artboard.
+        let hit = doc.artboard_for_rect(140.0, 10.0, 240.0, 90.0).expect("hit");
+        assert_eq!(hit.id, second_id);
+        // Rect fully over the first.
+        let hit = doc.artboard_for_rect(10.0, 10.0, 90.0, 90.0).expect("hit");
+        assert_eq!(hit.rect().0, 0.0);
+        // Rect overlapping neither.
+        assert!(doc.artboard_for_rect(400.0, 400.0, 500.0, 500.0).is_none());
     }
 
     #[test]
