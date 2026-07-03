@@ -304,7 +304,13 @@ impl SceneNode {
     /// the layer-mask operations above. Requires an axis-aligned, non-mirrored
     /// transform (pure translation + positive scale); rotated or flipped
     /// rasters return `Err` rather than silently resampling.
-    pub fn crop_raster_to_rect(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> Result<(), String> {
+    pub fn crop_raster_to_rect(
+        &mut self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    ) -> Result<(), String> {
         let SceneNodeKind::Raster(rn) = &mut self.kind else {
             return Err("not a raster node".to_string());
         };
@@ -825,7 +831,9 @@ mod raster_mask_tests {
         let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(10, 10)));
         n.transform = Transform::translate(-3.0, -2.0);
         n.crop_raster_to_rect(0.0, 0.0, 8.0, 6.0).expect("crop ok");
-        let SceneNodeKind::Raster(rn) = &n.kind else { unreachable!() };
+        let SceneNodeKind::Raster(rn) = &n.kind else {
+            unreachable!()
+        };
         // Pixels left of x=3 / above y=2 trimmed; artboard right/bottom edge
         // clips the rest: local 3..=10 clamps to width 8-… → (-3 + 3) = 0.
         assert_eq!(n.transform.matrix[4], 0.0);
@@ -841,7 +849,9 @@ mod raster_mask_tests {
         n.transform = Transform::translate(2.0, 2.0);
         // Crop to a rect covering only the bottom-right 3×3 of the image.
         n.crop_raster_to_rect(5.0, 5.0, 8.0, 8.0).expect("crop ok");
-        let SceneNodeKind::Raster(rn) = &n.kind else { unreachable!() };
+        let SceneNodeKind::Raster(rn) = &n.kind else {
+            unreachable!()
+        };
         assert_eq!((rn.image.width, rn.image.height), (3, 3));
         let m = rn.mask.as_ref().expect("mask kept");
         assert_eq!((m.width, m.height), (3, 3));
@@ -854,7 +864,9 @@ mod raster_mask_tests {
     #[test]
     fn crop_to_rect_rejects_rotation_and_no_overlap() {
         let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(4, 4)));
-        n.transform = Transform { matrix: [0.7, 0.7, -0.7, 0.7, 0.0, 0.0] };
+        n.transform = Transform {
+            matrix: [0.7, 0.7, -0.7, 0.7, 0.0, 0.0],
+        };
         assert!(n.crop_raster_to_rect(0.0, 0.0, 2.0, 2.0).is_err());
 
         let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(4, 4)));
@@ -867,7 +879,9 @@ mod raster_mask_tests {
         let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(4, 4)));
         n.transform = Transform::translate(2.0, 2.0);
         n.crop_raster_to_rect(0.0, 0.0, 100.0, 100.0).expect("ok");
-        let SceneNodeKind::Raster(rn) = &n.kind else { unreachable!() };
+        let SceneNodeKind::Raster(rn) = &n.kind else {
+            unreachable!()
+        };
         assert_eq!((rn.image.width, rn.image.height), (4, 4));
         assert_eq!(n.transform.matrix[4], 2.0);
     }

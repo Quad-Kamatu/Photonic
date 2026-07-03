@@ -68,15 +68,17 @@ fn ensure_model() -> Result<PathBuf> {
     let path = dir.join("u2netp.onnx");
     // A previous partial download can leave a tiny truncated file that ort will
     // fail to parse; treat anything implausibly small as absent.
-    let good = std::fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false);
+    let good = std::fs::metadata(&path)
+        .map(|m| m.len() > 1_000_000)
+        .unwrap_or(false);
     if good {
         return Ok(path);
     }
 
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating model cache dir {}", dir.display()))?;
-    let url = std::env::var("PHOTONIC_RMBG_MODEL_URL")
-        .unwrap_or_else(|_| DEFAULT_MODEL_URL.to_string());
+    let url =
+        std::env::var("PHOTONIC_RMBG_MODEL_URL").unwrap_or_else(|_| DEFAULT_MODEL_URL.to_string());
     tracing::info!(url = %url, "downloading background-removal model (once)");
 
     let resp = ureq::get(&url)

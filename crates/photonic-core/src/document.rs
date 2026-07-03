@@ -1480,7 +1480,9 @@ mod tests {
         let second = Artboard::new("Artboard 2", 150.0, 0.0, 100.0, 100.0);
         let second_id = doc.add_artboard(second);
         // Rect mostly over the second artboard.
-        let hit = doc.artboard_for_rect(140.0, 10.0, 240.0, 90.0).expect("hit");
+        let hit = doc
+            .artboard_for_rect(140.0, 10.0, 240.0, 90.0)
+            .expect("hit");
         assert_eq!(hit.id, second_id);
         // Rect fully over the first.
         let hit = doc.artboard_for_rect(10.0, 10.0, 90.0, 90.0).expect("hit");

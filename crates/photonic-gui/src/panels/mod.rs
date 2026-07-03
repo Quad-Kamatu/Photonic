@@ -33,17 +33,38 @@ pub enum FillColorSlot {
 #[derive(Debug, Clone)]
 pub enum EyedropperTarget {
     NewShapeFill,
-    NodeFillSolid { node_id: NodeId },
-    NodeFillGradStop { node_id: NodeId, idx: usize },
-    NodeFillFluid { node_id: NodeId, idx: usize },
-    NodeFillMesh { node_id: NodeId, idx: usize },
-    NodeStroke { node_id: NodeId },
-    NodeOuterGlow { node_id: NodeId },
-    NodeInnerGlow { node_id: NodeId },
-    NodeGaussianGlow { node_id: NodeId },
+    NodeFillSolid {
+        node_id: NodeId,
+    },
+    NodeFillGradStop {
+        node_id: NodeId,
+        idx: usize,
+    },
+    NodeFillFluid {
+        node_id: NodeId,
+        idx: usize,
+    },
+    NodeFillMesh {
+        node_id: NodeId,
+        idx: usize,
+    },
+    NodeStroke {
+        node_id: NodeId,
+    },
+    NodeOuterGlow {
+        node_id: NodeId,
+    },
+    NodeInnerGlow {
+        node_id: NodeId,
+    },
+    NodeGaussianGlow {
+        node_id: NodeId,
+    },
     /// Sample a color on a raster layer to begin a color-range mask-out session
     /// (hide every pixel within tolerance of the picked color).
-    RasterColorRange { node_id: NodeId },
+    RasterColorRange {
+        node_id: NodeId,
+    },
 }
 
 /// An action requested by a panel widget, to be processed by the main draw loop.
@@ -3575,9 +3596,8 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                     )
                                     .clicked()
                                 {
-                                    action = Some(PanelAction::StartRasterColorRange {
-                                        node_id: nid,
-                                    });
+                                    action =
+                                        Some(PanelAction::StartRasterColorRange { node_id: nid });
                                 }
                             }
                             Some(rgba) => {

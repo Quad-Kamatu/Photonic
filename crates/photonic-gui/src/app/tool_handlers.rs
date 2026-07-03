@@ -542,8 +542,10 @@ impl PhotonicApp {
                         .collect();
                     // Reuse the resize snapshot vec so the release path records the
                     // rotation as one undoable UpdateNode batch.
-                    self.resize_drag_origins =
-                        ids.iter().filter_map(|id| doc.nodes.get(id).cloned()).collect();
+                    self.resize_drag_origins = ids
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).cloned())
+                        .collect();
                 } else {
                     // Check if click is within the effective selection bounds (body).
                     let on_selected = match effective_bounds {
@@ -611,8 +613,7 @@ impl PhotonicApp {
                             match hit {
                                 Some(id) => {
                                     let members = self.select_group_members(doc, id, alt);
-                                    doc.selection =
-                                        Selection::from_ids(members.iter().copied());
+                                    doc.selection = Selection::from_ids(members.iter().copied());
                                     self.selected_id = Some(id);
                                     self.moving = !alt;
                                 }

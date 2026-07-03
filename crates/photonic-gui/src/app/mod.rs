@@ -1930,11 +1930,7 @@ impl PhotonicApp {
         // Placeholder layer id — `AddNode` reassigns it to the target layer
         // (`layer_id: None` → the document's active layer), same as MCP
         // `place_image`.
-        let mut node = SceneNode::new(
-            &name,
-            uuid::Uuid::nil(),
-            SceneNodeKind::Raster(raster),
-        );
+        let mut node = SceneNode::new(&name, uuid::Uuid::nil(), SceneNodeKind::Raster(raster));
         // Centre on the artboard (may be negative if the image is larger).
         node.transform = photonic_core::Transform::translate(
             (doc.width - w as f64) / 2.0,
@@ -2681,10 +2677,9 @@ impl PhotonicApp {
                                 self.place_image_file(doc, history, &path);
                                 if let Some(nid) = self.selected_id {
                                     let dims = doc.get_node(&nid).and_then(|n| match &n.kind {
-                                        SceneNodeKind::Raster(rn) => Some((
-                                            rn.image.width as f64,
-                                            rn.image.height as f64,
-                                        )),
+                                        SceneNodeKind::Raster(rn) => {
+                                            Some((rn.image.width as f64, rn.image.height as f64))
+                                        }
                                         _ => None,
                                     });
                                     if let Some((w, h)) = dims {
@@ -2714,21 +2709,21 @@ impl PhotonicApp {
                                 self.show_welcome = false;
                                 doc_modified = true;
                             } else {
-                            match load_document(&path) {
-                                Ok((loaded, hist_snap)) => {
-                                    self.welcome.add_recent(path.clone(), loaded.name.clone());
-                                    *doc = loaded;
-                                    apply_opened_history(history, hist_snap);
-                                    self.fit_pending = true;
-                                    self.current_file = Some(path);
-                                    self.selected_id = None;
-                                    self.show_welcome = false;
-                                    doc_modified = true;
+                                match load_document(&path) {
+                                    Ok((loaded, hist_snap)) => {
+                                        self.welcome.add_recent(path.clone(), loaded.name.clone());
+                                        *doc = loaded;
+                                        apply_opened_history(history, hist_snap);
+                                        self.fit_pending = true;
+                                        self.current_file = Some(path);
+                                        self.selected_id = None;
+                                        self.show_welcome = false;
+                                        doc_modified = true;
+                                    }
+                                    Err(e) => {
+                                        self.file_status = Some(format!("Open failed: {e}"));
+                                    }
                                 }
-                                Err(e) => {
-                                    self.file_status = Some(format!("Open failed: {e}"));
-                                }
-                            }
                             }
                         }
                     }
@@ -6310,9 +6305,8 @@ impl PhotonicApp {
                         // just two same-layer objects like before).
                         let order: Vec<NodeId> =
                             doc.nodes_in_draw_order().iter().map(|n| n.id).collect();
-                        let order_of = |id: &NodeId| {
-                            order.iter().position(|x| x == id).unwrap_or(usize::MAX)
-                        };
+                        let order_of =
+                            |id: &NodeId| order.iter().position(|x| x == id).unwrap_or(usize::MAX);
                         let mut path_ids: Vec<NodeId> = doc
                             .selection
                             .ids()
@@ -6370,9 +6364,7 @@ impl PhotonicApp {
                                 let base = doc.get_node(&base_id).unwrap();
                                 let base_layer = base.layer_id;
                                 let (fill, stroke) = match &base.kind {
-                                    SceneNodeKind::Path(p) => {
-                                        (p.fill.clone(), p.stroke.clone())
-                                    }
+                                    SceneNodeKind::Path(p) => (p.fill.clone(), p.stroke.clone()),
                                     _ => Default::default(),
                                 };
                                 let op_name = match bool_op {
@@ -6679,8 +6671,7 @@ impl PhotonicApp {
                 PanelAction::StartRasterColorRange { node_id } => {
                     // Arm the eyedropper; the click samples the raster's own
                     // pixels and begins the preview session.
-                    self.eyedropper.target =
-                        Some(EyedropperTarget::RasterColorRange { node_id });
+                    self.eyedropper.target = Some(EyedropperTarget::RasterColorRange { node_id });
                     self.eyedropper.skip_click = true;
                 }
 
@@ -6772,9 +6763,8 @@ impl PhotonicApp {
                         ) {
                             Some(ab) => ab.rect(),
                             None => {
-                                self.file_status = Some(
-                                    "Crop failed: image does not overlap any artboard".into(),
-                                );
+                                self.file_status =
+                                    Some("Crop failed: image does not overlap any artboard".into());
                                 continue 'actions;
                             }
                         };
@@ -6794,9 +6784,8 @@ impl PhotonicApp {
                                         Some(format!("Cropped image to artboard ({w}×{h})"));
                                     doc_modified = true;
                                 } else {
-                                    self.file_status = Some(
-                                        "Image is already inside the artboard".into(),
-                                    );
+                                    self.file_status =
+                                        Some("Image is already inside the artboard".into());
                                 }
                             }
                             Err(e) => self.file_status = Some(format!("Crop failed: {e}")),
