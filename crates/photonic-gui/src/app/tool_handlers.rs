@@ -312,6 +312,33 @@ impl PhotonicApp {
         doc_modified
     }
 
+    /// The node ids a Select-tool click on `hit_id` should act on: every member
+    /// of `hit_id`'s outermost group (Illustrator-style group selection), or
+    /// just `hit_id` itself when `alt` is held, when editing inside an isolated
+    /// group, or when `hit_id` isn't in a group at all. Never returns an empty
+    /// vec (falls back to `[hit_id]`).
+    pub(crate) fn select_group_members(
+        &self,
+        doc: &Document,
+        hit_id: NodeId,
+        alt: bool,
+    ) -> Vec<NodeId> {
+        if alt || self.isolated_group.is_some() {
+            return vec![hit_id];
+        }
+        match doc.outermost_group_of(&hit_id) {
+            Some(gid) => {
+                let members = doc.group_member_ids(&gid);
+                if members.is_empty() {
+                    vec![hit_id]
+                } else {
+                    members
+                }
+            }
+            None => vec![hit_id],
+        }
+    }
+
     pub(crate) fn handle_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -413,6 +440,9 @@ impl PhotonicApp {
 
                 // Check if click lands on a corner resize handle.
                 const HANDLE_HIT: f32 = 6.0;
+                // Thickness (screen px) of the rotate frame just outside the
+                // selection box: pressing anywhere in this band rotates.
+                const ROTATE_ZONE: f32 = 44.0;
                 let resize_hit = effective_bounds.and_then(|(bx0, by0, bx1, by1)| {
                     let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
                     let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
@@ -431,6 +461,27 @@ impl PhotonicApp {
                         .find(|(c, _)| (p - *c).length() <= HANDLE_HIT)
                         .map(|(_, h)| *h)
                 });
+
+                // Rotation zone: just OUTSIDE a corner handle (not on the body,
+                // not on a resize handle) → rotate in place about the selection
+                // centre, mirroring the Illustrator/Photoshop corner-rotate cursor.
+                let rotate_pivot = if resize_hit.is_some() {
+                    None
+                } else {
+                    effective_bounds.and_then(|(bx0, by0, bx1, by1)| {
+                        let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
+                        let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
+                        let rect = egui::Rect::from_two_pos(
+                            egui::pos2(sx0 as f32, sy0 as f32),
+                            egui::pos2(sx1 as f32, sy1 as f32),
+                        );
+                        // A thick frame hugging the selection box: inside the
+                        // inflated rect but outside the box itself.
+                        let outer = rect.expand(ROTATE_ZONE);
+                        (outer.contains(pos) && !rect.contains(pos))
+                            .then_some(((bx0 + bx1) / 2.0, (by0 + by1) / 2.0))
+                    })
+                };
 
                 if let Some(handle) = resize_hit {
                     self.resizing = Some(handle);
@@ -475,6 +526,26 @@ impl PhotonicApp {
                                 }
                             });
                     }
+                } else if let Some(pivot) = rotate_pivot {
+                    // Start a rotate-in-place drag about the selection centre.
+                    self.rotating = true;
+                    self.rotate_pivot = pivot;
+                    self.rotate_start_angle = (cy - pivot.1).atan2(cx - pivot.0);
+                    let ids: Vec<NodeId> = if sel_ids.len() > 1 {
+                        sel_ids.clone()
+                    } else {
+                        self.selected_id.into_iter().collect()
+                    };
+                    self.rotate_origins = ids
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).map(|n| (*id, n.transform.matrix)))
+                        .collect();
+                    // Reuse the resize snapshot vec so the release path records the
+                    // rotation as one undoable UpdateNode batch.
+                    self.resize_drag_origins = ids
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).cloned())
+                        .collect();
                 } else {
                     // Check if click is within the effective selection bounds (body).
                     let on_selected = match effective_bounds {
@@ -510,41 +581,45 @@ impl PhotonicApp {
                                 raw
                             }
                         };
+                        let alt = ui.input(|i| i.modifiers.alt);
+                        // Group selection: clicking any member of a group acts
+                        // on every object in its outermost group (Illustrator
+                        // behavior). Alt+click bypasses this to grab just the
+                        // clicked member; isolation mode is already editing
+                        // inside one group, so no expansion there either. See
+                        // `select_group_members`.
                         if shift {
                             if let Some(id) = hit {
-                                doc.selection.toggle(id);
-                                self.selected_id = Some(id);
+                                // Toggle the whole group as a unit: any member
+                                // already selected → deselect all of them,
+                                // otherwise add all.
+                                let members = self.select_group_members(doc, id, alt);
+                                if members.iter().any(|m| doc.selection.contains(m)) {
+                                    for m in &members {
+                                        doc.selection.remove(m);
+                                    }
+                                    self.selected_id = doc.selection.ids().next().copied();
+                                } else {
+                                    for m in &members {
+                                        doc.selection.add(*m);
+                                    }
+                                    self.selected_id = Some(id);
+                                }
                             } else {
                                 // Shift+drag on empty space → additive marquee
                                 self.marquee_start = Some(pos);
                             }
                         } else {
-                            let alt = ui.input(|i| i.modifiers.alt);
-                            // Alt+click: if the hit node is a group, select the
-                            // topmost child of that group instead (Group Selection behavior).
-                            let effective_hit = if alt {
-                                hit.and_then(|id| {
-                                    if let Some(SceneNodeKind::Group(g)) =
-                                        doc.nodes.get(&id).map(|n| &n.kind)
-                                    {
-                                        // Return topmost (last) child that exists in the document.
-                                        g.children
-                                            .iter()
-                                            .rev()
-                                            .find(|cid| doc.nodes.contains_key(*cid))
-                                            .copied()
-                                    } else {
-                                        Some(id)
-                                    }
-                                })
-                            } else {
-                                hit
-                            };
-                            self.selected_id = effective_hit;
-                            self.moving = effective_hit.is_some() && !alt;
-                            match self.selected_id {
-                                Some(id) => doc.selection = Selection::single(id),
+                            match hit {
+                                Some(id) => {
+                                    let members = self.select_group_members(doc, id, alt);
+                                    doc.selection = Selection::from_ids(members.iter().copied());
+                                    self.selected_id = Some(id);
+                                    self.moving = !alt;
+                                }
                                 None => {
+                                    self.selected_id = None;
+                                    self.moving = false;
                                     doc.selection.clear();
                                     // Drag on empty space → begin marquee selection
                                     self.marquee_start = Some(pos);
@@ -557,7 +632,28 @@ impl PhotonicApp {
         }
 
         if response.dragged_by(egui::PointerButton::Primary) {
-            if self.resizing.is_some() {
+            if self.rotating {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    use photonic_core::transform::Transform;
+                    let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                    let (pxc, pyc) = self.rotate_pivot;
+                    let ang = (cy - pyc).atan2(cx - pxc);
+                    let mut delta = ang - self.rotate_start_angle;
+                    // Shift snaps rotation to 15° increments.
+                    if ui.input(|i| i.modifiers.shift) {
+                        let step = std::f64::consts::PI / 12.0;
+                        delta = (delta / step).round() * step;
+                    }
+                    let rot = Transform::rotate_around(delta, pxc, pyc);
+                    let origins = self.rotate_origins.clone();
+                    for (id, orig) in &origins {
+                        if let Some(node) = doc.nodes.get_mut(id) {
+                            node.transform = rot.then(&Transform { matrix: *orig });
+                            *doc_modified = true;
+                        }
+                    }
+                }
+            } else if self.resizing.is_some() {
                 if let (Some(handle), Some((bx0, by0, bx1, by1))) =
                     (self.resizing, self.resize_origin_bounds)
                 {
@@ -768,6 +864,8 @@ impl PhotonicApp {
                 );
             }
             self.finalize_move(doc, history, doc_modified);
+            self.rotating = false;
+            self.rotate_origins.clear();
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
@@ -875,17 +973,35 @@ impl PhotonicApp {
             if let Some(pos) = response.interact_pointer_pos() {
                 let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
                 let shift = ui.input(|i| i.modifiers.shift);
+                let alt = ui.input(|i| i.modifiers.alt);
                 let hit = hit_test(doc, cx, cy, renderer);
                 if shift {
                     if let Some(id) = hit {
-                        doc.selection.toggle(id);
-                        self.selected_id = Some(id);
+                        // Toggle the whole group as a unit (see the drag path).
+                        let members = self.select_group_members(doc, id, alt);
+                        if members.iter().any(|m| doc.selection.contains(m)) {
+                            for m in &members {
+                                doc.selection.remove(m);
+                            }
+                            self.selected_id = doc.selection.ids().next().copied();
+                        } else {
+                            for m in &members {
+                                doc.selection.add(*m);
+                            }
+                            self.selected_id = Some(id);
+                        }
                     }
                 } else {
-                    self.selected_id = hit;
-                    match self.selected_id {
-                        Some(id) => doc.selection = Selection::single(id),
-                        None => doc.selection.clear(),
+                    match hit {
+                        Some(id) => {
+                            let members = self.select_group_members(doc, id, alt);
+                            doc.selection = Selection::from_ids(members.iter().copied());
+                            self.selected_id = Some(id);
+                        }
+                        None => {
+                            self.selected_id = None;
+                            doc.selection.clear();
+                        }
                     }
                 }
             }
@@ -1006,18 +1122,33 @@ impl PhotonicApp {
                     }
                 }
             } else {
-                let on_body = hover_bounds
+                // Rotate frame: within the band just outside the selection box.
+                const ROTATE_ZONE: f32 = 44.0;
+                let (near_corner, on_body) = hover_bounds
                     .map(|(bx0, by0, bx1, by1)| {
                         let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
                         let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
-                        egui::Rect::from_min_max(
+                        let rect = egui::Rect::from_two_pos(
                             egui::pos2(sx0 as f32, sy0 as f32),
                             egui::pos2(sx1 as f32, sy1 as f32),
-                        )
-                        .contains(hover_pos)
+                        );
+                        let inside = rect.contains(hover_pos);
+                        let in_frame = rect.expand(ROTATE_ZONE).contains(hover_pos) && !inside;
+                        (in_frame, inside)
                     })
-                    .unwrap_or(false);
-                if on_body {
+                    .unwrap_or((false, false));
+                if near_corner {
+                    // egui has no rotate cursor — paint a small clockwise-arrow
+                    // affordance at the pointer so the rotate zone reads clearly.
+                    ui.painter().text(
+                        hover_pos + egui::vec2(16.0, -16.0),
+                        egui::Align2::CENTER_CENTER,
+                        ph::ARROW_CLOCKWISE,
+                        egui::FontId::proportional(18.0),
+                        egui::Color32::from_rgb(110, 86, 207),
+                    );
+                    egui::CursorIcon::Grab
+                } else if on_body {
                     // Open (grab) hand on hover to signal a draggable move
                     egui::CursorIcon::Grab
                 } else {
@@ -1326,125 +1457,119 @@ impl PhotonicApp {
         subtract: bool,
         doc_modified: &mut bool,
     ) {
+        use photonic_core::history::Command;
         use photonic_core::ops::boolean::{boolean_op, BooleanOp};
 
-        // Gather (id, layer_id, z-index) for each touched node
-        let mut indexed: Vec<(NodeId, photonic_core::layer::LayerId, usize)> = ids
-            .iter()
-            .filter_map(|&id| doc.node_layer_and_index(&id).map(|(l, i)| (id, l, i)))
-            .collect();
+        // Keep the touched real path nodes (de-duplicated), sorted bottom-to-top
+        // by the document's global draw order — works across layers, matching
+        // the Union/boolean handler. (The old code required all touched shapes to
+        // live in one layer and silently did nothing otherwise, so Shape Builder
+        // appeared broken whenever the shapes weren't in the same layer.)
+        let order: Vec<NodeId> = doc.nodes_in_draw_order().iter().map(|n| n.id).collect();
+        let order_of = |id: &NodeId| order.iter().position(|x| x == id).unwrap_or(usize::MAX);
+        let mut path_ids: Vec<NodeId> = Vec::new();
+        for &id in ids {
+            if !path_ids.contains(&id)
+                && matches!(
+                    doc.get_node(&id).map(|n| &n.kind),
+                    Some(SceneNodeKind::Path(_))
+                )
+            {
+                path_ids.push(id);
+            }
+        }
+        path_ids.sort_by_key(order_of);
 
-        if indexed.is_empty() {
-            return;
+        if path_ids.is_empty() {
+            return; // dragged over nothing paintable — stay silent
         }
 
-        // All must be in the same layer
-        let layer_id = indexed[0].1;
-        if indexed.iter().any(|(_, l, _)| *l != layer_id) {
-            return;
-        }
-
-        // Sort by ascending z-order
-        indexed.sort_by_key(|(_, _, idx)| *idx);
-
-        if subtract && indexed.len() == 1 {
-            // Delete single alt-clicked shape
-            let node_id = indexed[0].0;
-            history.execute(photonic_core::history::Command::RemoveNode { node_id }, doc);
+        // Subtract mode over a single shape deletes it (Illustrator Alt-click).
+        if subtract && path_ids.len() == 1 {
+            let node_id = path_ids[0];
+            history.execute(Command::RemoveNode { node_id }, doc);
             self.shape_builder_hovered = None;
+            self.selected_id = None;
+            doc.selection.clear();
             *doc_modified = true;
+            self.file_status = Some("Shape Builder: deleted shape".into());
+            return;
+        }
+        if path_ids.len() < 2 {
+            // The drag only caught one shape — guide the user (the interior of
+            // each shape must be passed through; unfilled shapes only register
+            // on their outline).
+            self.file_status =
+                Some("Shape Builder: drag across 2+ overlapping shapes to merge".into());
             return;
         }
 
-        if !subtract && indexed.len() < 2 {
-            // Nothing to union
-            return;
-        }
-
-        // Bake transforms for all shapes
-        let baked_paths: Vec<_> = indexed
+        // Bake each transform into geometry, then fold the op with the bottom
+        // shape as the base.
+        let baked: Vec<PathData> = path_ids
             .iter()
-            .filter_map(|(id, _, _)| {
-                let n = doc.get_node(id)?;
-                if let SceneNodeKind::Path(pn) = &n.kind {
-                    Some((
-                        *id,
-                        gui_apply_affine_to_path(&pn.path_data, n.transform.to_kurbo()),
-                    ))
-                } else {
-                    None
-                }
+            .filter_map(|id| {
+                doc.get_node(id).and_then(|n| match &n.kind {
+                    SceneNodeKind::Path(p) => Some(gui_apply_affine_to_path(
+                        &p.path_data,
+                        n.transform.to_kurbo(),
+                    )),
+                    _ => None,
+                })
             })
             .collect();
-
-        if baked_paths.is_empty() {
-            return;
-        }
-
-        // Get style from the bottom-most shape (first in z-order)
-        let (fill, stroke) = doc
-            .get_node(&indexed[0].0)
-            .and_then(|n| {
-                if let SceneNodeKind::Path(pn) = &n.kind {
-                    Some((pn.fill.clone(), pn.stroke.clone()))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
-        // Compute result path
         let op = if subtract {
             BooleanOp::Subtract
         } else {
             BooleanOp::Union
         };
-        let mut result_path = baked_paths[0].1.clone();
-        for (_, path) in &baked_paths[1..] {
-            match boolean_op(&result_path, path, op) {
-                Ok(p) => result_path = p,
-                Err(_) => return,
+        let mut acc = baked[0].clone();
+        for p in &baked[1..] {
+            match boolean_op(&acc, p, op) {
+                Ok(r) => acc = r,
+                Err(e) => {
+                    self.file_status = Some(format!("Shape Builder failed: {e}"));
+                    return;
+                }
             }
         }
-
-        // Build result node inheriting the first shape's style
-        let mut result_pn = photonic_core::node::PathNode::new(result_path);
-        result_pn.fill = fill;
-        result_pn.stroke = stroke;
-        let result_node = SceneNode::new("Shape", layer_id, SceneNodeKind::Path(result_pn));
-        let result_id = result_node.id;
-
-        // Place the result at the z-position of the lowest input shape
-        let insert_z = indexed[0].2;
-        let layer_len = doc
-            .layers
-            .get(&layer_id)
-            .map(|l| l.node_ids.len())
-            .unwrap_or(0);
-        let result_pos = layer_len.saturating_sub(indexed.len()); // position after removes + add
-        let new_index = insert_z.min(result_pos);
-
-        let mut cmds: Vec<photonic_core::history::Command> = indexed
-            .iter()
-            .map(|(id, _, _)| photonic_core::history::Command::RemoveNode { node_id: *id })
-            .collect();
-        cmds.push(photonic_core::history::Command::AddNode {
-            node: result_node,
-            layer_id: Some(layer_id),
-        });
-        if new_index != result_pos {
-            cmds.push(photonic_core::history::Command::ReorderNode {
-                layer_id,
-                node_id: result_id,
-                old_index: result_pos,
-                new_index,
-            });
+        if acc.to_bez_path().elements().is_empty() {
+            self.file_status = Some("Shape Builder produced an empty shape".into());
+            return;
         }
 
-        history.execute(photonic_core::history::Command::Batch(cmds), doc);
+        // Result inherits the bottom shape's layer, fill and stroke.
+        let base_id = path_ids[0];
+        let Some(base) = doc.get_node(&base_id) else {
+            return;
+        };
+        let base_layer = base.layer_id;
+        let (fill, stroke) = match &base.kind {
+            SceneNodeKind::Path(p) => (p.fill.clone(), p.stroke.clone()),
+            _ => Default::default(),
+        };
+        let mut result_pn = photonic_core::node::PathNode::new(acc);
+        result_pn.fill = fill;
+        result_pn.stroke = stroke;
+        let result_node = SceneNode::new("Shape", base_layer, SceneNodeKind::Path(result_pn));
+        let result_id = result_node.id;
+        let mut cmds: Vec<Command> = path_ids
+            .iter()
+            .map(|id| Command::RemoveNode { node_id: *id })
+            .collect();
+        cmds.push(Command::AddNode {
+            node: result_node,
+            layer_id: Some(base_layer),
+        });
+        history.execute(Command::Batch(cmds), doc);
         self.selected_id = Some(result_id);
         doc.selection = Selection::single(result_id);
         *doc_modified = true;
+        self.file_status = Some(format!(
+            "Shape Builder: {} {} shapes",
+            if subtract { "subtracted" } else { "merged" },
+            path_ids.len()
+        ));
     }
 
     // ── Console panel ─────────────────────────────────────────────────────────

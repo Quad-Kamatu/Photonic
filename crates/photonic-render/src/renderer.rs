@@ -1153,6 +1153,16 @@ impl PhotonicRenderer {
                     return;
                 }
                 let [a, b, c, d, e, f] = node.matrix;
+                // Non-scaling stroke: a stroke's width is an absolute property,
+                // not part of the geometry, so it must NOT grow/shrink when the
+                // object's transform is scaled (Illustrator with "Scale Strokes
+                // & Effects" off). The mesh is built in local space and then
+                // multiplied by `matrix`, so pre-divide the width by the
+                // transform's uniform scale `sqrt(|det|)` to cancel it. This is
+                // a no-op for unscaled or purely-rotated/translated objects
+                // (det == 1) and leaves view zoom untouched.
+                let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
+                let width = width / obj_scale as f32;
                 let mesh = match &node.stroke_widths {
                     // Variable-width profile: scale samples by the same factor the
                     // caller applies to the uniform width (stroke-align doubling),

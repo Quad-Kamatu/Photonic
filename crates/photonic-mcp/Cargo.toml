@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 photonic-core = { path = "../photonic-core" }
+photonic-matte = { path = "../photonic-matte" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }

@@ -295,6 +295,75 @@ impl SceneNode {
         self
     }
 
+    /// Crop this raster node's pixels — and its layer mask, in lockstep — to
+    /// the axis-aligned canvas-space rectangle `(x0, y0)..(x1, y1)` (e.g. the
+    /// artboard bounds), adjusting the transform so the surviving pixels stay
+    /// exactly where they were on canvas.
+    ///
+    /// Destructive by design (pixels outside the rect are discarded), unlike
+    /// the layer-mask operations above. Requires an axis-aligned, non-mirrored
+    /// transform (pure translation + positive scale); rotated or flipped
+    /// rasters return `Err` rather than silently resampling.
+    pub fn crop_raster_to_rect(
+        &mut self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    ) -> Result<(), String> {
+        let SceneNodeKind::Raster(rn) = &mut self.kind else {
+            return Err("not a raster node".to_string());
+        };
+        if rn.is_adjustment_layer() {
+            return Err("cannot crop an adjustment layer".to_string());
+        }
+        let [a, b, c, d, tx, ty] = self.transform.matrix;
+        if b.abs() > 1e-9 || c.abs() > 1e-9 {
+            return Err("crop requires an unrotated image (no rotation/shear)".to_string());
+        }
+        if a <= 0.0 || d <= 0.0 {
+            return Err("crop requires a non-mirrored image (positive scale)".to_string());
+        }
+
+        // Image extent in canvas space.
+        let (w, h) = (rn.image.width as f64, rn.image.height as f64);
+        let (ix0, iy0) = (tx, ty);
+        let (ix1, iy1) = (tx + a * w, ty + d * h);
+
+        // Intersection with the crop rect.
+        let cx0 = ix0.max(x0.min(x1));
+        let cy0 = iy0.max(y0.min(y1));
+        let cx1 = ix1.min(x0.max(x1));
+        let cy1 = iy1.min(y0.max(y1));
+        if cx1 <= cx0 || cy1 <= cy0 {
+            return Err("image does not overlap the crop area".to_string());
+        }
+
+        // Canvas → local pixels. Outward-rounded so the crop never cuts a
+        // partially-inside pixel (the artboard edge lands inside the kept run).
+        let px0 = (((cx0 - tx) / a).floor().max(0.0)) as i64;
+        let py0 = (((cy0 - ty) / d).floor().max(0.0)) as i64;
+        let px1 = (((cx1 - tx) / a).ceil().min(w)) as i64;
+        let py1 = (((cy1 - ty) / d).ceil().min(h)) as i64;
+        let cw = (px1 - px0).max(1) as u32;
+        let ch = (py1 - py0).max(1) as u32;
+        if px0 == 0 && py0 == 0 && cw == rn.image.width && ch == rn.image.height {
+            return Ok(()); // fully inside — nothing to trim
+        }
+
+        rn.image = crate::raster::geometry::crop(&rn.image, px0, py0, cw, ch);
+        // The layer mask must be cut identically or every mask op afterwards
+        // sees a size mismatch.
+        if let Some(m) = &rn.mask {
+            rn.mask = Some(m.crop(px0, py0, cw, ch));
+        }
+        // Keep the surviving pixels where they were: origin moves by the
+        // trimmed-off left/top run, scaled into canvas units.
+        self.transform.matrix[4] = tx + a * px0 as f64;
+        self.transform.matrix[5] = ty + d * py0 as f64;
+        Ok(())
+    }
+
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags = tags;
         self
@@ -437,6 +506,45 @@ impl RasterNode {
 
     pub fn height(&self) -> u32 {
         self.image.height
+    }
+
+    /// Non-destructively **hide** the pixels covered by `sel` (a selection such as
+    /// a color-range or magic-wand mask) by subtracting it from the layer mask.
+    ///
+    /// This is the reversible equivalent of Photoshop's "delete a color range to
+    /// transparency": the pixels stay in `image`, but the layer mask (which the
+    /// compositor multiplies into source alpha) drops to `0` wherever `sel` is
+    /// selected. Partial selection coverage yields partial hiding, so anti-aliased
+    /// selection edges soften cleanly. Repeated calls accumulate (each subtracts
+    /// more). A size mismatch is a no-op.
+    pub fn hide_selection(&mut self, sel: &Mask) {
+        if sel.width != self.image.width || sel.height != self.image.height {
+            return;
+        }
+        let mut m = self
+            .mask
+            .take()
+            .unwrap_or_else(|| Mask::full(self.image.width, self.image.height));
+        m.subtract(sel);
+        self.mask = Some(m);
+    }
+
+    /// Set the layer mask to a **foreground matte** — coverage `255` where the
+    /// subject is, `0` for background — such as the alpha matte returned by a
+    /// background-removal model. If a mask already exists it is intersected with
+    /// the matte (so a prior hand mask is never widened), otherwise the matte
+    /// becomes the mask directly. A size mismatch is a no-op.
+    pub fn set_foreground_matte(&mut self, matte: Mask) {
+        if matte.width != self.image.width || matte.height != self.image.height {
+            return;
+        }
+        match self.mask.take() {
+            Some(mut existing) => {
+                existing.intersect(&matte);
+                self.mask = Some(existing);
+            }
+            None => self.mask = Some(matte),
+        }
     }
 }
 
@@ -664,4 +772,133 @@ pub enum PrimitiveKind {
     Star,
     Line,
     Arc,
+}
+
+#[cfg(test)]
+mod raster_mask_tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32) -> RasterNode {
+        RasterNode::new(RasterImage::filled(w, h, [10, 20, 30, 255]))
+    }
+
+    #[test]
+    fn hide_selection_subtracts_from_layer_mask() {
+        let mut n = solid(4, 4);
+        // Select the left 2 columns.
+        let sel = Mask::rect(4, 4, 0, 0, 2, 4);
+        n.hide_selection(&sel);
+        let m = n.mask.as_ref().expect("mask created");
+        // Selected pixels hidden (0), unselected fully visible (255).
+        assert_eq!(m.get(0, 0), 0);
+        assert_eq!(m.get(1, 3), 0);
+        assert_eq!(m.get(2, 0), 255);
+        assert_eq!(m.get(3, 3), 255);
+    }
+
+    #[test]
+    fn hide_selection_accumulates() {
+        let mut n = solid(4, 4);
+        n.hide_selection(&Mask::rect(4, 4, 0, 0, 1, 4));
+        n.hide_selection(&Mask::rect(4, 4, 3, 0, 1, 4));
+        let m = n.mask.as_ref().unwrap();
+        assert_eq!(m.get(0, 0), 0);
+        assert_eq!(m.get(3, 0), 0);
+        assert_eq!(m.get(1, 0), 255);
+    }
+
+    #[test]
+    fn hide_selection_size_mismatch_is_noop() {
+        let mut n = solid(4, 4);
+        n.hide_selection(&Mask::full(2, 2));
+        assert!(n.mask.is_none());
+    }
+
+    #[test]
+    fn set_foreground_matte_replaces_when_no_mask() {
+        let mut n = solid(4, 4);
+        let mut matte = Mask::empty(4, 4);
+        matte.set(1, 1, 255);
+        n.set_foreground_matte(matte);
+        let m = n.mask.as_ref().unwrap();
+        assert_eq!(m.get(1, 1), 255);
+        assert_eq!(m.get(0, 0), 0);
+    }
+
+    #[test]
+    fn crop_to_rect_trims_and_repositions() {
+        // 10×10 image at canvas (-3, -2); crop to an 8×6 artboard at origin.
+        let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(10, 10)));
+        n.transform = Transform::translate(-3.0, -2.0);
+        n.crop_raster_to_rect(0.0, 0.0, 8.0, 6.0).expect("crop ok");
+        let SceneNodeKind::Raster(rn) = &n.kind else {
+            unreachable!()
+        };
+        // Pixels left of x=3 / above y=2 trimmed; artboard right/bottom edge
+        // clips the rest: local 3..=10 clamps to width 8-… → (-3 + 3) = 0.
+        assert_eq!(n.transform.matrix[4], 0.0);
+        assert_eq!(n.transform.matrix[5], 0.0);
+        assert_eq!((rn.image.width, rn.image.height), (7, 6));
+    }
+
+    #[test]
+    fn crop_to_rect_crops_mask_in_lockstep() {
+        let mut node = solid(6, 6);
+        node.hide_selection(&Mask::rect(6, 6, 0, 0, 6, 3)); // hide top half
+        let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(node));
+        n.transform = Transform::translate(2.0, 2.0);
+        // Crop to a rect covering only the bottom-right 3×3 of the image.
+        n.crop_raster_to_rect(5.0, 5.0, 8.0, 8.0).expect("crop ok");
+        let SceneNodeKind::Raster(rn) = &n.kind else {
+            unreachable!()
+        };
+        assert_eq!((rn.image.width, rn.image.height), (3, 3));
+        let m = rn.mask.as_ref().expect("mask kept");
+        assert_eq!((m.width, m.height), (3, 3));
+        // Bottom half of the original mask was fully visible → all 255 here.
+        assert!(m.data.iter().all(|&v| v == 255));
+        assert_eq!(n.transform.matrix[4], 5.0);
+        assert_eq!(n.transform.matrix[5], 5.0);
+    }
+
+    #[test]
+    fn crop_to_rect_rejects_rotation_and_no_overlap() {
+        let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(4, 4)));
+        n.transform = Transform {
+            matrix: [0.7, 0.7, -0.7, 0.7, 0.0, 0.0],
+        };
+        assert!(n.crop_raster_to_rect(0.0, 0.0, 2.0, 2.0).is_err());
+
+        let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(4, 4)));
+        n.transform = Transform::translate(100.0, 100.0);
+        assert!(n.crop_raster_to_rect(0.0, 0.0, 8.0, 8.0).is_err());
+    }
+
+    #[test]
+    fn crop_to_rect_fully_inside_is_noop() {
+        let mut n = SceneNode::new("img", Uuid::nil(), SceneNodeKind::Raster(solid(4, 4)));
+        n.transform = Transform::translate(2.0, 2.0);
+        n.crop_raster_to_rect(0.0, 0.0, 100.0, 100.0).expect("ok");
+        let SceneNodeKind::Raster(rn) = &n.kind else {
+            unreachable!()
+        };
+        assert_eq!((rn.image.width, rn.image.height), (4, 4));
+        assert_eq!(n.transform.matrix[4], 2.0);
+    }
+
+    #[test]
+    fn set_foreground_matte_intersects_existing_mask() {
+        let mut n = solid(4, 4);
+        // Existing mask hides the top-left pixel.
+        n.hide_selection(&Mask::rect(4, 4, 0, 0, 1, 1));
+        // Matte keeps only the top row.
+        let matte = Mask::rect(4, 4, 0, 0, 4, 1);
+        n.set_foreground_matte(matte);
+        let m = n.mask.as_ref().unwrap();
+        // Intersection: top-left stays hidden (0), rest of top row visible,
+        // everything below the top row hidden by the matte.
+        assert_eq!(m.get(0, 0), 0);
+        assert_eq!(m.get(1, 0), 255);
+        assert_eq!(m.get(0, 1), 0);
+    }
 }

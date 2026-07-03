@@ -376,6 +376,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::raster::clear_layer_mask(state, a).await,
             ))
         }
+        "remove_background" => {
+            let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::raster::remove_background(state, a).await,
+            ))
+        }
         "get_raster_info" => {
             let a = serde_json::from_value(args).map_err(|e: serde_json::Error| e.to_string())?;
             Ok(ToolOutput::readonly(
@@ -2464,6 +2470,15 @@ pub fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": { "node_id": { "type": "string" } },
+                "required": ["node_id"]
+            }
+        },
+        {
+            "name": "remove_background",
+            "description": "Detect the subject of a raster layer with a local on-device matting model (U²-Net-p via ONNX Runtime; one-time ~5 MB download, then offline) and apply the result as a non-destructive foreground layer mask — the background is hidden, not erased, and the edit is undoable. Intersects with any existing mask.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "node_id": { "type": "string", "description": "Raster node id or name" } },
                 "required": ["node_id"]
             }
         },

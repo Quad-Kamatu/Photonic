@@ -6,6 +6,7 @@ members = [
     "crates/photonic-mcp",
     "crates/photonic-app",
     "crates/photonic-embed",
+    "crates/photonic-matte",
 ]
 resolver = "2"
 

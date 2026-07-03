@@ -33,14 +33,38 @@ pub enum FillColorSlot {
 #[derive(Debug, Clone)]
 pub enum EyedropperTarget {
     NewShapeFill,
-    NodeFillSolid { node_id: NodeId },
-    NodeFillGradStop { node_id: NodeId, idx: usize },
-    NodeFillFluid { node_id: NodeId, idx: usize },
-    NodeFillMesh { node_id: NodeId, idx: usize },
-    NodeStroke { node_id: NodeId },
-    NodeOuterGlow { node_id: NodeId },
-    NodeInnerGlow { node_id: NodeId },
-    NodeGaussianGlow { node_id: NodeId },
+    NodeFillSolid {
+        node_id: NodeId,
+    },
+    NodeFillGradStop {
+        node_id: NodeId,
+        idx: usize,
+    },
+    NodeFillFluid {
+        node_id: NodeId,
+        idx: usize,
+    },
+    NodeFillMesh {
+        node_id: NodeId,
+        idx: usize,
+    },
+    NodeStroke {
+        node_id: NodeId,
+    },
+    NodeOuterGlow {
+        node_id: NodeId,
+    },
+    NodeInnerGlow {
+        node_id: NodeId,
+    },
+    NodeGaussianGlow {
+        node_id: NodeId,
+    },
+    /// Sample a color on a raster layer to begin a color-range mask-out session
+    /// (hide every pixel within tolerance of the picked color).
+    RasterColorRange {
+        node_id: NodeId,
+    },
 }
 
 /// An action requested by a panel widget, to be processed by the main draw loop.
@@ -173,6 +197,24 @@ pub enum PanelAction {
     DivideObjectsBelow { node_id: NodeId },
     /// Activate the eyedropper for the given color slot.
     StartEyedropper(EyedropperTarget),
+    /// Remove the background of a raster layer with the local matting model,
+    /// storing the result as a non-destructive foreground layer mask.
+    RasterRemoveBackground { node_id: NodeId },
+    /// Begin a color-range mask-out session on a raster layer: arms the
+    /// eyedropper so the next canvas click samples the color to hide.
+    StartRasterColorRange { node_id: NodeId },
+    /// Live-update the active color-range session's fuzziness/contiguity and
+    /// refresh its preview.
+    SetRasterColorRangeParams { tolerance: f32, contiguous: bool },
+    /// Commit the active color-range session as one undoable step.
+    ApplyRasterColorRange,
+    /// Discard the active color-range session, restoring the layer.
+    CancelRasterColorRange,
+    /// Remove a raster layer's non-destructive layer mask (undoable).
+    ClearRasterMask { node_id: NodeId },
+    /// Crop a raster layer's pixels (and mask) to the artboard bounds,
+    /// discarding everything outside (undoable).
+    CropRasterToArtboard { node_id: NodeId },
     /// Move the given nodes (or current selection if empty) into a new layer.
     CollectInNewLayer { node_ids: Vec<NodeId> },
     /// Blend fill colors linearly across 3+ selected path nodes.
@@ -1469,6 +1511,15 @@ pub(crate) struct PropPanelCtx<'a> {
     pub magic_wand_attribute: &'a mut SelectSameAttr,
     pub magic_wand_tolerance: &'a mut f64,
     pub eraser_radius: &'a mut f64,
+    /// Raster color-range mask-out: fuzziness (0..1) and contiguous (wand) flag.
+    pub raster_mask_tolerance: &'a mut f32,
+    pub raster_mask_contiguous: &'a mut bool,
+    /// `Some(rgba)` while a color-range session is live on the selected raster
+    /// layer (drives the swatch + Apply/Cancel controls). `None` otherwise.
+    pub raster_color_range_target: Option<[u8; 4]>,
+    /// Whether the background-removal model is already downloaded (drives the
+    /// first-run "~4.7 MB download" hint on the button).
+    pub rmbg_model_cached: bool,
     pub composition_findings: &'a [String],
     pub rhythm_findings: &'a [String],
     pub branch_names: &'a [String],
@@ -1745,6 +1796,10 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let margin_right = &mut *ctx.margin_right;
     let margin_bottom = &mut *ctx.margin_bottom;
     let margin_left = &mut *ctx.margin_left;
+    let raster_mask_tolerance = &mut *ctx.raster_mask_tolerance;
+    let raster_mask_contiguous = &mut *ctx.raster_mask_contiguous;
+    let raster_color_range_target = ctx.raster_color_range_target;
+    let rmbg_model_cached = ctx.rmbg_model_cached;
     let q = ctx.q.as_str();
     let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
     let forced_open = ctx.forced_open;
@@ -3475,6 +3530,176 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             }
                         });
                     });
+            }
+        }
+
+        // ── Raster Masking (raster layers only) ───────────────────────────
+        // Non-destructive: both operations write the node's layer mask (which
+        // the compositor multiplies into source alpha), never the pixels, and
+        // commit as one undoable UpdateNode.
+        if let (Some(nid), Some(node)) = (selected_id, selected_node) {
+            let is_plain_raster = matches!(
+                &node.kind,
+                SceneNodeKind::Raster(r) if !r.is_adjustment_layer()
+            );
+            if is_plain_raster && matches("Raster Masking") {
+                egui::CollapsingHeader::new("Raster Masking")
+                    .default_open(true)
+                    .id_salt("raster_masking_header")
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        // ── Color range ────────────────────────────────────
+                        ui.label(
+                            RichText::new(
+                                "Hide pixels by color (like Select > Color Range + delete, \
+                                 but reversible via the layer mask).",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Fuzziness:");
+                            let tol = ui.add(
+                                egui::Slider::new(raster_mask_tolerance, 0.0..=1.0)
+                                    .fixed_decimals(2),
+                            );
+                            if tol.changed() && raster_color_range_target.is_some() {
+                                action = Some(PanelAction::SetRasterColorRangeParams {
+                                    tolerance: *raster_mask_tolerance,
+                                    contiguous: *raster_mask_contiguous,
+                                });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let cont = ui
+                                .checkbox(raster_mask_contiguous, "Contiguous")
+                                .on_hover_text(
+                                    "On: only the connected region under the click \
+                                     (magic wand). Off: every matching pixel in the layer \
+                                     (color range).",
+                                );
+                            if cont.changed() && raster_color_range_target.is_some() {
+                                action = Some(PanelAction::SetRasterColorRangeParams {
+                                    tolerance: *raster_mask_tolerance,
+                                    contiguous: *raster_mask_contiguous,
+                                });
+                            }
+                        });
+                        match raster_color_range_target {
+                            None => {
+                                if ui
+                                    .button(format!("{} Pick Color to Hide", ph::EYEDROPPER))
+                                    .on_hover_text(
+                                        "Click a color on the canvas; matching pixels \
+                                         preview as hidden, then Apply or Cancel",
+                                    )
+                                    .clicked()
+                                {
+                                    action =
+                                        Some(PanelAction::StartRasterColorRange { node_id: nid });
+                                }
+                            }
+                            Some(rgba) => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Hiding:");
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(18.0, 14.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        3.0,
+                                        Color32::from_rgb(rgba[0], rgba[1], rgba[2]),
+                                    );
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        3.0,
+                                        egui::Stroke::new(1.0, Color32::WHITE),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "#{:02X}{:02X}{:02X}",
+                                            rgba[0], rgba[1], rgba[2]
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Apply").clicked() {
+                                        action = Some(PanelAction::ApplyRasterColorRange);
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        action = Some(PanelAction::CancelRasterColorRange);
+                                    }
+                                    if ui
+                                        .button(format!("{} Repick", ph::EYEDROPPER))
+                                        .on_hover_text("Sample a different color")
+                                        .clicked()
+                                    {
+                                        action = Some(PanelAction::StartRasterColorRange {
+                                            node_id: nid,
+                                        });
+                                    }
+                                });
+                            }
+                        }
+
+                        // ── Remove background ─────────────────────────────
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(
+                            RichText::new(
+                                "Detect the subject with a local model (offline, on-device) \
+                                 and mask out the background.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                        ui.add_space(2.0);
+                        if ui
+                            .button(format!("{} Remove Background", ph::PERSON_SIMPLE))
+                            .on_hover_text(if rmbg_model_cached {
+                                "Runs the local U²-Net model and applies the result as a \
+                                 non-destructive layer mask"
+                            } else {
+                                "First use downloads the small model (~4.7 MB) to the \
+                                 Photonic cache, then works offline"
+                            })
+                            .clicked()
+                        {
+                            action = Some(PanelAction::RasterRemoveBackground { node_id: nid });
+                        }
+                        if ui
+                            .small_button("Clear Layer Mask")
+                            .on_hover_text("Remove the layer mask, revealing all pixels again")
+                            .clicked()
+                        {
+                            action = Some(PanelAction::ClearRasterMask { node_id: nid });
+                        }
+                    });
+                ui.add_space(2.0);
+            }
+            if is_plain_raster && matches("Raster Layer") {
+                egui::CollapsingHeader::new("Raster Layer")
+                    .default_open(true)
+                    .id_salt("raster_layer_header")
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        if ui
+                            .button(format!("{} Crop to Artboard", ph::CROP))
+                            .on_hover_text(
+                                "Trim the image (and its layer mask) to the artboard \
+                                 bounds, discarding pixels outside. Destructive but \
+                                 undoable. Requires an unrotated image.",
+                            )
+                            .clicked()
+                        {
+                            action = Some(PanelAction::CropRasterToArtboard { node_id: nid });
+                        }
+                    });
+                ui.add_space(2.0);
             }
         }
 

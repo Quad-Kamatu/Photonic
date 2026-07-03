@@ -13,6 +13,71 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- **Rotate objects from the canvas.** Hover just outside a corner handle with
+  the Select tool — a rotate affordance appears — then drag to rotate the
+  selection in place about its centre (Illustrator/Photoshop-style). Works for
+  single or multiple objects; hold Shift to snap to 15° increments; one undo
+  step. (Precise numeric rotation in the Transform inspector still works too.)
+- Image import in the GUI (previously raster layers could only be placed via
+  the MCP `place_image` tool):
+  - **File → Place Image…** imports a PNG/JPEG/WebP/BMP/GIF/TIFF as a raster
+    layer, centred on the artboard, selected, and undoable.
+  - **File → Open…** and the welcome screen's Browse now accept image files
+    too: from the editor the photo is placed into the current document; from
+    the welcome screen it opens as a fresh artboard sized to the photo.
+  - Image files can be **dragged & dropped** onto the window on X11, Windows,
+    and macOS. (Not on Wayland yet — winit's Wayland backend has no
+    drag-and-drop support.)
+- **Crop to Artboard** on raster layers (Inspector → Raster Layer): trims the
+  image — and its layer mask, in lockstep — to the bounds of the artboard the
+  image is on (the one it overlaps most, in the spatial multi-artboard model),
+  discarding pixels outside while keeping the surviving pixels exactly where
+  they were on canvas. Destructive but undoable; rotated images are rejected
+  rather than silently resampled.
+- **Group selection with the Select tool**: clicking any member of a group now
+  selects every object in its outermost group (Illustrator behavior), so the
+  whole group moves/edits as a unit; Shift+click toggles the whole group in and
+  out of the selection. Alt+click still grabs just the clicked member, and
+  double-click still enters isolation mode for editing inside the group.
+
+### Fixed
+
+- **Shape Builder now merges across layers, with feedback.** Like the boolean
+  combine below, it silently did nothing unless every touched shape lived in the
+  same layer. It now folds all dragged-over path shapes regardless of layer,
+  reports the result (or why nothing merged) in the status bar, and hints when a
+  drag only caught one shape.
+- **Union / boolean combine now actually merges shapes.** The Union, Subtract,
+  Intersect, and Exclude operations silently did nothing unless *exactly two*
+  path objects in the *same layer* were selected, and gave no feedback when
+  they didn't run. They now combine **any number** of selected path shapes,
+  **across layers**, folding bottom-to-top (Union merges all, Subtract removes
+  the upper shapes from the bottom one, etc.), and report what happened in the
+  status bar — including why nothing merged ("Select 2 or more path shapes",
+  "produced an empty shape").
+- **Strokes no longer scale with the object.** Scaling a shape (drag its
+  bounding-box handles, or any transform with a scale) kept its stroke a fixed
+  width instead of thickening/thinning it — a stroke is an absolute property,
+  not geometry (Illustrator's "Scale Strokes & Effects" off). Applied uniformly
+  across the live canvas, raster/PNG export, and SVG/PDF export, so all four
+  agree. Rotation and translation are unaffected; view zoom still scales
+  everything as before.
+- Opening a photo from the welcome screen now also sizes the **artboard** to
+  the photo (previously only the document dimensions changed, leaving the
+  visible artboard at its default size — which also made Crop to Artboard trim
+  against the wrong rectangle).
+- Raster Masking on imported images (Inspector → Raster Masking, shown when a
+  raster layer is selected): pick a color on the canvas and hide every pixel
+  within an adjustable fuzziness of it — globally (Color Range) or only the
+  connected region under the click (Contiguous / magic-wand) — with a live
+  preview and Apply/Cancel. Non-destructive: the pixels are hidden via the
+  layer mask, never erased, and the edit is a single undo step.
+- One-click **Remove Background** on raster layers: a small local matting
+  model (U²-Net-p, Apache-2.0) detects the subject fully on-device via ONNX
+  Runtime and applies it as a non-destructive foreground layer mask. The
+  ~5 MB model downloads once to the Photonic cache, then works offline. Also
+  exposed as the `remove_background` MCP tool, and a Clear Layer Mask button
+  reveals the layer again at any time.
 - Opt-in crash reporting and diagnostics (#59): when Photonic panics it now
   writes a structured, non-sensitive crash report (app version, UTC time,
   OS/arch, panic message, backtrace) to a `crash-reports/` folder in your

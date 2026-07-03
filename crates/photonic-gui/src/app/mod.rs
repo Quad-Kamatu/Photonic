@@ -72,6 +72,25 @@ impl EyedropperState {
     }
 }
 
+// ─── Raster color-range masking ───────────────────────────────────────────────
+
+/// Live "hide pixels by color" session on a raster layer.
+///
+/// While active, the document holds a *preview*: `original` with the matching
+/// pixels subtracted from its layer mask. Fuzziness/contiguous changes rebuild
+/// the preview from `original` (so they never accumulate); Apply commits
+/// `original → current` as one undoable `UpdateNode`; Cancel restores
+/// `original` verbatim.
+pub struct RasterColorRangeSession {
+    pub node_id: NodeId,
+    /// Color sampled from the layer's own pixels (straight RGBA).
+    pub target: [u8; 4],
+    /// Seed pixel (node-local) for contiguous / magic-wand mode.
+    pub seed: (u32, u32),
+    /// The node as it was before the preview.
+    pub original: SceneNode,
+}
+
 // ─── Drawer kind ──────────────────────────────────────────────────────────────
 
 /// Which top-bar drawer is currently open (replaces floating popover menus).
@@ -485,8 +504,19 @@ pub struct PhotonicApp {
     /// Transforms of all selected nodes captured at the start of a multi-node resize.
     resize_multi_origins: Vec<(NodeId, [f64; 6])>,
     /// Full snapshots of the nodes captured at the start of a resize drag, used
-    /// to record a single undoable UpdateNode batch on release.
+    /// to record a single undoable UpdateNode batch on release. Rotation reuses
+    /// this (release records any transform change as one undo step).
     resize_drag_origins: Vec<SceneNode>,
+
+    /// True while dragging in a corner rotation zone (rotate-in-place).
+    rotating: bool,
+    /// Canvas-space pivot (selection-bbox centre) for the active rotation.
+    rotate_pivot: (f64, f64),
+    /// Pointer angle (radians, atan2 about the pivot) at rotation-drag start.
+    rotate_start_angle: f64,
+    /// Each selected node's transform matrix captured at rotation-drag start,
+    /// so the drag applies an absolute rotation (pivot ∘ orig) every frame.
+    rotate_origins: Vec<(NodeId, [f64; 6])>,
 
     /// Screen-space position where a marquee (drag-select) began; None when inactive.
     marquee_start: Option<egui::Pos2>,
@@ -630,6 +660,21 @@ pub struct PhotonicApp {
     raster_stroke_orig: Option<(photonic_core::node::NodeId, photonic_core::node::SceneNode)>,
     /// Local-space points accumulated during the current drag.
     raster_stroke_pts: Vec<(f32, f32)>,
+
+    // ── Raster masking (color range / remove background) ──────────────────────
+    /// Fuzziness (0..1) for the color-range / magic-wand mask-out.
+    pub raster_mask_tolerance: f32,
+    /// Contiguous (magic-wand flood from the click) vs global color range.
+    pub raster_mask_contiguous: bool,
+    /// Live color-range session; the doc holds its preview while `Some`.
+    pub raster_color_range: Option<RasterColorRangeSession>,
+    /// In-flight background-removal job (worker thread → matte result).
+    rmbg_rx: Option<std::sync::mpsc::Receiver<Result<photonic_core::Mask, String>>>,
+    /// Node targeted by the in-flight background-removal job.
+    rmbg_node: Option<NodeId>,
+    /// Whether the matting model is on disk (checked once at startup, set true
+    /// after a successful run) — drives the first-use download hint.
+    rmbg_model_cached: bool,
 
     // ── Guides ────────────────────────────────────────────────────────────────
     /// When true, ruler guides are rendered on the canvas (toggle with Ctrl+;).
@@ -929,6 +974,10 @@ impl Default for PhotonicApp {
             resize_origin_font_size: None,
             resize_multi_origins: Vec::new(),
             resize_drag_origins: Vec::new(),
+            rotating: false,
+            rotate_pivot: (0.0, 0.0),
+            rotate_start_angle: 0.0,
+            rotate_origins: Vec::new(),
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),
@@ -1024,6 +1073,12 @@ impl Default for PhotonicApp {
             raster_brush_hardness: 0.8,
             raster_stroke_orig: None,
             raster_stroke_pts: Vec::new(),
+            raster_mask_tolerance: 0.25,
+            raster_mask_contiguous: false,
+            raster_color_range: None,
+            rmbg_rx: None,
+            rmbg_node: None,
+            rmbg_model_cached: photonic_matte::model_is_cached(),
             window_logical_pos: (0, 0),
             window_scale_factor: 1.0,
             outline_mode: false,
@@ -1068,6 +1123,17 @@ where
     F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
 {
     std::thread::spawn(f).join().unwrap_or(None)
+}
+
+/// Image extensions accepted by Place Image / Open / drag-and-drop.
+const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"];
+
+/// Whether a path looks like an importable raster image (by extension).
+fn is_image_path(p: &std::path::Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 /// Fit and center the artboard bounding box `(bx0,by0,bx1,by1)` (canvas units)
@@ -1704,6 +1770,227 @@ impl PhotonicApp {
         }
     }
 
+    // ── Raster masking: color range + remove background ──────────────────────
+
+    /// Sample a raster node's own pixel at canvas coordinates `(cx, cy)`.
+    /// Returns the straight-RGBA color and the node-local pixel position, or
+    /// `None` if the point is outside the layer (or the node isn't a raster).
+    fn sample_raster_pixel(
+        &self,
+        doc: &Document,
+        nid: NodeId,
+        cx: f64,
+        cy: f64,
+    ) -> Option<([u8; 4], (u32, u32))> {
+        let node = doc.get_node(&nid)?;
+        let SceneNodeKind::Raster(rn) = &node.kind else {
+            return None;
+        };
+        let lp = node.transform.to_kurbo().inverse() * kurbo::Point::new(cx, cy);
+        if lp.x < 0.0
+            || lp.y < 0.0
+            || lp.x >= rn.image.width as f64
+            || lp.y >= rn.image.height as f64
+        {
+            return None;
+        }
+        let (px, py) = (lp.x as u32, lp.y as u32);
+        Some((rn.image.pixel(px, py), (px, py)))
+    }
+
+    /// Start (or restart) a color-range session on `nid` with the sampled color.
+    fn begin_raster_color_range(
+        &mut self,
+        doc: &mut Document,
+        nid: NodeId,
+        target: [u8; 4],
+        seed: (u32, u32),
+    ) {
+        // A prior session's preview must not leak into the new baseline.
+        self.cancel_raster_color_range(doc);
+        let Some(original) = doc.get_node(&nid).cloned() else {
+            return;
+        };
+        self.raster_color_range = Some(RasterColorRangeSession {
+            node_id: nid,
+            target,
+            seed,
+            original,
+        });
+        self.refresh_raster_color_range(doc);
+    }
+
+    /// Rebuild the live preview from the session's `original` using the current
+    /// fuzziness/contiguous settings (idempotent — parameter changes never
+    /// accumulate).
+    fn refresh_raster_color_range(&mut self, doc: &mut Document) {
+        let Some(s) = &self.raster_color_range else {
+            return;
+        };
+        let SceneNodeKind::Raster(orig_rn) = &s.original.kind else {
+            return;
+        };
+        let sel = if self.raster_mask_contiguous {
+            photonic_core::Mask::magic_wand(
+                &orig_rn.image,
+                s.seed.0,
+                s.seed.1,
+                self.raster_mask_tolerance,
+            )
+        } else {
+            photonic_core::Mask::color_range(&orig_rn.image, s.target, self.raster_mask_tolerance)
+        };
+        let node_id = s.node_id;
+        let original = s.original.clone();
+        if let Some(node) = doc.get_node_mut(&node_id) {
+            *node = original;
+            if let SceneNodeKind::Raster(rn) = &mut node.kind {
+                rn.hide_selection(&sel);
+            }
+        }
+    }
+
+    /// Commit the active session as one undoable `UpdateNode`. Returns true if
+    /// the document changed.
+    fn apply_raster_color_range(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        let Some(s) = self.raster_color_range.take() else {
+            return false;
+        };
+        let Some(current) = doc.get_node(&s.node_id).cloned() else {
+            return false;
+        };
+        // The preview is already live in the doc; record it as one undo step
+        // (same pattern as the raster brush stroke).
+        history.execute(
+            Command::UpdateNode {
+                old: s.original,
+                new: current,
+            },
+            doc,
+        );
+        true
+    }
+
+    /// Discard the active session, restoring the node to its pre-preview state.
+    fn cancel_raster_color_range(&mut self, doc: &mut Document) {
+        if let Some(s) = self.raster_color_range.take() {
+            if let Some(node) = doc.get_node_mut(&s.node_id) {
+                *node = s.original;
+            }
+        }
+    }
+
+    // ── Image placement ───────────────────────────────────────────────────────
+
+    /// Place an image file (PNG/JPEG/WebP/…) as a new raster layer centred on
+    /// the artboard, select it, and record one undoable `AddNode`. This is the
+    /// GUI counterpart of the MCP `place_image` tool.
+    fn place_image_file(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        path: &std::path::Path,
+    ) {
+        match std::fs::read(path) {
+            Ok(bytes) => self.place_image_bytes(doc, history, &bytes, Some(path)),
+            Err(e) => self.file_status = Some(format!("Place image failed: {e}")),
+        }
+    }
+
+    /// Decode `bytes` and place them as a raster layer (see
+    /// [`Self::place_image_file`]). `source` supplies the layer name and the
+    /// `source_uri` used for relink/re-export.
+    fn place_image_bytes(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        bytes: &[u8],
+        source: Option<&std::path::Path>,
+    ) {
+        let image = match photonic_core::raster::image::RasterImage::from_encoded(bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                self.file_status = Some(format!("Place image failed: {e}"));
+                return;
+            }
+        };
+        let (w, h) = (image.width, image.height);
+        let mut raster = photonic_core::node::RasterNode::new(image);
+        if let Some(p) = source {
+            raster.source_uri = Some(p.to_string_lossy().into_owned());
+        }
+        let name = source
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Image".to_string());
+        // Placeholder layer id — `AddNode` reassigns it to the target layer
+        // (`layer_id: None` → the document's active layer), same as MCP
+        // `place_image`.
+        let mut node = SceneNode::new(&name, uuid::Uuid::nil(), SceneNodeKind::Raster(raster));
+        // Centre on the artboard (may be negative if the image is larger).
+        node.transform = photonic_core::Transform::translate(
+            (doc.width - w as f64) / 2.0,
+            (doc.height - h as f64) / 2.0,
+        );
+        let nid = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            doc,
+        );
+        doc.selection = Selection::single(nid);
+        self.selected_id = Some(nid);
+        self.file_status = Some(format!("Placed {name} ({w}×{h})"));
+    }
+
+    /// Kick off background removal on `nid`'s pixels in a worker thread (model
+    /// load/inference is far too slow for the UI thread). The result lands in
+    /// `rmbg_rx` and is applied in the `draw` poll.
+    fn start_remove_background(&mut self, doc: &mut Document, nid: NodeId) {
+        if self.rmbg_rx.is_some() {
+            self.file_status = Some("Background removal is already running…".into());
+            return;
+        }
+        // Discard any live color-range preview on this node first: the job's
+        // snapshot and the eventual undo record must both be built from
+        // committed state, not an uncommitted preview.
+        if self
+            .raster_color_range
+            .as_ref()
+            .is_some_and(|s| s.node_id == nid)
+        {
+            self.cancel_raster_color_range(doc);
+        }
+        let Some(node) = doc.get_node(&nid) else {
+            return;
+        };
+        let SceneNodeKind::Raster(rn) = &node.kind else {
+            return;
+        };
+        if rn.is_adjustment_layer() {
+            return;
+        }
+        let img = rn.image.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = photonic_matte::remove_background(&img).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(res);
+        });
+        self.rmbg_rx = Some(rx);
+        self.rmbg_node = Some(nid);
+        self.file_status = Some(if self.rmbg_model_cached {
+            "Removing background…".into()
+        } else {
+            "Downloading the background-removal model (~5 MB), then removing background…".into()
+        });
+    }
+
     pub fn new() -> Self {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
@@ -1980,6 +2267,45 @@ impl PhotonicApp {
     ) -> bool {
         let mut doc_modified = false;
 
+        // ── Orphaned color-range preview guard ────────────────────────────────
+        // A live color-range session previews directly in the document and is
+        // controlled from the selected node's Raster Masking section. If the
+        // selection moves off that node, discard the preview — otherwise an
+        // uncommitted (and undo-invisible) mask would linger with no UI to
+        // cancel it.
+        if self
+            .raster_color_range
+            .as_ref()
+            .is_some_and(|s| self.selected_id != Some(s.node_id))
+        {
+            self.cancel_raster_color_range(doc);
+            doc_modified = true;
+        }
+
+        // ── Drag-and-drop image import ────────────────────────────────────────
+        // Dropping image files onto the window places each as a raster layer
+        // (same path as File → Place Image…). Native drops carry a filesystem
+        // path; sandboxed/portal drops may only carry bytes — handle both.
+        //
+        // Platform caveat: winit 0.30 only emits DroppedFile on X11, Windows,
+        // and macOS — its Wayland backend has no drag-and-drop support, so on
+        // Wayland this handler never fires and File → Open/Place Image… is the
+        // way in.
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            if let Some(path) = file.path.as_deref().filter(|p| is_image_path(p)) {
+                let path = path.to_path_buf();
+                self.place_image_file(doc, history, &path);
+                doc_modified = true;
+            } else if let Some(bytes) = &file.bytes {
+                let name = std::path::PathBuf::from(&file.name);
+                if is_image_path(&name) {
+                    self.place_image_bytes(doc, history, bytes, Some(&name));
+                    doc_modified = true;
+                }
+            }
+        }
+
         // ── Direct Select entry seed (#164) ───────────────────────────────────
         // Edge-detect switching *into* the Direct Selection tool: when it becomes
         // active while a path object is selected, seed its point-edit state so
@@ -2055,6 +2381,66 @@ impl PhotonicApp {
                 self.update_rx = None;
             } else {
                 ctx.request_repaint(); // keep polling until the check returns
+            }
+        }
+
+        // ── Poll an in-flight background-removal job ──────────────────────────
+        if let Some(rx) = &self.rmbg_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.rmbg_rx = None;
+                let nid = self.rmbg_node.take();
+                match (result, nid) {
+                    (Ok(matte), Some(nid)) => {
+                        self.rmbg_model_cached = true;
+                        // A color-range preview started mid-inference would
+                        // otherwise be baked into the undo record — discard it
+                        // so the commit is built from committed state.
+                        if self
+                            .raster_color_range
+                            .as_ref()
+                            .is_some_and(|s| s.node_id == nid)
+                        {
+                            self.cancel_raster_color_range(doc);
+                        }
+                        if let Some(node) = doc.get_node(&nid) {
+                            let mut updated = node.clone();
+                            let mut applied = false;
+                            if let SceneNodeKind::Raster(rn) = &mut updated.kind {
+                                // No-op on size mismatch (image was replaced
+                                // while the job ran) — then `applied` stays false.
+                                let before = rn.mask.clone();
+                                rn.set_foreground_matte(matte);
+                                applied = rn.mask != before;
+                            }
+                            if applied {
+                                history.execute(
+                                    Command::UpdateNode {
+                                        old: node.clone(),
+                                        new: updated,
+                                    },
+                                    doc,
+                                );
+                                doc_modified = true;
+                                self.file_status = Some(
+                                    "Background removed — applied as a layer mask (undoable)"
+                                        .into(),
+                                );
+                            } else {
+                                self.file_status =
+                                    Some("Background removal skipped: layer changed".into());
+                            }
+                        } else {
+                            self.file_status =
+                                Some("Background removal skipped: layer was deleted".into());
+                        }
+                    }
+                    (Err(e), _) => {
+                        self.file_status = Some(format!("Background removal failed: {e}"));
+                    }
+                    (Ok(_), None) => {}
+                }
+            } else {
+                ctx.request_repaint(); // keep polling until the matte returns
             }
         }
 
@@ -2272,22 +2658,71 @@ impl PhotonicApp {
                             rfd::FileDialog::new()
                                 .add_filter("Photonic", &["photon"])
                                 .add_filter("SVG", &["svg"])
-                                .add_filter("All supported", &["photon", "svg"])
+                                .add_filter("Images", &IMAGE_EXTENSIONS)
+                                .add_filter("All supported", &{
+                                    let mut all = vec!["photon", "svg"];
+                                    all.extend(IMAGE_EXTENSIONS);
+                                    all
+                                })
                                 .pick_file()
                         }) {
-                            match load_document(&path) {
-                                Ok((loaded, hist_snap)) => {
-                                    self.welcome.add_recent(path.clone(), loaded.name.clone());
-                                    *doc = loaded;
-                                    apply_opened_history(history, hist_snap);
-                                    self.fit_pending = true;
-                                    self.current_file = Some(path);
-                                    self.selected_id = None;
-                                    self.show_welcome = false;
-                                    doc_modified = true;
+                            // Opening a photo from the welcome screen starts a
+                            // fresh artboard sized to it, with the image placed
+                            // at the origin — like opening a photo in Photoshop.
+                            if is_image_path(&path) {
+                                *doc = Document::default_artboard();
+                                history.reset();
+                                self.current_file = None;
+                                self.selected_id = None;
+                                self.place_image_file(doc, history, &path);
+                                if let Some(nid) = self.selected_id {
+                                    let dims = doc.get_node(&nid).and_then(|n| match &n.kind {
+                                        SceneNodeKind::Raster(rn) => {
+                                            Some((rn.image.width as f64, rn.image.height as f64))
+                                        }
+                                        _ => None,
+                                    });
+                                    if let Some((w, h)) = dims {
+                                        doc.width = w;
+                                        doc.height = h;
+                                        // The artboard is a spatial rect of its
+                                        // own — size it to the photo as well,
+                                        // or the visible board (and Crop to
+                                        // Artboard) would still be A4.
+                                        if let Some(ab) = doc.artboards.first_mut() {
+                                            ab.x = 0.0;
+                                            ab.y = 0.0;
+                                            ab.width = w;
+                                            ab.height = h;
+                                        }
+                                        if let Some(node) = doc.get_node_mut(&nid) {
+                                            node.transform =
+                                                photonic_core::Transform::translate(0.0, 0.0);
+                                        }
+                                    }
+                                    doc.name = path
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| doc.name.clone());
                                 }
-                                Err(e) => {
-                                    self.file_status = Some(format!("Open failed: {e}"));
+                                self.fit_pending = true;
+                                self.show_welcome = false;
+                                doc_modified = true;
+                            } else {
+                                match load_document(&path) {
+                                    Ok((loaded, hist_snap)) => {
+                                        self.welcome.add_recent(path.clone(), loaded.name.clone());
+                                        *doc = loaded;
+                                        apply_opened_history(history, hist_snap);
+                                        self.fit_pending = true;
+                                        self.current_file = Some(path);
+                                        self.selected_id = None;
+                                        self.show_welcome = false;
+                                        doc_modified = true;
+                                    }
+                                    Err(e) => {
+                                        self.file_status = Some(format!("Open failed: {e}"));
+                                    }
                                 }
                             }
                         }
@@ -2462,9 +2897,21 @@ impl PhotonicApp {
                                                 rfd::FileDialog::new()
                                                     .add_filter("Photonic", &["photon"])
                                                     .add_filter("SVG", &["svg"])
-                                                    .add_filter("All supported", &["photon", "svg"])
+                                                    .add_filter("Images", &IMAGE_EXTENSIONS)
+                                                    .add_filter("All supported", &{
+                                                        let mut all = vec!["photon", "svg"];
+                                                        all.extend(IMAGE_EXTENSIONS);
+                                                        all
+                                                    })
                                                     .pick_file()
                                             }) {
+                                                // A photo isn't a document: place it
+                                                // into the current one as a raster
+                                                // layer instead of trying to load it.
+                                                if is_image_path(&path) {
+                                                    self.place_image_file(doc, history, &path);
+                                                    doc_modified = true;
+                                                } else {
                                                 match load_document(&path) {
                                                     Ok((loaded, hist_snap)) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
@@ -2478,6 +2925,25 @@ impl PhotonicApp {
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Open failed: {e}")),
                                                 }
+                                                }
+                                            }
+                                        }
+                                        if ui.button("  Place Image…  ")
+                                            .on_hover_text(
+                                                "Import a PNG/JPEG/WebP as a raster layer \
+                                                 into the current document",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.active_drawer = None;
+                                            self.selected_drawer_option = None;
+                                            if let Some(path) = run_file_dialog(|| {
+                                                rfd::FileDialog::new()
+                                                    .add_filter("Images", &IMAGE_EXTENSIONS)
+                                                    .pick_file()
+                                            }) {
+                                                self.place_image_file(doc, history, &path);
+                                                doc_modified = true;
                                             }
                                         }
                                     }
@@ -3424,6 +3890,13 @@ impl PhotonicApp {
                     // history_entries(20) is cheap (<=20 items); the mutable write
                     // lands before the immutable &self.history_entries borrow below.
                     self.history_entries = history.history_entries(20);
+                    // Swatch shown in the Raster Masking section — only when the
+                    // live session belongs to the currently selected node.
+                    let raster_color_range_target = self
+                        .raster_color_range
+                        .as_ref()
+                        .filter(|s| Some(s.node_id) == self.selected_id)
+                        .map(|s| s.target);
                     let mut ctx = panels::PropPanelCtx {
                         doc: doc,
                         active_tool: self.active_tool,
@@ -3458,6 +3931,10 @@ impl PhotonicApp {
                         magic_wand_attribute: &mut self.magic_wand_attribute,
                         magic_wand_tolerance: &mut self.magic_wand_tolerance,
                         eraser_radius: &mut self.eraser_radius,
+                        raster_mask_tolerance: &mut self.raster_mask_tolerance,
+                        raster_mask_contiguous: &mut self.raster_mask_contiguous,
+                        raster_color_range_target: raster_color_range_target,
+                        rmbg_model_cached: self.rmbg_model_cached,
                         composition_findings: &self.composition_findings,
                         rhythm_findings: &self.rhythm_findings,
                         branch_names: &branch_names,
@@ -5817,94 +6294,109 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::BooleanOp(bool_op) => {
-                    // Determine target (lower z) and tool (upper z) from selection
-                    let sel_ids: Vec<_> = doc.selection.ids().copied().collect();
-                    if sel_ids.len() == 2 {
-                        if let (Some((lid_a, idx_a)), Some((lid_b, idx_b))) = (
-                            doc.node_layer_and_index(&sel_ids[0]),
-                            doc.node_layer_and_index(&sel_ids[1]),
-                        ) {
-                            if lid_a == lid_b {
-                                let (target_id, tool_id) = if idx_a <= idx_b {
-                                    (sel_ids[0], sel_ids[1])
-                                } else {
-                                    (sel_ids[1], sel_ids[0])
-                                };
-                                let (target_idx, tool_idx) = if idx_a <= idx_b {
-                                    (idx_a, idx_b)
-                                } else {
-                                    (idx_b, idx_a)
-                                };
+                    use photonic_core::ops::boolean::{boolean_op, BooleanOp};
+                    // Divide isn't a fold-into-one op — route the user to it.
+                    if matches!(bool_op, BooleanOp::Divide) {
+                        self.file_status =
+                            Some("Use Pathfinder ▸ Divide to split overlapping shapes".into());
+                    } else {
+                        // Every selected PATH node, sorted bottom-to-top by the
+                        // document's global draw order (works across layers, not
+                        // just two same-layer objects like before).
+                        let order: Vec<NodeId> =
+                            doc.nodes_in_draw_order().iter().map(|n| n.id).collect();
+                        let order_of =
+                            |id: &NodeId| order.iter().position(|x| x == id).unwrap_or(usize::MAX);
+                        let mut path_ids: Vec<NodeId> = doc
+                            .selection
+                            .ids()
+                            .copied()
+                            .filter(|id| {
+                                matches!(
+                                    doc.get_node(id).map(|n| &n.kind),
+                                    Some(SceneNodeKind::Path(_))
+                                )
+                            })
+                            .collect();
+                        path_ids.sort_by_key(order_of);
 
-                                if let (Some(tn), Some(on)) =
-                                    (doc.get_node(&target_id), doc.get_node(&tool_id))
-                                {
-                                    if let (SceneNodeKind::Path(tp), SceneNodeKind::Path(op_node)) =
-                                        (&tn.kind, &on.kind)
-                                    {
-                                        use photonic_core::ops::boolean::{boolean_op, BooleanOp};
-                                        let target_baked = gui_apply_affine_to_path(
-                                            &tp.path_data,
-                                            tn.transform.to_kurbo(),
-                                        );
-                                        let tool_baked = gui_apply_affine_to_path(
-                                            &op_node.path_data,
-                                            on.transform.to_kurbo(),
-                                        );
-                                        if let Ok(result_path) =
-                                            boolean_op(&target_baked, &tool_baked, bool_op)
-                                        {
-                                            let mut result_pn = PathNode::new(result_path);
-                                            result_pn.fill = tp.fill.clone();
-                                            result_pn.stroke = tp.stroke.clone();
-                                            let op_name = match bool_op {
-                                                BooleanOp::Union => "union",
-                                                BooleanOp::Subtract => "subtract",
-                                                BooleanOp::Intersect => "intersect",
-                                                BooleanOp::Exclude => "exclude",
-                                                BooleanOp::Divide => "divide",
-                                            };
-                                            let result_name =
-                                                format!("{} {} {}", tn.name, op_name, on.name);
-                                            let result_node = SceneNode::new(
-                                                &result_name,
-                                                lid_a,
-                                                SceneNodeKind::Path(result_pn),
-                                            );
-                                            let result_id = result_node.id;
-                                            let orig_len = doc
-                                                .layers
-                                                .get(&lid_a)
-                                                .map(|l| l.node_ids.len())
-                                                .unwrap_or(2);
-                                            let tool_below = tool_idx < target_idx;
-                                            let adj_target = if tool_below {
-                                                target_idx.saturating_sub(1)
-                                            } else {
-                                                target_idx
-                                            };
-                                            let result_pos = orig_len.saturating_sub(2);
-                                            let cmd = Command::Batch(vec![
-                                                Command::RemoveNode { node_id: tool_id },
-                                                Command::RemoveNode { node_id: target_id },
-                                                Command::AddNode {
-                                                    node: result_node,
-                                                    layer_id: Some(lid_a),
-                                                },
-                                                Command::ReorderNode {
-                                                    layer_id: lid_a,
-                                                    node_id: result_id,
-                                                    old_index: result_pos,
-                                                    new_index: adj_target,
-                                                },
-                                            ]);
-                                            history.execute(cmd, doc);
-                                            self.selected_id = Some(result_id);
-                                            doc.selection = Selection::single(result_id);
-                                            doc_modified = true;
-                                        }
+                        if path_ids.len() < 2 {
+                            self.file_status =
+                                Some("Select 2 or more path shapes to combine".into());
+                        } else {
+                            // Bake each shape's transform into its geometry so the
+                            // boolean runs in shared canvas space.
+                            let baked: Vec<PathData> = path_ids
+                                .iter()
+                                .filter_map(|id| {
+                                    doc.get_node(id).and_then(|n| match &n.kind {
+                                        SceneNodeKind::Path(p) => Some(gui_apply_affine_to_path(
+                                            &p.path_data,
+                                            n.transform.to_kurbo(),
+                                        )),
+                                        _ => None,
+                                    })
+                                })
+                                .collect();
+                            // Fold the op across all shapes, bottom shape as the
+                            // base (matches Minus-Front / additive Union semantics).
+                            let mut acc = baked[0].clone();
+                            let mut err: Option<String> = None;
+                            for p in &baked[1..] {
+                                match boolean_op(&acc, p, bool_op) {
+                                    Ok(r) => acc = r,
+                                    Err(e) => {
+                                        err = Some(e);
+                                        break;
                                     }
                                 }
+                            }
+
+                            if let Some(e) = err {
+                                self.file_status = Some(format!("Combine failed: {e}"));
+                            } else if acc.to_bez_path().elements().is_empty() {
+                                self.file_status = Some(
+                                    "Combine produced an empty shape (do they overlap?)".into(),
+                                );
+                            } else {
+                                // Result inherits the bottom shape's layer + look.
+                                let base_id = path_ids[0];
+                                let base = doc.get_node(&base_id).unwrap();
+                                let base_layer = base.layer_id;
+                                let (fill, stroke) = match &base.kind {
+                                    SceneNodeKind::Path(p) => (p.fill.clone(), p.stroke.clone()),
+                                    _ => Default::default(),
+                                };
+                                let op_name = match bool_op {
+                                    BooleanOp::Union => "Union",
+                                    BooleanOp::Subtract => "Subtract",
+                                    BooleanOp::Intersect => "Intersect",
+                                    BooleanOp::Exclude => "Exclude",
+                                    BooleanOp::Divide => "Divide",
+                                };
+                                let mut result_pn = PathNode::new(acc);
+                                result_pn.fill = fill;
+                                result_pn.stroke = stroke;
+                                let result_node = SceneNode::new(
+                                    op_name,
+                                    base_layer,
+                                    SceneNodeKind::Path(result_pn),
+                                );
+                                let result_id = result_node.id;
+                                let mut cmds: Vec<Command> = path_ids
+                                    .iter()
+                                    .map(|id| Command::RemoveNode { node_id: *id })
+                                    .collect();
+                                cmds.push(Command::AddNode {
+                                    node: result_node,
+                                    layer_id: Some(base_layer),
+                                });
+                                history.execute(Command::Batch(cmds), doc);
+                                self.selected_id = Some(result_id);
+                                doc.selection = Selection::single(result_id);
+                                doc_modified = true;
+                                self.file_status =
+                                    Some(format!("{op_name}: combined {} shapes", path_ids.len()));
                             }
                         }
                     }
@@ -6174,6 +6666,131 @@ impl PhotonicApp {
                         doc.selection.clear();
                     }
                     doc_modified = true;
+                }
+
+                PanelAction::StartRasterColorRange { node_id } => {
+                    // Arm the eyedropper; the click samples the raster's own
+                    // pixels and begins the preview session.
+                    self.eyedropper.target = Some(EyedropperTarget::RasterColorRange { node_id });
+                    self.eyedropper.skip_click = true;
+                }
+
+                PanelAction::SetRasterColorRangeParams {
+                    tolerance,
+                    contiguous,
+                } => {
+                    self.raster_mask_tolerance = tolerance;
+                    self.raster_mask_contiguous = contiguous;
+                    if self.raster_color_range.is_some() {
+                        self.refresh_raster_color_range(doc);
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::ApplyRasterColorRange => {
+                    if self.apply_raster_color_range(doc, history) {
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::CancelRasterColorRange => {
+                    if self.raster_color_range.is_some() {
+                        self.cancel_raster_color_range(doc);
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::ClearRasterMask { node_id } => {
+                    // Discard any live preview on this node first so the mask
+                    // removal starts from the committed state.
+                    if self
+                        .raster_color_range
+                        .as_ref()
+                        .is_some_and(|s| s.node_id == node_id)
+                    {
+                        self.cancel_raster_color_range(doc);
+                    }
+                    if let Some(node) = doc.get_node(&node_id) {
+                        let has_mask =
+                            matches!(&node.kind, SceneNodeKind::Raster(r) if r.mask.is_some());
+                        if has_mask {
+                            let mut updated = node.clone();
+                            if let SceneNodeKind::Raster(rn) = &mut updated.kind {
+                                rn.mask = None;
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: updated,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::RasterRemoveBackground { node_id } => {
+                    self.start_remove_background(doc, node_id);
+                }
+
+                PanelAction::CropRasterToArtboard { node_id } => {
+                    // The crop resizes the pixel buffer, which would desync a
+                    // live color-range preview's `original` — discard it first.
+                    if self
+                        .raster_color_range
+                        .as_ref()
+                        .is_some_and(|s| s.node_id == node_id)
+                    {
+                        self.cancel_raster_color_range(doc);
+                    }
+                    if let Some(node) = doc.get_node(&node_id) {
+                        let dims = |n: &SceneNode| match &n.kind {
+                            SceneNodeKind::Raster(r) => (r.image.width, r.image.height),
+                            _ => (0, 0),
+                        };
+                        let before = (dims(node), node.transform.matrix);
+                        // Crop to the artboard the image is actually on (the
+                        // one it overlaps most — spatial multi-artboard model),
+                        // not the document rect at the origin.
+                        let (iw, ih) = dims(node);
+                        let [a, _, _, d, tx, ty] = node.transform.matrix;
+                        let (ax0, ay0, ax1, ay1) = match doc.artboard_for_rect(
+                            tx,
+                            ty,
+                            tx + a * iw as f64,
+                            ty + d * ih as f64,
+                        ) {
+                            Some(ab) => ab.rect(),
+                            None => {
+                                self.file_status =
+                                    Some("Crop failed: image does not overlap any artboard".into());
+                                continue 'actions;
+                            }
+                        };
+                        let mut updated = node.clone();
+                        match updated.crop_raster_to_rect(ax0, ay0, ax1, ay1) {
+                            Ok(()) => {
+                                if (dims(&updated), updated.transform.matrix) != before {
+                                    let (w, h) = dims(&updated);
+                                    history.execute(
+                                        Command::UpdateNode {
+                                            old: node.clone(),
+                                            new: updated,
+                                        },
+                                        doc,
+                                    );
+                                    self.file_status =
+                                        Some(format!("Cropped image to artboard ({w}×{h})"));
+                                    doc_modified = true;
+                                } else {
+                                    self.file_status =
+                                        Some("Image is already inside the artboard".into());
+                                }
+                            }
+                            Err(e) => self.file_status = Some(format!("Crop failed: {e}")),
+                        }
+                    }
                 }
 
                 PanelAction::AddAnchorPoints { node_id } => {
@@ -12149,7 +12766,26 @@ impl PhotonicApp {
                     // topmost filled node in the document.  This is reliable on
                     // all platforms including Wayland — no screen capture needed.
                     let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                    let sampled = photonic_core::sample_fill_at(doc, cx, cy);
+                    // The raster color-range target samples the raster layer's
+                    // own pixels; every other target samples vector fills.
+                    let raster_target: Option<NodeId> = match &self.eyedropper.target {
+                        Some(EyedropperTarget::RasterColorRange { node_id }) => Some(*node_id),
+                        _ => None,
+                    };
+                    let raster_sample =
+                        raster_target.and_then(|nid| self.sample_raster_pixel(doc, nid, cx, cy));
+                    let sampled = if raster_target.is_some() {
+                        raster_sample.map(|(rgba, _)| {
+                            [
+                                rgba[0] as f32 / 255.0,
+                                rgba[1] as f32 / 255.0,
+                                rgba[2] as f32 / 255.0,
+                                rgba[3] as f32 / 255.0,
+                            ]
+                        })
+                    } else {
+                        photonic_core::sample_fill_at(doc, cx, cy)
+                    };
 
                     // Draw color preview badge near cursor
                     let preview_color = sampled
@@ -12179,7 +12815,15 @@ impl PhotonicApp {
                     );
 
                     if clicked {
-                        if let Some(rgba) = sampled {
+                        if let Some(nid) = raster_target {
+                            // Begin (or restart) the color-range mask-out
+                            // session with the sampled pixel; a click outside
+                            // the layer just cancels the eyedropper.
+                            if let Some((rgba, seed)) = raster_sample {
+                                self.begin_raster_color_range(doc, nid, rgba, seed);
+                                doc_modified = true;
+                            }
+                        } else if let Some(rgba) = sampled {
                             let picked = photonic_core::Color {
                                 r: rgba[0],
                                 g: rgba[1],
@@ -12354,6 +12998,10 @@ impl PhotonicApp {
                     *doc_modified = true;
                 }
             }
+            // Handled directly in the eyedropper overlay (samples raster pixels
+            // and needs the seed coordinates, not just a Color) — never reaches
+            // this color-slot dispatcher.
+            Some(EyedropperTarget::RasterColorRange { .. }) => {}
             None => {}
         }
     }
