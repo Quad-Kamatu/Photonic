@@ -191,6 +191,9 @@ pub enum PanelAction {
     CancelRasterColorRange,
     /// Remove a raster layer's non-destructive layer mask (undoable).
     ClearRasterMask { node_id: NodeId },
+    /// Crop a raster layer's pixels (and mask) to the artboard bounds,
+    /// discarding everything outside (undoable).
+    CropRasterToArtboard { node_id: NodeId },
     /// Move the given nodes (or current selection if empty) into a new layer.
     CollectInNewLayer { node_ids: Vec<NodeId> },
     /// Blend fill colors linearly across 3+ selected path nodes.
@@ -3654,6 +3657,26 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             .clicked()
                         {
                             action = Some(PanelAction::ClearRasterMask { node_id: nid });
+                        }
+                    });
+                ui.add_space(2.0);
+            }
+            if is_plain_raster && matches("Raster Layer") {
+                egui::CollapsingHeader::new("Raster Layer")
+                    .default_open(true)
+                    .id_salt("raster_layer_header")
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        if ui
+                            .button(format!("{} Crop to Artboard", ph::CROP))
+                            .on_hover_text(
+                                "Trim the image (and its layer mask) to the artboard \
+                                 bounds, discarding pixels outside. Destructive but \
+                                 undoable. Requires an unrotated image.",
+                            )
+                            .clicked()
+                        {
+                            action = Some(PanelAction::CropRasterToArtboard { node_id: nid });
                         }
                     });
                 ui.add_space(2.0);

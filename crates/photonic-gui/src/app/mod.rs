@@ -6700,6 +6700,48 @@ impl PhotonicApp {
                     self.start_remove_background(doc, node_id);
                 }
 
+                PanelAction::CropRasterToArtboard { node_id } => {
+                    // The crop resizes the pixel buffer, which would desync a
+                    // live color-range preview's `original` — discard it first.
+                    if self
+                        .raster_color_range
+                        .as_ref()
+                        .is_some_and(|s| s.node_id == node_id)
+                    {
+                        self.cancel_raster_color_range(doc);
+                    }
+                    if let Some(node) = doc.get_node(&node_id) {
+                        let dims = |n: &SceneNode| match &n.kind {
+                            SceneNodeKind::Raster(r) => (r.image.width, r.image.height),
+                            _ => (0, 0),
+                        };
+                        let before = (dims(node), node.transform.matrix);
+                        let mut updated = node.clone();
+                        match updated.crop_raster_to_rect(0.0, 0.0, doc.width, doc.height) {
+                            Ok(()) => {
+                                if (dims(&updated), updated.transform.matrix) != before {
+                                    let (w, h) = dims(&updated);
+                                    history.execute(
+                                        Command::UpdateNode {
+                                            old: node.clone(),
+                                            new: updated,
+                                        },
+                                        doc,
+                                    );
+                                    self.file_status =
+                                        Some(format!("Cropped image to artboard ({w}×{h})"));
+                                    doc_modified = true;
+                                } else {
+                                    self.file_status = Some(
+                                        "Image is already inside the artboard".into(),
+                                    );
+                                }
+                            }
+                            Err(e) => self.file_status = Some(format!("Crop failed: {e}")),
+                        }
+                    }
+                }
+
                 PanelAction::AddAnchorPoints { node_id } => {
                     if let Some(node) = doc.nodes.get(&node_id) {
                         if let SceneNodeKind::Path(pn) = &node.kind {

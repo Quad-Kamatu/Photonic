@@ -397,6 +397,26 @@ impl Mask {
     pub fn is_empty_selection(&self) -> bool {
         self.data.iter().all(|&v| v == 0)
     }
+
+    /// Crop to the pixel rect `(x, y, w, h)`, clamped to the mask bounds —
+    /// the mask counterpart of `geometry::crop`, so a layer mask can be cut
+    /// down in lockstep with its image. Out-of-range regions clamp to at
+    /// least 1×1 (matching `geometry::crop`).
+    pub fn crop(&self, x: i64, y: i64, w: u32, h: u32) -> Mask {
+        let x0 = x.clamp(0, self.width as i64);
+        let y0 = y.clamp(0, self.height as i64);
+        let x1 = (x + w as i64).clamp(0, self.width as i64);
+        let y1 = (y + h as i64).clamp(0, self.height as i64);
+        let cw = (x1 - x0).max(1) as u32;
+        let ch = (y1 - y0).max(1) as u32;
+        let mut out = Mask::empty(cw, ch);
+        for yy in 0..ch {
+            for xx in 0..cw {
+                out.set(xx, yy, self.get(x0 as u32 + xx, y0 as u32 + yy));
+            }
+        }
+        out
+    }
 }
 
 /// Even-odd (ray-casting) point-in-polygon test. Callers must pass only finite

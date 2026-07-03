@@ -23,6 +23,11 @@ embeds this file to show a "What's New" popup after an update.
   - Image files can be **dragged & dropped** onto the window on X11, Windows,
     and macOS. (Not on Wayland yet — winit's Wayland backend has no
     drag-and-drop support.)
+- **Crop to Artboard** on raster layers (Inspector → Raster Layer): trims the
+  image — and its layer mask, in lockstep — to the artboard bounds, discarding
+  pixels outside while keeping the surviving pixels exactly where they were on
+  canvas. Destructive but undoable; rotated images are rejected rather than
+  silently resampled.
 - Raster Masking on imported images (Inspector → Raster Masking, shown when a
   raster layer is selected): pick a color on the canvas and hide every pixel
   within an adjustable fuzziness of it — globally (Color Range) or only the
