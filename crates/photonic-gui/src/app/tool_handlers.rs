@@ -312,6 +312,33 @@ impl PhotonicApp {
         doc_modified
     }
 
+    /// The node ids a Select-tool click on `hit_id` should act on: every member
+    /// of `hit_id`'s outermost group (Illustrator-style group selection), or
+    /// just `hit_id` itself when `alt` is held, when editing inside an isolated
+    /// group, or when `hit_id` isn't in a group at all. Never returns an empty
+    /// vec (falls back to `[hit_id]`).
+    pub(crate) fn select_group_members(
+        &self,
+        doc: &Document,
+        hit_id: NodeId,
+        alt: bool,
+    ) -> Vec<NodeId> {
+        if alt || self.isolated_group.is_some() {
+            return vec![hit_id];
+        }
+        match doc.outermost_group_of(&hit_id) {
+            Some(gid) => {
+                let members = doc.group_member_ids(&gid);
+                if members.is_empty() {
+                    vec![hit_id]
+                } else {
+                    members
+                }
+            }
+            None => vec![hit_id],
+        }
+    }
+
     pub(crate) fn handle_select_tool(
         &mut self,
         ui: &egui::Ui,
@@ -515,30 +542,14 @@ impl PhotonicApp {
                         // on every object in its outermost group (Illustrator
                         // behavior). Alt+click bypasses this to grab just the
                         // clicked member; isolation mode is already editing
-                        // inside one group, so no expansion there either.
-                        let in_isolation = self.isolated_group.is_some();
-                        let group_members = move |doc: &Document, id: NodeId| -> Vec<NodeId> {
-                            if alt || in_isolation {
-                                return vec![id];
-                            }
-                            match doc.outermost_group_of(&id) {
-                                Some(gid) => {
-                                    let m = doc.group_member_ids(&gid);
-                                    if m.is_empty() {
-                                        vec![id]
-                                    } else {
-                                        m
-                                    }
-                                }
-                                None => vec![id],
-                            }
-                        };
+                        // inside one group, so no expansion there either. See
+                        // `select_group_members`.
                         if shift {
                             if let Some(id) = hit {
                                 // Toggle the whole group as a unit: any member
                                 // already selected → deselect all of them,
                                 // otherwise add all.
-                                let members = group_members(doc, id);
+                                let members = self.select_group_members(doc, id, alt);
                                 if members.iter().any(|m| doc.selection.contains(m)) {
                                     for m in &members {
                                         doc.selection.remove(m);
@@ -557,7 +568,7 @@ impl PhotonicApp {
                         } else {
                             match hit {
                                 Some(id) => {
-                                    let members = group_members(doc, id);
+                                    let members = self.select_group_members(doc, id, alt);
                                     doc.selection =
                                         Selection::from_ids(members.iter().copied());
                                     self.selected_id = Some(id);
@@ -896,17 +907,35 @@ impl PhotonicApp {
             if let Some(pos) = response.interact_pointer_pos() {
                 let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
                 let shift = ui.input(|i| i.modifiers.shift);
+                let alt = ui.input(|i| i.modifiers.alt);
                 let hit = hit_test(doc, cx, cy, renderer);
                 if shift {
                     if let Some(id) = hit {
-                        doc.selection.toggle(id);
-                        self.selected_id = Some(id);
+                        // Toggle the whole group as a unit (see the drag path).
+                        let members = self.select_group_members(doc, id, alt);
+                        if members.iter().any(|m| doc.selection.contains(m)) {
+                            for m in &members {
+                                doc.selection.remove(m);
+                            }
+                            self.selected_id = doc.selection.ids().next().copied();
+                        } else {
+                            for m in &members {
+                                doc.selection.add(*m);
+                            }
+                            self.selected_id = Some(id);
+                        }
                     }
                 } else {
-                    self.selected_id = hit;
-                    match self.selected_id {
-                        Some(id) => doc.selection = Selection::single(id),
-                        None => doc.selection.clear(),
+                    match hit {
+                        Some(id) => {
+                            let members = self.select_group_members(doc, id, alt);
+                            doc.selection = Selection::from_ids(members.iter().copied());
+                            self.selected_id = Some(id);
+                        }
+                        None => {
+                            self.selected_id = None;
+                            doc.selection.clear();
+                        }
                     }
                 }
             }
