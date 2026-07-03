@@ -37,6 +37,14 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Fixed
 
+- **Union / boolean combine now actually merges shapes.** The Union, Subtract,
+  Intersect, and Exclude operations silently did nothing unless *exactly two*
+  path objects in the *same layer* were selected, and gave no feedback when
+  they didn't run. They now combine **any number** of selected path shapes,
+  **across layers**, folding bottom-to-top (Union merges all, Subtract removes
+  the upper shapes from the bottom one, etc.), and report what happened in the
+  status bar — including why nothing merged ("Select 2 or more path shapes",
+  "produced an empty shape").
 - **Strokes no longer scale with the object.** Scaling a shape (drag its
   bounding-box handles, or any transform with a scale) kept its stroke a fixed
   width instead of thickening/thinning it — a stroke is an absolute property,

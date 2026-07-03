@@ -6284,94 +6284,112 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::BooleanOp(bool_op) => {
-                    // Determine target (lower z) and tool (upper z) from selection
-                    let sel_ids: Vec<_> = doc.selection.ids().copied().collect();
-                    if sel_ids.len() == 2 {
-                        if let (Some((lid_a, idx_a)), Some((lid_b, idx_b))) = (
-                            doc.node_layer_and_index(&sel_ids[0]),
-                            doc.node_layer_and_index(&sel_ids[1]),
-                        ) {
-                            if lid_a == lid_b {
-                                let (target_id, tool_id) = if idx_a <= idx_b {
-                                    (sel_ids[0], sel_ids[1])
-                                } else {
-                                    (sel_ids[1], sel_ids[0])
-                                };
-                                let (target_idx, tool_idx) = if idx_a <= idx_b {
-                                    (idx_a, idx_b)
-                                } else {
-                                    (idx_b, idx_a)
-                                };
+                    use photonic_core::ops::boolean::{boolean_op, BooleanOp};
+                    // Divide isn't a fold-into-one op — route the user to it.
+                    if matches!(bool_op, BooleanOp::Divide) {
+                        self.file_status =
+                            Some("Use Pathfinder ▸ Divide to split overlapping shapes".into());
+                    } else {
+                        // Every selected PATH node, sorted bottom-to-top by the
+                        // document's global draw order (works across layers, not
+                        // just two same-layer objects like before).
+                        let order: Vec<NodeId> =
+                            doc.nodes_in_draw_order().iter().map(|n| n.id).collect();
+                        let order_of = |id: &NodeId| {
+                            order.iter().position(|x| x == id).unwrap_or(usize::MAX)
+                        };
+                        let mut path_ids: Vec<NodeId> = doc
+                            .selection
+                            .ids()
+                            .copied()
+                            .filter(|id| {
+                                matches!(
+                                    doc.get_node(id).map(|n| &n.kind),
+                                    Some(SceneNodeKind::Path(_))
+                                )
+                            })
+                            .collect();
+                        path_ids.sort_by_key(order_of);
 
-                                if let (Some(tn), Some(on)) =
-                                    (doc.get_node(&target_id), doc.get_node(&tool_id))
-                                {
-                                    if let (SceneNodeKind::Path(tp), SceneNodeKind::Path(op_node)) =
-                                        (&tn.kind, &on.kind)
-                                    {
-                                        use photonic_core::ops::boolean::{boolean_op, BooleanOp};
-                                        let target_baked = gui_apply_affine_to_path(
-                                            &tp.path_data,
-                                            tn.transform.to_kurbo(),
-                                        );
-                                        let tool_baked = gui_apply_affine_to_path(
-                                            &op_node.path_data,
-                                            on.transform.to_kurbo(),
-                                        );
-                                        if let Ok(result_path) =
-                                            boolean_op(&target_baked, &tool_baked, bool_op)
-                                        {
-                                            let mut result_pn = PathNode::new(result_path);
-                                            result_pn.fill = tp.fill.clone();
-                                            result_pn.stroke = tp.stroke.clone();
-                                            let op_name = match bool_op {
-                                                BooleanOp::Union => "union",
-                                                BooleanOp::Subtract => "subtract",
-                                                BooleanOp::Intersect => "intersect",
-                                                BooleanOp::Exclude => "exclude",
-                                                BooleanOp::Divide => "divide",
-                                            };
-                                            let result_name =
-                                                format!("{} {} {}", tn.name, op_name, on.name);
-                                            let result_node = SceneNode::new(
-                                                &result_name,
-                                                lid_a,
-                                                SceneNodeKind::Path(result_pn),
-                                            );
-                                            let result_id = result_node.id;
-                                            let orig_len = doc
-                                                .layers
-                                                .get(&lid_a)
-                                                .map(|l| l.node_ids.len())
-                                                .unwrap_or(2);
-                                            let tool_below = tool_idx < target_idx;
-                                            let adj_target = if tool_below {
-                                                target_idx.saturating_sub(1)
-                                            } else {
-                                                target_idx
-                                            };
-                                            let result_pos = orig_len.saturating_sub(2);
-                                            let cmd = Command::Batch(vec![
-                                                Command::RemoveNode { node_id: tool_id },
-                                                Command::RemoveNode { node_id: target_id },
-                                                Command::AddNode {
-                                                    node: result_node,
-                                                    layer_id: Some(lid_a),
-                                                },
-                                                Command::ReorderNode {
-                                                    layer_id: lid_a,
-                                                    node_id: result_id,
-                                                    old_index: result_pos,
-                                                    new_index: adj_target,
-                                                },
-                                            ]);
-                                            history.execute(cmd, doc);
-                                            self.selected_id = Some(result_id);
-                                            doc.selection = Selection::single(result_id);
-                                            doc_modified = true;
-                                        }
+                        if path_ids.len() < 2 {
+                            self.file_status =
+                                Some("Select 2 or more path shapes to combine".into());
+                        } else {
+                            // Bake each shape's transform into its geometry so the
+                            // boolean runs in shared canvas space.
+                            let baked: Vec<PathData> = path_ids
+                                .iter()
+                                .filter_map(|id| {
+                                    doc.get_node(id).and_then(|n| match &n.kind {
+                                        SceneNodeKind::Path(p) => Some(gui_apply_affine_to_path(
+                                            &p.path_data,
+                                            n.transform.to_kurbo(),
+                                        )),
+                                        _ => None,
+                                    })
+                                })
+                                .collect();
+                            // Fold the op across all shapes, bottom shape as the
+                            // base (matches Minus-Front / additive Union semantics).
+                            let mut acc = baked[0].clone();
+                            let mut err: Option<String> = None;
+                            for p in &baked[1..] {
+                                match boolean_op(&acc, p, bool_op) {
+                                    Ok(r) => acc = r,
+                                    Err(e) => {
+                                        err = Some(e);
+                                        break;
                                     }
                                 }
+                            }
+
+                            if let Some(e) = err {
+                                self.file_status = Some(format!("Combine failed: {e}"));
+                            } else if acc.to_bez_path().elements().is_empty() {
+                                self.file_status = Some(
+                                    "Combine produced an empty shape (do they overlap?)".into(),
+                                );
+                            } else {
+                                // Result inherits the bottom shape's layer + look.
+                                let base_id = path_ids[0];
+                                let base = doc.get_node(&base_id).unwrap();
+                                let base_layer = base.layer_id;
+                                let (fill, stroke) = match &base.kind {
+                                    SceneNodeKind::Path(p) => {
+                                        (p.fill.clone(), p.stroke.clone())
+                                    }
+                                    _ => Default::default(),
+                                };
+                                let op_name = match bool_op {
+                                    BooleanOp::Union => "Union",
+                                    BooleanOp::Subtract => "Subtract",
+                                    BooleanOp::Intersect => "Intersect",
+                                    BooleanOp::Exclude => "Exclude",
+                                    BooleanOp::Divide => "Divide",
+                                };
+                                let mut result_pn = PathNode::new(acc);
+                                result_pn.fill = fill;
+                                result_pn.stroke = stroke;
+                                let result_node = SceneNode::new(
+                                    op_name,
+                                    base_layer,
+                                    SceneNodeKind::Path(result_pn),
+                                );
+                                let result_id = result_node.id;
+                                let mut cmds: Vec<Command> = path_ids
+                                    .iter()
+                                    .map(|id| Command::RemoveNode { node_id: *id })
+                                    .collect();
+                                cmds.push(Command::AddNode {
+                                    node: result_node,
+                                    layer_id: Some(base_layer),
+                                });
+                                history.execute(Command::Batch(cmds), doc);
+                                self.selected_id = Some(result_id);
+                                doc.selection = Selection::single(result_id);
+                                doc_modified = true;
+                                self.file_status =
+                                    Some(format!("{op_name}: combined {} shapes", path_ids.len()));
                             }
                         }
                     }
