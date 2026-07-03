@@ -1858,6 +1858,75 @@ impl PhotonicApp {
         }
     }
 
+    // ── Image placement ───────────────────────────────────────────────────────
+
+    /// Place an image file (PNG/JPEG/WebP/…) as a new raster layer centred on
+    /// the artboard, select it, and record one undoable `AddNode`. This is the
+    /// GUI counterpart of the MCP `place_image` tool.
+    fn place_image_file(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        path: &std::path::Path,
+    ) {
+        match std::fs::read(path) {
+            Ok(bytes) => self.place_image_bytes(doc, history, &bytes, Some(path)),
+            Err(e) => self.file_status = Some(format!("Place image failed: {e}")),
+        }
+    }
+
+    /// Decode `bytes` and place them as a raster layer (see
+    /// [`Self::place_image_file`]). `source` supplies the layer name and the
+    /// `source_uri` used for relink/re-export.
+    fn place_image_bytes(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        bytes: &[u8],
+        source: Option<&std::path::Path>,
+    ) {
+        let image = match photonic_core::raster::image::RasterImage::from_encoded(bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                self.file_status = Some(format!("Place image failed: {e}"));
+                return;
+            }
+        };
+        let (w, h) = (image.width, image.height);
+        let mut raster = photonic_core::node::RasterNode::new(image);
+        if let Some(p) = source {
+            raster.source_uri = Some(p.to_string_lossy().into_owned());
+        }
+        let name = source
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Image".to_string());
+        // Placeholder layer id — `AddNode` reassigns it to the target layer
+        // (`layer_id: None` → the document's active layer), same as MCP
+        // `place_image`.
+        let mut node = SceneNode::new(
+            &name,
+            uuid::Uuid::nil(),
+            SceneNodeKind::Raster(raster),
+        );
+        // Centre on the artboard (may be negative if the image is larger).
+        node.transform = photonic_core::Transform::translate(
+            (doc.width - w as f64) / 2.0,
+            (doc.height - h as f64) / 2.0,
+        );
+        let nid = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            doc,
+        );
+        doc.selection = Selection::single(nid);
+        self.selected_id = Some(nid);
+        self.file_status = Some(format!("Placed {name} ({w}×{h})"));
+    }
+
     /// Kick off background removal on `nid`'s pixels in a worker thread (model
     /// load/inference is far too slow for the UI thread). The result lands in
     /// `rmbg_rx` and is applied in the `draw` poll.
@@ -2189,6 +2258,36 @@ impl PhotonicApp {
         {
             self.cancel_raster_color_range(doc);
             doc_modified = true;
+        }
+
+        // ── Drag-and-drop image import ────────────────────────────────────────
+        // Dropping image files onto the window places each as a raster layer
+        // (same path as File → Place Image…). Native drops carry a filesystem
+        // path; sandboxed/portal drops may only carry bytes — handle both.
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            let is_image = |p: &std::path::Path| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| {
+                        matches!(
+                            e.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tif" | "tiff"
+                        )
+                    })
+                    .unwrap_or(false)
+            };
+            if let Some(path) = file.path.as_deref().filter(|p| is_image(p)) {
+                let path = path.to_path_buf();
+                self.place_image_file(doc, history, &path);
+                doc_modified = true;
+            } else if let Some(bytes) = &file.bytes {
+                let name = std::path::PathBuf::from(&file.name);
+                if is_image(&name) {
+                    self.place_image_bytes(doc, history, bytes, Some(&name));
+                    doc_modified = true;
+                }
+            }
         }
 
         // ── Direct Select entry seed (#164) ───────────────────────────────────
@@ -2749,6 +2848,28 @@ impl PhotonicApp {
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Open failed: {e}")),
                                                 }
+                                            }
+                                        }
+                                        if ui.button("  Place Image…  ")
+                                            .on_hover_text(
+                                                "Import a PNG/JPEG/WebP as a raster layer \
+                                                 (you can also drag & drop image files onto \
+                                                 the canvas)",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.active_drawer = None;
+                                            self.selected_drawer_option = None;
+                                            if let Some(path) = run_file_dialog(|| {
+                                                rfd::FileDialog::new()
+                                                    .add_filter(
+                                                        "Images",
+                                                        &["png", "jpg", "jpeg", "webp", "bmp",
+                                                          "gif", "tif", "tiff"],
+                                                    )
+                                                    .pick_file()
+                                            }) {
+                                                self.place_image_file(doc, history, &path);
                                             }
                                         }
                                     }

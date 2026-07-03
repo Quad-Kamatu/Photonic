@@ -13,6 +13,10 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- Image import in the GUI: **File → Place Image…** imports a PNG/JPEG/WebP/
+  BMP/GIF/TIFF as a raster layer (centred on the artboard, selected, undoable),
+  and image files can now also be **dragged & dropped** onto the window.
+  Previously raster layers could only be placed via the MCP `place_image` tool.
 - Raster Masking on imported images (Inspector → Raster Masking, shown when a
   raster layer is selected): pick a color on the canvas and hide every pixel
   within an adjustable fuzziness of it — globally (Color Range) or only the
