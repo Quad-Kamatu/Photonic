@@ -37,6 +37,11 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Fixed
 
+- **Shape Builder now merges across layers, with feedback.** Like the boolean
+  combine below, it silently did nothing unless every touched shape lived in the
+  same layer. It now folds all dragged-over path shapes regardless of layer,
+  reports the result (or why nothing merged) in the status bar, and hints when a
+  drag only caught one shape.
 - **Union / boolean combine now actually merges shapes.** The Union, Subtract,
   Intersect, and Exclude operations silently did nothing unless *exactly two*
   path objects in the *same layer* were selected, and gave no feedback when

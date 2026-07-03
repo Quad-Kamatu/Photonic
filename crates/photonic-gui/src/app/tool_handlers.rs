@@ -1376,125 +1376,119 @@ impl PhotonicApp {
         subtract: bool,
         doc_modified: &mut bool,
     ) {
+        use photonic_core::history::Command;
         use photonic_core::ops::boolean::{boolean_op, BooleanOp};
 
-        // Gather (id, layer_id, z-index) for each touched node
-        let mut indexed: Vec<(NodeId, photonic_core::layer::LayerId, usize)> = ids
-            .iter()
-            .filter_map(|&id| doc.node_layer_and_index(&id).map(|(l, i)| (id, l, i)))
-            .collect();
+        // Keep the touched real path nodes (de-duplicated), sorted bottom-to-top
+        // by the document's global draw order — works across layers, matching
+        // the Union/boolean handler. (The old code required all touched shapes to
+        // live in one layer and silently did nothing otherwise, so Shape Builder
+        // appeared broken whenever the shapes weren't in the same layer.)
+        let order: Vec<NodeId> = doc.nodes_in_draw_order().iter().map(|n| n.id).collect();
+        let order_of = |id: &NodeId| order.iter().position(|x| x == id).unwrap_or(usize::MAX);
+        let mut path_ids: Vec<NodeId> = Vec::new();
+        for &id in ids {
+            if !path_ids.contains(&id)
+                && matches!(
+                    doc.get_node(&id).map(|n| &n.kind),
+                    Some(SceneNodeKind::Path(_))
+                )
+            {
+                path_ids.push(id);
+            }
+        }
+        path_ids.sort_by_key(order_of);
 
-        if indexed.is_empty() {
-            return;
+        if path_ids.is_empty() {
+            return; // dragged over nothing paintable — stay silent
         }
 
-        // All must be in the same layer
-        let layer_id = indexed[0].1;
-        if indexed.iter().any(|(_, l, _)| *l != layer_id) {
-            return;
-        }
-
-        // Sort by ascending z-order
-        indexed.sort_by_key(|(_, _, idx)| *idx);
-
-        if subtract && indexed.len() == 1 {
-            // Delete single alt-clicked shape
-            let node_id = indexed[0].0;
-            history.execute(photonic_core::history::Command::RemoveNode { node_id }, doc);
+        // Subtract mode over a single shape deletes it (Illustrator Alt-click).
+        if subtract && path_ids.len() == 1 {
+            let node_id = path_ids[0];
+            history.execute(Command::RemoveNode { node_id }, doc);
             self.shape_builder_hovered = None;
+            self.selected_id = None;
+            doc.selection.clear();
             *doc_modified = true;
+            self.file_status = Some("Shape Builder: deleted shape".into());
+            return;
+        }
+        if path_ids.len() < 2 {
+            // The drag only caught one shape — guide the user (the interior of
+            // each shape must be passed through; unfilled shapes only register
+            // on their outline).
+            self.file_status =
+                Some("Shape Builder: drag across 2+ overlapping shapes to merge".into());
             return;
         }
 
-        if !subtract && indexed.len() < 2 {
-            // Nothing to union
-            return;
-        }
-
-        // Bake transforms for all shapes
-        let baked_paths: Vec<_> = indexed
+        // Bake each transform into geometry, then fold the op with the bottom
+        // shape as the base.
+        let baked: Vec<PathData> = path_ids
             .iter()
-            .filter_map(|(id, _, _)| {
-                let n = doc.get_node(id)?;
-                if let SceneNodeKind::Path(pn) = &n.kind {
-                    Some((
-                        *id,
-                        gui_apply_affine_to_path(&pn.path_data, n.transform.to_kurbo()),
-                    ))
-                } else {
-                    None
-                }
+            .filter_map(|id| {
+                doc.get_node(id).and_then(|n| match &n.kind {
+                    SceneNodeKind::Path(p) => Some(gui_apply_affine_to_path(
+                        &p.path_data,
+                        n.transform.to_kurbo(),
+                    )),
+                    _ => None,
+                })
             })
             .collect();
-
-        if baked_paths.is_empty() {
-            return;
-        }
-
-        // Get style from the bottom-most shape (first in z-order)
-        let (fill, stroke) = doc
-            .get_node(&indexed[0].0)
-            .and_then(|n| {
-                if let SceneNodeKind::Path(pn) = &n.kind {
-                    Some((pn.fill.clone(), pn.stroke.clone()))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
-        // Compute result path
         let op = if subtract {
             BooleanOp::Subtract
         } else {
             BooleanOp::Union
         };
-        let mut result_path = baked_paths[0].1.clone();
-        for (_, path) in &baked_paths[1..] {
-            match boolean_op(&result_path, path, op) {
-                Ok(p) => result_path = p,
-                Err(_) => return,
+        let mut acc = baked[0].clone();
+        for p in &baked[1..] {
+            match boolean_op(&acc, p, op) {
+                Ok(r) => acc = r,
+                Err(e) => {
+                    self.file_status = Some(format!("Shape Builder failed: {e}"));
+                    return;
+                }
             }
         }
-
-        // Build result node inheriting the first shape's style
-        let mut result_pn = photonic_core::node::PathNode::new(result_path);
-        result_pn.fill = fill;
-        result_pn.stroke = stroke;
-        let result_node = SceneNode::new("Shape", layer_id, SceneNodeKind::Path(result_pn));
-        let result_id = result_node.id;
-
-        // Place the result at the z-position of the lowest input shape
-        let insert_z = indexed[0].2;
-        let layer_len = doc
-            .layers
-            .get(&layer_id)
-            .map(|l| l.node_ids.len())
-            .unwrap_or(0);
-        let result_pos = layer_len.saturating_sub(indexed.len()); // position after removes + add
-        let new_index = insert_z.min(result_pos);
-
-        let mut cmds: Vec<photonic_core::history::Command> = indexed
-            .iter()
-            .map(|(id, _, _)| photonic_core::history::Command::RemoveNode { node_id: *id })
-            .collect();
-        cmds.push(photonic_core::history::Command::AddNode {
-            node: result_node,
-            layer_id: Some(layer_id),
-        });
-        if new_index != result_pos {
-            cmds.push(photonic_core::history::Command::ReorderNode {
-                layer_id,
-                node_id: result_id,
-                old_index: result_pos,
-                new_index,
-            });
+        if acc.to_bez_path().elements().is_empty() {
+            self.file_status = Some("Shape Builder produced an empty shape".into());
+            return;
         }
 
-        history.execute(photonic_core::history::Command::Batch(cmds), doc);
+        // Result inherits the bottom shape's layer, fill and stroke.
+        let base_id = path_ids[0];
+        let Some(base) = doc.get_node(&base_id) else {
+            return;
+        };
+        let base_layer = base.layer_id;
+        let (fill, stroke) = match &base.kind {
+            SceneNodeKind::Path(p) => (p.fill.clone(), p.stroke.clone()),
+            _ => Default::default(),
+        };
+        let mut result_pn = photonic_core::node::PathNode::new(acc);
+        result_pn.fill = fill;
+        result_pn.stroke = stroke;
+        let result_node = SceneNode::new("Shape", base_layer, SceneNodeKind::Path(result_pn));
+        let result_id = result_node.id;
+        let mut cmds: Vec<Command> = path_ids
+            .iter()
+            .map(|id| Command::RemoveNode { node_id: *id })
+            .collect();
+        cmds.push(Command::AddNode {
+            node: result_node,
+            layer_id: Some(base_layer),
+        });
+        history.execute(Command::Batch(cmds), doc);
         self.selected_id = Some(result_id);
         doc.selection = Selection::single(result_id);
         *doc_modified = true;
+        self.file_status = Some(format!(
+            "Shape Builder: {} {} shapes",
+            if subtract { "subtracted" } else { "merged" },
+            path_ids.len()
+        ));
     }
 
     // ── Console panel ─────────────────────────────────────────────────────────
