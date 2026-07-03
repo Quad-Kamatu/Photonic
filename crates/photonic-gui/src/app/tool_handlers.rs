@@ -440,8 +440,9 @@ impl PhotonicApp {
 
                 // Check if click lands on a corner resize handle.
                 const HANDLE_HIT: f32 = 6.0;
-                // Ring just beyond the handles where a drag rotates instead.
-                const ROTATE_ZONE: f32 = 26.0;
+                // Thickness (screen px) of the rotate frame just outside the
+                // selection box: pressing anywhere in this band rotates.
+                const ROTATE_ZONE: f32 = 44.0;
                 let resize_hit = effective_bounds.and_then(|(bx0, by0, bx1, by1)| {
                     let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
                     let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
@@ -474,15 +475,10 @@ impl PhotonicApp {
                             egui::pos2(sx0 as f32, sy0 as f32),
                             egui::pos2(sx1 as f32, sy1 as f32),
                         );
-                        let corners = [
-                            egui::pos2(sx0 as f32, sy0 as f32),
-                            egui::pos2(sx1 as f32, sy0 as f32),
-                            egui::pos2(sx0 as f32, sy1 as f32),
-                            egui::pos2(sx1 as f32, sy1 as f32),
-                        ];
-                        let near_corner =
-                            corners.iter().any(|c| (pos - *c).length() <= ROTATE_ZONE);
-                        (!rect.contains(pos) && near_corner)
+                        // A thick frame hugging the selection box: inside the
+                        // inflated rect but outside the box itself.
+                        let outer = rect.expand(ROTATE_ZONE);
+                        (outer.contains(pos) && !rect.contains(pos))
                             .then_some(((bx0 + bx1) / 2.0, (by0 + by1) / 2.0))
                     })
                 };
@@ -1125,26 +1121,19 @@ impl PhotonicApp {
                     }
                 }
             } else {
-                // Rotate zone: just beyond a corner and off the body → rotate.
-                const ROTATE_ZONE: f32 = 26.0;
+                // Rotate frame: within the band just outside the selection box.
+                const ROTATE_ZONE: f32 = 44.0;
                 let (near_corner, on_body) = hover_bounds
                     .map(|(bx0, by0, bx1, by1)| {
                         let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
                         let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
-                        let rect = egui::Rect::from_min_max(
+                        let rect = egui::Rect::from_two_pos(
                             egui::pos2(sx0 as f32, sy0 as f32),
                             egui::pos2(sx1 as f32, sy1 as f32),
                         );
-                        let corners = [
-                            egui::pos2(sx0 as f32, sy0 as f32),
-                            egui::pos2(sx1 as f32, sy0 as f32),
-                            egui::pos2(sx0 as f32, sy1 as f32),
-                            egui::pos2(sx1 as f32, sy1 as f32),
-                        ];
-                        let nc =
-                            corners.iter().any(|c| (hover_pos - *c).length() <= ROTATE_ZONE);
                         let inside = rect.contains(hover_pos);
-                        (nc && !inside, inside)
+                        let in_frame = rect.expand(ROTATE_ZONE).contains(hover_pos) && !inside;
+                        (in_frame, inside)
                     })
                     .unwrap_or((false, false));
                 if near_corner {
