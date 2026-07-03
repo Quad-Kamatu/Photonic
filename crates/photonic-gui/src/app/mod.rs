@@ -504,8 +504,19 @@ pub struct PhotonicApp {
     /// Transforms of all selected nodes captured at the start of a multi-node resize.
     resize_multi_origins: Vec<(NodeId, [f64; 6])>,
     /// Full snapshots of the nodes captured at the start of a resize drag, used
-    /// to record a single undoable UpdateNode batch on release.
+    /// to record a single undoable UpdateNode batch on release. Rotation reuses
+    /// this (release records any transform change as one undo step).
     resize_drag_origins: Vec<SceneNode>,
+
+    /// True while dragging in a corner rotation zone (rotate-in-place).
+    rotating: bool,
+    /// Canvas-space pivot (selection-bbox centre) for the active rotation.
+    rotate_pivot: (f64, f64),
+    /// Pointer angle (radians, atan2 about the pivot) at rotation-drag start.
+    rotate_start_angle: f64,
+    /// Each selected node's transform matrix captured at rotation-drag start,
+    /// so the drag applies an absolute rotation (pivot ∘ orig) every frame.
+    rotate_origins: Vec<(NodeId, [f64; 6])>,
 
     /// Screen-space position where a marquee (drag-select) began; None when inactive.
     marquee_start: Option<egui::Pos2>,
@@ -963,6 +974,10 @@ impl Default for PhotonicApp {
             resize_origin_font_size: None,
             resize_multi_origins: Vec::new(),
             resize_drag_origins: Vec::new(),
+            rotating: false,
+            rotate_pivot: (0.0, 0.0),
+            rotate_start_angle: 0.0,
+            rotate_origins: Vec::new(),
             marquee_start: None,
             point_edit_node: None,
             point_selected: Vec::new(),

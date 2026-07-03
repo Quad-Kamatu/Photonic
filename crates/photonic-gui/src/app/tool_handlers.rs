@@ -440,6 +440,8 @@ impl PhotonicApp {
 
                 // Check if click lands on a corner resize handle.
                 const HANDLE_HIT: f32 = 6.0;
+                // Ring just beyond the handles where a drag rotates instead.
+                const ROTATE_ZONE: f32 = 26.0;
                 let resize_hit = effective_bounds.and_then(|(bx0, by0, bx1, by1)| {
                     let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
                     let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
@@ -458,6 +460,32 @@ impl PhotonicApp {
                         .find(|(c, _)| (p - *c).length() <= HANDLE_HIT)
                         .map(|(_, h)| *h)
                 });
+
+                // Rotation zone: just OUTSIDE a corner handle (not on the body,
+                // not on a resize handle) → rotate in place about the selection
+                // centre, mirroring the Illustrator/Photoshop corner-rotate cursor.
+                let rotate_pivot = if resize_hit.is_some() {
+                    None
+                } else {
+                    effective_bounds.and_then(|(bx0, by0, bx1, by1)| {
+                        let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
+                        let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
+                        let rect = egui::Rect::from_two_pos(
+                            egui::pos2(sx0 as f32, sy0 as f32),
+                            egui::pos2(sx1 as f32, sy1 as f32),
+                        );
+                        let corners = [
+                            egui::pos2(sx0 as f32, sy0 as f32),
+                            egui::pos2(sx1 as f32, sy0 as f32),
+                            egui::pos2(sx0 as f32, sy1 as f32),
+                            egui::pos2(sx1 as f32, sy1 as f32),
+                        ];
+                        let near_corner =
+                            corners.iter().any(|c| (pos - *c).length() <= ROTATE_ZONE);
+                        (!rect.contains(pos) && near_corner)
+                            .then_some(((bx0 + bx1) / 2.0, (by0 + by1) / 2.0))
+                    })
+                };
 
                 if let Some(handle) = resize_hit {
                     self.resizing = Some(handle);
@@ -502,6 +530,24 @@ impl PhotonicApp {
                                 }
                             });
                     }
+                } else if let Some(pivot) = rotate_pivot {
+                    // Start a rotate-in-place drag about the selection centre.
+                    self.rotating = true;
+                    self.rotate_pivot = pivot;
+                    self.rotate_start_angle = (cy - pivot.1).atan2(cx - pivot.0);
+                    let ids: Vec<NodeId> = if sel_ids.len() > 1 {
+                        sel_ids.clone()
+                    } else {
+                        self.selected_id.into_iter().collect()
+                    };
+                    self.rotate_origins = ids
+                        .iter()
+                        .filter_map(|id| doc.nodes.get(id).map(|n| (*id, n.transform.matrix)))
+                        .collect();
+                    // Reuse the resize snapshot vec so the release path records the
+                    // rotation as one undoable UpdateNode batch.
+                    self.resize_drag_origins =
+                        ids.iter().filter_map(|id| doc.nodes.get(id).cloned()).collect();
                 } else {
                     // Check if click is within the effective selection bounds (body).
                     let on_selected = match effective_bounds {
@@ -589,7 +635,28 @@ impl PhotonicApp {
         }
 
         if response.dragged_by(egui::PointerButton::Primary) {
-            if self.resizing.is_some() {
+            if self.rotating {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    use photonic_core::transform::Transform;
+                    let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                    let (pxc, pyc) = self.rotate_pivot;
+                    let ang = (cy - pyc).atan2(cx - pxc);
+                    let mut delta = ang - self.rotate_start_angle;
+                    // Shift snaps rotation to 15° increments.
+                    if ui.input(|i| i.modifiers.shift) {
+                        let step = std::f64::consts::PI / 12.0;
+                        delta = (delta / step).round() * step;
+                    }
+                    let rot = Transform::rotate_around(delta, pxc, pyc);
+                    let origins = self.rotate_origins.clone();
+                    for (id, orig) in &origins {
+                        if let Some(node) = doc.nodes.get_mut(id) {
+                            node.transform = rot.then(&Transform { matrix: *orig });
+                            *doc_modified = true;
+                        }
+                    }
+                }
+            } else if self.resizing.is_some() {
                 if let (Some(handle), Some((bx0, by0, bx1, by1))) =
                     (self.resizing, self.resize_origin_bounds)
                 {
@@ -800,6 +867,8 @@ impl PhotonicApp {
                 );
             }
             self.finalize_move(doc, history, doc_modified);
+            self.rotating = false;
+            self.rotate_origins.clear();
             self.resizing = None;
             self.resize_origin_bounds = None;
             self.resize_origin_transform = None;
@@ -1056,18 +1125,40 @@ impl PhotonicApp {
                     }
                 }
             } else {
-                let on_body = hover_bounds
+                // Rotate zone: just beyond a corner and off the body → rotate.
+                const ROTATE_ZONE: f32 = 26.0;
+                let (near_corner, on_body) = hover_bounds
                     .map(|(bx0, by0, bx1, by1)| {
                         let (sx0, sy0) = view.canvas_to_screen(bx0, by0);
                         let (sx1, sy1) = view.canvas_to_screen(bx1, by1);
-                        egui::Rect::from_min_max(
+                        let rect = egui::Rect::from_min_max(
                             egui::pos2(sx0 as f32, sy0 as f32),
                             egui::pos2(sx1 as f32, sy1 as f32),
-                        )
-                        .contains(hover_pos)
+                        );
+                        let corners = [
+                            egui::pos2(sx0 as f32, sy0 as f32),
+                            egui::pos2(sx1 as f32, sy0 as f32),
+                            egui::pos2(sx0 as f32, sy1 as f32),
+                            egui::pos2(sx1 as f32, sy1 as f32),
+                        ];
+                        let nc =
+                            corners.iter().any(|c| (hover_pos - *c).length() <= ROTATE_ZONE);
+                        let inside = rect.contains(hover_pos);
+                        (nc && !inside, inside)
                     })
-                    .unwrap_or(false);
-                if on_body {
+                    .unwrap_or((false, false));
+                if near_corner {
+                    // egui has no rotate cursor — paint a small clockwise-arrow
+                    // affordance at the pointer so the rotate zone reads clearly.
+                    ui.painter().text(
+                        hover_pos + egui::vec2(16.0, -16.0),
+                        egui::Align2::CENTER_CENTER,
+                        ph::ARROW_CLOCKWISE,
+                        egui::FontId::proportional(18.0),
+                        egui::Color32::from_rgb(110, 86, 207),
+                    );
+                    egui::CursorIcon::Grab
+                } else if on_body {
                     // Open (grab) hand on hover to signal a draggable move
                     egui::CursorIcon::Grab
                 } else {

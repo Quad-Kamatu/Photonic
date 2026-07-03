@@ -13,6 +13,11 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- **Rotate objects from the canvas.** Hover just outside a corner handle with
+  the Select tool — a rotate affordance appears — then drag to rotate the
+  selection in place about its centre (Illustrator/Photoshop-style). Works for
+  single or multiple objects; hold Shift to snap to 15° increments; one undo
+  step. (Precise numeric rotation in the Transform inspector still works too.)
 - Image import in the GUI (previously raster layers could only be placed via
   the MCP `place_image` tool):
   - **File → Place Image…** imports a PNG/JPEG/WebP/BMP/GIF/TIFF as a raster
