@@ -438,6 +438,45 @@ impl RasterNode {
     pub fn height(&self) -> u32 {
         self.image.height
     }
+
+    /// Non-destructively **hide** the pixels covered by `sel` (a selection such as
+    /// a color-range or magic-wand mask) by subtracting it from the layer mask.
+    ///
+    /// This is the reversible equivalent of Photoshop's "delete a color range to
+    /// transparency": the pixels stay in `image`, but the layer mask (which the
+    /// compositor multiplies into source alpha) drops to `0` wherever `sel` is
+    /// selected. Partial selection coverage yields partial hiding, so anti-aliased
+    /// selection edges soften cleanly. Repeated calls accumulate (each subtracts
+    /// more). A size mismatch is a no-op.
+    pub fn hide_selection(&mut self, sel: &Mask) {
+        if sel.width != self.image.width || sel.height != self.image.height {
+            return;
+        }
+        let mut m = self
+            .mask
+            .take()
+            .unwrap_or_else(|| Mask::full(self.image.width, self.image.height));
+        m.subtract(sel);
+        self.mask = Some(m);
+    }
+
+    /// Set the layer mask to a **foreground matte** — coverage `255` where the
+    /// subject is, `0` for background — such as the alpha matte returned by a
+    /// background-removal model. If a mask already exists it is intersected with
+    /// the matte (so a prior hand mask is never widened), otherwise the matte
+    /// becomes the mask directly. A size mismatch is a no-op.
+    pub fn set_foreground_matte(&mut self, matte: Mask) {
+        if matte.width != self.image.width || matte.height != self.image.height {
+            return;
+        }
+        match self.mask.take() {
+            Some(mut existing) => {
+                existing.intersect(&matte);
+                self.mask = Some(existing);
+            }
+            None => self.mask = Some(matte),
+        }
+    }
 }
 
 /// A group node — contains ordered child node IDs.
@@ -664,4 +703,72 @@ pub enum PrimitiveKind {
     Star,
     Line,
     Arc,
+}
+
+#[cfg(test)]
+mod raster_mask_tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32) -> RasterNode {
+        RasterNode::new(RasterImage::filled(w, h, [10, 20, 30, 255]))
+    }
+
+    #[test]
+    fn hide_selection_subtracts_from_layer_mask() {
+        let mut n = solid(4, 4);
+        // Select the left 2 columns.
+        let sel = Mask::rect(4, 4, 0, 0, 2, 4);
+        n.hide_selection(&sel);
+        let m = n.mask.as_ref().expect("mask created");
+        // Selected pixels hidden (0), unselected fully visible (255).
+        assert_eq!(m.get(0, 0), 0);
+        assert_eq!(m.get(1, 3), 0);
+        assert_eq!(m.get(2, 0), 255);
+        assert_eq!(m.get(3, 3), 255);
+    }
+
+    #[test]
+    fn hide_selection_accumulates() {
+        let mut n = solid(4, 4);
+        n.hide_selection(&Mask::rect(4, 4, 0, 0, 1, 4));
+        n.hide_selection(&Mask::rect(4, 4, 3, 0, 1, 4));
+        let m = n.mask.as_ref().unwrap();
+        assert_eq!(m.get(0, 0), 0);
+        assert_eq!(m.get(3, 0), 0);
+        assert_eq!(m.get(1, 0), 255);
+    }
+
+    #[test]
+    fn hide_selection_size_mismatch_is_noop() {
+        let mut n = solid(4, 4);
+        n.hide_selection(&Mask::full(2, 2));
+        assert!(n.mask.is_none());
+    }
+
+    #[test]
+    fn set_foreground_matte_replaces_when_no_mask() {
+        let mut n = solid(4, 4);
+        let mut matte = Mask::empty(4, 4);
+        matte.set(1, 1, 255);
+        n.set_foreground_matte(matte);
+        let m = n.mask.as_ref().unwrap();
+        assert_eq!(m.get(1, 1), 255);
+        assert_eq!(m.get(0, 0), 0);
+    }
+
+    #[test]
+    fn set_foreground_matte_intersects_existing_mask() {
+        let mut n = solid(4, 4);
+        // Existing mask hides the top-left pixel.
+        n.hide_selection(&Mask::rect(4, 4, 0, 0, 1, 1));
+        // Matte keeps only the top row.
+        let matte = Mask::rect(4, 4, 0, 0, 4, 1);
+        n.set_foreground_matte(matte);
+        let m = n.mask.as_ref().unwrap();
+        // Intersection: top-left stays hidden (0), rest of top row visible,
+        // everything below the top row hidden by the matte.
+        assert_eq!(m.get(0, 0), 0);
+        assert_eq!(m.get(1, 0), 255);
+        assert_eq!(m.get(0, 1), 0);
+    }
 }

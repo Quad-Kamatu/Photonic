@@ -895,6 +895,65 @@ pub async fn clear_layer_mask(state: &AppState, args: ClearLayerMaskArgs) -> Too
     ToolResult::text(format!("Cleared layer mask on {}", nid)).with_data(json!({ "node_id": nid }))
 }
 
+// ─── remove_background ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveBackgroundArgs {
+    pub node_id: String,
+}
+
+/// Detect the subject with the local matting model (photonic-matte, U²-Net-p
+/// via ONNX Runtime — offline after a one-time ~5 MB download) and apply the
+/// result as a non-destructive foreground layer mask.
+pub async fn remove_background(state: &AppState, args: RemoveBackgroundArgs) -> ToolResult {
+    // Snapshot the pixels, then release the doc lock for the (slow) inference.
+    let (nid, img) = {
+        let doc = state.document.lock().await;
+        let (nid, node) = match get_raster(&doc, &args.node_id) {
+            Ok(v) => v,
+            Err(e) => return ToolResult::error(e),
+        };
+        let SceneNodeKind::Raster(rn) = &node.kind else {
+            return ToolResult::error("not a raster node");
+        };
+        if rn.is_adjustment_layer() {
+            return ToolResult::error("cannot remove background on an adjustment layer");
+        }
+        (nid, rn.image.clone())
+    };
+
+    let matte =
+        match tokio::task::spawn_blocking(move || photonic_matte::remove_background(&img)).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(e)) => return ToolResult::error(format!("background removal failed: {e:#}")),
+            Err(e) => return ToolResult::error(format!("background removal panicked: {e}")),
+        };
+
+    // Re-read the node — it may have changed while inference ran; the re-read
+    // state is the correct `old` for undo, and a resized image is rejected by
+    // the dimension check below.
+    let mut doc = state.document.lock().await;
+    let Some(old) = doc.nodes.get(&nid).cloned() else {
+        return ToolResult::error("node was deleted during background removal");
+    };
+    let mut new_node = old.clone();
+    let SceneNodeKind::Raster(rn) = &mut new_node.kind else {
+        return ToolResult::error("node is no longer a raster node");
+    };
+    if rn.image.width != matte.width || rn.image.height != matte.height {
+        return ToolResult::error("layer pixels changed during background removal; retry");
+    }
+    rn.set_foreground_matte(matte);
+
+    let mut history = state.history.lock().await;
+    history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
+    ToolResult::text(format!(
+        "Removed background on {} (applied as a non-destructive layer mask)",
+        nid
+    ))
+    .with_data(json!({ "node_id": nid }))
+}
+
 // ─── get_raster_info (read-only) ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

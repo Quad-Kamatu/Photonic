@@ -13,6 +13,18 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- Raster Masking on imported images (Inspector → Raster Masking, shown when a
+  raster layer is selected): pick a color on the canvas and hide every pixel
+  within an adjustable fuzziness of it — globally (Color Range) or only the
+  connected region under the click (Contiguous / magic-wand) — with a live
+  preview and Apply/Cancel. Non-destructive: the pixels are hidden via the
+  layer mask, never erased, and the edit is a single undo step.
+- One-click **Remove Background** on raster layers: a small local matting
+  model (U²-Net-p, Apache-2.0) detects the subject fully on-device via ONNX
+  Runtime and applies it as a non-destructive foreground layer mask. The
+  ~5 MB model downloads once to the Photonic cache, then works offline. Also
+  exposed as the `remove_background` MCP tool, and a Clear Layer Mask button
+  reveals the layer again at any time.
 - Opt-in crash reporting and diagnostics (#59): when Photonic panics it now
   writes a structured, non-sensitive crash report (app version, UTC time,
   OS/arch, panic message, backtrace) to a `crash-reports/` folder in your

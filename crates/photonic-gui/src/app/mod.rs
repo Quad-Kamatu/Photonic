@@ -72,6 +72,25 @@ impl EyedropperState {
     }
 }
 
+// ─── Raster color-range masking ───────────────────────────────────────────────
+
+/// Live "hide pixels by color" session on a raster layer.
+///
+/// While active, the document holds a *preview*: `original` with the matching
+/// pixels subtracted from its layer mask. Fuzziness/contiguous changes rebuild
+/// the preview from `original` (so they never accumulate); Apply commits
+/// `original → current` as one undoable `UpdateNode`; Cancel restores
+/// `original` verbatim.
+pub struct RasterColorRangeSession {
+    pub node_id: NodeId,
+    /// Color sampled from the layer's own pixels (straight RGBA).
+    pub target: [u8; 4],
+    /// Seed pixel (node-local) for contiguous / magic-wand mode.
+    pub seed: (u32, u32),
+    /// The node as it was before the preview.
+    pub original: SceneNode,
+}
+
 // ─── Drawer kind ──────────────────────────────────────────────────────────────
 
 /// Which top-bar drawer is currently open (replaces floating popover menus).
@@ -631,6 +650,21 @@ pub struct PhotonicApp {
     /// Local-space points accumulated during the current drag.
     raster_stroke_pts: Vec<(f32, f32)>,
 
+    // ── Raster masking (color range / remove background) ──────────────────────
+    /// Fuzziness (0..1) for the color-range / magic-wand mask-out.
+    pub raster_mask_tolerance: f32,
+    /// Contiguous (magic-wand flood from the click) vs global color range.
+    pub raster_mask_contiguous: bool,
+    /// Live color-range session; the doc holds its preview while `Some`.
+    pub raster_color_range: Option<RasterColorRangeSession>,
+    /// In-flight background-removal job (worker thread → matte result).
+    rmbg_rx: Option<std::sync::mpsc::Receiver<Result<photonic_core::Mask, String>>>,
+    /// Node targeted by the in-flight background-removal job.
+    rmbg_node: Option<NodeId>,
+    /// Whether the matting model is on disk (checked once at startup, set true
+    /// after a successful run) — drives the first-use download hint.
+    rmbg_model_cached: bool,
+
     // ── Guides ────────────────────────────────────────────────────────────────
     /// When true, ruler guides are rendered on the canvas (toggle with Ctrl+;).
     pub guides_visible: bool,
@@ -1024,6 +1058,12 @@ impl Default for PhotonicApp {
             raster_brush_hardness: 0.8,
             raster_stroke_orig: None,
             raster_stroke_pts: Vec::new(),
+            raster_mask_tolerance: 0.25,
+            raster_mask_contiguous: false,
+            raster_color_range: None,
+            rmbg_rx: None,
+            rmbg_node: None,
+            rmbg_model_cached: photonic_matte::model_is_cached(),
             window_logical_pos: (0, 0),
             window_scale_factor: 1.0,
             outline_mode: false,
@@ -1704,6 +1744,162 @@ impl PhotonicApp {
         }
     }
 
+    // ── Raster masking: color range + remove background ──────────────────────
+
+    /// Sample a raster node's own pixel at canvas coordinates `(cx, cy)`.
+    /// Returns the straight-RGBA color and the node-local pixel position, or
+    /// `None` if the point is outside the layer (or the node isn't a raster).
+    fn sample_raster_pixel(
+        &self,
+        doc: &Document,
+        nid: NodeId,
+        cx: f64,
+        cy: f64,
+    ) -> Option<([u8; 4], (u32, u32))> {
+        let node = doc.get_node(&nid)?;
+        let SceneNodeKind::Raster(rn) = &node.kind else {
+            return None;
+        };
+        let lp = node.transform.to_kurbo().inverse() * kurbo::Point::new(cx, cy);
+        if lp.x < 0.0
+            || lp.y < 0.0
+            || lp.x >= rn.image.width as f64
+            || lp.y >= rn.image.height as f64
+        {
+            return None;
+        }
+        let (px, py) = (lp.x as u32, lp.y as u32);
+        Some((rn.image.pixel(px, py), (px, py)))
+    }
+
+    /// Start (or restart) a color-range session on `nid` with the sampled color.
+    fn begin_raster_color_range(
+        &mut self,
+        doc: &mut Document,
+        nid: NodeId,
+        target: [u8; 4],
+        seed: (u32, u32),
+    ) {
+        // A prior session's preview must not leak into the new baseline.
+        self.cancel_raster_color_range(doc);
+        let Some(original) = doc.get_node(&nid).cloned() else {
+            return;
+        };
+        self.raster_color_range = Some(RasterColorRangeSession {
+            node_id: nid,
+            target,
+            seed,
+            original,
+        });
+        self.refresh_raster_color_range(doc);
+    }
+
+    /// Rebuild the live preview from the session's `original` using the current
+    /// fuzziness/contiguous settings (idempotent — parameter changes never
+    /// accumulate).
+    fn refresh_raster_color_range(&mut self, doc: &mut Document) {
+        let Some(s) = &self.raster_color_range else {
+            return;
+        };
+        let SceneNodeKind::Raster(orig_rn) = &s.original.kind else {
+            return;
+        };
+        let sel = if self.raster_mask_contiguous {
+            photonic_core::Mask::magic_wand(
+                &orig_rn.image,
+                s.seed.0,
+                s.seed.1,
+                self.raster_mask_tolerance,
+            )
+        } else {
+            photonic_core::Mask::color_range(&orig_rn.image, s.target, self.raster_mask_tolerance)
+        };
+        let node_id = s.node_id;
+        let original = s.original.clone();
+        if let Some(node) = doc.get_node_mut(&node_id) {
+            *node = original;
+            if let SceneNodeKind::Raster(rn) = &mut node.kind {
+                rn.hide_selection(&sel);
+            }
+        }
+    }
+
+    /// Commit the active session as one undoable `UpdateNode`. Returns true if
+    /// the document changed.
+    fn apply_raster_color_range(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        let Some(s) = self.raster_color_range.take() else {
+            return false;
+        };
+        let Some(current) = doc.get_node(&s.node_id).cloned() else {
+            return false;
+        };
+        // The preview is already live in the doc; record it as one undo step
+        // (same pattern as the raster brush stroke).
+        history.execute(
+            Command::UpdateNode {
+                old: s.original,
+                new: current,
+            },
+            doc,
+        );
+        true
+    }
+
+    /// Discard the active session, restoring the node to its pre-preview state.
+    fn cancel_raster_color_range(&mut self, doc: &mut Document) {
+        if let Some(s) = self.raster_color_range.take() {
+            if let Some(node) = doc.get_node_mut(&s.node_id) {
+                *node = s.original;
+            }
+        }
+    }
+
+    /// Kick off background removal on `nid`'s pixels in a worker thread (model
+    /// load/inference is far too slow for the UI thread). The result lands in
+    /// `rmbg_rx` and is applied in the `draw` poll.
+    fn start_remove_background(&mut self, doc: &mut Document, nid: NodeId) {
+        if self.rmbg_rx.is_some() {
+            self.file_status = Some("Background removal is already running…".into());
+            return;
+        }
+        // Discard any live color-range preview on this node first: the job's
+        // snapshot and the eventual undo record must both be built from
+        // committed state, not an uncommitted preview.
+        if self
+            .raster_color_range
+            .as_ref()
+            .is_some_and(|s| s.node_id == nid)
+        {
+            self.cancel_raster_color_range(doc);
+        }
+        let Some(node) = doc.get_node(&nid) else {
+            return;
+        };
+        let SceneNodeKind::Raster(rn) = &node.kind else {
+            return;
+        };
+        if rn.is_adjustment_layer() {
+            return;
+        }
+        let img = rn.image.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = photonic_matte::remove_background(&img).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(res);
+        });
+        self.rmbg_rx = Some(rx);
+        self.rmbg_node = Some(nid);
+        self.file_status = Some(if self.rmbg_model_cached {
+            "Removing background…".into()
+        } else {
+            "Downloading the background-removal model (~5 MB), then removing background…".into()
+        });
+    }
+
     pub fn new() -> Self {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
@@ -1980,6 +2176,21 @@ impl PhotonicApp {
     ) -> bool {
         let mut doc_modified = false;
 
+        // ── Orphaned color-range preview guard ────────────────────────────────
+        // A live color-range session previews directly in the document and is
+        // controlled from the selected node's Raster Masking section. If the
+        // selection moves off that node, discard the preview — otherwise an
+        // uncommitted (and undo-invisible) mask would linger with no UI to
+        // cancel it.
+        if self
+            .raster_color_range
+            .as_ref()
+            .is_some_and(|s| self.selected_id != Some(s.node_id))
+        {
+            self.cancel_raster_color_range(doc);
+            doc_modified = true;
+        }
+
         // ── Direct Select entry seed (#164) ───────────────────────────────────
         // Edge-detect switching *into* the Direct Selection tool: when it becomes
         // active while a path object is selected, seed its point-edit state so
@@ -2055,6 +2266,66 @@ impl PhotonicApp {
                 self.update_rx = None;
             } else {
                 ctx.request_repaint(); // keep polling until the check returns
+            }
+        }
+
+        // ── Poll an in-flight background-removal job ──────────────────────────
+        if let Some(rx) = &self.rmbg_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.rmbg_rx = None;
+                let nid = self.rmbg_node.take();
+                match (result, nid) {
+                    (Ok(matte), Some(nid)) => {
+                        self.rmbg_model_cached = true;
+                        // A color-range preview started mid-inference would
+                        // otherwise be baked into the undo record — discard it
+                        // so the commit is built from committed state.
+                        if self
+                            .raster_color_range
+                            .as_ref()
+                            .is_some_and(|s| s.node_id == nid)
+                        {
+                            self.cancel_raster_color_range(doc);
+                        }
+                        if let Some(node) = doc.get_node(&nid) {
+                            let mut updated = node.clone();
+                            let mut applied = false;
+                            if let SceneNodeKind::Raster(rn) = &mut updated.kind {
+                                // No-op on size mismatch (image was replaced
+                                // while the job ran) — then `applied` stays false.
+                                let before = rn.mask.clone();
+                                rn.set_foreground_matte(matte);
+                                applied = rn.mask != before;
+                            }
+                            if applied {
+                                history.execute(
+                                    Command::UpdateNode {
+                                        old: node.clone(),
+                                        new: updated,
+                                    },
+                                    doc,
+                                );
+                                doc_modified = true;
+                                self.file_status = Some(
+                                    "Background removed — applied as a layer mask (undoable)"
+                                        .into(),
+                                );
+                            } else {
+                                self.file_status =
+                                    Some("Background removal skipped: layer changed".into());
+                            }
+                        } else {
+                            self.file_status =
+                                Some("Background removal skipped: layer was deleted".into());
+                        }
+                    }
+                    (Err(e), _) => {
+                        self.file_status = Some(format!("Background removal failed: {e}"));
+                    }
+                    (Ok(_), None) => {}
+                }
+            } else {
+                ctx.request_repaint(); // keep polling until the matte returns
             }
         }
 
@@ -3424,6 +3695,13 @@ impl PhotonicApp {
                     // history_entries(20) is cheap (<=20 items); the mutable write
                     // lands before the immutable &self.history_entries borrow below.
                     self.history_entries = history.history_entries(20);
+                    // Swatch shown in the Raster Masking section — only when the
+                    // live session belongs to the currently selected node.
+                    let raster_color_range_target = self
+                        .raster_color_range
+                        .as_ref()
+                        .filter(|s| Some(s.node_id) == self.selected_id)
+                        .map(|s| s.target);
                     let mut ctx = panels::PropPanelCtx {
                         doc: doc,
                         active_tool: self.active_tool,
@@ -3458,6 +3736,10 @@ impl PhotonicApp {
                         magic_wand_attribute: &mut self.magic_wand_attribute,
                         magic_wand_tolerance: &mut self.magic_wand_tolerance,
                         eraser_radius: &mut self.eraser_radius,
+                        raster_mask_tolerance: &mut self.raster_mask_tolerance,
+                        raster_mask_contiguous: &mut self.raster_mask_contiguous,
+                        raster_color_range_target: raster_color_range_target,
+                        rmbg_model_cached: self.rmbg_model_cached,
                         composition_findings: &self.composition_findings,
                         rhythm_findings: &self.rhythm_findings,
                         branch_names: &branch_names,
@@ -6174,6 +6456,73 @@ impl PhotonicApp {
                         doc.selection.clear();
                     }
                     doc_modified = true;
+                }
+
+                PanelAction::StartRasterColorRange { node_id } => {
+                    // Arm the eyedropper; the click samples the raster's own
+                    // pixels and begins the preview session.
+                    self.eyedropper.target =
+                        Some(EyedropperTarget::RasterColorRange { node_id });
+                    self.eyedropper.skip_click = true;
+                }
+
+                PanelAction::SetRasterColorRangeParams {
+                    tolerance,
+                    contiguous,
+                } => {
+                    self.raster_mask_tolerance = tolerance;
+                    self.raster_mask_contiguous = contiguous;
+                    if self.raster_color_range.is_some() {
+                        self.refresh_raster_color_range(doc);
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::ApplyRasterColorRange => {
+                    if self.apply_raster_color_range(doc, history) {
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::CancelRasterColorRange => {
+                    if self.raster_color_range.is_some() {
+                        self.cancel_raster_color_range(doc);
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::ClearRasterMask { node_id } => {
+                    // Discard any live preview on this node first so the mask
+                    // removal starts from the committed state.
+                    if self
+                        .raster_color_range
+                        .as_ref()
+                        .is_some_and(|s| s.node_id == node_id)
+                    {
+                        self.cancel_raster_color_range(doc);
+                    }
+                    if let Some(node) = doc.get_node(&node_id) {
+                        let has_mask =
+                            matches!(&node.kind, SceneNodeKind::Raster(r) if r.mask.is_some());
+                        if has_mask {
+                            let mut updated = node.clone();
+                            if let SceneNodeKind::Raster(rn) = &mut updated.kind {
+                                rn.mask = None;
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: updated,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::RasterRemoveBackground { node_id } => {
+                    self.start_remove_background(doc, node_id);
                 }
 
                 PanelAction::AddAnchorPoints { node_id } => {
@@ -12149,7 +12498,26 @@ impl PhotonicApp {
                     // topmost filled node in the document.  This is reliable on
                     // all platforms including Wayland — no screen capture needed.
                     let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                    let sampled = photonic_core::sample_fill_at(doc, cx, cy);
+                    // The raster color-range target samples the raster layer's
+                    // own pixels; every other target samples vector fills.
+                    let raster_target: Option<NodeId> = match &self.eyedropper.target {
+                        Some(EyedropperTarget::RasterColorRange { node_id }) => Some(*node_id),
+                        _ => None,
+                    };
+                    let raster_sample =
+                        raster_target.and_then(|nid| self.sample_raster_pixel(doc, nid, cx, cy));
+                    let sampled = if raster_target.is_some() {
+                        raster_sample.map(|(rgba, _)| {
+                            [
+                                rgba[0] as f32 / 255.0,
+                                rgba[1] as f32 / 255.0,
+                                rgba[2] as f32 / 255.0,
+                                rgba[3] as f32 / 255.0,
+                            ]
+                        })
+                    } else {
+                        photonic_core::sample_fill_at(doc, cx, cy)
+                    };
 
                     // Draw color preview badge near cursor
                     let preview_color = sampled
@@ -12179,7 +12547,15 @@ impl PhotonicApp {
                     );
 
                     if clicked {
-                        if let Some(rgba) = sampled {
+                        if let Some(nid) = raster_target {
+                            // Begin (or restart) the color-range mask-out
+                            // session with the sampled pixel; a click outside
+                            // the layer just cancels the eyedropper.
+                            if let Some((rgba, seed)) = raster_sample {
+                                self.begin_raster_color_range(doc, nid, rgba, seed);
+                                doc_modified = true;
+                            }
+                        } else if let Some(rgba) = sampled {
                             let picked = photonic_core::Color {
                                 r: rgba[0],
                                 g: rgba[1],
@@ -12354,6 +12730,10 @@ impl PhotonicApp {
                     *doc_modified = true;
                 }
             }
+            // Handled directly in the eyedropper overlay (samples raster pixels
+            // and needs the seed coordinates, not just a Color) — never reaches
+            // this color-slot dispatcher.
+            Some(EyedropperTarget::RasterColorRange { .. }) => {}
             None => {}
         }
     }
