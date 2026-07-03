@@ -11,6 +11,17 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Eyedropper now samples raster images** (and transformed shapes). In-canvas
+  colour sampling only ever hit vector paths, so clicking the eyedropper on an
+  imported image sampled nothing; it also hit-tested shape geometry against the
+  raw canvas point, so moved/scaled/rotated shapes sampled the wrong spot.
+  Sampling now maps the click into each node's local space, reads the pixel of a
+  raster layer (honouring its layer mask, falling through transparent pixels to
+  whatever is beneath), and keeps gradient colours matched to the on-screen
+  render. Applies to both the GUI eyedropper and the `sample_color_at` MCP tool.
+
 ### Added
 
 - **Rotate objects from the canvas.** Hover just outside a corner handle with
