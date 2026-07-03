@@ -1110,6 +1110,17 @@ where
     std::thread::spawn(f).join().unwrap_or(None)
 }
 
+/// Image extensions accepted by Place Image / Open / drag-and-drop.
+const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"];
+
+/// Whether a path looks like an importable raster image (by extension).
+fn is_image_path(p: &std::path::Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Fit and center the artboard bounding box `(bx0,by0,bx1,by1)` (canvas units)
 /// inside the on-screen viewport `rect`, so the artwork lands properly scaled in
 /// the actual visible canvas area (not the full window). Sets zoom + pan
@@ -2264,26 +2275,20 @@ impl PhotonicApp {
         // Dropping image files onto the window places each as a raster layer
         // (same path as File → Place Image…). Native drops carry a filesystem
         // path; sandboxed/portal drops may only carry bytes — handle both.
+        //
+        // Platform caveat: winit 0.30 only emits DroppedFile on X11, Windows,
+        // and macOS — its Wayland backend has no drag-and-drop support, so on
+        // Wayland this handler never fires and File → Open/Place Image… is the
+        // way in.
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
-            let is_image = |p: &std::path::Path| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| {
-                        matches!(
-                            e.to_ascii_lowercase().as_str(),
-                            "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tif" | "tiff"
-                        )
-                    })
-                    .unwrap_or(false)
-            };
-            if let Some(path) = file.path.as_deref().filter(|p| is_image(p)) {
+            if let Some(path) = file.path.as_deref().filter(|p| is_image_path(p)) {
                 let path = path.to_path_buf();
                 self.place_image_file(doc, history, &path);
                 doc_modified = true;
             } else if let Some(bytes) = &file.bytes {
                 let name = std::path::PathBuf::from(&file.name);
-                if is_image(&name) {
+                if is_image_path(&name) {
                     self.place_image_bytes(doc, history, bytes, Some(&name));
                     doc_modified = true;
                 }
@@ -2642,9 +2647,48 @@ impl PhotonicApp {
                             rfd::FileDialog::new()
                                 .add_filter("Photonic", &["photon"])
                                 .add_filter("SVG", &["svg"])
-                                .add_filter("All supported", &["photon", "svg"])
+                                .add_filter("Images", &IMAGE_EXTENSIONS)
+                                .add_filter("All supported", &{
+                                    let mut all = vec!["photon", "svg"];
+                                    all.extend(IMAGE_EXTENSIONS);
+                                    all
+                                })
                                 .pick_file()
                         }) {
+                            // Opening a photo from the welcome screen starts a
+                            // fresh artboard sized to it, with the image placed
+                            // at the origin — like opening a photo in Photoshop.
+                            if is_image_path(&path) {
+                                *doc = Document::default_artboard();
+                                history.reset();
+                                self.current_file = None;
+                                self.selected_id = None;
+                                self.place_image_file(doc, history, &path);
+                                if let Some(nid) = self.selected_id {
+                                    let dims = doc.get_node(&nid).and_then(|n| match &n.kind {
+                                        SceneNodeKind::Raster(rn) => Some((
+                                            rn.image.width as f64,
+                                            rn.image.height as f64,
+                                        )),
+                                        _ => None,
+                                    });
+                                    if let Some((w, h)) = dims {
+                                        doc.width = w;
+                                        doc.height = h;
+                                        if let Some(node) = doc.get_node_mut(&nid) {
+                                            node.transform =
+                                                photonic_core::Transform::translate(0.0, 0.0);
+                                        }
+                                    }
+                                    doc.name = path
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| doc.name.clone());
+                                }
+                                self.fit_pending = true;
+                                self.show_welcome = false;
+                                doc_modified = true;
+                            } else {
                             match load_document(&path) {
                                 Ok((loaded, hist_snap)) => {
                                     self.welcome.add_recent(path.clone(), loaded.name.clone());
@@ -2659,6 +2703,7 @@ impl PhotonicApp {
                                 Err(e) => {
                                     self.file_status = Some(format!("Open failed: {e}"));
                                 }
+                            }
                             }
                         }
                     }
@@ -2832,9 +2877,21 @@ impl PhotonicApp {
                                                 rfd::FileDialog::new()
                                                     .add_filter("Photonic", &["photon"])
                                                     .add_filter("SVG", &["svg"])
-                                                    .add_filter("All supported", &["photon", "svg"])
+                                                    .add_filter("Images", &IMAGE_EXTENSIONS)
+                                                    .add_filter("All supported", &{
+                                                        let mut all = vec!["photon", "svg"];
+                                                        all.extend(IMAGE_EXTENSIONS);
+                                                        all
+                                                    })
                                                     .pick_file()
                                             }) {
+                                                // A photo isn't a document: place it
+                                                // into the current one as a raster
+                                                // layer instead of trying to load it.
+                                                if is_image_path(&path) {
+                                                    self.place_image_file(doc, history, &path);
+                                                    doc_modified = true;
+                                                } else {
                                                 match load_document(&path) {
                                                     Ok((loaded, hist_snap)) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
@@ -2848,13 +2905,13 @@ impl PhotonicApp {
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Open failed: {e}")),
                                                 }
+                                                }
                                             }
                                         }
                                         if ui.button("  Place Image…  ")
                                             .on_hover_text(
                                                 "Import a PNG/JPEG/WebP as a raster layer \
-                                                 (you can also drag & drop image files onto \
-                                                 the canvas)",
+                                                 into the current document",
                                             )
                                             .clicked()
                                         {
@@ -2862,14 +2919,11 @@ impl PhotonicApp {
                                             self.selected_drawer_option = None;
                                             if let Some(path) = run_file_dialog(|| {
                                                 rfd::FileDialog::new()
-                                                    .add_filter(
-                                                        "Images",
-                                                        &["png", "jpg", "jpeg", "webp", "bmp",
-                                                          "gif", "tif", "tiff"],
-                                                    )
+                                                    .add_filter("Images", &IMAGE_EXTENSIONS)
                                                     .pick_file()
                                             }) {
                                                 self.place_image_file(doc, history, &path);
+                                                doc_modified = true;
                                             }
                                         }
                                     }
