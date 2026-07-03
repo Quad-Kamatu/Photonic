@@ -171,9 +171,14 @@ fn render_path_node(
         let sc = &pn.stroke;
         let alpha = sc.color.a * sc.opacity * node_opacity * gop;
         if alpha > 0.0 {
+            // Non-scaling stroke: cancel the object transform's uniform scale so
+            // the stroke keeps a constant width regardless of object size (see
+            // the matching note in `renderer.rs`). No-op when det == 1.
+            let m = &transform.matrix;
+            let obj_scale = (m[0] * m[3] - m[1] * m[2]).abs().sqrt().max(1e-6);
             let mesh = tessellate_stroke(
                 &pn.path_data,
-                sc.width as f32,
+                (sc.width / obj_scale) as f32,
                 sc.line_cap,
                 sc.line_join,
                 sc.miter_limit as f32,

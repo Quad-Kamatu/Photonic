@@ -336,7 +336,7 @@ fn emit_node_inner(
     match &node.kind {
         SceneNodeKind::Path(p) => {
             let fill = fill_attrs(&p.fill, defs, grad_counter);
-            let stroke = stroke_attrs(&p.stroke);
+            let stroke = stroke_attrs(&p.stroke, affine_scale(&node.transform));
             body.push_str(&format!(
                 "{}<path{}{}{}{}{}{}{} d=\"{}\"/>\n",
                 pad,
@@ -373,7 +373,7 @@ fn emit_node_inner(
         }
         SceneNodeKind::Text(t) => {
             let fill = fill_attrs(&t.fill, defs, grad_counter);
-            let stroke = stroke_attrs(&t.stroke);
+            let stroke = stroke_attrs(&t.stroke, affine_scale(&node.transform));
             let anchor = match t.align {
                 TextAlign::Left => "start",
                 TextAlign::Center => "middle",
@@ -696,7 +696,19 @@ fn solid_fill_attr(c: &Color, fill_opacity: f32) -> String {
     }
 }
 
-fn stroke_attrs(stroke: &Stroke) -> String {
+/// Uniform scale factor of an affine transform, `sqrt(|det|)` — used to keep
+/// stroke widths constant regardless of the object's scale (non-scaling stroke),
+/// matching the renderer. `1.0` for unscaled/rotated/translated transforms.
+fn affine_scale(t: &Transform) -> f64 {
+    let [a, b, c, d, _, _] = t.matrix;
+    (a * d - b * c).abs().sqrt().max(1e-6)
+}
+
+/// `obj_scale` is the emitting element's transform scale; the stroke width is
+/// divided by it so that, once the element's `transform="matrix(...)"` scales it
+/// back up, the stroke renders at its authored width in canvas units — a
+/// non-scaling stroke, consistent with the live canvas and raster export.
+fn stroke_attrs(stroke: &Stroke, obj_scale: f64) -> String {
     if !stroke.enabled || stroke.width <= 0.0 {
         return " stroke=\"none\"".to_string();
     }
@@ -720,7 +732,7 @@ fn stroke_attrs(stroke: &Stroke) -> String {
     };
     let mut s = format!(
         " stroke=\"{hex}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\"{align_attr}",
-        stroke.width,
+        stroke.width / obj_scale,
     );
     if join == "miter" && (stroke.miter_limit - 4.0).abs() > 0.001 {
         s.push_str(&format!(" stroke-miterlimit=\"{}\"", stroke.miter_limit));
@@ -835,7 +847,11 @@ fn emit_node_pdf(node: &SceneNode, doc: &Document, content: &mut pdf_writer::Con
             }
             if let Some(s) = stroke {
                 content.set_stroke_rgb(s.color.r, s.color.g, s.color.b);
-                content.set_line_width(s.width as f32);
+                // Non-scaling stroke: the `cm` transform above scales subsequent
+                // line widths, so divide by the transform scale to keep the
+                // authored width (matches the canvas and other exporters).
+                let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
+                content.set_line_width((s.width / obj_scale) as f32);
             }
             match (fill.is_some(), stroke.is_some()) {
                 (true, true) => {
@@ -976,6 +992,44 @@ mod tests {
             svg.to_lowercase().contains("#ffffff"),
             "expected white background fill:\n{svg}"
         );
+    }
+
+    /// Non-scaling stroke: a node scaled 2× must export a stroke-width halved,
+    /// so that the element's `matrix(...)` scales it back to the authored width
+    /// in canvas units (constant width regardless of object size).
+    #[test]
+    fn svg_export_stroke_width_is_non_scaling() {
+        use crate::node::{PathNode, SceneNode, SceneNodeKind};
+        use crate::path::PathData;
+        use crate::transform::Transform;
+
+        let mut doc = Document::new("t", 200.0, 200.0);
+        let layer_id = doc.layer_order[0];
+        let pn = PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))
+            .with_stroke(Stroke::solid(Color::BLACK, 4.0));
+        let mut node = SceneNode::new("r", layer_id, SceneNodeKind::Path(pn));
+        // Uniform 2× scale about the origin.
+        node.transform = Transform::new(2.0, 0.0, 0.0, 2.0, 0.0, 0.0);
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(
+            svg.contains("stroke-width=\"2\""),
+            "2× scaled node should export stroke-width 2 (4 / 2):\n{svg}"
+        );
+    }
+
+    #[test]
+    fn affine_scale_is_rotation_invariant() {
+        use crate::transform::Transform;
+        // Pure rotation → scale 1 (stroke unaffected).
+        let rot = Transform::new(0.6, 0.8, -0.8, 0.6, 0.0, 0.0);
+        assert!((affine_scale(&rot) - 1.0).abs() < 1e-9);
+        // Uniform 3× → scale 3.
+        let s = Transform::new(3.0, 0.0, 0.0, 3.0, 5.0, 7.0);
+        assert!((affine_scale(&s) - 3.0).abs() < 1e-9);
     }
 
     #[test]

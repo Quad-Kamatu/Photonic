@@ -37,6 +37,13 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Fixed
 
+- **Strokes no longer scale with the object.** Scaling a shape (drag its
+  bounding-box handles, or any transform with a scale) kept its stroke a fixed
+  width instead of thickening/thinning it — a stroke is an absolute property,
+  not geometry (Illustrator's "Scale Strokes & Effects" off). Applied uniformly
+  across the live canvas, raster/PNG export, and SVG/PDF export, so all four
+  agree. Rotation and translation are unaffected; view zoom still scales
+  everything as before.
 - Opening a photo from the welcome screen now also sizes the **artboard** to
   the photo (previously only the document dimensions changed, leaving the
   visible artboard at its default size — which also made Crop to Artboard trim

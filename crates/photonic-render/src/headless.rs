@@ -1135,9 +1135,13 @@ fn build_geometry(
             let alpha = sc.color.a * sc.opacity * node.opacity * gop;
             let stroke_color = [sc.color.r, sc.color.g, sc.color.b, alpha];
 
+            // Non-scaling stroke: cancel the object transform's uniform scale so
+            // the stroke width stays constant regardless of object size, exactly
+            // as the live renderer does (see `renderer.rs`). No-op when det == 1.
+            let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
             let mesh = tessellate_stroke(
                 &path_node.path_data,
-                sc.width as f32,
+                (sc.width / obj_scale) as f32,
                 sc.line_cap,
                 sc.line_join,
                 sc.miter_limit as f32,
