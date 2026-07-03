@@ -1362,16 +1362,23 @@ impl Document {
 
 // ─── In-canvas color sampling ─────────────────────────────────────────────────
 
-/// Sample the topmost visible filled node at canvas-space coordinates `(x, y)`.
+/// Sample the topmost visible node at canvas-space coordinates `(x, y)`.
 ///
 /// Walks layers and nodes from top to bottom (reverse of the rendering order
-/// stored in `layer_order` / `node_ids`). For each visible `PathNode` whose
-/// fill is enabled, performs a non-zero winding-rule hit test.  The first hit
-/// returns the sampled RGBA colour via `FillKind::sample_at`, which correctly
-/// handles solid, gradient, fluid-gradient, and mesh-gradient fills.
+/// stored in `layer_order` / `node_ids`) and returns the colour of the first
+/// node that actually covers the point:
 ///
-/// Returns `None` if no node covers the point or every node at that point has
-/// its fill disabled.
+/// - **Path** nodes: a non-zero winding-rule hit test (the canvas point is
+///   mapped into the node's *local* space first, so moved/scaled/rotated shapes
+///   test correctly), then `FillKind::sample_at` at the canvas coordinate — the
+///   same space the renderer samples gradients in, so the eyedropper matches
+///   what's on screen. Fill-disabled paths are skipped (the point falls through).
+/// - **Raster** nodes (images): the pixel at the mapped local coordinate,
+///   honouring the layer mask and node opacity. Fully-transparent/masked pixels
+///   are skipped so the eyedropper samples whatever shows through beneath them.
+///
+/// Text and group nodes are skipped. Returns `None` if nothing opaque covers the
+/// point.
 pub fn sample_fill_at(doc: &Document, x: f64, y: f64) -> Option<[f32; 4]> {
     use kurbo::Shape;
     let pt = kurbo::Point::new(x, y);
@@ -1386,15 +1393,51 @@ pub fn sample_fill_at(doc: &Document, x: f64, y: f64) -> Option<[f32; 4]> {
                 Some(n) if n.visible => n,
                 _ => continue,
             };
-            if let SceneNodeKind::Path(pn) = &node.kind {
-                if !pn.fill.enabled {
-                    continue;
+            // Map the canvas point into the node's local space for hit-testing.
+            // (A non-invertible transform yields non-finite coords, which fail
+            // every containment test below — the node is simply skipped.)
+            let local = node.transform.to_kurbo().inverse() * pt;
+            match &node.kind {
+                SceneNodeKind::Path(pn) => {
+                    if !pn.fill.enabled {
+                        continue;
+                    }
+                    let bez = pn.path_data.to_bez_path();
+                    if bez.winding(local) != 0 {
+                        let opacity = pn.fill.opacity * node.opacity;
+                        // Gradients are sampled in canvas space by the renderer,
+                        // so sample there too for an on-screen-accurate colour.
+                        return Some(pn.fill.kind.sample_at(x, y, opacity));
+                    }
                 }
-                let bez = pn.path_data.to_bez_path();
-                if bez.winding(pt) != 0 {
-                    let opacity = pn.fill.opacity * node.opacity;
-                    return Some(pn.fill.kind.sample_at(x, y, opacity));
+                SceneNodeKind::Raster(rn) => {
+                    if rn.is_adjustment_layer() {
+                        continue;
+                    }
+                    if local.x < 0.0
+                        || local.y < 0.0
+                        || local.x >= rn.image.width as f64
+                        || local.y >= rn.image.height as f64
+                    {
+                        continue;
+                    }
+                    let (px, py) = (local.x as u32, local.y as u32);
+                    let rgba = rn.image.pixel(px, py);
+                    // A layer mask (and node opacity) can hide the pixel — if it
+                    // is not visible here, keep looking beneath it.
+                    let cov = rn.mask.as_ref().map(|m| m.coverage(px, py)).unwrap_or(1.0);
+                    let visible = (rgba[3] as f32 / 255.0) * cov * node.opacity;
+                    if visible <= 0.0 {
+                        continue;
+                    }
+                    return Some([
+                        rgba[0] as f32 / 255.0,
+                        rgba[1] as f32 / 255.0,
+                        rgba[2] as f32 / 255.0,
+                        rgba[3] as f32 / 255.0,
+                    ]);
                 }
+                SceneNodeKind::Text(_) | SceneNodeKind::Group(_) => continue,
             }
         }
     }
@@ -1497,6 +1540,74 @@ mod tests {
         let doc = doc_with_nodes(vec![(path, Color::RED)]);
         // Point outside the rectangle
         assert!(sample_fill_at(&doc, 200.0, 200.0).is_none());
+    }
+
+    #[test]
+    fn samples_raster_pixels() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+        let mut img = RasterImage::filled(10, 10, [0, 0, 0, 255]);
+        img.set_pixel(3, 4, [10, 200, 30, 255]); // a distinct green pixel
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let layer_id = doc.layer_order[0];
+        let mut node = SceneNode::new("img", layer_id, SceneNodeKind::Raster(RasterNode::new(img)));
+        node.transform = crate::transform::Transform::translate(20.0, 20.0);
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+
+        // Canvas (23,24) maps to the green pixel (3,4) of the image at origin (20,20).
+        let s = sample_fill_at(&doc, 23.5, 24.5).expect("raster hit");
+        assert!((s[0] - 10.0 / 255.0).abs() < 1e-3, "r");
+        assert!((s[1] - 200.0 / 255.0).abs() < 1e-3, "g");
+        assert!((s[2] - 30.0 / 255.0).abs() < 1e-3, "b");
+        // Outside the image → nothing.
+        assert!(sample_fill_at(&doc, 5.0, 5.0).is_none());
+    }
+
+    #[test]
+    fn transparent_raster_pixel_falls_through() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+        // A red path beneath, a raster with a transparent hole on top.
+        let mut doc = doc_with_nodes(vec![(PathData::rect(0.0, 0.0, 100.0, 100.0), Color::RED)]);
+        let layer_id = doc.layer_order[0];
+        let img = RasterImage::filled(10, 10, [0, 0, 0, 0]); // fully transparent
+        let node = SceneNode::new("img", layer_id, SceneNodeKind::Raster(RasterNode::new(img)));
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid); // on top
+                                                                   // Over the transparent raster → samples the red path underneath.
+        let s = sample_fill_at(&doc, 5.0, 5.0).expect("hit");
+        assert!(
+            (s[0] - 1.0).abs() < 1e-6 && s[1].abs() < 1e-6,
+            "should see red beneath"
+        );
+    }
+
+    #[test]
+    fn transformed_path_hit_test_uses_local_space() {
+        // A 10×10 rect translated to (50,50). The canvas point (55,55) is inside
+        // the moved shape; (5,5) is not — the pre-fix code (winding local geometry
+        // against the raw canvas point) got this backwards.
+        let mut doc = Document::new("t", 200.0, 200.0);
+        let layer_id = doc.layer_order[0];
+        let pn =
+            PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0)).with_fill(Fill::solid(Color::BLUE));
+        let mut node = SceneNode::new("r", layer_id, SceneNodeKind::Path(pn));
+        node.transform = crate::transform::Transform::translate(50.0, 50.0);
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+
+        assert!(
+            sample_fill_at(&doc, 55.0, 55.0).is_some(),
+            "inside moved rect"
+        );
+        assert!(
+            sample_fill_at(&doc, 5.0, 5.0).is_none(),
+            "at the old (untransformed) spot"
+        );
     }
 
     #[test]

@@ -5710,35 +5710,68 @@ pub async fn sample_color_at(state: &AppState, args: SampleColorAtArgs) -> ToolR
                 Some(n) if n.visible => n,
                 _ => continue,
             };
-            if let SceneNodeKind::Path(pn) = &node.kind {
-                let bez = pn.path_data.to_bez_path();
-                // Simple hit test: check if point is inside the path (winding rule).
-                if bez.winding(pt) != 0 {
-                    // Found it — return fill and stroke colors.
-                    let fill_hex = match &pn.fill.kind {
-                        FillKind::Solid(c) => Some(c.to_hex()),
-                        _ => None,
-                    };
-                    let stroke_hex = if pn.stroke.enabled {
-                        Some(pn.stroke.color.to_hex())
-                    } else {
-                        None
-                    };
+            // Map the canvas point into the node's local space so moved/scaled/
+            // rotated nodes hit-test correctly.
+            let local = node.transform.to_kurbo().inverse() * pt;
+            match &node.kind {
+                SceneNodeKind::Path(pn) => {
+                    let bez = pn.path_data.to_bez_path();
+                    if bez.winding(local) != 0 {
+                        let fill_hex = match &pn.fill.kind {
+                            FillKind::Solid(c) => Some(c.to_hex()),
+                            _ => None,
+                        };
+                        let stroke_hex = if pn.stroke.enabled {
+                            Some(pn.stroke.color.to_hex())
+                        } else {
+                            None
+                        };
 
-                    return ToolResult::text(format!(
-                        "Sampled '{}': fill={}, stroke={}",
-                        node.name,
-                        fill_hex.as_deref().unwrap_or("none"),
-                        stroke_hex.as_deref().unwrap_or("none"),
-                    ))
-                    .with_data(serde_json::json!({
-                        "node_id": nid,
-                        "node_name": node.name,
-                        "fill_color": fill_hex,
-                        "stroke_color": stroke_hex,
-                        "opacity": node.opacity,
-                    }));
+                        return ToolResult::text(format!(
+                            "Sampled '{}': fill={}, stroke={}",
+                            node.name,
+                            fill_hex.as_deref().unwrap_or("none"),
+                            stroke_hex.as_deref().unwrap_or("none"),
+                        ))
+                        .with_data(serde_json::json!({
+                            "node_id": nid,
+                            "node_name": node.name,
+                            "fill_color": fill_hex,
+                            "stroke_color": stroke_hex,
+                            "opacity": node.opacity,
+                        }));
+                    }
                 }
+                SceneNodeKind::Raster(rn) if !rn.is_adjustment_layer() => {
+                    if local.x >= 0.0
+                        && local.y >= 0.0
+                        && local.x < rn.image.width as f64
+                        && local.y < rn.image.height as f64
+                    {
+                        let rgba = rn.image.pixel(local.x as u32, local.y as u32);
+                        let cov = rn
+                            .mask
+                            .as_ref()
+                            .map(|m| m.coverage(local.x as u32, local.y as u32))
+                            .unwrap_or(1.0);
+                        // Skip transparent/masked pixels so sampling falls through.
+                        if (rgba[3] as f32 / 255.0) * cov * node.opacity > 0.0 {
+                            let hex = format!("#{:02X}{:02X}{:02X}", rgba[0], rgba[1], rgba[2]);
+                            return ToolResult::text(format!(
+                                "Sampled '{}': color={} (raster pixel)",
+                                node.name, hex
+                            ))
+                            .with_data(serde_json::json!({
+                                "node_id": nid,
+                                "node_name": node.name,
+                                "fill_color": hex,
+                                "stroke_color": null,
+                                "opacity": node.opacity,
+                            }));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
