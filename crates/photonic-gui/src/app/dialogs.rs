@@ -1,0 +1,995 @@
+use super::*;
+
+impl PhotonicApp {
+    pub(crate) fn draw_export_modal(&mut self, ctx: &egui::Context, doc: &Document) {
+        let Some(dlg) = &mut self.export_dialog else {
+            return;
+        };
+
+        // Collect the button the user clicked without holding a mutable borrow
+        // inside the egui closure at the same time as `.open(&mut open)`.
+        #[derive(PartialEq)]
+        enum Action {
+            None,
+            Cancel,
+            Export,
+        }
+        let mut action = Action::None;
+        let mut open = true;
+
+        egui::Window::new("Export")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([340.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                // ── Format ───────────────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    ui.label("Format");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::Png, "PNG");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::Jpeg, "JPEG");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::WebP, "WebP");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::Gif, "GIF");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::Tiff, "TIFF");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::Ico, "ICO");
+                    ui.selectable_value(&mut dlg.format, ExportFormat::Svg, "SVG");
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // ── Background (all formats, incl. transparent SVG) + bounds ──
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    ui.radio_value(
+                        &mut dlg.background,
+                        ExportBackground::Transparent,
+                        "Transparent",
+                    );
+                    ui.radio_value(
+                        &mut dlg.background,
+                        ExportBackground::Artboard,
+                        "Artboard (white)",
+                    );
+                });
+                // Bounds/crop only applies to raster export; SVG uses the full artboard viewBox.
+                if dlg.format != ExportFormat::Svg {
+                    ui.horizontal(|ui| {
+                        ui.label("Bounds       ");
+                        ui.checkbox(&mut dlg.crop_to_content, "Crop to artwork");
+                    });
+                }
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // ── Format-specific settings ──────────────────────────────
+                match dlg.format {
+                    ExportFormat::Png
+                    | ExportFormat::Jpeg
+                    | ExportFormat::WebP
+                    | ExportFormat::Gif
+                    | ExportFormat::Tiff => {
+                        ui.horizontal(|ui| {
+                            ui.label("Width ");
+                            let prev_w = dlg.png_width;
+                            let r = ui.add(
+                                egui::DragValue::new(&mut dlg.png_width)
+                                    .range(1..=8192)
+                                    .suffix(" px"),
+                            );
+                            if r.changed() && dlg.aspect > 0.0 {
+                                dlg.png_height =
+                                    ((dlg.png_width as f64 / dlg.aspect) as u32).max(1);
+                            }
+                            let _ = prev_w;
+                            ui.label("  Height ");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut dlg.png_height)
+                                    .range(1..=8192)
+                                    .suffix(" px"),
+                            );
+                            if r.changed() && dlg.aspect > 0.0 {
+                                dlg.png_width =
+                                    ((dlg.png_height as f64 * dlg.aspect) as u32).max(1);
+                            }
+                        });
+                        if dlg.format == ExportFormat::Jpeg || dlg.format == ExportFormat::WebP {
+                            ui.horizontal(|ui| {
+                                ui.label("Quality");
+                                ui.add(
+                                    egui::Slider::new(&mut dlg.jpeg_quality, 1..=100).suffix("%"),
+                                );
+                            });
+                        }
+                    }
+                    ExportFormat::Ico => {
+                        ui.label("Sizes");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut dlg.ico_size_16, "16");
+                            ui.checkbox(&mut dlg.ico_size_32, "32");
+                            ui.checkbox(&mut dlg.ico_size_48, "48");
+                            ui.checkbox(&mut dlg.ico_size_256, "256");
+                        });
+                    }
+                    ExportFormat::Svg => {}
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // ── Action buttons ────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = Action::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Export…").clicked() {
+                            action = Action::Export;
+                        }
+                    });
+                });
+            });
+
+        // X button closed the window
+        if !open {
+            self.export_dialog = None;
+            return;
+        }
+
+        match action {
+            Action::Cancel => {
+                self.export_dialog = None;
+            }
+            Action::Export => {
+                self.run_export(doc);
+            }
+            Action::None => {}
+        }
+    }
+
+    pub(crate) fn draw_simplify_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.simplify_dialog.is_none() {
+            return;
+        }
+
+        #[derive(PartialEq)]
+        enum Action {
+            None,
+            Cancel,
+            Apply,
+        }
+        let mut action = Action::None;
+        let mut open = true;
+
+        let node_name = self.simplify_dialog.as_ref().unwrap().node_name.clone();
+        let node_id = self.simplify_dialog.as_ref().unwrap().node_id;
+
+        // Refresh the per-tolerance preview cache (shared with the canvas
+        // overlay) so the "Points: N → M" readout is always in sync, regardless
+        // of draw order. RDP still runs only when the tolerance changes.
+        let orig_points = self.simplify_dialog.as_ref().unwrap().orig_points;
+        let new_points = {
+            let dlg = self.simplify_dialog.as_mut().unwrap();
+            if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    dlg.refresh(&pn.path_data);
+                }
+            }
+            dlg.preview
+                .as_ref()
+                .map(photonic_core::ops::simplify::count_points)
+        };
+
+        egui::Window::new("Simplify Path")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([260.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Node: {}", node_name));
+                ui.add_space(6.0);
+
+                let dlg = self.simplify_dialog.as_mut().unwrap();
+                ui.checkbox(&mut dlg.fit_curves, "Fit curves")
+                    .on_hover_text(
+                        "Fit smooth Bézier curves to the fewest anchor points \
+                         (turns a polyline arch into one curve). Off = reduce to \
+                         straight segments.",
+                    );
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(if dlg.fit_curves {
+                        "Fit tolerance"
+                    } else {
+                        "Tolerance"
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut dlg.tolerance, 0.05..=50.0)
+                            .logarithmic(true)
+                            .max_decimals(2),
+                    );
+                });
+                ui.label(
+                    RichText::new(if dlg.fit_curves {
+                        "Higher = more aggressive (fewer anchors, looser fit)"
+                    } else {
+                        "Larger = more aggressive reduction"
+                    })
+                    .weak()
+                    .small(),
+                );
+
+                if dlg.fit_curves {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Corner angle");
+                        ui.add(
+                            egui::Slider::new(&mut dlg.corner_angle_deg, 0.0..=90.0)
+                                .suffix("°")
+                                .max_decimals(0),
+                        );
+                    });
+                    ui.label(
+                        RichText::new("Bends gentler than this smooth into a curve; sharper stay corners")
+                            .weak()
+                            .small(),
+                    );
+                    ui.add_space(2.0);
+                    ui.checkbox(&mut dlg.refit_existing, "Refit existing curves")
+                        .on_hover_text(
+                            "On: flatten and re-fit segments that are already \
+                             curved. Off: keep existing curves, fit only \
+                             straight-line runs.",
+                        );
+                }
+                ui.add_space(4.0);
+                match new_points {
+                    Some(new) => {
+                        ui.label(format!("Points: {} → {}", orig_points, new));
+                    }
+                    None => {
+                        ui.label(format!("Points: {}", orig_points));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = Action::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Apply").clicked() {
+                            action = Action::Apply;
+                        }
+                    });
+                });
+            });
+
+        let tolerance = self
+            .simplify_dialog
+            .as_ref()
+            .map(|d| d.tolerance)
+            .unwrap_or(1.0);
+
+        if !open {
+            self.simplify_dialog = None;
+            return;
+        }
+
+        match action {
+            Action::None => {}
+            Action::Cancel => {
+                self.simplify_dialog = None;
+            }
+            Action::Apply => {
+                // Reuse the preview the dialog/overlay already computed for the
+                // current parameters; fall back to recomputing in the selected
+                // mode if the cache is somehow empty.
+                let dlg = self.simplify_dialog.take();
+                if let Some(node) = doc.nodes.get(&node_id) {
+                    if let SceneNodeKind::Path(pn) = &node.kind {
+                        let result = dlg
+                            .as_ref()
+                            .and_then(|d| d.preview.clone())
+                            .unwrap_or_else(|| match &dlg {
+                                Some(d) => d.compute(&pn.path_data),
+                                None => photonic_core::ops::simplify::simplify_path(
+                                    &pn.path_data,
+                                    tolerance,
+                                ),
+                            });
+                        let mut new_path = pn.clone();
+                        new_path.path_data = result;
+                        let mut new_node = node.clone();
+                        new_node.kind = SceneNodeKind::Path(new_path);
+                        let cmd = Command::UpdateNode {
+                            old: node.clone(),
+                            new: new_node,
+                        };
+                        history.execute(cmd, doc);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_merge_vertices_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.merge_vertices_dialog.is_none() {
+            return;
+        }
+
+        #[derive(PartialEq)]
+        enum Action {
+            None,
+            Cancel,
+            Apply,
+        }
+        let mut action = Action::None;
+        let mut open = true;
+
+        let node_name = self
+            .merge_vertices_dialog
+            .as_ref()
+            .unwrap()
+            .node_name
+            .clone();
+        let node_id = self.merge_vertices_dialog.as_ref().unwrap().node_id;
+
+        // Refresh the per-threshold preview cache (shared with the canvas
+        // overlay) so the "Points: N → M" readout is always in sync, regardless
+        // of draw order. The weld still runs only when the threshold changes.
+        let orig_points = self.merge_vertices_dialog.as_ref().unwrap().orig_points;
+        let new_points = {
+            let dlg = self.merge_vertices_dialog.as_mut().unwrap();
+            if let Some(node) = doc.nodes.get(&dlg.node_id) {
+                if let SceneNodeKind::Path(pn) = &node.kind {
+                    if dlg.preview.is_none() || dlg.cached_thr != dlg.threshold {
+                        dlg.preview = Some(photonic_core::ops::merge::merge_vertices_by_distance(
+                            &pn.path_data,
+                            dlg.threshold,
+                        ));
+                        dlg.cached_thr = dlg.threshold;
+                    }
+                }
+            }
+            dlg.preview
+                .as_ref()
+                .map(photonic_core::ops::simplify::count_points)
+        };
+
+        egui::Window::new("Merge Vertices by Distance")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([260.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Node: {}", node_name));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Distance");
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut self.merge_vertices_dialog.as_mut().unwrap().threshold,
+                        )
+                        .range(0.01..=100.0)
+                        .speed(0.05)
+                        .max_decimals(2),
+                    );
+                });
+                ui.label(
+                    RichText::new("Larger = weld anchors farther apart")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(4.0);
+                match new_points {
+                    Some(new) => {
+                        ui.label(format!("Points: {} → {}", orig_points, new));
+                    }
+                    None => {
+                        ui.label(format!("Points: {}", orig_points));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = Action::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Apply").clicked() {
+                            action = Action::Apply;
+                        }
+                    });
+                });
+            });
+
+        let threshold = self
+            .merge_vertices_dialog
+            .as_ref()
+            .map(|d| d.threshold)
+            .unwrap_or(1.0);
+
+        if !open {
+            self.merge_vertices_dialog = None;
+            return;
+        }
+
+        match action {
+            Action::None => {}
+            Action::Cancel => {
+                self.merge_vertices_dialog = None;
+            }
+            Action::Apply => {
+                // Reuse the preview the dialog/overlay already computed for this
+                // threshold instead of re-running the weld.
+                let cached = self
+                    .merge_vertices_dialog
+                    .as_mut()
+                    .and_then(|d| d.preview.take());
+                self.merge_vertices_dialog = None;
+                if let Some(node) = doc.nodes.get(&node_id) {
+                    if let SceneNodeKind::Path(pn) = &node.kind {
+                        let welded = cached.unwrap_or_else(|| {
+                            photonic_core::ops::merge::merge_vertices_by_distance(
+                                &pn.path_data,
+                                threshold,
+                            )
+                        });
+                        let mut new_path = pn.clone();
+                        new_path.path_data = welded;
+                        let mut new_node = node.clone();
+                        new_node.kind = SceneNodeKind::Path(new_path);
+                        let cmd = Command::UpdateNode {
+                            old: node.clone(),
+                            new: new_node,
+                        };
+                        history.execute(cmd, doc);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_find_replace_text_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.find_replace_text_dialog.is_none() {
+            return;
+        }
+
+        #[derive(PartialEq)]
+        enum Action {
+            None,
+            Cancel,
+            Apply,
+        }
+        let mut action = Action::None;
+        let mut open = true;
+
+        egui::Window::new("Find / Replace Text")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([320.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let dlg = self.find_replace_text_dialog.as_mut().unwrap();
+                ui.horizontal(|ui| {
+                    ui.label("Find    ");
+                    ui.add(egui::TextEdit::singleline(&mut dlg.find).desired_width(f32::INFINITY));
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Replace ");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dlg.replace).desired_width(f32::INFINITY),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.checkbox(&mut dlg.regex, "Regular expression");
+                ui.checkbox(&mut dlg.case_sensitive, "Case sensitive");
+                ui.checkbox(&mut dlg.selection_only, "Selection only");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = Action::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Apply").clicked() {
+                            action = Action::Apply;
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.find_replace_text_dialog = None;
+            return;
+        }
+
+        match action {
+            Action::None => {}
+            Action::Cancel => {
+                self.find_replace_text_dialog = None;
+            }
+            Action::Apply => {
+                let dlg = self.find_replace_text_dialog.take().unwrap();
+
+                // Build regex pattern
+                let pattern = if dlg.regex {
+                    dlg.find.clone()
+                } else {
+                    regex::escape(&dlg.find)
+                };
+                let pattern = if dlg.case_sensitive {
+                    pattern
+                } else {
+                    format!("(?i){}", pattern)
+                };
+                let re = match regex::Regex::new(&pattern) {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+
+                // Collect candidates
+                let candidate_ids: Vec<NodeId> = if dlg.selection_only {
+                    doc.selection.ids().copied().collect()
+                } else {
+                    doc.nodes
+                        .values()
+                        .filter(|n| matches!(n.kind, SceneNodeKind::Text(_)))
+                        .map(|n| n.id)
+                        .collect()
+                };
+
+                let mut cmds: Vec<Command> = Vec::new();
+                for id in &candidate_ids {
+                    if let Some(node) = doc.nodes.get(id) {
+                        if let SceneNodeKind::Text(tn) = &node.kind {
+                            let new_content = re
+                                .replace_all(&tn.content, dlg.replace.as_str())
+                                .into_owned();
+                            if new_content != tn.content {
+                                let mut new_node = node.clone();
+                                if let SceneNodeKind::Text(ref mut new_tn) = new_node.kind {
+                                    new_tn.content = new_content;
+                                }
+                                cmds.push(Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                });
+                            }
+                        }
+                    }
+                }
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                }
+            }
+        }
+    }
+
+    /// Centered modal listing release notes for versions the user just skipped.
+    /// Dimming scrim behind, single "Got it" button to dismiss.
+    /// Crash-report prompt shown on launch when local reports are pending (#59).
+    ///
+    /// - consent `None`  → a one-time modal asking whether to enable reporting;
+    ///   answering it sets `crash_reporting_consent` to `Some(bool)`.
+    /// - consent `Some(true)`  → a dismissable banner offering Report / Dismiss.
+    /// - consent `Some(false)` → nothing is offered (reports stay on disk for the
+    ///   settings page; we simply stop nagging).
+    ///
+    /// Reported or dismissed files are deleted so they are not re-offered.
+    pub(crate) fn draw_crash_report_prompt(&mut self, ctx: &egui::Context) {
+        match self.prefs.crash_reporting_consent {
+            None => {
+                // One-time consent modal.
+                egui::Area::new(egui::Id::new("crash_consent_scrim"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(egui::pos2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        let screen = ctx.screen_rect();
+                        ui.painter()
+                            .rect_filled(screen, 0.0, Color32::from_black_alpha(160));
+                        ui.allocate_rect(screen, egui::Sense::click());
+                    });
+
+                let mut choice: Option<bool> = None;
+                egui::Window::new(
+                    RichText::new(format!("{}  Help improve Photonic", ph::SHIELD_CHECK))
+                        .size(16.0),
+                )
+                .id(egui::Id::new("crash_consent_window"))
+                .order(egui::Order::Foreground)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.label(format!(
+                        "Photonic closed unexpectedly. {} local crash report{} {} ready.",
+                        self.pending_crash_reports.len(),
+                        if self.pending_crash_reports.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        if self.pending_crash_reports.len() == 1 {
+                            "is"
+                        } else {
+                            "are"
+                        },
+                    ));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "May Photonic offer to file these as GitHub issues in future? \
+                             A report includes the app version, time, OS/arch, the panic \
+                             message and a backtrace. It never includes your document, file \
+                             paths, or environment variables — and you always review the \
+                             pre-filled issue in your browser before submitting it.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                RichText::new(format!("{}  Enable & report", ph::PAPER_PLANE_TILT))
+                                    .color(Color32::WHITE),
+                            )
+                            .clicked()
+                        {
+                            choice = Some(true);
+                        }
+                        if ui.button("Not now").clicked() {
+                            choice = Some(false);
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(
+                            "You can change this anytime in Edit ▸ Privacy & Diagnostics.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
+
+                if let Some(allow) = choice {
+                    self.prefs.crash_reporting_consent = Some(allow);
+                    self.prefs.save();
+                    if allow {
+                        // File the newest report immediately and clear ONLY that
+                        // one from disk. Any remaining reports stay on disk and
+                        // are offered again on next launch — deleting them here
+                        // would silently destroy unreported diagnostics (the very
+                        // data this feature exists to preserve). Delete-all is
+                        // reserved for the explicit Dismiss action.
+                        if let Some(path) = self.pending_crash_reports.last() {
+                            if let Some(report) = photonic_core::diagnostics::load_report(path) {
+                                ctx.open_url(egui::OpenUrl::new_tab(issue_url_for_report(&report)));
+                            }
+                            let _ = photonic_core::diagnostics::clear_report(path);
+                        }
+                    }
+                    // Stop offering for this session; declining ("Not now") leaves
+                    // every report on disk (still listed in the settings page).
+                    self.pending_crash_reports.clear();
+                }
+            }
+            Some(true) => {
+                // Dismissable Report / Dismiss banner.
+                let mut report = false;
+                let mut dismiss = false;
+                let n = self.pending_crash_reports.len();
+                egui::Area::new(egui::Id::new("crash_report_banner"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 52.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style())
+                            .fill(Color32::from_rgb(48, 33, 33))
+                            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(190, 90, 90)))
+                            .rounding(10.0)
+                            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(ph::BUG)
+                                            .size(18.0)
+                                            .color(Color32::from_rgb(240, 150, 150)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Photonic recovered from a crash — {n} report{} ready",
+                                            if n == 1 { "" } else { "s" },
+                                        ))
+                                        .strong()
+                                        .color(Color32::from_rgb(240, 226, 226)),
+                                    );
+                                    ui.add_space(8.0);
+                                    if ui
+                                        .button(
+                                            RichText::new(format!(
+                                                "{}  Report",
+                                                ph::PAPER_PLANE_TILT
+                                            ))
+                                            .color(Color32::WHITE),
+                                        )
+                                        .clicked()
+                                    {
+                                        report = true;
+                                    }
+                                    if ui.button("Dismiss").clicked() {
+                                        dismiss = true;
+                                    }
+                                });
+                            });
+                    });
+                if report {
+                    // File the newest report and clear ONLY that one from disk —
+                    // identical semantics to the consent dialog and the settings
+                    // "Report latest…" path. Remaining reports are re-offered next
+                    // launch instead of being destroyed.
+                    if let Some(path) = self.pending_crash_reports.last() {
+                        if let Some(rep) = photonic_core::diagnostics::load_report(path) {
+                            ctx.open_url(egui::OpenUrl::new_tab(issue_url_for_report(&rep)));
+                        }
+                        let _ = photonic_core::diagnostics::clear_report(path);
+                    }
+                    self.pending_crash_reports.clear();
+                } else if dismiss {
+                    // Explicit dismissal is the only delete-all path: discard
+                    // every pending report from disk.
+                    for p in &self.pending_crash_reports {
+                        let _ = photonic_core::diagnostics::clear_report(p);
+                    }
+                    self.pending_crash_reports.clear();
+                }
+            }
+            Some(false) => {
+                // Declined: don't nag. Stop offering this session (reports remain
+                // on disk and are still listed in the settings page).
+                self.pending_crash_reports.clear();
+            }
+        }
+    }
+
+    pub(crate) fn draw_whats_new(&mut self, ctx: &egui::Context) {
+        // Dim the rest of the app.
+        egui::Area::new(egui::Id::new("whats_new_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter()
+                    .rect_filled(screen, 0.0, Color32::from_black_alpha(160));
+                // Swallow clicks on the backdrop.
+                ui.allocate_rect(screen, egui::Sense::click());
+            });
+
+        let mut open = true;
+        let cur = crate::update::CURRENT_VERSION;
+        egui::Window::new(RichText::new(format!("{}  What's New", ph::SPARKLE)).size(17.0))
+            .id(egui::Id::new("whats_new_window"))
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(
+                    RichText::new(format!("Photonic updated to v{cur}"))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for note in &self.whats_new_notes {
+                            let title = match &note.date {
+                                Some(d) => format!("v{}  ·  {}", note.version, d),
+                                None => format!("v{}", note.version),
+                            };
+                            ui.label(
+                                RichText::new(title)
+                                    .strong()
+                                    .size(15.0)
+                                    .color(Color32::from_rgb(96, 165, 250)),
+                            );
+                            ui.add_space(2.0);
+                            render_changelog_body(ui, &note.body);
+                            ui.add_space(10.0);
+                        }
+                    });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(RichText::new("Got it").color(Color32::WHITE))
+                        .clicked()
+                    {
+                        open = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.show_whats_new = false;
+            self.whats_new_notes.clear();
+        }
+    }
+
+    pub(crate) fn run_export(&mut self, doc: &Document) {
+        let Some(dlg) = &self.export_dialog else {
+            return;
+        };
+        let format = dlg.format;
+        let opts = dlg.export_opts();
+        let png_w = dlg.png_width;
+        let png_h = dlg.png_height;
+
+        let (filter_name, ext) = match format {
+            ExportFormat::Png => ("PNG image", "png"),
+            ExportFormat::Jpeg => ("JPEG image", "jpg"),
+            ExportFormat::WebP => ("WebP image", "webp"),
+            ExportFormat::Gif => ("GIF image", "gif"),
+            ExportFormat::Tiff => ("TIFF image", "tiff"),
+            ExportFormat::Ico => ("Icon file", "ico"),
+            ExportFormat::Svg => ("SVG vector", "svg"),
+        };
+        let default_name = format!("{}.{ext}", doc.name);
+        let start_dir = self
+            .current_file
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        let mut file_dialog = rfd::FileDialog::new()
+            .add_filter(filter_name, &[ext])
+            .set_file_name(&default_name);
+        if let Some(dir) = start_dir {
+            file_dialog = file_dialog.set_directory(dir);
+        }
+        let Some(path) = run_file_dialog(move || file_dialog.save_file()) else {
+            return;
+        };
+        let path = if path.extension().is_none() {
+            path.with_extension(ext)
+        } else {
+            path
+        };
+
+        // ── Multi-artboard raster export: one file per artboard ──────────────
+        // Each board exports at its own pixel size into `<stem>_<name>.<ext>`.
+        // SVG/ICO keep whole-document behaviour.
+        if matches!(
+            format,
+            ExportFormat::Png
+                | ExportFormat::Jpeg
+                | ExportFormat::WebP
+                | ExportFormat::Gif
+                | ExportFormat::Tiff
+        ) && doc.artboards.len() > 1
+        {
+            let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+            let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| doc.name.clone());
+            let mut err: Option<String> = None;
+            let mut count = 0usize;
+            for ab in &doc.artboards {
+                let mut o = opts.clone();
+                o.region = Some((ab.x, ab.y, ab.width, ab.height));
+                let aw = ab.width.round().max(1.0) as u32;
+                let ah = ab.height.round().max(1.0) as u32;
+                let bytes = match format {
+                    ExportFormat::Png => renderer.render_png_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Jpeg => renderer.render_jpeg_with_opts(doc, aw, ah, &o),
+                    ExportFormat::WebP => renderer.render_webp_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Gif => renderer.render_gif_with_opts(doc, aw, ah, &o),
+                    ExportFormat::Tiff => renderer.render_tiff_with_opts(doc, aw, ah, &o),
+                    _ => unreachable!(),
+                };
+                let safe: String = ab
+                    .name
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let p = parent.join(format!("{stem}_{safe}.{ext}"));
+                if let Err(e) = std::fs::write(&p, bytes) {
+                    err = Some(e.to_string());
+                    break;
+                }
+                count += 1;
+            }
+            self.export_dialog = None;
+            self.file_status = Some(match err {
+                None => format!("Exported {count} artboards → {stem}_*.{ext}"),
+                Some(e) => format!("Export failed: {e}"),
+            });
+            return;
+        }
+
+        let result = match format {
+            ExportFormat::Svg => {
+                // Honor the Background selector: Transparent => no rect,
+                // Artboard => a white background rect.
+                let background = match opts.background {
+                    ExportBackground::Transparent => None,
+                    ExportBackground::Artboard => Some(Color::WHITE),
+                };
+                let svg = photonic_core::export::export_svg(
+                    doc,
+                    &photonic_core::export::SvgExportOptions {
+                        background,
+                        ..Default::default()
+                    },
+                );
+                std::fs::write(&path, svg).map_err(|e| e.to_string())
+            }
+            ExportFormat::Png => {
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                let bytes = renderer.render_png_with_opts(doc, png_w, png_h, &opts);
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            ExportFormat::Jpeg => {
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                let bytes = renderer.render_jpeg_with_opts(doc, png_w, png_h, &opts);
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            ExportFormat::WebP => {
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                let bytes = renderer.render_webp_with_opts(doc, png_w, png_h, &opts);
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            ExportFormat::Gif => {
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                let bytes = renderer.render_gif_with_opts(doc, png_w, png_h, &opts);
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            ExportFormat::Tiff => {
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                let bytes = renderer.render_tiff_with_opts(doc, png_w, png_h, &opts);
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            ExportFormat::Ico => {
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                renderer
+                    .render_ico_with_opts(doc, &opts)
+                    .and_then(|b| std::fs::write(&path, b).map_err(Into::into))
+                    .map_err(|e| e.to_string())
+            }
+        };
+
+        self.export_dialog = None;
+        self.file_status = Some(match result {
+            Ok(_) => format!(
+                "Exported {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Err(e) => format!("Export failed: {e}"),
+        });
+    }
+
+}
