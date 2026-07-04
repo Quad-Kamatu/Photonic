@@ -11,6 +11,8 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-04
+
 ### Added
 
 - **Gradient (and pattern) strokes** (#201). Strokes are no longer limited to a
