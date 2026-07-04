@@ -352,7 +352,7 @@ pub async fn create_curvature_path(state: &AppState, args: CreateCurvaturePathAr
 
 /// Convert a sequence of points to a smooth cubic bezier path using Catmull-Rom interpolation.
 /// The tension parameter is fixed at 0 (uniform Catmull-Rom = smooth interpolation).
-fn catmull_rom_to_bezier(points: &[kurbo::Point], closed: bool) -> kurbo::BezPath {
+pub(crate) fn catmull_rom_to_bezier(points: &[kurbo::Point], closed: bool) -> kurbo::BezPath {
     let n = points.len();
     let mut path = kurbo::BezPath::new();
 
@@ -2082,7 +2082,7 @@ pub async fn style_transfer(state: &AppState, args: StyleTransferArgs) -> ToolRe
 
 /// Returns true if `prop` should be copied given the optional property filter list.
 /// An absent or empty list means "copy everything".
-fn style_prop_enabled(properties: &Option<Vec<String>>, prop: &str) -> bool {
+pub(crate) fn style_prop_enabled(properties: &Option<Vec<String>>, prop: &str) -> bool {
     match properties {
         None => true,
         Some(v) if v.is_empty() => true,
@@ -3286,7 +3286,7 @@ pub async fn inspect_node(state: &AppState, args: InspectNodeArgs) -> ToolResult
 // ─── auto_name_nodes ──────────────────────────────────────────────────────────
 
 /// Returns true if `name` looks like an auto-generated default (should be renamed).
-fn is_generic_name(name: &str) -> bool {
+pub(crate) fn is_generic_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     let generic_prefixes = [
         "path",
@@ -3309,7 +3309,7 @@ fn is_generic_name(name: &str) -> bool {
 }
 
 /// Map an RGB colour (0..1 linear sRGB) to a short English label.
-fn color_label(r: f32, g: f32, b: f32) -> &'static str {
+pub(crate) fn color_label(r: f32, g: f32, b: f32) -> &'static str {
     if r > 0.85 && g > 0.85 && b > 0.85 {
         return "white";
     }
@@ -3350,7 +3350,7 @@ fn color_label(r: f32, g: f32, b: f32) -> &'static str {
 }
 
 /// Generate a descriptive name for a node based on its type and properties.
-fn generate_name(node: &SceneNode) -> String {
+pub(crate) fn generate_name(node: &SceneNode) -> String {
     use photonic_core::style::FillKind;
 
     match &node.kind {
@@ -4459,7 +4459,7 @@ pub async fn pucker_bloat(state: &AppState, args: PuckerBloatArgs) -> ToolResult
 }
 
 /// Compute the centroid of all on-curve points in a BezPath.
-fn path_centroid(bez: &kurbo::BezPath) -> kurbo::Point {
+pub(crate) fn path_centroid(bez: &kurbo::BezPath) -> kurbo::Point {
     let mut sum_x = 0.0;
     let mut sum_y = 0.0;
     let mut count = 0usize;
@@ -4570,7 +4570,7 @@ pub async fn roughen_path(state: &AppState, args: RoughenPathArgs) -> ToolResult
 
 
 /// Subdivide every segment of a BezPath once (insert midpoints).
-fn subdivide_bez(bez: &kurbo::BezPath) -> kurbo::BezPath {
+pub(crate) fn subdivide_bez(bez: &kurbo::BezPath) -> kurbo::BezPath {
     let mut result = kurbo::BezPath::new();
     let mut current = kurbo::Point::ZERO;
 
@@ -4614,7 +4614,7 @@ fn subdivide_bez(bez: &kurbo::BezPath) -> kurbo::BezPath {
     result
 }
 
-fn mid(a: kurbo::Point, b: kurbo::Point) -> kurbo::Point {
+pub(crate) fn mid(a: kurbo::Point, b: kurbo::Point) -> kurbo::Point {
     kurbo::Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
 }
 
@@ -4878,7 +4878,7 @@ pub async fn blend_objects(state: &AppState, args: BlendObjectsArgs) -> ToolResu
     }))
 }
 
-fn lerp_point(a: kurbo::Point, b: kurbo::Point, t: f64) -> kurbo::Point {
+pub(crate) fn lerp_point(a: kurbo::Point, b: kurbo::Point, t: f64) -> kurbo::Point {
     kurbo::Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
 }
 
@@ -8400,7 +8400,7 @@ pub async fn create_donut(state: &AppState, args: CreateDonutArgs) -> ToolResult
 }
 
 /// Reverse a sequence of BezPath elements.
-fn reverse_bez(els: &[kurbo::PathEl]) -> Vec<kurbo::PathEl> {
+pub(crate) fn reverse_bez(els: &[kurbo::PathEl]) -> Vec<kurbo::PathEl> {
     // Collect endpoints in reverse, rebuild path.
     let mut points: Vec<kurbo::Point> = Vec::new();
     for el in els {
@@ -9285,7 +9285,7 @@ pub async fn warp_envelope(state: &AppState, args: WarpEnvelopeArgs) -> ToolResu
 
 /// Apply a named warp envelope to a BezPath.
 /// Points are normalized to [0,1] based on bounding box, warped, then scaled back.
-fn apply_warp_envelope(
+pub(crate) fn apply_warp_envelope(
     bez: &kurbo::BezPath,
     warp_type: &str,
     bend: f64,
@@ -9522,7 +9522,7 @@ pub async fn scallop_path(state: &AppState, args: ScallopPathArgs) -> ToolResult
 }
 
 /// Replace each line/curve segment with scallop arcs (smooth inward curves).
-fn apply_scallop(bez: &kurbo::BezPath, depth: f64, count: usize) -> kurbo::BezPath {
+pub(crate) fn apply_scallop(bez: &kurbo::BezPath, depth: f64, count: usize) -> kurbo::BezPath {
     let mut result = kurbo::BezPath::new();
     let mut current = kurbo::Point::ZERO;
     let mut subpath_start = kurbo::Point::ZERO;
@@ -9574,7 +9574,7 @@ fn apply_scallop(bez: &kurbo::BezPath, depth: f64, count: usize) -> kurbo::BezPa
 }
 
 /// Emit scallop arcs between `from` and `to`.
-fn scallop_segment(
+pub(crate) fn scallop_segment(
     path: &mut kurbo::BezPath,
     from: kurbo::Point,
     to: kurbo::Point,
@@ -9693,7 +9693,7 @@ pub async fn crystallize_path(state: &AppState, args: CrystallizePathArgs) -> To
 }
 
 /// Add sharp outward spikes along each segment.
-fn apply_crystallize(bez: &kurbo::BezPath, size: f64, count: usize) -> kurbo::BezPath {
+pub(crate) fn apply_crystallize(bez: &kurbo::BezPath, size: f64, count: usize) -> kurbo::BezPath {
     let mut result = kurbo::BezPath::new();
     let mut current = kurbo::Point::ZERO;
     let mut subpath_start = kurbo::Point::ZERO;
@@ -9745,7 +9745,7 @@ fn apply_crystallize(bez: &kurbo::BezPath, size: f64, count: usize) -> kurbo::Be
 }
 
 /// Emit sharp triangular spikes between `from` and `to`.
-fn crystallize_segment(
+pub(crate) fn crystallize_segment(
     path: &mut kurbo::BezPath,
     from: kurbo::Point,
     to: kurbo::Point,
@@ -9781,7 +9781,7 @@ fn crystallize_segment(
     }
 }
 
-fn solid_fill_of(fill: &photonic_core::style::Fill) -> Option<photonic_core::color::Color> {
+pub(crate) fn solid_fill_of(fill: &photonic_core::style::Fill) -> Option<photonic_core::color::Color> {
     match &fill.kind {
         photonic_core::style::FillKind::Solid(c) => Some(*c),
         _ => None,
@@ -11927,7 +11927,7 @@ pub async fn select_same(state: &AppState, args: SelectSameArgs) -> ToolResult {
 }
 
 /// Extract the solid fill color from a node, or None if it has no solid fill.
-fn solid_fill_color(node: &SceneNode) -> Option<photonic_core::color::Color> {
+pub(crate) fn solid_fill_color(node: &SceneNode) -> Option<photonic_core::color::Color> {
     use photonic_core::style::FillKind;
     if let SceneNodeKind::Path(pn) = &node.kind {
         if pn.fill.enabled {
@@ -11940,7 +11940,7 @@ fn solid_fill_color(node: &SceneNode) -> Option<photonic_core::color::Color> {
 }
 
 /// Euclidean distance between two RGBA colors in [0,1] space.
-fn color_distance(a: photonic_core::color::Color, b: photonic_core::color::Color) -> f32 {
+pub(crate) fn color_distance(a: photonic_core::color::Color, b: photonic_core::color::Color) -> f32 {
     let dr = a.r - b.r;
     let dg = a.g - b.g;
     let db = a.b - b.b;
@@ -11950,7 +11950,7 @@ fn color_distance(a: photonic_core::color::Color, b: photonic_core::color::Color
 
 
 /// Returns the horizontal center of a path node's bounding box (local space).
-fn path_center_x(node: &SceneNode) -> f32 {
+pub(crate) fn path_center_x(node: &SceneNode) -> f32 {
     if let SceneNodeKind::Path(p) = &node.kind {
         if let Some(bb) = p.path_data.bounding_box() {
             return ((bb.x0 + bb.x1) / 2.0) as f32;
@@ -11960,7 +11960,7 @@ fn path_center_x(node: &SceneNode) -> f32 {
 }
 
 /// Returns the vertical center of a path node's bounding box (local space).
-fn path_center_y(node: &SceneNode) -> f32 {
+pub(crate) fn path_center_y(node: &SceneNode) -> f32 {
     if let SceneNodeKind::Path(p) = &node.kind {
         if let Some(bb) = p.path_data.bounding_box() {
             return ((bb.y0 + bb.y1) / 2.0) as f32;
@@ -12968,7 +12968,7 @@ pub async fn magic_wand_select(state: &AppState, args: MagicWandSelectArgs) -> T
 
 /// Compute the world-space axis-aligned bounding box of a node using its
 /// transform and path bounding box (or a text fallback of 1×1 at origin).
-fn node_world_aabb(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
+pub(crate) fn node_world_aabb(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
     let (lx0, ly0, lx1, ly1) = match &node.kind {
         SceneNodeKind::Path(pn) => {
             let r = pn.path_data.bounding_box()?;
@@ -13315,7 +13315,7 @@ pub async fn get_recent_colors(state: &AppState, _args: GetRecentColorsArgs) -> 
 
 /// Ray-casting point-in-polygon test (Jordan curve theorem).
 /// Returns true when `(px, py)` is strictly inside the polygon.
-fn point_in_polygon(px: f64, py: f64, poly: &[[f64; 2]]) -> bool {
+pub(crate) fn point_in_polygon(px: f64, py: f64, poly: &[[f64; 2]]) -> bool {
     let n = poly.len();
     let mut inside = false;
     let mut j = n - 1;
