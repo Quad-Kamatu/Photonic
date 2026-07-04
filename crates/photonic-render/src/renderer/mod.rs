@@ -27,9 +27,17 @@ use tokio::sync::Mutex;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+mod text_renderer;
+mod glow_renderer;
+mod effects_renderer;
+mod scene_renderer;
+mod frame_manager;
+mod capture;
+mod camera;
+
 // ─── Background colour (deep violet-dark canvas surround) ─────────────────────
 // Linear values for sRGB target #0D0D14 (r:13 g:13 b:20).
-const BG: wgpu::Color = wgpu::Color {
+pub(crate) const BG: wgpu::Color = wgpu::Color {
     r: 0.002,
     g: 0.002,
     b: 0.005,
@@ -53,113 +61,113 @@ pub struct FrameHandle {
 // ─── Main renderer ───────────────────────────────────────────────────────────
 
 pub struct PhotonicRenderer {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    surface_config: wgpu::SurfaceConfiguration,
-    surface_format: wgpu::TextureFormat,
+    pub(crate) surface: wgpu::Surface<'static>,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+    pub(crate) surface_config: wgpu::SurfaceConfiguration,
+    pub(crate) surface_format: wgpu::TextureFormat,
 
-    fill_pipeline: wgpu::RenderPipeline,
+    pub(crate) fill_pipeline: wgpu::RenderPipeline,
     /// One fill-pipeline variant per separable blend mode (Multiply/Screen/
     /// Darken/Lighten), built at `MSAA_SAMPLES`. Modes without an entry fall back
     /// to `fill_pipeline` (normal alpha blending).
-    blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)>,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    pub(crate) blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)>,
+    pub(crate) camera_buffer: wgpu::Buffer,
+    pub(crate) camera_bind_group: wgpu::BindGroup,
 
-    msaa_texture: wgpu::Texture,
-    msaa_view: wgpu::TextureView,
+    pub(crate) msaa_texture: wgpu::Texture,
+    pub(crate) msaa_view: wgpu::TextureView,
 
     pub view: CanvasView,
     document: Arc<Mutex<Document>>,
-    capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
+    pub(crate) capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
 
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 
     /// Last successfully built geometry — returned as-is when the doc lock is contended.
     cached_vertices: Vec<Vertex>,
     cached_indices: Vec<u32>,
     /// Per-blend-mode index ranges for the current frame, in draw order. Read by
     /// `record_document_pass` to issue one draw call per contiguous run.
-    draw_segments: Vec<DrawSegment>,
+    pub(crate) draw_segments: Vec<DrawSegment>,
     cached_segments: Vec<DrawSegment>,
 
     // ── Text rendering (glyphon) ───────────────────────────────────────────────
-    font_system: FontSystem,
-    swash_cache: SwashCache,
+    pub(crate) font_system: FontSystem,
+    pub(crate) swash_cache: SwashCache,
     /// Kept alive so `text_atlas` and `text_viewport` remain valid.
     #[allow(dead_code)]
     text_glyph_cache: Cache,
-    text_atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    text_viewport: Viewport,
+    pub(crate) text_atlas: TextAtlas,
+    pub(crate) text_renderer: TextRenderer,
+    pub(crate) text_viewport: Viewport,
     /// Text nodes collected during `build_geometry` for the current frame.
-    pending_texts: Vec<TextSnapshot>,
+    pub(crate) pending_texts: Vec<TextSnapshot>,
     /// Text-on-path glyph outlines (document space) + RGBA fill colour, built
     /// during `build_geometry` and tessellated into the fill geometry. Rendered
     /// as vector fills because glyphon cannot rotate glyphs along a curve.
     pending_path_text: Vec<(Vec<PathData>, [f32; 4])>,
 
     // ── Gaussian glow blur ────────────────────────────────────────────────────
-    fill_pipeline_1spp: wgpu::RenderPipeline, // sample_count=1 for offscreen silhouette
-    blur_pipeline_h: wgpu::RenderPipeline,    // H blur (alpha-blend output)
+    pub(crate) fill_pipeline_1spp: wgpu::RenderPipeline, // sample_count=1 for offscreen silhouette
+    pub(crate) blur_pipeline_h: wgpu::RenderPipeline,    // H blur (alpha-blend output)
     blur_pipeline_v: wgpu::RenderPipeline,    // V blur (additive composite to surface)
-    blur_bgl: wgpu::BindGroupLayout,
-    blur_sampler: wgpu::Sampler,
-    glow_tex_a: wgpu::Texture, // silhouette & V-blur source
-    glow_tex_a_view: wgpu::TextureView,
-    glow_tex_b: wgpu::Texture, // H-blur output
-    glow_tex_b_view: wgpu::TextureView,
+    pub(crate) blur_bgl: wgpu::BindGroupLayout,
+    pub(crate) blur_sampler: wgpu::Sampler,
+    pub(crate) glow_tex_a: wgpu::Texture, // silhouette & V-blur source
+    pub(crate) glow_tex_a_view: wgpu::TextureView,
+    pub(crate) glow_tex_b: wgpu::Texture, // H-blur output
+    pub(crate) glow_tex_b_view: wgpu::TextureView,
     /// Gaussian glow jobs built each frame by build_geometry, consumed by render_gaussian_glow_pass.
-    pending_gaussian_glows: Vec<GaussianGlowJob>,
+    pub(crate) pending_gaussian_glows: Vec<GaussianGlowJob>,
 
     // ── Live-effects (drop shadow / object blur / feather) blur layer ──────────
     /// Straight-alpha blur/composite pipeline (the effect textures hold
     /// non-premultiplied colour, unlike the premultiplied glow path). The blur
     /// ping-pong / layer textures are allocated per frame at the target size so
     /// the same path serves both the window and offscreen capture.
-    blur_pipeline_alpha: wgpu::RenderPipeline,
+    pub(crate) blur_pipeline_alpha: wgpu::RenderPipeline,
     /// Effect blur jobs built each frame by build_geometry.
-    pending_blur_jobs: Vec<BlurJob>,
+    pub(crate) pending_blur_jobs: Vec<BlurJob>,
 }
 
 /// One blurred live effect for the windowed renderer's effects layer:
 /// pre-transformed document-space geometry + blur radius in document units.
-struct BlurJob {
-    verts: Vec<Vertex>,
-    idxs: Vec<u32>,
-    radius_doc: f64,
+pub(crate) struct BlurJob {
+    pub(crate) verts: Vec<Vertex>,
+    pub(crate) idxs: Vec<u32>,
+    pub(crate) radius_doc: f64,
 }
 
 /// Screen-space snapshot of one text node, ready for glyphon.
-struct TextSnapshot {
-    content: String,
-    font_family: String,
+pub(crate) struct TextSnapshot {
+    pub(crate) content: String,
+    pub(crate) font_family: String,
     /// Font size already scaled by canvas zoom (physical pixels).
-    font_size: f32,
+    pub(crate) font_size: f32,
     /// Line height multiplier (default: 1.2).
-    line_height_mul: f32,
+    pub(crate) line_height_mul: f32,
     /// Font weight (100–900).
-    font_weight: u16,
+    pub(crate) font_weight: u16,
     /// Font style: 0=Normal, 1=Italic, 2=Oblique.
-    font_style: u8,
+    pub(crate) font_style: u8,
     /// RGBA 0-255 fill colour.
-    color: [u8; 4],
-    screen_x: f32,
-    screen_y: f32,
+    pub(crate) color: [u8; 4],
+    pub(crate) screen_x: f32,
+    pub(crate) screen_y: f32,
     /// Vertical offset in physical pixels added to the text's top, encoding the
     /// node's baseline shift and super/subscript position. Positive moves the
     /// glyphs down; negative (raised, e.g. superscript) moves them up.
-    top_offset: f32,
+    pub(crate) top_offset: f32,
 }
 
-struct GaussianGlowJob {
+pub(crate) struct GaussianGlowJob {
     /// Fill geometry coloured with the glow tint (rendered to offscreen silhouette texture).
-    verts: Vec<Vertex>,
-    idxs: Vec<u32>,
+    pub(crate) verts: Vec<Vertex>,
+    pub(crate) idxs: Vec<u32>,
     /// Blur sigma in screen pixels (radius_doc_units × zoom).
-    sigma_px: f32,
+    pub(crate) sigma_px: f32,
 }
 
 impl PhotonicRenderer {
@@ -397,355 +405,6 @@ impl PhotonicRenderer {
         (width as f64, height as f64)
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        self.width = width;
-        self.height = height;
-        self.view.screen_width = width;
-        self.view.screen_height = height;
-        self.surface_config.width = width;
-        self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
-        let (msaa_texture, msaa_view) =
-            create_msaa_texture(&self.device, self.surface_format, width, height);
-        self.msaa_texture = msaa_texture;
-        self.msaa_view = msaa_view;
-        let (glow_tex_a, glow_tex_a_view, glow_tex_b, glow_tex_b_view) =
-            create_glow_textures(&self.device, self.surface_format, width, height);
-        self.glow_tex_a = glow_tex_a;
-        self.glow_tex_a_view = glow_tex_a_view;
-        self.glow_tex_b = glow_tex_b;
-        self.glow_tex_b_view = glow_tex_b_view;
-    }
-
-    // ── Frame management ──────────────────────────────────────────────────────
-
-    /// Push camera uniforms and build vertex/index data for this frame.
-    pub fn update(&mut self) -> (Vec<Vertex>, Vec<u32>) {
-        self.push_camera();
-        self.build_geometry()
-    }
-
-    /// Acquire the swapchain frame and record the document render pass into
-    /// `FrameHandle::encoder`. Returns `None` when the surface is lost/timeout
-    /// (the surface will be reconfigured automatically).
-    ///
-    /// Callers may append further render passes (e.g. egui) to `handle.encoder`
-    /// before calling `finish_frame`.
-    pub fn begin_frame(&self, vertices: &[Vertex], indices: &[u32]) -> Option<FrameHandle> {
-        let surface_texture = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.surface_config);
-                return None;
-            }
-            Err(e) => {
-                tracing::warn!("surface error: {:?}", e);
-                return None;
-            }
-        };
-        let view = surface_texture.texture.create_view(&Default::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame_encoder"),
-            });
-        self.render_scene(
-            &mut encoder,
-            &self.msaa_view,
-            &view,
-            self.width,
-            self.height,
-            vertices,
-            indices,
-        );
-        Some(FrameHandle {
-            surface_texture,
-            view,
-            encoder,
-        })
-    }
-
-    /// Submit the frame encoder and present the surface texture.
-    pub fn finish_frame(&self, handle: FrameHandle) {
-        self.queue.submit([handle.encoder.finish()]);
-        handle.surface_texture.present();
-    }
-
-    /// Render any text nodes collected during `update()` into the frame.
-    ///
-    /// Call this after `begin_frame` and before the egui pass.
-    /// No-op if there are no text nodes this frame.
-    pub fn render_text_pass(&mut self, frame: &mut FrameHandle) {
-        if self.pending_texts.is_empty() {
-            return;
-        }
-
-        // Update the glyphon viewport to the current screen resolution.
-        self.text_viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.width,
-                height: self.height,
-            },
-        );
-
-        // Build one glyphon Buffer per text node and collect TextAreas.
-        let snapshots = &self.pending_texts;
-        let mut buffers: Vec<Buffer> = Vec::with_capacity(snapshots.len());
-        for snap in snapshots.iter() {
-            let font_size = snap.font_size.max(1.0);
-            let line_height = font_size * 1.2;
-            let mut buf = Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
-            buf.set_size(&mut self.font_system, None, None);
-            let glyph_style = match snap.font_style {
-                1 => GlyphonStyle::Italic,
-                2 => GlyphonStyle::Oblique,
-                _ => GlyphonStyle::Normal,
-            };
-            let attrs = Attrs::new()
-                .family(Family::Name(&snap.font_family))
-                .weight(Weight(snap.font_weight))
-                .style(glyph_style);
-            buf.set_text(
-                &mut self.font_system,
-                &snap.content,
-                attrs,
-                Shaping::Advanced,
-            );
-            buf.shape_until_scroll(&mut self.font_system, false);
-            buffers.push(buf);
-        }
-
-        let text_areas: Vec<TextArea> = snapshots
-            .iter()
-            .zip(buffers.iter())
-            .map(|(snap, buf)| TextArea {
-                buffer: buf,
-                left: snap.screen_x,
-                top: snap.screen_y + snap.top_offset,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: i32::MIN,
-                    top: i32::MIN,
-                    right: i32::MAX,
-                    bottom: i32::MAX,
-                },
-                default_color: GlyphonColor::rgba(
-                    snap.color[0],
-                    snap.color[1],
-                    snap.color[2],
-                    snap.color[3],
-                ),
-                custom_glyphs: &[],
-            })
-            .collect();
-
-        if let Err(e) = self.text_renderer.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.text_atlas,
-            &self.text_viewport,
-            text_areas,
-            &mut self.swash_cache,
-        ) {
-            tracing::warn!("glyphon prepare failed: {:?}", e);
-            return;
-        }
-
-        {
-            let mut pass = frame
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("text_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &frame.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                })
-                .forget_lifetime();
-
-            if let Err(e) =
-                self.text_renderer
-                    .render(&self.text_atlas, &self.text_viewport, &mut pass)
-            {
-                tracing::warn!("glyphon render failed: {:?}", e);
-            }
-        }
-
-        self.text_atlas.trim();
-    }
-
-    /// Execute all pending Gaussian glow jobs collected during `update()`.
-    ///
-    /// Must be called **after** `begin_frame` (so the scene is already rendered on the
-    /// surface texture) and **before** `finish_frame`.
-    /// Uses an additive blend so the glow brightens the scene without erasing the fill.
-    pub fn render_gaussian_glow_pass(&mut self, frame: &mut FrameHandle) {
-        if self.pending_gaussian_glows.is_empty() {
-            return;
-        }
-
-        let jobs: Vec<GaussianGlowJob> = std::mem::take(&mut self.pending_gaussian_glows);
-
-        for job in &jobs {
-            if job.verts.is_empty() {
-                continue;
-            }
-
-            let sigma = job.sigma_px.max(0.5);
-
-            // ── Pass A: render fill silhouette (glow tint colour) → glow_tex_a ──
-            {
-                let vbuf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gglow_vbuf"),
-                        contents: bytemuck::cast_slice(&job.verts),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                let ibuf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gglow_ibuf"),
-                        contents: bytemuck::cast_slice(&job.idxs),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-                let mut pass = frame
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("gglow_shape"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.glow_tex_a_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                pass.set_pipeline(&self.fill_pipeline_1spp);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..job.idxs.len() as u32, 0, 0..1);
-            }
-
-            // Helper: create blur bind group for a given source texture view.
-            let make_blur_bg = |src_view: &wgpu::TextureView, sigma: f32, horizontal: bool| {
-                let params = BlurParams {
-                    sigma,
-                    horizontal: horizontal as u32,
-                    _pad: [0.0; 2],
-                };
-                let params_buf =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("blur_params"),
-                            contents: bytemuck::bytes_of(&params),
-                            usage: wgpu::BufferUsages::UNIFORM,
-                        });
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("blur_bg"),
-                    layout: &self.blur_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(src_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: params_buf.as_entire_binding(),
-                        },
-                    ],
-                })
-            };
-
-            // ── Pass B: horizontal blur  glow_tex_a → glow_tex_b ────────────────
-            {
-                let bg = make_blur_bg(&self.glow_tex_a_view, sigma, true);
-                let mut pass = frame
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("gglow_blur_h"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.glow_tex_b_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                pass.set_pipeline(&self.blur_pipeline_h);
-                pass.set_bind_group(0, &bg, &[]);
-                pass.draw(0..6, 0..1);
-            }
-
-            // ── Pass C: vertical blur  glow_tex_b → surface (additive) ──────────
-            {
-                let bg = make_blur_bg(&self.glow_tex_b_view, sigma, false);
-                let mut pass = frame
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("gglow_blur_v"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &frame.view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                pass.set_pipeline(&self.blur_pipeline_h);
-                pass.set_bind_group(0, &bg, &[]);
-                pass.draw(0..6, 0..1);
-            }
-        }
-    }
-
-    /// Poll the capture channel and service any pending screenshot requests.
-    pub fn service_captures(&mut self, vertices: &[Vertex], indices: &[u32]) {
-        while let Ok(reply_tx) = self.capture_rx.try_recv() {
-            tracing::info!(
-                "render: capture_png starting ({}x{})",
-                self.width,
-                self.height
-            );
-            let png = self.capture_png(vertices, indices);
-            tracing::info!(
-                "render: capture_png done ({} bytes) — sending reply",
-                png.len()
-            );
-            let _ = reply_tx.send(png);
-            tracing::info!("render: capture reply sent — render loop resuming");
-        }
-    }
-
     /// Convenience: full render loop without an egui overlay.
     pub fn render(&mut self) {
         let (verts, idxs) = self.update(); // already &mut self
@@ -753,20 +412,6 @@ impl PhotonicRenderer {
             self.finish_frame(frame);
         }
         self.service_captures(&verts, &idxs);
-    }
-
-    // ── Private helpers ───────────────────────────────────────────────────────
-
-    fn push_camera(&self) {
-        let cam = CameraUniform::from_viewport(
-            self.view.pan_x,
-            self.view.pan_y,
-            self.view.zoom,
-            self.width,
-            self.height,
-        );
-        self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cam));
     }
 
     /// Walk the document and build one combined vertex + index buffer.
@@ -1613,590 +1258,13 @@ impl PhotonicRenderer {
 
         (verts, idxs)
     }
-
-    /// Record the document render pass into an existing command encoder.
-    ///
-    /// `msaa_view` is the 4× multisampled render target; `resolve_view` is the
-    /// single-sample destination (surface texture or offscreen capture texture).
-    fn record_document_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        msaa_view: &wgpu::TextureView,
-        resolve_view: &wgpu::TextureView,
-        vertices: &[Vertex],
-        indices: &[u32],
-        clear: wgpu::Color,
-    ) {
-        if !vertices.is_empty() {
-            let vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("vbuf"),
-                    contents: bytemuck::cast_slice(vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("ibuf"),
-                    contents: bytemuck::cast_slice(indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("fill_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: msaa_view,
-                    resolve_target: Some(resolve_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_vertex_buffer(0, vbuf.slice(..));
-            pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            draw_segments(
-                &mut pass,
-                &self.draw_segments,
-                &self.blend_pipelines,
-                &self.fill_pipeline,
-                indices.len() as u32,
-            );
-        } else {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: msaa_view,
-                    resolve_target: Some(resolve_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        }
-    }
-
-    /// Render the document to `target_view`, inserting the live-effects blur
-    /// layer (drop shadow / object blur / feather) between the artboard
-    /// background and the sharp shapes when any effect is active. With no
-    /// effects this is the original single-pass document render.
-    fn render_scene(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        msaa_view: &wgpu::TextureView,
-        target_view: &wgpu::TextureView,
-        w: u32,
-        h: u32,
-        vertices: &[Vertex],
-        indices: &[u32],
-    ) {
-        if self.pending_blur_jobs.is_empty() {
-            self.record_document_pass(enc, msaa_view, target_view, vertices, indices, BG);
-            return;
-        }
-
-        // The artboard rect is the first 4 verts / 6 indices built by
-        // build_geometry; render the rest (shapes) to a transparent offscreen
-        // texture so the effects layer can sit beneath them.
-        let skip = 6.min(indices.len());
-        let doc_tex = self.make_fx_tex(w, h);
-        let doc_view = doc_tex.create_view(&Default::default());
-        self.record_document_pass(
-            enc,
-            msaa_view,
-            &doc_view,
-            vertices,
-            &indices[skip..],
-            wgpu::Color::TRANSPARENT,
-        );
-
-        let (fx_tex, fx_view) = self.render_effects_layer(enc, w, h);
-
-        // Composite onto the target: background → artboard → effects → shapes.
-        self.composite_effects(
-            enc,
-            target_view,
-            vertices,
-            &indices[..skip],
-            &fx_view,
-            &doc_view,
-        );
-        drop(fx_tex);
-        drop(doc_tex);
-    }
-
-    /// Single-sample colour texture (render target + sampleable) for the
-    /// per-frame effects layer.
-    fn make_fx_tex(&self, w: u32, h: u32) -> wgpu::Texture {
-        self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("fx_tex"),
-            size: wgpu::Extent3d {
-                width: w.max(1),
-                height: h.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-    }
-
-    /// Bind group for the blur shader: source texture + sampler + params.
-    fn effects_blur_bg(
-        &self,
-        src: &wgpu::TextureView,
-        sigma: f32,
-        horizontal: bool,
-    ) -> wgpu::BindGroup {
-        let params = BlurParams {
-            sigma,
-            horizontal: horizontal as u32,
-            _pad: [0.0; 2],
-        };
-        let buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("fx_blur_params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fx_blur_bg"),
-            layout: &self.blur_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(src),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf.as_entire_binding(),
-                },
-            ],
-        })
-    }
-
-    /// Render each pending blur job (silhouette → H-blur → V-blur) and
-    /// accumulate them into a single straight-alpha effects texture.
-    fn render_effects_layer(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        w: u32,
-        h: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let fx_a = self.make_fx_tex(w, h);
-        let fx_b = self.make_fx_tex(w, h);
-        let accum = self.make_fx_tex(w, h);
-        let (a_view, b_view, accum_view) = (
-            fx_a.create_view(&Default::default()),
-            fx_b.create_view(&Default::default()),
-            accum.create_view(&Default::default()),
-        );
-
-        let mut accum_cleared = false;
-        for job in &self.pending_blur_jobs {
-            if job.idxs.is_empty() {
-                continue;
-            }
-            let sigma = (job.radius_doc * self.view.zoom).max(0.0) as f32;
-            let vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fx_vbuf"),
-                    contents: bytemuck::cast_slice(&job.verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fx_ibuf"),
-                    contents: bytemuck::cast_slice(&job.idxs),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            // Pass A: silhouette → fx_a (cleared transparent).
-            {
-                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("fx_silhouette"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &a_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(&self.fill_pipeline_1spp);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..job.idxs.len() as u32, 0, 0..1);
-            }
-            // Pass B: horizontal blur fx_a → fx_b.
-            {
-                let bg = self.effects_blur_bg(&a_view, sigma, true);
-                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("fx_blur_h"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &b_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(&self.blur_pipeline_alpha);
-                pass.set_bind_group(0, &bg, &[]);
-                pass.draw(0..6, 0..1);
-            }
-            // Pass C: vertical blur fx_b → accum (accumulate).
-            {
-                let bg = self.effects_blur_bg(&b_view, sigma, false);
-                let load = if accum_cleared {
-                    wgpu::LoadOp::Load
-                } else {
-                    accum_cleared = true;
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                };
-                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("fx_blur_v"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &accum_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(&self.blur_pipeline_alpha);
-                pass.set_bind_group(0, &bg, &[]);
-                pass.draw(0..6, 0..1);
-            }
-        }
-        (accum, accum_view)
-    }
-
-    /// Composite the artboard rect, the effects layer, and the sharp shapes onto
-    /// `target` (single-sample) over a cleared background.
-    fn composite_effects(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        vertices: &[Vertex],
-        artboard_indices: &[u32],
-        fx_view: &wgpu::TextureView,
-        doc_view: &wgpu::TextureView,
-    ) {
-        // Pass 1: clear to the canvas background and draw the artboard rect.
-        {
-            let vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fx_artboard_vbuf"),
-                    contents: bytemuck::cast_slice(vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fx_artboard_ibuf"),
-                    contents: bytemuck::cast_slice(artboard_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("fx_composite_artboard"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BG),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            if !artboard_indices.is_empty() {
-                pass.set_pipeline(&self.fill_pipeline_1spp);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..artboard_indices.len() as u32, 0, 0..1);
-            }
-        }
-        // Passes 2 & 3: effects layer, then sharp shapes (both straight-alpha).
-        for layer in [fx_view, doc_view] {
-            let bg = self.effects_blur_bg(layer, 0.0, true);
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("fx_composite_layer"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.blur_pipeline_alpha);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..6, 0..1);
-        }
-    }
-
-    /// Render to an offscreen texture, read back pixels, encode as PNG.
-    fn capture_png(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
-        let w = self.width;
-        let h = self.height;
-
-        // Offscreen resolve target (single-sample, read back as PNG)
-        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("capture_tex"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let tex_view = tex.create_view(&Default::default());
-
-        // MSAA render target for the capture (resolved into tex_view)
-        let (capture_msaa_tex, capture_msaa_view) =
-            create_msaa_texture(&self.device, self.surface_format, w, h);
-
-        // Draw geometry into the offscreen texture via MSAA (with effects layer).
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        self.render_scene(
-            &mut enc,
-            &capture_msaa_view,
-            &tex_view,
-            w,
-            h,
-            vertices,
-            indices,
-        );
-
-        // Render text nodes on top (same encoder, loads resolved geometry from tex_view)
-        if !self.pending_texts.is_empty() {
-            self.text_viewport.update(
-                &self.queue,
-                Resolution {
-                    width: w,
-                    height: h,
-                },
-            );
-
-            let mut buffers: Vec<Buffer> = Vec::with_capacity(self.pending_texts.len());
-            for snap in self.pending_texts.iter() {
-                let font_size = snap.font_size.max(1.0);
-                let line_height = font_size * snap.line_height_mul;
-                let mut buf =
-                    Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
-                buf.set_size(&mut self.font_system, None, None);
-                let glyph_style = match snap.font_style {
-                    1 => GlyphonStyle::Italic,
-                    2 => GlyphonStyle::Oblique,
-                    _ => GlyphonStyle::Normal,
-                };
-                let attrs = Attrs::new()
-                    .family(Family::Name(&snap.font_family))
-                    .weight(Weight(snap.font_weight))
-                    .style(glyph_style);
-                buf.set_text(
-                    &mut self.font_system,
-                    &snap.content,
-                    attrs,
-                    Shaping::Advanced,
-                );
-                buf.shape_until_scroll(&mut self.font_system, false);
-                buffers.push(buf);
-            }
-
-            let text_areas: Vec<TextArea> = self
-                .pending_texts
-                .iter()
-                .zip(buffers.iter())
-                .map(|(snap, buf)| TextArea {
-                    buffer: buf,
-                    left: snap.screen_x,
-                    top: snap.screen_y + snap.top_offset,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: i32::MIN,
-                        top: i32::MIN,
-                        right: i32::MAX,
-                        bottom: i32::MAX,
-                    },
-                    default_color: GlyphonColor::rgba(
-                        snap.color[0],
-                        snap.color[1],
-                        snap.color[2],
-                        snap.color[3],
-                    ),
-                    custom_glyphs: &[],
-                })
-                .collect();
-
-            if self
-                .text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.text_atlas,
-                    &self.text_viewport,
-                    text_areas,
-                    &mut self.swash_cache,
-                )
-                .is_ok()
-            {
-                {
-                    let mut pass = enc
-                        .begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("capture_text_pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &tex_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        })
-                        .forget_lifetime();
-                    if let Err(e) =
-                        self.text_renderer
-                            .render(&self.text_atlas, &self.text_viewport, &mut pass)
-                    {
-                        tracing::warn!("glyphon render in capture failed: {:?}", e);
-                    }
-                }
-                self.text_atlas.trim();
-            }
-        }
-
-        self.queue.submit([enc.finish()]);
-        drop(capture_msaa_tex); // keep alive until after submit
-
-        // Copy texture → staging buffer (bytes_per_row must be aligned to 256)
-        let bpr = align256(w * 4);
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: (bpr * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut enc2 = self.device.create_command_encoder(&Default::default());
-        enc2.copy_texture_to_buffer(
-            tex.as_image_copy(),
-            wgpu::ImageCopyBuffer {
-                buffer: &staging,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit([enc2.finish()]);
-
-        // Map & read
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        tracing::info!("render: capture_png — poll(Wait) starting");
-        self.device.poll(wgpu::Maintain::Wait);
-        tracing::info!("render: capture_png — poll(Wait) done");
-        if rx.recv().ok().and_then(|r| r.ok()).is_none() {
-            tracing::warn!("render: capture_png — map_async failed");
-            return vec![];
-        }
-
-        let raw = slice.get_mapped_range();
-
-        let is_bgra = matches!(
-            self.surface_format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-        );
-
-        let mut pixels: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
-        for row in 0..h {
-            let start = (row * bpr) as usize;
-            let end = start + (w * 4) as usize;
-            if is_bgra {
-                for px in raw[start..end].chunks_exact(4) {
-                    pixels.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-                }
-            } else {
-                pixels.extend_from_slice(&raw[start..end]);
-            }
-        }
-        drop(raw);
-        staging.unmap();
-
-        // Encode as PNG
-        let img: ImageBuffer<Rgba<u8>, _> =
-            ImageBuffer::from_raw(w, h, pixels).unwrap_or_else(|| ImageBuffer::new(w, h));
-        let mut png = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap_or_default();
-        png
-    }
 }
 
-fn align256(n: u32) -> u32 {
+pub(crate) fn align256(n: u32) -> u32 {
     (n + 255) & !255
 }
 
-fn create_msaa_texture(
+pub(crate) fn create_msaa_texture(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     width: u32,
@@ -2220,7 +1288,7 @@ fn create_msaa_texture(
     (texture, view)
 }
 
-fn create_glow_textures(
+pub(crate) fn create_glow_textures(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     width: u32,
