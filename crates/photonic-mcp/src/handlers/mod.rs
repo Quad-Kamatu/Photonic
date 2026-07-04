@@ -15,3 +15,4 @@ pub mod selection;
 pub(crate) mod shared;
 pub mod transform;
 pub mod transforms;
+pub mod typography;
