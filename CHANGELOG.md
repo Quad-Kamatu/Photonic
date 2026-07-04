@@ -41,6 +41,13 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Changed
 
+- **Under the hood: a big internal cleanup, with no change to how Photonic
+  works.** The app's largest source files were reorganised into smaller, focused
+  modules across the editor, the panels, the renderer, and the built-in tool
+  server. This is purely a maintainability refactor — every feature, tool, and
+  keyboard shortcut behaves exactly as before, and your documents are
+  unaffected. It just makes Photonic faster to improve from here. If you do spot
+  anything behaving differently after updating, please report it.
 - **Selection SVG export is compact and consistent** (#205, #206, #203).
   `export_selection_as_svg` now rounds coordinates and path data to a `precision`
   (default 4 — no more 15-decimal path bloat), deduplicates byte-identical
