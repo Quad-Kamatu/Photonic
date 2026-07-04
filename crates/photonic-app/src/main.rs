@@ -23,7 +23,7 @@ use winit::{
     dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowAttributes, WindowId},
+    window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -272,10 +272,12 @@ impl ApplicationHandler for PhotonicWinitApp {
         }
 
         let window_icon = load_window_icon();
+        let fullscreen = Fullscreen::Borderless(event_loop.primary_monitor());
         #[allow(unused_mut)]
         let mut attrs = WindowAttributes::default()
             .with_title("Photonic")
             .with_inner_size(PhysicalSize::new(1280u32, 800u32))
+            .with_fullscreen(Some(fullscreen))
             .with_window_icon(window_icon);
         // On Linux the compositor (esp. Wayland/KWin) ignores the embedded .ico
         // for the titlebar/taskbar icon and instead maps the window to a desktop
