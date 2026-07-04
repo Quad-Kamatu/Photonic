@@ -1,4 +1,5 @@
 #![recursion_limit = "1024"]
+pub(crate) mod dispatch;
 
 pub mod handlers;
 pub mod protocol;
