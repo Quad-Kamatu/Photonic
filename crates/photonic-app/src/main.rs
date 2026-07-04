@@ -13,6 +13,7 @@ use photonic_gui::PhotonicApp;
 use photonic_mcp::{McpServer, McpServerConfig};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -210,6 +211,7 @@ fn main() -> Result<()> {
         show_welcome: args.file.is_none(),
         initial_file: args.file.clone(),
         audit_log,
+        window_state: WindowState::load(),
     };
 
     event_loop.run_app(&mut app)?;
@@ -263,6 +265,93 @@ struct PhotonicWinitApp {
     initial_file: Option<std::path::PathBuf>,
     /// Shared audit log — passed to the GUI panel for display.
     audit_log: Arc<std::sync::Mutex<AuditLog>>,
+    /// Last normal bounds and maximized state, persisted between launches.
+    window_state: WindowState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct WindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+    has_position: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+            maximized: true,
+            has_position: false,
+        }
+    }
+}
+
+impl WindowState {
+    fn path() -> Option<std::path::PathBuf> {
+        photonic_core::crash_dir().map(|dir| dir.join("window_state.json"))
+    }
+
+    fn load() -> Self {
+        Self::path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) {
+        let Some(path) = Self::path() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            if let Err(error) = std::fs::write(&path, json) {
+                tracing::warn!(?path, %error, "Failed to save window state");
+            }
+        }
+    }
+
+    fn update_normal_bounds(&mut self, window: &Window) {
+        if window.is_maximized() || window.fullscreen().is_some() {
+            return;
+        }
+        if let Ok(position) = window.outer_position() {
+            self.x = position.x;
+            self.y = position.y;
+            self.has_position = true;
+        }
+        let size = window.inner_size();
+        if size.width > 0 && size.height > 0 {
+            self.width = size.width;
+            self.height = size.height;
+        }
+    }
+
+    fn position_is_visible(&self, event_loop: &ActiveEventLoop) -> bool {
+        if !self.has_position {
+            return false;
+        }
+        event_loop.available_monitors().any(|monitor| {
+            let origin = monitor.position();
+            let size = monitor.size();
+            let left = i64::from(origin.x);
+            let top = i64::from(origin.y);
+            let right = left + i64::from(size.width);
+            let bottom = top + i64::from(size.height);
+            let x = i64::from(self.x);
+            let y = i64::from(self.y);
+            x < right
+                && y < bottom
+                && x + i64::from(self.width) > left
+                && y + i64::from(self.height) > top
+        })
+    }
 }
 
 impl ApplicationHandler for PhotonicWinitApp {
@@ -275,10 +364,18 @@ impl ApplicationHandler for PhotonicWinitApp {
         #[allow(unused_mut)]
         let mut attrs = WindowAttributes::default()
             .with_title("Photonic")
-            .with_inner_size(PhysicalSize::new(1280u32, 800u32))
-            .with_maximized(true)
+            .with_inner_size(PhysicalSize::new(
+                self.window_state.width.clamp(320, 16_384),
+                self.window_state.height.clamp(240, 16_384),
+            ))
+            .with_maximized(self.window_state.maximized)
             .with_window_icon(window_icon);
-        if let Some(primary_monitor) = event_loop.primary_monitor() {
+        if self.window_state.position_is_visible(event_loop) {
+            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                self.window_state.x,
+                self.window_state.y,
+            ));
+        } else if let Some(primary_monitor) = event_loop.primary_monitor() {
             attrs = attrs.with_position(primary_monitor.position());
         }
         // On Linux the compositor (esp. Wayland/KWin) ignores the embedded .ico
@@ -390,6 +487,9 @@ impl ApplicationHandler for PhotonicWinitApp {
         match event {
             WindowEvent::CloseRequested => {
                 info!("Window closed");
+                self.window_state.update_normal_bounds(&state.window);
+                self.window_state.maximized = state.window.is_maximized();
+                self.window_state.save();
                 // Flush preferences so settings changed right before quitting
                 // (e.g. the history limit) survive to the next launch.
                 state.gui.prefs.save();
@@ -397,7 +497,11 @@ impl ApplicationHandler for PhotonicWinitApp {
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
                 state.renderer.resize(width, height);
+                self.window_state.update_normal_bounds(&state.window);
                 state.window.request_redraw();
+            }
+            WindowEvent::Moved(_) => {
+                self.window_state.update_normal_bounds(&state.window);
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
