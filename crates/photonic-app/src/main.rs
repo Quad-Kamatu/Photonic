@@ -199,6 +199,19 @@ fn main() -> Result<()> {
         });
     }
 
+    // Native Wayland intentionally prevents clients from reading or setting
+    // absolute window positions. Prefer XWayland when it is available so the
+    // persisted bounds can restore Photonic to the monitor where it was closed.
+    #[cfg(target_os = "linux")]
+    let event_loop = {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        let mut builder = EventLoop::builder();
+        if std::env::var_os("DISPLAY").is_some() {
+            builder.with_x11();
+        }
+        builder.build()?
+    };
+    #[cfg(not(target_os = "linux"))]
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -361,6 +374,7 @@ impl ApplicationHandler for PhotonicWinitApp {
         }
 
         let window_icon = load_window_icon();
+        let restore_maximized = self.window_state.maximized;
         #[allow(unused_mut)]
         let mut attrs = WindowAttributes::default()
             .with_title("Photonic")
@@ -368,7 +382,9 @@ impl ApplicationHandler for PhotonicWinitApp {
                 self.window_state.width.clamp(320, 16_384),
                 self.window_state.height.clamp(240, 16_384),
             ))
-            .with_maximized(self.window_state.maximized)
+            // Apply maximization after creation so the window manager first
+            // associates the normal bounds with the saved monitor.
+            .with_maximized(false)
             .with_window_icon(window_icon);
         if self.window_state.position_is_visible(event_loop) {
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
@@ -394,6 +410,9 @@ impl ApplicationHandler for PhotonicWinitApp {
                 .create_window(attrs)
                 .expect("Failed to create window"),
         );
+        if restore_maximized {
+            window.set_maximized(true);
+        }
 
         let capture_rx = self.capture_rx.take().expect("capture_rx already consumed");
 
