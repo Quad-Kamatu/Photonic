@@ -21,7 +21,7 @@ use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
 use photonic_core::{
-    history::{Command, CommandHistory},
+    history::{Command, CommandHistory, HistoryGraphNode},
     node::{GroupNode, NodeId, PathNode},
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
@@ -33,7 +33,8 @@ use std::sync::Arc;
 use crate::{
     hotbar::{self, HotbarAction, HotbarBucket, HotbarEffect, HotbarItem, HotbarMode},
     panels::{
-        self, DrawerGroup, EyedropperTarget, PanelAction, SelectSameAttr, ShapeKind, ZOrderOp,
+        self, DrawerGroup, EyedropperTarget, PanelAction, RightDrawerGroup, SelectSameAttr,
+        ShapeKind, ZOrderOp,
     },
     preferences::AppPreferences,
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
@@ -826,8 +827,10 @@ pub struct PhotonicApp {
     pub distance_results: Vec<(String, String, f64, f64, f64)>,
     /// Cached action set names: (name, step_count).
     pub action_names: Vec<(String, usize)>,
-    /// Cached history entries: (step_index, description) newest first.
-    pub history_entries: Vec<(usize, String)>,
+    /// Cached edit-tree topology for the branching commit graph (newest first).
+    pub history_graph: Vec<HistoryGraphNode>,
+    /// HEAD node id in the edit tree, cached alongside `history_graph`.
+    pub history_current: u64,
     /// Bleed input (mm) for print settings panel.
     pub bleed_mm_input: f64,
     /// Slug input (mm) for print settings panel.
@@ -862,6 +865,12 @@ pub struct PhotonicApp {
     /// content during the close (collapse) animation after `open_drawer` flips
     /// to `None`. Not persisted.
     pub last_drawer_group: DrawerGroup,
+    /// Which group is open in the *right* rail, or `None` when the right drawer
+    /// is collapsed and only the right rail shows. Mirrors `prefs.open_right_drawer`.
+    pub open_right_drawer: Option<RightDrawerGroup>,
+    /// Last open right group, kept for the right drawer's close animation (mirror
+    /// of [`Self::last_drawer_group`]). Not persisted.
+    pub last_right_drawer_group: RightDrawerGroup,
     /// Live search query that filters which property accordions are visible.
     pub prop_search: String,
     /// Recolor panel: comma-separated hex palette input.
@@ -1099,7 +1108,8 @@ impl Default for PhotonicApp {
             grammar_check_results: Vec::new(),
             distance_results: Vec::new(),
             action_names: Vec::new(),
-            history_entries: Vec::new(),
+            history_graph: Vec::new(),
+            history_current: 0,
             bleed_mm_input: 0.0,
             slug_mm_input: 0.0,
             construction_angle: 45.0,
@@ -1115,6 +1125,8 @@ impl Default for PhotonicApp {
 
             open_drawer: Some(DrawerGroup::Tools),
             last_drawer_group: DrawerGroup::Tools,
+            open_right_drawer: Some(RightDrawerGroup::Layers),
+            last_right_drawer_group: RightDrawerGroup::Layers,
             prop_search: String::new(),
             recolor_palette_input: String::new(),
 
@@ -1509,6 +1521,16 @@ impl PhotonicApp {
         if let Some(g) = open_drawer {
             s.last_drawer_group = g;
         }
+        // History moved to the right rail. Migrate a persisted left-History open
+        // state so it doesn't leave an unreachable open drawer on the left.
+        if s.open_drawer == Some(DrawerGroup::History) {
+            s.open_drawer = None;
+            s.prefs.open_right_drawer = Some(RightDrawerGroup::History);
+        }
+        s.open_right_drawer = s.prefs.open_right_drawer;
+        if let Some(g) = s.prefs.open_right_drawer {
+            s.last_right_drawer_group = g;
+        }
         s
     }
 
@@ -1529,7 +1551,117 @@ impl PhotonicApp {
         if let Some(g) = open_drawer {
             s.last_drawer_group = g;
         }
+        // History moved to the right rail. Migrate a persisted left-History open
+        // state so it doesn't leave an unreachable open drawer on the left.
+        if s.open_drawer == Some(DrawerGroup::History) {
+            s.open_drawer = None;
+            s.prefs.open_right_drawer = Some(RightDrawerGroup::History);
+        }
+        s.open_right_drawer = s.prefs.open_right_drawer;
+        if let Some(g) = s.prefs.open_right_drawer {
+            s.last_right_drawer_group = g;
+        }
         s
+    }
+
+    /// Build the shared [`PropPanelCtx`] and render one property-drawer group into
+    /// `ui`, forwarding any produced action. Factored out so both the left drawer
+    /// and the right drawer (which now hosts History) can render property groups
+    /// from the same ctx construction rather than duplicating ~60 field bindings.
+    fn draw_property_drawer_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &Document,
+        history: &CommandHistory,
+        group: DrawerGroup,
+    ) {
+        let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
+        let selection_count = doc.selection.node_ids.len();
+        let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();
+        let branch_names = self.branch_names.clone();
+        // Keep the Edit History list live — recompute from the current undo/redo
+        // stacks each frame so it never goes stale after an edit. Pull a deeper
+        // slice than the old flat list needed so the commit graph shows real depth.
+        self.history_graph = history.history_graph();
+        self.history_current = history.current_node();
+        let raster_color_range_target = self
+            .raster_color_range
+            .as_ref()
+            .filter(|s| Some(s.node_id) == self.selected_id)
+            .map(|s| s.target);
+        let mut ctx = panels::PropPanelCtx {
+            doc,
+            active_tool: self.active_tool,
+            fill_color: &mut self.fill_color,
+            polygon_sides: &mut self.polygon_sides,
+            star_points: &mut self.star_points,
+            star_inner_ratio: &mut self.star_inner_ratio,
+            rounded_rect_radius: &mut self.rounded_rect_radius,
+            spiral_turns: &mut self.spiral_turns,
+            spiral_inner_radius: &mut self.spiral_inner_radius,
+            spiral_segs_per_turn: &mut self.spiral_segs_per_turn,
+            selected_node,
+            selected_id: self.selected_id,
+            selection_count,
+            selected_ids: &selected_ids,
+            point_edit_node: self.point_edit_node,
+            point_selected: &self.point_selected,
+            prop_search: &mut self.prop_search,
+            shear_x: &mut self.shear_x,
+            shear_y: &mut self.shear_y,
+            line_snap_45: &mut self.line_snap_45,
+            color_guide_rule: &mut self.color_guide_rule,
+            arc_start_angle: &mut self.arc_start_angle,
+            arc_end_angle: &mut self.arc_end_angle,
+            arc_open: &mut self.arc_open,
+            grid_cols: &mut self.grid_cols,
+            grid_rows: &mut self.grid_rows,
+            polar_grid_rings: &mut self.polar_grid_rings,
+            polar_grid_sectors: &mut self.polar_grid_sectors,
+            polar_grid_inner_ratio: &mut self.polar_grid_inner_ratio,
+            recolor_palette_input: &mut self.recolor_palette_input,
+            magic_wand_attribute: &mut self.magic_wand_attribute,
+            magic_wand_tolerance: &mut self.magic_wand_tolerance,
+            eraser_radius: &mut self.eraser_radius,
+            raster_mask_tolerance: &mut self.raster_mask_tolerance,
+            raster_mask_contiguous: &mut self.raster_mask_contiguous,
+            raster_color_range_target,
+            rmbg_model_cached: self.rmbg_model_cached,
+            composition_findings: &self.composition_findings,
+            rhythm_findings: &self.rhythm_findings,
+            branch_names: &branch_names,
+            branch_name_input: &mut self.branch_name_input,
+            swatch_library_selected: &mut self.swatch_library_selected,
+            graphic_style_name_input: &mut self.graphic_style_name_input,
+            width_profile_name_input: &mut self.width_profile_name_input,
+            grammar_rules: &self.grammar_rules,
+            grammar_rule_name_input: &mut self.grammar_rule_name_input,
+            grammar_rule_type_selected: &mut self.grammar_rule_type_selected,
+            grammar_rule_params_input: &mut self.grammar_rule_params_input,
+            grammar_check_results: &self.grammar_check_results,
+            distance_results: &self.distance_results,
+            action_names: &self.action_names,
+            history_graph: &self.history_graph,
+            history_current: self.history_current,
+            bleed_mm_input: &mut self.bleed_mm_input,
+            slug_mm_input: &mut self.slug_mm_input,
+            construction_angle: &mut self.construction_angle,
+            construction_x: &mut self.construction_x,
+            construction_y: &mut self.construction_y,
+            margin_top: &mut self.margin_top_input,
+            margin_right: &mut self.margin_right_input,
+            margin_bottom: &mut self.margin_bottom_input,
+            margin_left: &mut self.margin_left_input,
+            event_trigger_event: &mut self.event_trigger_event,
+            event_trigger_action: &mut self.event_trigger_action,
+            workspace_name_input: &mut self.workspace_name_input,
+            action: None,
+            q: String::new(),
+            forced_open: None,
+        };
+        if let Some(action) = panels::draw_drawer(ui, &mut ctx, group) {
+            self.pending_panel_actions.push(action);
+        }
     }
 
 
@@ -2186,27 +2318,71 @@ impl PhotonicApp {
         // when the context returns) via `effective_open` — no state churn.
         let sel_count = doc.selection.node_ids.len();
         let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
-        // Trim the rail's right inner margin to 0 so its buttons hug the drawer
-        // edge — the default `Frame::side_top_panel` uses `symmetric(8, 2)`,
-        // whose 8 px right margin (plus the drawer's 8 px left margin below)
-        // read as a dead ~16 px band between rail and drawer (#168).
+        // ── Rail / drawer card layout ─────────────────────────────────────────
+        // Shared knobs for the floating rail + drawer "cards". Both use the same
+        // corner radius, border, and vertical float; the rail stays flush with
+        // the window on the left (square left corners) while its right side and
+        // the drawer float. Tweak the look here — everything below derives from it.
+        const CARD_ROUNDING: f32 = 8.0; // radius on every corner that rounds
+        const CARD_FLOAT_Y: f32 = 6.0; // top/bottom gap so the cards float vertically
+        const RAIL_ICON: f32 = 30.0; // rail icon button (square)
+        const RAIL_PAD_X: f32 = 7.0; // rail inner left/right padding around the icons
+        const RAIL_PAD_Y: f32 = 4.0; // rail inner top/bottom padding
+        const RAIL_GAP: f32 = 4.0; // gap on the rail's right, before the drawer
+        const DRAWER_GAP: f32 = 3.0; // gap on the drawer's left, after the rail
+        const DRAWER_FLOAT_X: f32 = 4.0; // gap on the drawer's right, off the canvas
+        const DRAWER_PAD_X: f32 = 10.0; // drawer inner left/right content gutter
+        const DRAWER_PAD_Y: f32 = 8.0; // drawer inner top/bottom content gutter
+        // Rail width is fully determined by its padding, icon size and right gap.
+        const RAIL_WIDTH: f32 = RAIL_PAD_X + RAIL_ICON + RAIL_PAD_X + RAIL_GAP;
+
+        // Style the rail to match the floating drawer: its left edge stays flush
+        // with the window, but the right edge is rounded and it gets the same
+        // top/bottom float, border, and corner radius, so rail + drawer read as a
+        // matched pair of cards.
         let rail_frame = {
             let mut f = egui::Frame::side_top_panel(&ctx.style());
+            // Symmetric left/right inner padding so the centre-aligned icons sit
+            // visually centred within the card (the outer-right gap is separate).
             f.inner_margin = egui::Margin {
-                left: 5.0,
-                right: 0.0,
-                top: 2.0,
-                bottom: 2.0,
+                left: RAIL_PAD_X,
+                right: RAIL_PAD_X,
+                top: RAIL_PAD_Y,
+                bottom: RAIL_PAD_Y,
             };
+            // Flush on the left (window edge), but float on the right, top and
+            // bottom. The right gap is what makes the rounded right corners
+            // actually read — with no gap they sat flush against the neighbour
+            // at near-zero contrast, which is why the rounding looked absent.
+            f.outer_margin = egui::Margin {
+                left: 0.0,
+                right: RAIL_GAP,
+                top: CARD_FLOAT_Y,
+                bottom: CARD_FLOAT_Y,
+            };
+            // Round only the two right corners; the left edge is the window edge.
+            f.rounding = egui::Rounding {
+                nw: 0.0,
+                ne: CARD_ROUNDING,
+                sw: 0.0,
+                se: CARD_ROUNDING,
+            };
+            // Same 1 px border as the drawer so the rounded right corners read the
+            // same way (fill-vs-background alone was too low-contrast to show them).
+            f.stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
             f
         };
         egui::SidePanel::left("drawer_rail")
             .resizable(false)
-            .exact_width(40.0)
+            .exact_width(RAIL_WIDTH)
             .frame(rail_frame)
+            // Drop egui's default panel separator — with the floating card look it
+            // was the stray vertical line sitting in the gap beside the drawer.
+            .show_separator_line(false)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
-                ui.vertical_centered(|ui| {
+                // Centre the icon column within the rail card.
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     for group in DrawerGroup::ALL {
                         let active = effective_open == Some(group);
                         let enabled = group.has_content(sel_count);
@@ -2214,7 +2390,7 @@ impl PhotonicApp {
                             .add_enabled(
                                 enabled,
                                 egui::Button::new(RichText::new(group.icon()).size(18.0))
-                                    .min_size(egui::vec2(30.0, 30.0))
+                                    .min_size(egui::vec2(RAIL_ICON, RAIL_ICON))
                                     .selected(active),
                             )
                             .on_hover_text(group.title());
@@ -2298,23 +2474,41 @@ impl PhotonicApp {
         let target_w = self.prefs.drawer_width.clamp(160.0, 420.0);
         if t > 0.001 {
             let fully_open = drawer_open && t >= 0.999;
-            // Give the drawer a small left inner margin (#186 follow-up to #168):
-            // #168 zeroed this to close a ~16 px dead band, but that left the
-            // content touching the rail. Restore a modest 6 px gutter so the
-            // content breathes without reopening the old gap. Set on the base
-            // binding so it carries through both the resizable and the
-            // exact-width tween branches.
+            // Float the drawer as a rounded card, detached from the rail.
+            // Prior work (#168 closed a dead band, #186 restored a small inner
+            // gutter) treated the drawer as a flush-docked panel. Joseph wants
+            // it to read as a floating card instead: a couple-pixel gap from
+            // the rail on the left, a little breathing room from the canvas on
+            // the right, and top/bottom padding so all four corners are visibly
+            // rounded against the darker window background. The rail itself
+            // stays flush with the window's left edge.
+            //
+            // `outer_margin` is the float (transparent, shows the window fill
+            // behind); `inner_margin` is the content gutter (bumped on top so
+            // the header clears the rounded top corners); a 1 px non-interactive
+            // border makes the rounded edge crisp against the low-contrast gap.
             let drawer_frame = {
                 let mut f = egui::Frame::side_top_panel(&ctx.style());
                 f.inner_margin = egui::Margin {
-                    left: 6.0,
-                    right: 8.0,
-                    top: 2.0,
-                    bottom: 2.0,
+                    left: DRAWER_PAD_X,
+                    right: DRAWER_PAD_X,
+                    top: DRAWER_PAD_Y,
+                    bottom: DRAWER_PAD_Y,
                 };
+                f.outer_margin = egui::Margin {
+                    left: DRAWER_GAP,
+                    right: DRAWER_FLOAT_X,
+                    top: CARD_FLOAT_Y,
+                    bottom: CARD_FLOAT_Y,
+                };
+                f.rounding = egui::Rounding::same(CARD_ROUNDING);
+                f.stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
                 f
             };
-            let mut panel = egui::SidePanel::left("properties").frame(drawer_frame);
+            let mut panel = egui::SidePanel::left("properties")
+                .frame(drawer_frame)
+                // No default separator line — the card's own border defines its edge.
+                .show_separator_line(false);
             panel = if fully_open {
                 // Fully open: let the user drag-resize within range.
                 panel
@@ -2350,95 +2544,7 @@ impl PhotonicApp {
                         }
                         return;
                     }
-                    let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
-                    let selection_count = doc.selection.node_ids.len();
-                    let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();
-                    let branch_names = self.branch_names.clone();
-                    // Keep the Edit History list live — recompute from the current
-                    // undo stack each frame so it never goes stale after an edit.
-                    // history_entries(20) is cheap (<=20 items); the mutable write
-                    // lands before the immutable &self.history_entries borrow below.
-                    self.history_entries = history.history_entries(20);
-                    // Swatch shown in the Raster Masking section — only when the
-                    // live session belongs to the currently selected node.
-                    let raster_color_range_target = self
-                        .raster_color_range
-                        .as_ref()
-                        .filter(|s| Some(s.node_id) == self.selected_id)
-                        .map(|s| s.target);
-                    let mut ctx = panels::PropPanelCtx {
-                        doc: doc,
-                        active_tool: self.active_tool,
-                        fill_color: &mut self.fill_color,
-                        polygon_sides: &mut self.polygon_sides,
-                        star_points: &mut self.star_points,
-                        star_inner_ratio: &mut self.star_inner_ratio,
-                        rounded_rect_radius: &mut self.rounded_rect_radius,
-                        spiral_turns: &mut self.spiral_turns,
-                        spiral_inner_radius: &mut self.spiral_inner_radius,
-                        spiral_segs_per_turn: &mut self.spiral_segs_per_turn,
-                        selected_node: selected_node,
-                        selected_id: self.selected_id,
-                        selection_count: selection_count,
-                        selected_ids: &selected_ids,
-                        point_edit_node: self.point_edit_node,
-                        point_selected: &self.point_selected,
-                        prop_search: &mut self.prop_search,
-                        shear_x: &mut self.shear_x,
-                        shear_y: &mut self.shear_y,
-                        line_snap_45: &mut self.line_snap_45,
-                        color_guide_rule: &mut self.color_guide_rule,
-                        arc_start_angle: &mut self.arc_start_angle,
-                        arc_end_angle: &mut self.arc_end_angle,
-                        arc_open: &mut self.arc_open,
-                        grid_cols: &mut self.grid_cols,
-                        grid_rows: &mut self.grid_rows,
-                        polar_grid_rings: &mut self.polar_grid_rings,
-                        polar_grid_sectors: &mut self.polar_grid_sectors,
-                        polar_grid_inner_ratio: &mut self.polar_grid_inner_ratio,
-                        recolor_palette_input: &mut self.recolor_palette_input,
-                        magic_wand_attribute: &mut self.magic_wand_attribute,
-                        magic_wand_tolerance: &mut self.magic_wand_tolerance,
-                        eraser_radius: &mut self.eraser_radius,
-                        raster_mask_tolerance: &mut self.raster_mask_tolerance,
-                        raster_mask_contiguous: &mut self.raster_mask_contiguous,
-                        raster_color_range_target: raster_color_range_target,
-                        rmbg_model_cached: self.rmbg_model_cached,
-                        composition_findings: &self.composition_findings,
-                        rhythm_findings: &self.rhythm_findings,
-                        branch_names: &branch_names,
-                        branch_name_input: &mut self.branch_name_input,
-                        swatch_library_selected: &mut self.swatch_library_selected,
-                        graphic_style_name_input: &mut self.graphic_style_name_input,
-                        width_profile_name_input: &mut self.width_profile_name_input,
-                        grammar_rules: &self.grammar_rules,
-                        grammar_rule_name_input: &mut self.grammar_rule_name_input,
-                        grammar_rule_type_selected: &mut self.grammar_rule_type_selected,
-                        grammar_rule_params_input: &mut self.grammar_rule_params_input,
-                        grammar_check_results: &self.grammar_check_results,
-                        distance_results: &self.distance_results,
-                        action_names: &self.action_names,
-                        history_entries: &self.history_entries,
-                        history_total: history.undo_depth(),
-                        bleed_mm_input: &mut self.bleed_mm_input,
-                        slug_mm_input: &mut self.slug_mm_input,
-                        construction_angle: &mut self.construction_angle,
-                        construction_x: &mut self.construction_x,
-                        construction_y: &mut self.construction_y,
-                        margin_top: &mut self.margin_top_input,
-                        margin_right: &mut self.margin_right_input,
-                        margin_bottom: &mut self.margin_bottom_input,
-                        margin_left: &mut self.margin_left_input,
-                        event_trigger_event: &mut self.event_trigger_event,
-                        event_trigger_action: &mut self.event_trigger_action,
-                        workspace_name_input: &mut self.workspace_name_input,
-                        action: None,
-                        q: String::new(),
-                        forced_open: None,
-                    };
-                    if let Some(action) = panels::draw_drawer(ui, &mut ctx, render_group) {
-                        self.pending_panel_actions.push(action);
-                    }
+                    self.draw_property_drawer_content(ui, doc, history, render_group);
                 });
             });
             // Capture a user resize of the fully-open drawer so it persists
@@ -2451,32 +2557,155 @@ impl PhotonicApp {
             }
         }
 
-        // ── Right panel: layers + AI chat ───────────────────────────────────
-        egui::SidePanel::right("right_panel")
-            .default_width(280.0)
-            .min_width(220.0)
-            .max_width(400.0)
+        // ── Right icon rail (mirror of the left drawer rail) ──────────────────
+        // Flush with the window's right edge; its LEFT corners round and it floats
+        // on the left/top/bottom. Icons toggle the right-side drawers (Layers, AI
+        // Chat) that used to be stacked together in the always-on right panel.
+        // Created before the right drawer so it stays the outermost (rightmost)
+        // panel — the mirror of the left rail being the leftmost.
+        let right_rail_frame = {
+            let mut f = egui::Frame::side_top_panel(&ctx.style());
+            f.inner_margin = egui::Margin {
+                left: RAIL_PAD_X,
+                right: RAIL_PAD_X,
+                top: RAIL_PAD_Y,
+                bottom: RAIL_PAD_Y,
+            };
+            f.outer_margin = egui::Margin {
+                left: RAIL_GAP,
+                right: 0.0,
+                top: CARD_FLOAT_Y,
+                bottom: CARD_FLOAT_Y,
+            };
+            // Round only the two left corners; the right edge is the window edge.
+            f.rounding = egui::Rounding {
+                nw: CARD_ROUNDING,
+                ne: 0.0,
+                sw: CARD_ROUNDING,
+                se: 0.0,
+            };
+            f.stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
+            f
+        };
+        egui::SidePanel::right("right_rail")
+            .resizable(false)
+            .exact_width(RAIL_WIDTH)
+            .frame(right_rail_frame)
+            .show_separator_line(false)
             .show(ctx, |ui| {
-                // ── Layers panel (top) ────────────────────────────────────────
-                egui::ScrollArea::vertical()
-                    .id_salt("layers_scroll")
-                    .max_height(150.0)
-                    .show(ui, |ui| {
-                        if let Some(action) = panels::draw_layers_panel(
-                            ui,
-                            doc,
-                            &mut self.selected_layer_ids,
-                            self.selected_id,
-                        ) {
-                            self.pending_panel_actions.push(action);
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    for group in RightDrawerGroup::ALL {
+                        let active = self.open_right_drawer == Some(group);
+                        let resp = ui
+                            .add(
+                                egui::Button::new(RichText::new(group.icon()).size(18.0))
+                                    .min_size(egui::vec2(RAIL_ICON, RAIL_ICON))
+                                    .selected(active),
+                            )
+                            .on_hover_text(group.title());
+                        if resp.clicked() {
+                            self.open_right_drawer = if active { None } else { Some(group) };
+                            if let Some(g) = self.open_right_drawer {
+                                self.last_right_drawer_group = g;
+                            }
+                            self.prefs.open_right_drawer = self.open_right_drawer;
+                            self.prefs.save();
                         }
-                    });
-
-                ui.separator();
-
-                // ── AI chat (bottom) ─────────────────────────────────────────
-                self.draw_claude_tab(ui);
+                        ui.add_space(4.0);
+                    }
+                });
             });
+
+        // ── Right animated drawer (mirror of the left drawer) ─────────────────
+        let right_open = self.open_right_drawer;
+        let right_drawer_open = right_open.is_some();
+        let r_anim = if self.prefs.reduced_motion { 0.0 } else { 0.18 };
+        let rt = ctx.animate_bool_with_time_and_easing(
+            egui::Id::new("right_drawer_width_anim"),
+            right_drawer_open,
+            r_anim,
+            egui::emath::easing::cubic_out,
+        );
+        let right_render_group = right_open.unwrap_or(self.last_right_drawer_group);
+        let right_target_w = self.prefs.right_drawer_width.clamp(220.0, 480.0);
+        if rt > 0.001 {
+            let fully_open = right_drawer_open && rt >= 0.999;
+            let right_drawer_frame = {
+                let mut f = egui::Frame::side_top_panel(&ctx.style());
+                f.inner_margin = egui::Margin {
+                    left: DRAWER_PAD_X,
+                    right: DRAWER_PAD_X,
+                    top: DRAWER_PAD_Y,
+                    bottom: DRAWER_PAD_Y,
+                };
+                // Mirror of the left drawer: the rail is on the RIGHT here and the
+                // canvas on the LEFT, so the rail-side gap is on the right.
+                f.outer_margin = egui::Margin {
+                    left: DRAWER_FLOAT_X,
+                    right: DRAWER_GAP,
+                    top: CARD_FLOAT_Y,
+                    bottom: CARD_FLOAT_Y,
+                };
+                f.rounding = egui::Rounding::same(CARD_ROUNDING);
+                f.stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
+                f
+            };
+            let mut panel = egui::SidePanel::right("right_properties")
+                .frame(right_drawer_frame)
+                .show_separator_line(false);
+            panel = if fully_open {
+                panel
+                    .resizable(true)
+                    .min_width(220.0)
+                    .max_width(480.0)
+                    .default_width(right_target_w)
+            } else {
+                panel.resizable(false).exact_width((right_target_w * rt).max(1.0))
+            };
+            let resp = panel.show(ctx, |ui| {
+                ui.set_opacity(rt);
+                match right_render_group {
+                    RightDrawerGroup::Layers => {
+                        egui::ScrollArea::vertical().id_salt("layers_scroll").show(
+                            ui,
+                            |ui| {
+                                if let Some(action) = panels::draw_layers_panel(
+                                    ui,
+                                    doc,
+                                    &mut self.selected_layer_ids,
+                                    self.selected_id,
+                                ) {
+                                    self.pending_panel_actions.push(action);
+                                }
+                            },
+                        );
+                    }
+                    RightDrawerGroup::Chat => {
+                        self.draw_claude_tab(ui);
+                    }
+                    RightDrawerGroup::History => {
+                        egui::ScrollArea::vertical().id_salt("right_history_scroll").show(
+                            ui,
+                            |ui| {
+                                self.draw_property_drawer_content(
+                                    ui,
+                                    doc,
+                                    history,
+                                    DrawerGroup::History,
+                                );
+                            },
+                        );
+                    }
+                }
+            });
+            if fully_open {
+                let w = resp.response.rect.width();
+                if (w - self.prefs.right_drawer_width).abs() > 0.5 {
+                    self.prefs.right_drawer_width = w;
+                }
+            }
+        }
 
         // ── Console panel ────────────────────────────────────────────────────
         // Changing the panel ID when toggling expanded forces egui to reset
@@ -4932,39 +5161,160 @@ impl PhotonicApp {
 // ── hit-testing & node helpers moved to `mod hit_test` (see hit_test.rs) ──
 // ── chart/tiling demo generators moved to `mod demos` (see demos.rs) ──
 
-/// Render a Keep-a-Changelog section body with light formatting: `### Foo`
-/// becomes a small heading, `- item` / `* item` become bullets, everything
-/// else is a wrapped paragraph. (We don't pull in a full markdown renderer.)
+/// Render a Keep-a-Changelog section body with light markdown: `### Foo`
+/// becomes a small heading, `- item` / `* item` become bullets (nested by leading
+/// indentation), and inline `**bold**`, `*italic*` / `_italic_`, `` `code` `` and
+/// `[text](url)` links are formatted rather than shown with their literal markup.
+/// (We still don't pull in a full markdown crate — just enough for our changelog.)
 fn render_changelog_body(ui: &mut egui::Ui, body: &str) {
+    const BASE: Color32 = Color32::from_rgb(203, 213, 225);
     for raw in body.lines() {
+        // Keep leading whitespace to derive nesting; trim only the trailing edge.
         let line = raw.trim_end();
-        if line.is_empty() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
             ui.add_space(3.0);
             continue;
         }
-        if let Some(h) = line.strip_prefix("### ") {
+        // Two leading spaces per nesting level (Keep-a-Changelog sub-bullets).
+        let indent = line.len() - trimmed.len();
+        let level = (indent / 2) as f32;
+
+        if let Some(h) = trimmed.strip_prefix("### ") {
             ui.add_space(2.0);
-            ui.label(
-                RichText::new(h.trim())
-                    .strong()
-                    .color(Color32::from_rgb(203, 213, 225)),
-            );
-        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            let w = ui.available_width();
+            let job = inline_md_job(ui, h.trim(), Color32::from_rgb(226, 232, 240), true, w);
+            ui.add(egui::Label::new(job));
+        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))
+        {
             ui.horizontal_top(|ui| {
-                ui.add_space(6.0);
+                ui.add_space(6.0 + level * 14.0);
                 ui.label(RichText::new("•").color(Color32::from_rgb(96, 165, 250)));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(item.trim()).color(Color32::from_rgb(203, 213, 225)),
-                    )
-                    .wrap(),
-                );
+                // Wrap to the width remaining to the right of the bullet + indent.
+                let w = ui.available_width();
+                let job = inline_md_job(ui, item.trim(), BASE, false, w);
+                ui.add(egui::Label::new(job));
             });
         } else {
-            ui.add(
-                egui::Label::new(RichText::new(line).color(Color32::from_rgb(203, 213, 225)))
-                    .wrap(),
-            );
+            let w = ui.available_width();
+            let job = inline_md_job(ui, trimmed, BASE, false, w);
+            ui.add(egui::Label::new(job));
+        }
+    }
+}
+
+/// Parse one line of inline markdown into a wrapped [`egui::text::LayoutJob`].
+/// Handles `**bold**` (rendered as a brighter "strong" colour), `*italic*` /
+/// `_italic_` (egui's synthetic slant), `` `code` `` (monospace on a faint chip)
+/// and `[text](url)` (the link text, inline). Unmatched markers stay literal.
+fn inline_md_job(
+    ui: &egui::Ui,
+    text: &str,
+    base: Color32,
+    base_strong: bool,
+    wrap_width: f32,
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
+    let strong_col = Color32::from_rgb(236, 242, 250);
+    let code_col = Color32::from_rgb(147, 197, 253);
+    let code_bg = Color32::from_rgb(30, 30, 50);
+
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut buf = String::new();
+    let mut bold = base_strong;
+    let mut italic = false;
+
+    // Flush the plain-text accumulator as one styled run.
+    let flush = |job: &mut LayoutJob, buf: &mut String, bold: bool, italic: bool| {
+        if buf.is_empty() {
+            return;
+        }
+        let mut fmt = TextFormat::simple(
+            body_font.clone(),
+            if bold { strong_col } else { base },
+        );
+        fmt.italics = italic;
+        job.append(buf, 0.0, fmt);
+        buf.clear();
+    };
+
+    let mut i = 0usize;
+    while i < n {
+        let c = chars[i];
+        if c == '`' {
+            // Inline code up to the next backtick.
+            if let Some(rel) = chars[i + 1..].iter().position(|&x| x == '`') {
+                flush(&mut job, &mut buf, bold, italic);
+                let end = i + 1 + rel;
+                let code: String = chars[i + 1..end].iter().collect();
+                let mut fmt = TextFormat::simple(mono_font.clone(), code_col);
+                fmt.background = code_bg;
+                job.append(&code, 0.0, fmt);
+                i = end + 1;
+                continue;
+            }
+        } else if c == '*' && i + 1 < n && chars[i + 1] == '*' {
+            // Bold toggle.
+            flush(&mut job, &mut buf, bold, italic);
+            bold = !bold;
+            i += 2;
+            continue;
+        } else if (c == '*' || c == '_') && is_emph_delim(&chars, i, italic) {
+            // Italic toggle (word-boundary aware so `snake_case` is untouched).
+            flush(&mut job, &mut buf, bold, italic);
+            italic = !italic;
+            i += 1;
+            continue;
+        } else if c == '[' {
+            // Link `[text](url)` → keep the link text, drop the URL.
+            if let Some(close_rel) = chars[i + 1..].iter().position(|&x| x == ']') {
+                let close = i + 1 + close_rel;
+                if close + 1 < n && chars[close + 1] == '(' {
+                    if let Some(paren_rel) = chars[close + 2..].iter().position(|&x| x == ')') {
+                        for ch in &chars[i + 1..close] {
+                            buf.push(*ch);
+                        }
+                        i = close + 2 + paren_rel + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        buf.push(c);
+        i += 1;
+    }
+    flush(&mut job, &mut buf, bold, italic);
+    job
+}
+
+/// Whether the `*`/`_` at `i` acts as an emphasis delimiter (rather than literal
+/// punctuation or an intra-word underscore like `set_paint`). Opening markers
+/// must be followed by a non-space; closing markers must follow a non-space; and
+/// `_` additionally requires a word boundary on the outer side so identifiers are
+/// never italicised.
+fn is_emph_delim(chars: &[char], i: usize, in_italic: bool) -> bool {
+    let c = chars[i];
+    let prev = i.checked_sub(1).map(|p| chars[p]);
+    let next = chars.get(i + 1).copied();
+    if in_italic {
+        let prev_ok = prev.is_some_and(|p| !p.is_whitespace());
+        if c == '_' {
+            prev_ok && next.is_none_or(|x| !x.is_alphanumeric())
+        } else {
+            prev_ok
+        }
+    } else {
+        let next_ok = next.is_some_and(|x| !x.is_whitespace() && x != c);
+        if c == '_' {
+            next_ok && prev.is_none_or(|p| !p.is_alphanumeric())
+        } else {
+            next_ok
         }
     }
 }

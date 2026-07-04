@@ -1,6 +1,6 @@
 use crate::commands::KeyBinding;
 use crate::hotbar::{HotbarBucket, HotbarMode};
-use crate::panels::DrawerGroup;
+use crate::panels::{DrawerGroup, RightDrawerGroup};
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -92,6 +92,13 @@ pub struct AppPreferences {
     /// Target (fully-open) width of the drawer panel, in logical px.
     #[serde(default = "default_drawer_width")]
     pub drawer_width: f32,
+    /// Which group is open in the right rail, or `None` when only the right rail
+    /// shows. Defaults to Layers so launch looks ~like the old always-on panel.
+    #[serde(default = "default_open_right_drawer")]
+    pub open_right_drawer: Option<RightDrawerGroup>,
+    /// Target (fully-open) width of the right drawer panel, in logical px.
+    #[serde(default = "default_right_drawer_width")]
+    pub right_drawer_width: f32,
     /// When true, drawer open/close transitions are instant (no width tween) —
     /// honours the user's reduced-motion preference.
     #[serde(default)]
@@ -124,6 +131,14 @@ fn default_open_drawer() -> Option<DrawerGroup> {
 
 fn default_drawer_width() -> f32 {
     220.0
+}
+
+fn default_open_right_drawer() -> Option<RightDrawerGroup> {
+    Some(RightDrawerGroup::Layers)
+}
+
+fn default_right_drawer_width() -> f32 {
+    280.0
 }
 
 /// How the project-history retention limit is measured.
@@ -188,6 +203,8 @@ impl Default for AppPreferences {
             pinned_tools: Vec::new(),
             open_drawer: Some(DrawerGroup::Tools),
             drawer_width: 220.0,
+            open_right_drawer: Some(RightDrawerGroup::Layers),
+            right_drawer_width: 280.0,
             reduced_motion: false,
             hotbar_mode: HotbarMode::default(),
             hotbar_usage: HashMap::new(),

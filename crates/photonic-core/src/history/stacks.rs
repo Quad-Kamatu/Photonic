@@ -2,9 +2,22 @@ use super::*;
 
 impl CommandHistory {
     pub fn new(max_depth: usize) -> Self {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            0,
+            HistNode {
+                id: 0,
+                parent: None,
+                command: None,
+                children: vec![],
+                primary_child: None,
+            },
+        );
         Self {
-            undo_stack: vec![],
-            redo_stack: vec![],
+            nodes,
+            root: 0,
+            current: 0,
+            next_id: 1,
             max_depth,
             size_limit_bytes: None,
             warned_at_limit: false,
@@ -63,16 +76,35 @@ impl CommandHistory {
             .unwrap_or(0)
     }
 
-    /// Drop oldest undo steps until within the step ceiling. Cheap — no
-    /// serialization. Latches a warning on the first step actually dropped.
+    /// Ceiling on the total number of retained tree nodes. The step limit bounds
+    /// the *current path* depth; this bounds the whole tree so many sibling
+    /// branches can't grow memory without bound. Generous relative to the step
+    /// ceiling so real branching is kept, but finite.
+    fn node_cap(&self) -> usize {
+        self.max_depth.saturating_mul(4).max(self.max_depth + 1)
+    }
+
+    /// Trim the edit tree back within limits. Cheap — no serialization. First
+    /// re-roots while the current path is deeper than the step ceiling (dropping
+    /// the oldest states and any branches hanging off them), then prunes the
+    /// oldest off-path leaves until the total node count is within `node_cap`.
+    /// Latches a warning on the first node actually dropped.
     pub(crate) fn enforce_steps(&mut self) {
         let mut dropped = false;
-        while self.undo_stack.len() > self.max_depth {
-            self.undo_stack.remove(0);
+        while self.depth_of(self.current) > self.max_depth {
+            if !self.reroot_once() {
+                break;
+            }
+            dropped = true;
+        }
+        while self.nodes.len() > self.node_cap() + 1 {
+            if !self.prune_oldest_offpath_leaf() {
+                break;
+            }
             dropped = true;
         }
         // Recovered comfortably under the ceiling → re-arm the warning latch.
-        if self.undo_stack.len() * 10 < self.max_depth * 9 {
+        if self.depth_of(self.current) * 10 < self.max_depth * 9 {
             self.warned_at_limit = false;
         }
         if dropped {
@@ -99,21 +131,24 @@ impl CommandHistory {
             return false;
         };
 
-        let mut est = self.history_byte_size();
         let mut dropped = false;
-        while est > limit {
-            // `+1` approximates the JSON array separator per element.
-            if self.undo_stack.len() > Self::MIN_RETAINED_STEPS {
-                est = est.saturating_sub(entry_byte_size(&self.undo_stack[0]).saturating_add(1));
-                self.undo_stack.remove(0);
-            } else if !self.redo_stack.is_empty() {
-                est = est.saturating_sub(entry_byte_size(&self.redo_stack[0]).saturating_add(1));
-                self.redo_stack.remove(0);
-            } else if self.undo_stack.len() > 1 {
-                est = est.saturating_sub(entry_byte_size(&self.undo_stack[0]).saturating_add(1));
-                self.undo_stack.remove(0);
+        // Re-measure each round: the tree is a graph, not a flat list, so an
+        // incremental byte estimate isn't as clean. Node counts are bounded by
+        // `node_cap`, so at most O(cap) rounds. Prefer dropping the oldest state
+        // (re-root) while above the retained-steps floor, then prune off-path
+        // branches, then as a last resort re-root down to a single step.
+        while self.history_byte_size() > limit {
+            let progressed = if self.depth_of(self.current) > Self::MIN_RETAINED_STEPS {
+                self.reroot_once()
+            } else if self.prune_oldest_offpath_leaf() {
+                true
+            } else if self.depth_of(self.current) > 1 {
+                self.reroot_once()
             } else {
-                // Only a single undo step plus un-trimmable checkpoints/branches
+                false
+            };
+            if !progressed {
+                // Only a single step plus un-trimmable checkpoints/branches
                 // remain. Stop rather than wipe the last step.
                 break;
             }
@@ -168,33 +203,55 @@ impl CommandHistory {
         let desc = cmd.description();
 
         // Gesture coalescing (#182): during an open pointer gesture, fold a
-        // mergeable same-target command into the gesture's anchor undo entry
-        // instead of pushing a new step, so one continuous drag records a single
-        // undo step. Only merges once the gesture has pushed its anchor
-        // (`coalesce_started`), and only when `Command::coalesce` accepts the
-        // pair. Redo was already cleared by the anchor push, and `enforce_steps`
-        // trims from the front, so mutating `undo_stack.last()` is safe.
-        if self.coalescing && self.coalesce_started {
-            if let Some(last) = self.undo_stack.last() {
-                if let Some(merged) = Command::coalesce(last, &cmd) {
-                    cmd.apply(doc);
-                    reevaluate_constraints(doc);
-                    *self.undo_stack.last_mut().unwrap() = merged;
-                    self.gui_debounce.schedule(desc);
-                    return;
+        // mergeable same-target command into the gesture's anchor node's edge
+        // command instead of adding a new node, so one continuous drag records a
+        // single undo step. Only merges once the gesture has anchored
+        // (`coalesce_started`) and when `Command::coalesce` accepts the pair.
+        if self.coalescing && self.coalesce_started && self.current != self.root {
+            let merged = self
+                .nodes
+                .get(&self.current)
+                .and_then(|n| n.command.as_ref())
+                .and_then(|last| Command::coalesce(last, &cmd));
+            if let Some(merged) = merged {
+                cmd.apply(doc);
+                reevaluate_constraints(doc);
+                if let Some(n) = self.nodes.get_mut(&self.current) {
+                    n.command = Some(merged);
                 }
+                self.gui_debounce.schedule(desc);
+                return;
             }
         }
 
         cmd.apply(doc);
         reevaluate_constraints(doc);
-        self.undo_stack.push(cmd);
-        self.redo_stack.clear();
+        // Add a new child under HEAD. Crucially we do NOT discard the old redo
+        // path — if HEAD already had children (i.e. we're editing after an undo),
+        // this new node becomes a *sibling branch* and the old future is kept.
+        let id = self.next_id;
+        self.next_id += 1;
+        let parent = self.current;
+        self.nodes.insert(
+            id,
+            HistNode {
+                id,
+                parent: Some(parent),
+                command: Some(cmd),
+                children: vec![],
+                primary_child: None,
+            },
+        );
+        if let Some(p) = self.nodes.get_mut(&parent) {
+            p.children.push(id);
+            p.primary_child = Some(id);
+        }
+        self.current = id;
         // Enforce the step ceiling on the hot path (cheap). The optional size
         // cap is enforced separately via `enforce_size` (off the hot path,
         // since it must serialize the history to measure it).
         self.enforce_steps();
-        // While a gesture is open, the entry just pushed becomes the anchor that
+        // While a gesture is open, the node just added becomes the anchor that
         // subsequent mergeable ticks fold into.
         if self.coalescing {
             self.coalesce_started = true;
@@ -231,59 +288,105 @@ impl CommandHistory {
         self.coalescing = was_coalescing;
     }
 
-    /// Undo the last command.
+    /// Undo the current edit — move HEAD toward the root, applying the inverse of
+    /// the edge command. The branch we came from is remembered as `primary_child`
+    /// so redo returns to it.
     pub fn undo(&mut self, doc: &mut Document) -> bool {
-        if let Some(cmd) = self.undo_stack.pop() {
-            if let Some(inv) = cmd.inverse(doc) {
-                inv.apply(doc);
+        let cur = self.current;
+        let (parent, cmd) = match self.nodes.get(&cur) {
+            Some(n) => match (n.parent, n.command.clone()) {
+                (Some(p), Some(c)) => (p, c),
+                _ => return false,
+            },
+            None => return false,
+        };
+        if let Some(inv) = cmd.inverse(doc) {
+            inv.apply(doc);
+            reevaluate_constraints(doc);
+            if let Some(pn) = self.nodes.get_mut(&parent) {
+                pn.primary_child = Some(cur);
+            }
+            self.current = parent;
+            true
+        } else {
+            // Can't invert — stay put.
+            false
+        }
+    }
+
+    /// Redo — move HEAD down its primary child (the most recently visited/created
+    /// branch), applying that edge command.
+    pub fn redo(&mut self, doc: &mut Document) -> bool {
+        let cur = self.current;
+        let child = match self.nodes.get(&cur) {
+            Some(n) => n.primary_child.or_else(|| n.children.last().copied()),
+            None => None,
+        };
+        if let Some(c) = child {
+            if let Some(cmd) = self.nodes.get(&c).and_then(|n| n.command.clone()) {
+                cmd.apply(doc);
                 reevaluate_constraints(doc);
-                self.redo_stack.push(cmd);
+                self.current = c;
                 return true;
-            } else {
-                // Can't invert — put it back
-                self.undo_stack.push(cmd);
             }
         }
         false
     }
 
-    /// Redo the last undone command.
-    pub fn redo(&mut self, doc: &mut Document) -> bool {
-        if let Some(cmd) = self.redo_stack.pop() {
-            cmd.apply(doc);
-            reevaluate_constraints(doc);
-            self.undo_stack.push(cmd);
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
+        self.nodes.get(&self.current).is_some_and(|n| n.parent.is_some())
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        self.nodes
+            .get(&self.current)
+            .is_some_and(|n| !n.children.is_empty())
     }
 
     pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+        self.depth_of(self.current)
     }
 
     pub fn redo_depth(&self) -> usize {
-        self.redo_stack.len()
+        self.primary_chain(self.current, usize::MAX).len()
     }
 
-    /// Return the most recent `limit` undo stack entries as `(step_index, description)` pairs,
-    /// newest first. `step_index` is 1-based (1 = most recent).
+    /// Return up to `limit` undo entries (the path from HEAD to the root) as
+    /// `(step_index, description)` pairs, newest first. `step_index` is 1-based
+    /// (1 = most recent).
     pub fn history_entries(&self, limit: usize) -> Vec<(usize, String)> {
-        self.undo_stack
-            .iter()
-            .rev()
+        let mut out = Vec::new();
+        let mut id = self.current;
+        while out.len() < limit {
+            let (cmd, parent) = match self.nodes.get(&id) {
+                Some(n) => match (&n.command, n.parent) {
+                    (Some(c), Some(p)) => (c.description(), p),
+                    _ => break,
+                },
+                None => break,
+            };
+            out.push((out.len() + 1, cmd));
+            id = parent;
+        }
+        out
+    }
+
+    /// Return up to `limit` redo entries (the primary future chain below HEAD) as
+    /// `(step_index, description)` pairs, newest edit first. `step_index` is
+    /// 1-based (1 = the newest future edit — the farthest down the chain).
+    pub fn redo_entries(&self, limit: usize) -> Vec<(usize, String)> {
+        let mut chain = self.primary_chain(self.current, usize::MAX);
+        chain.reverse(); // newest (farthest) first
+        chain
+            .into_iter()
             .take(limit)
             .enumerate()
-            .map(|(i, cmd)| (i + 1, cmd.description()))
+            .filter_map(|(i, id)| {
+                self.nodes
+                    .get(&id)
+                    .and_then(|n| n.command.as_ref())
+                    .map(|c| (i + 1, c.description()))
+            })
             .collect()
     }
 
@@ -306,12 +409,15 @@ impl CommandHistory {
         let current = doc.nodes.get(&node_id)?.clone();
         let steps = steps.max(1);
 
-        // Collect UpdateNode commands that touched this node, newest first.
+        // Collect UpdateNode commands that touched this node along the current
+        // undo path, newest first.
         let mut hits: Vec<SceneNode> = Vec::new(); // each hit's `old` (pre-mutation state)
-        for cmd in self.undo_stack.iter().rev() {
-            collect_node_olds(cmd, node_id, &mut hits);
-            if hits.len() >= steps {
-                break;
+        for id in self.ancestor_edges(self.current) {
+            if let Some(cmd) = self.nodes.get(&id).and_then(|n| n.command.as_ref()) {
+                collect_node_olds(cmd, node_id, &mut hits);
+                if hits.len() >= steps {
+                    break;
+                }
             }
         }
 

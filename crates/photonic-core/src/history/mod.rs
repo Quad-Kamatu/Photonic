@@ -10,6 +10,9 @@ mod branches;
 mod checkpoints;
 mod coalescing;
 mod stacks;
+mod tree;
+
+pub use tree::{HistoryGraphNode, HistoryTree};
 
 #[cfg(test)]
 mod tests {
@@ -1438,7 +1441,7 @@ mod tests {
         history.execute(Command::RemoveNode { node_id }, &mut doc);
         assert!(
             matches!(
-                history.undo_stack.last(),
+                history.current_command(),
                 Some(Command::RemoveNodeFull { node }) if node.id == node_id
             ),
             "RemoveNode was not hydrated into RemoveNodeFull on the undo stack"
@@ -1451,7 +1454,7 @@ mod tests {
         history.execute(Command::RemoveLayer { layer_id }, &mut doc);
         assert!(
             matches!(
-                history.undo_stack.last(),
+                history.current_command(),
                 Some(Command::RemoveLayerFull { layer }) if layer.id == layer_id
             ),
             "RemoveLayer was not hydrated into RemoveLayerFull on the undo stack"
@@ -1471,13 +1474,76 @@ mod tests {
             Command::Batch(vec![Command::RemoveNode { node_id: n2_id }]),
             &mut doc,
         );
-        match history.undo_stack.last() {
+        match history.current_command() {
             Some(Command::Batch(cmds)) => assert!(
                 matches!(cmds.as_slice(), [Command::RemoveNodeFull { node }] if node.id == n2_id),
                 "RemoveNode inside Batch was not hydrated"
             ),
             other => panic!("expected Batch on undo stack, got {other:?}"),
         }
+    }
+
+    // ── Edit tree / branching ─────────────────────────────────────────────────
+
+    #[test]
+    fn editing_after_undo_forks_a_branch_and_keeps_the_old_future() {
+        let mut doc = make_doc();
+        let mut h = CommandHistory::new(200);
+
+        let a = make_node(&doc);
+        let a_id = a.id;
+        h.execute(Command::AddNode { node: a, layer_id: None }, &mut doc);
+        let b = make_node(&doc);
+        let b_id = b.id;
+        h.execute(Command::AddNode { node: b, layer_id: None }, &mut doc);
+
+        // Undo B, then make a different edit C — this must FORK (keep B), not
+        // discard it the way a flat redo stack would.
+        assert!(h.undo(&mut doc));
+        assert!(!doc.nodes.contains_key(&b_id));
+        let c = make_node(&doc);
+        let c_id = c.id;
+        h.execute(Command::AddNode { node: c, layer_id: None }, &mut doc);
+
+        // Tree now: root → A → { B (undone), C (current) }.
+        let graph = h.history_graph();
+        assert_eq!(graph.len(), 4, "root + A + B + C expected");
+        assert!(!h.can_redo(), "C is a leaf");
+
+        // Locate the sibling (B) branch and jump across to it.
+        let cur = graph.iter().find(|n| n.is_current).unwrap();
+        let parent_id = cur.parent.unwrap();
+        let parent = graph.iter().find(|n| n.id == parent_id).unwrap();
+        let b_node = parent.children.iter().copied().find(|&x| x != cur.id).unwrap();
+
+        assert!(h.jump_to_node(b_node, &mut doc), "jump to B branch");
+        assert!(doc.nodes.contains_key(&b_id), "B restored after cross-branch jump");
+        assert!(!doc.nodes.contains_key(&c_id), "C removed after jump to B branch");
+        assert!(doc.nodes.contains_key(&a_id), "shared ancestor A still present");
+
+        // Jump back to C and confirm the other branch swaps back in.
+        assert!(h.jump_to_node(cur.id, &mut doc), "jump back to C branch");
+        assert!(doc.nodes.contains_key(&c_id));
+        assert!(!doc.nodes.contains_key(&b_id));
+    }
+
+    #[test]
+    fn branching_survives_snapshot_round_trip() {
+        let mut doc = make_doc();
+        let mut h = CommandHistory::new(200);
+        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        h.undo(&mut doc);
+        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        // 3 edits made across two branches → 4 tree nodes (root + 3).
+        assert_eq!(h.history_graph().len(), 4);
+
+        let json = serde_json::to_string(&h.snapshot_state()).unwrap();
+        let restored: HistorySnapshot = serde_json::from_str(&json).unwrap();
+        let mut fresh = CommandHistory::new(200);
+        fresh.restore_state(restored);
+        // The whole tree (both branches) survives, not just the linear path.
+        assert_eq!(fresh.history_graph().len(), 4, "branch lost across save/load");
     }
 }
 
@@ -2108,14 +2174,22 @@ pub struct Checkpoint {
 /// history survives save → close → reopen and file transfer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HistorySnapshot {
+    /// Legacy flat undo history (path root→current, oldest→newest). Still written
+    /// so older Photonic builds can open new files, and read to reconstruct a
+    /// linear tree from files written before the edit-tree existed.
     #[serde(default)]
     pub undo_stack: Vec<Command>,
+    /// Legacy flat redo history (primary future chain), same compatibility role.
     #[serde(default)]
     pub redo_stack: Vec<Command>,
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
     #[serde(default)]
     pub branches: std::collections::HashMap<String, Document>,
+    /// Full edit tree (the source of truth when present). Absent in files written
+    /// before branching history; those fall back to `undo_stack`/`redo_stack`.
+    #[serde(default)]
+    pub tree: Option<HistoryTree>,
 }
 
 impl HistorySnapshot {
@@ -2186,12 +2260,41 @@ impl DebounceCheckpoint {
 }
 
 /// Maintains a history of commands applied to a Document, enabling undo/redo.
+/// One node in the [`CommandHistory`] edit tree. Represents the document state
+/// reached by applying `command` to the parent's state (the root has no command
+/// and is the oldest retained state). Undo moves toward the root; redo follows
+/// `primary_child`. Undo-then-edit adds a *sibling* child (a new branch) rather
+/// than discarding the old future — that is the undo-tree behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistNode {
+    pub id: u64,
+    #[serde(default)]
+    pub parent: Option<u64>,
+    /// Command transforming the parent's state into this node's. `None` at the root.
+    #[serde(default)]
+    pub command: Option<Command>,
+    /// Child node ids in creation order — each a divergent future edit.
+    #[serde(default)]
+    pub children: Vec<u64>,
+    /// Which child redo prefers (the most recently created or visited).
+    #[serde(default)]
+    pub primary_child: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct CommandHistory {
-    /// Commands that have been applied (undo stack).
-    undo_stack: Vec<Command>,
-    /// Commands that have been undone (redo stack). Cleared on new command.
-    redo_stack: Vec<Command>,
+    /// Edit tree keyed by node id; always contains the root (id of `root`).
+    /// Replaces the old flat undo/redo stacks — the path root→`current` is the
+    /// undo history and `current`'s primary-child chain is the redo history, but
+    /// diverging branches are retained so undo-then-edit no longer loses the
+    /// redo path.
+    nodes: std::collections::HashMap<u64, HistNode>,
+    /// Root (oldest retained) node id.
+    root: u64,
+    /// Node the document currently reflects (HEAD).
+    current: u64,
+    /// Next node id to allocate (monotonic; also the creation-order key).
+    next_id: u64,
     /// Hard ceiling on retained undo steps. Always enforced (cheaply) on every
     /// `execute`, independent of the optional size cap below, so memory stays
     /// bounded even in size-limited mode.
@@ -2233,13 +2336,6 @@ pub struct CommandHistory {
     /// gesture that created it — never into a step left over from before the
     /// gesture began.
     coalesce_started: bool,
-}
-
-/// Serialized byte length of a single history entry (a `Command` or
-/// `Checkpoint`), used for incremental size accounting in
-/// [`CommandHistory::enforce_size`].
-fn entry_byte_size<T: Serialize>(v: &T) -> u64 {
-    serde_json::to_vec(v).map(|b| b.len() as u64).unwrap_or(0)
 }
 
 impl Default for CommandHistory {

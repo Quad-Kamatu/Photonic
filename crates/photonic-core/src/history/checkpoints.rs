@@ -6,11 +6,26 @@ impl CommandHistory {
     /// Capture the persistent history (undo/redo/checkpoints/branches) for
     /// serialization into a `.photon` file. Clones; does not mutate self.
     pub fn snapshot_state(&self) -> HistorySnapshot {
+        // Also emit the legacy flat views (the current undo path and primary redo
+        // chain) so older builds can still open the file; new builds prefer `tree`.
+        let mut undo_stack: Vec<Command> = self
+            .ancestor_edges(self.current)
+            .into_iter()
+            .filter_map(|id| self.nodes.get(&id).and_then(|n| n.command.clone()))
+            .collect();
+        undo_stack.reverse(); // oldest → newest
+        let mut redo_stack: Vec<Command> = self
+            .primary_chain(self.current, usize::MAX)
+            .into_iter()
+            .filter_map(|id| self.nodes.get(&id).and_then(|n| n.command.clone()))
+            .collect();
+        redo_stack.reverse(); // last element == the next redo, matching the old stack
         HistorySnapshot {
-            undo_stack: self.undo_stack.clone(),
-            redo_stack: self.redo_stack.clone(),
+            undo_stack,
+            redo_stack,
             checkpoints: self.checkpoints.clone(),
             branches: self.branches.clone(),
+            tree: Some(self.export_tree()),
         }
     }
 
@@ -19,8 +34,13 @@ impl CommandHistory {
     /// and the revision counter are preserved. Bumps `revision` so revision-
     /// keyed caches refresh.
     pub fn restore_state(&mut self, s: HistorySnapshot) {
-        self.undo_stack = s.undo_stack;
-        self.redo_stack = s.redo_stack;
+        // Prefer the full edit tree; fall back to reconstructing a linear tree
+        // from the legacy flat stacks (files written before branching history).
+        if let Some(tree) = s.tree {
+            self.load_tree(tree);
+        } else {
+            self.rebuild_linear_tree(s.undo_stack, s.redo_stack);
+        }
         self.checkpoints = s.checkpoints;
         self.branches = s.branches;
         self.warned_at_limit = false;
@@ -35,8 +55,7 @@ impl CommandHistory {
     /// no embedded history, or on New, so a previous project's history can't
     /// bleed into the freshly loaded one. Bumps `revision`.
     pub fn reset(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        self.init_empty_tree();
         self.checkpoints.clear();
         self.branches.clear();
         self.warned_at_limit = false;
@@ -88,8 +107,8 @@ impl CommandHistory {
             .find(|c| c.id == id)?
             .snapshot
             .clone();
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        // The checkpoint snapshot becomes the new baseline — start history fresh.
+        self.init_empty_tree();
         Some(snapshot)
     }
 

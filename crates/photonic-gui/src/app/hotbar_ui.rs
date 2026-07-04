@@ -67,8 +67,10 @@ impl PhotonicApp {
         }
     }
 
-    /// Draw the always-on hotbar row (its own `TopBottomPanel`, below the main
-    /// toolbar). Shown every frame regardless of selection.
+    /// Draw the always-on hotbar. Rather than a full-width docked bar, it floats
+    /// as a centred, content-width rounded pill pinned just below the top
+    /// toolbar — detached from the panel stack so it hugs its contents and
+    /// overlays the canvas. Shown every frame regardless of selection.
     pub(crate) fn draw_hotbar(&mut self, ctx: &egui::Context, doc: &mut Document) {
         let (bucket, single_is_group, single_is_fillable_path, single_id) = self.hotbar_bucket(doc);
         self.refresh_hotbar_cache(bucket, single_is_group, single_is_fillable_path);
@@ -77,16 +79,29 @@ impl PhotonicApp {
             .as_ref()
             .map(|c| c.items.clone())
             .unwrap_or_default();
+        if items.is_empty() {
+            return;
+        }
         let active_tool = self.active_tool;
 
+        // `available_rect().top()` is the y directly under the top toolbar (this
+        // runs after that panel is added, before the side panels), so anchoring
+        // there pins the pill to the top of the canvas without covering the
+        // toolbar. CENTER_TOP centres it horizontally in the window.
+        let top_y = ctx.available_rect().top() + 6.0;
+        // Floating pill: fill + border + rounded corners, sized to its contents.
+        let frame = egui::Frame::popup(&ctx.style())
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(8.0, 3.0));
+
         let mut invoked: Option<HotbarItem> = None;
-        egui::TopBottomPanel::top("hotbar")
-            .frame(
-                egui::Frame::side_top_panel(&ctx.style())
-                    .inner_margin(egui::Margin::symmetric(8.0, 3.0)),
-            )
+        egui::Area::new(egui::Id::new("hotbar"))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top_y))
+            .order(egui::Order::Middle)
             .show(ctx, |ui| {
-                invoked = hotbar::render(ui, &items, active_tool);
+                frame.show(ui, |ui| {
+                    invoked = hotbar::render(ui, &items, active_tool);
+                });
             });
 
         if let Some(item) = invoked {

@@ -20,8 +20,8 @@ impl CommandHistory {
     /// Clears undo/redo stacks. Returns `None` if the branch doesn't exist.
     pub fn branch_switch(&mut self, name: &str) -> Option<Document> {
         let snapshot = self.branches.get(name)?.clone();
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        // The branch snapshot becomes the new baseline — start history fresh.
+        self.init_empty_tree();
         Some(snapshot)
     }
 

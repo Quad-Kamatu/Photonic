@@ -3926,7 +3926,8 @@ impl PhotonicApp {
                 }
 
                 PanelAction::RefreshHistory => {
-                    self.history_entries = history.history_entries(20);
+                    self.history_graph = history.history_graph();
+                    self.history_current = history.current_node();
                 }
 
                 PanelAction::SetDocumentBleed { bleed_mm, slug_mm } => {
@@ -6565,6 +6566,16 @@ impl PhotonicApp {
                                 break;
                             }
                         }
+                        self.selected_id = doc.selection.ids().next().copied();
+                        self.invalidate_point_edit(doc);
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::JumpToHistoryNode { id } => {
+                    // Branch-aware jump: navigate the edit tree to the clicked
+                    // commit (may cross branches via the lowest common ancestor).
+                    if history.current_node() != id && history.jump_to_node(id, doc) {
                         self.selected_id = doc.selection.ids().next().copied();
                         self.invalidate_point_edit(doc);
                         doc_modified = true;

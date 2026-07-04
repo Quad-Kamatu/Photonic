@@ -607,8 +607,11 @@ pub enum PanelAction {
     },
     /// Refresh the displayed history entries (read-only trigger).
     RefreshHistory,
-    /// Jump to a specific undo history index.
+    /// Jump to a specific undo history index (linear; used by MCP/CLI).
     JumpToHistory { index: usize },
+    /// Jump to a specific edit-tree node by id (branch-aware; used by the commit
+    /// graph). Navigates across branches via the history tree.
+    JumpToHistoryNode { id: u64 },
     /// Scale and position selected (or all) nodes to fill the artboard safe area.
     FitToMargins,
     /// Add a dimension annotation between two nodes.
@@ -963,8 +966,10 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) grammar_check_results: &'a [(String, bool, String)],
     pub(crate) distance_results: &'a [(String, String, f64, f64, f64)],
     pub(crate) action_names: &'a [(String, usize)],
-    pub(crate) history_entries: &'a [(usize, String)],
-    pub(crate) history_total: usize,
+    /// Full edit tree flattened for the commit graph (newest node first).
+    pub(crate) history_graph: &'a [photonic_core::history::HistoryGraphNode],
+    /// The HEAD node id in the edit tree.
+    pub(crate) history_current: u64,
     pub(crate) bleed_mm_input: &'a mut f64,
     pub(crate) slug_mm_input: &'a mut f64,
     pub(crate) construction_angle: &'a mut f64,
@@ -1013,15 +1018,17 @@ pub enum DrawerGroup {
 }
 
 impl DrawerGroup {
-    /// All groups in rail order (top to bottom).
-    pub const ALL: [DrawerGroup; 7] = [
+    /// All groups shown on the left rail, in order (top to bottom). History is
+    /// intentionally absent — it now lives on the right rail (see
+    /// [`RightDrawerGroup`]) — but the `History` variant is retained so
+    /// `draw_drawer` can still render it there.
+    pub const ALL: [DrawerGroup; 6] = [
         DrawerGroup::Tools,
         DrawerGroup::Inspector,
         DrawerGroup::Modify,
         DrawerGroup::Arrange,
         DrawerGroup::Assets,
         DrawerGroup::Document,
-        DrawerGroup::History,
     ];
 
     /// Phosphor glyph shown on the rail button.
@@ -1063,6 +1070,46 @@ impl DrawerGroup {
             | DrawerGroup::Document
             | DrawerGroup::History => true,
             DrawerGroup::Modify | DrawerGroup::Arrange => selection_count >= 1,
+        }
+    }
+}
+
+/// One of the panels surfaced by the *right* icon rail — the mirror image of
+/// [`DrawerGroup`] on the left. Each toggles a right-side drawer that used to be
+/// stacked together in the always-on right panel (Layers over AI Chat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RightDrawerGroup {
+    /// The layer stack.
+    Layers,
+    /// The AI (Claude) chat assistant.
+    Chat,
+    /// Edit history and branches (moved here from the left rail).
+    History,
+}
+
+impl RightDrawerGroup {
+    /// All groups in rail order (top to bottom).
+    pub const ALL: [RightDrawerGroup; 3] = [
+        RightDrawerGroup::Layers,
+        RightDrawerGroup::Chat,
+        RightDrawerGroup::History,
+    ];
+
+    /// Phosphor glyph shown on the rail button.
+    pub fn icon(self) -> &'static str {
+        match self {
+            RightDrawerGroup::Layers => ph::STACK,
+            RightDrawerGroup::Chat => ph::CHAT_CIRCLE_DOTS,
+            RightDrawerGroup::History => ph::CLOCK_COUNTER_CLOCKWISE,
+        }
+    }
+
+    /// Human-readable title shown in the rail tooltip / drawer header.
+    pub fn title(self) -> &'static str {
+        match self {
+            RightDrawerGroup::Layers => "Layers",
+            RightDrawerGroup::Chat => "AI Chat",
+            RightDrawerGroup::History => "History",
         }
     }
 }
