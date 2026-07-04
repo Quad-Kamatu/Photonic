@@ -36,6 +36,11 @@ pub enum EyedropperTarget {
     NodeFillSolid {
         node_id: NodeId,
     },
+    /// Sample one color and apply it as a solid fill to every listed node
+    /// (multi-selection eyedropper). Recorded as a single undoable batch.
+    NodesFillSolid {
+        node_ids: Vec<NodeId>,
+    },
     NodeFillGradStop {
         node_id: NodeId,
         idx: usize,
@@ -51,6 +56,12 @@ pub enum EyedropperTarget {
     NodeStroke {
         node_id: NodeId,
     },
+    /// Sample one color and apply it as the stroke color of every listed node
+    /// (multi-selection eyedropper). Recorded as a single undoable batch;
+    /// each node keeps its own stroke width/dash.
+    NodesStroke {
+        node_ids: Vec<NodeId>,
+    },
     NodeOuterGlow {
         node_id: NodeId,
     },
@@ -64,6 +75,13 @@ pub enum EyedropperTarget {
     /// (hide every pixel within tolerance of the picked color).
     RasterColorRange {
         node_id: NodeId,
+    },
+    /// Recolor every object listed in `ids` (all currently sharing the `from`
+    /// color) to the sampled color, as one undoable step. Driven by the
+    /// "Fill colors in document" swatch picker's eyedropper button.
+    RecolorSwatch {
+        ids: Vec<NodeId>,
+        from: [f32; 4],
     },
 }
 
@@ -87,6 +105,12 @@ pub enum PanelAction {
     UpdateNodeFill { node_id: NodeId, fill: Fill },
     /// Update the stroke of a selected node.
     UpdateNodeStroke { node_id: NodeId, stroke: Stroke },
+    /// Apply the same fill to every listed node at once (multi-selection edit).
+    /// Recorded as a single undoable batch.
+    UpdateNodesFill { node_ids: Vec<NodeId>, fill: Fill },
+    /// Apply the same stroke to every listed node at once (multi-selection edit).
+    /// Recorded as a single undoable batch.
+    UpdateNodesStroke { node_ids: Vec<NodeId>, stroke: Stroke },
     /// Deep-clone a node and insert the copy at a small offset.
     DuplicateNode { node_id: NodeId },
     /// Remove a specific node by ID.
@@ -1979,15 +2003,41 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                     .default_open(true)
                     .open(forced_open)
                     .show(ui, |ui| {
+                        // When 2+ nodes are selected, a fill edit broadcasts to
+                        // the whole selection; with one node it targets just it.
+                        let multi = selection_count >= 2;
+                        if multi {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Editing fill for {selection_count} selected objects"
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        }
                         let mut fill_drop: Option<FillColorSlot> = None;
                         if let Some(new_fill) = draw_fill_editor(ui, &pn.fill, &mut fill_drop) {
-                            action = Some(PanelAction::UpdateNodeFill {
-                                node_id: nid,
-                                fill: new_fill,
+                            action = Some(if multi {
+                                PanelAction::UpdateNodesFill {
+                                    node_ids: selected_ids.to_vec(),
+                                    fill: new_fill,
+                                }
+                            } else {
+                                PanelAction::UpdateNodeFill {
+                                    node_id: nid,
+                                    fill: new_fill,
+                                }
                             });
                         }
                         if let Some(slot) = fill_drop {
+                            // The solid-fill eyedropper broadcasts to the whole
+                            // selection; per-stop/point slots stay on the primary.
                             action = Some(PanelAction::StartEyedropper(match slot {
+                                FillColorSlot::Solid if multi => {
+                                    EyedropperTarget::NodesFillSolid {
+                                        node_ids: selected_ids.to_vec(),
+                                    }
+                                }
                                 FillColorSlot::Solid => {
                                     EyedropperTarget::NodeFillSolid { node_id: nid }
                                 }
@@ -2032,14 +2082,22 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                     );
                                     if resp.clicked() {
                                         use photonic_core::{Color, Fill};
-                                        action = Some(PanelAction::UpdateNodeFill {
-                                            node_id: nid,
-                                            fill: Fill::solid(Color {
-                                                r: rc.r,
-                                                g: rc.g,
-                                                b: rc.b,
-                                                a: rc.a,
-                                            }),
+                                        let fill = Fill::solid(Color {
+                                            r: rc.r,
+                                            g: rc.g,
+                                            b: rc.b,
+                                            a: rc.a,
+                                        });
+                                        action = Some(if multi {
+                                            PanelAction::UpdateNodesFill {
+                                                node_ids: selected_ids.to_vec(),
+                                                fill,
+                                            }
+                                        } else {
+                                            PanelAction::UpdateNodeFill {
+                                                node_id: nid,
+                                                fill,
+                                            }
                                         });
                                     }
                                     if resp.hovered() {
@@ -2063,18 +2121,31 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                     .default_open(true)
                     .open(forced_open)
                     .show(ui, |ui| {
+                        let multi = selection_count >= 2;
                         let mut d = false;
                         if let Some(new_stroke) = draw_stroke_editor(ui, &pn.stroke, &mut d) {
-                            action = Some(PanelAction::UpdateNodeStroke {
-                                node_id: nid,
-                                stroke: new_stroke,
+                            action = Some(if multi {
+                                PanelAction::UpdateNodesStroke {
+                                    node_ids: selected_ids.to_vec(),
+                                    stroke: new_stroke,
+                                }
+                            } else {
+                                PanelAction::UpdateNodeStroke {
+                                    node_id: nid,
+                                    stroke: new_stroke,
+                                }
                             });
                         }
                         if d {
-                            action =
-                                Some(PanelAction::StartEyedropper(EyedropperTarget::NodeStroke {
-                                    node_id: nid,
-                                }));
+                            // With 2+ selected, the stroke eyedropper recolors
+                            // every selected object's stroke; otherwise just this one.
+                            action = Some(PanelAction::StartEyedropper(if multi {
+                                EyedropperTarget::NodesStroke {
+                                    node_ids: selected_ids.to_vec(),
+                                }
+                            } else {
+                                EyedropperTarget::NodeStroke { node_id: nid }
+                            }));
                         }
                     });
             }
@@ -4014,6 +4085,20 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             let mut edit = ui.data(|d| d.get_temp::<RecolorSwatchEdit>(edit_id));
             let mut just_opened = false;
 
+            // A pending eyedropper request from the picker's "Pick" button.
+            // The eyedropper is started one frame *after* the popup closes so any
+            // live preview has already been reverted to the original color first;
+            // an Esc during the eyedropper then leaves the document untouched.
+            let pending_pick_id = ui.make_persistent_id("recolor_swatch_pending_pick");
+            if let Some((ids, from)) =
+                ui.data_mut(|d| d.remove_temp::<(Vec<NodeId>, [f32; 4])>(pending_pick_id))
+            {
+                action = Some(PanelAction::StartEyedropper(EyedropperTarget::RecolorSwatch {
+                    ids,
+                    from,
+                }));
+            }
+
             ui.horizontal_wrapped(|ui| {
                 for c in &fill_colors {
                     let rgba = [c.r, c.g, c.b, c.a];
@@ -4079,6 +4164,7 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 let mut current = e.current;
                 let mut apply = false;
                 let mut cancel = false;
+                let mut pick = false;
                 let frame_resp = egui::Frame::popup(ui.style())
                     .show(ui, |ui| {
                         ui.label(
@@ -4110,6 +4196,16 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             if ui.button("Cancel").clicked() {
                                 cancel = true;
                             }
+                            if ui
+                                .button(format!("{} Pick", ph::EYEDROPPER))
+                                .on_hover_text(
+                                    "Sample a replacement color from the canvas \
+                                     (Esc to cancel)",
+                                )
+                                .clicked()
+                            {
+                                pick = true;
+                            }
                         });
                     })
                     .response;
@@ -4118,7 +4214,24 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 // keeps the change — same as Apply. Ignore the click that opened it.
                 let click_away = !just_opened && frame_resp.clicked_elsewhere();
 
-                if apply || click_away {
+                if pick {
+                    // Hand off to the canvas eyedropper. Revert any live preview
+                    // to the original color now, then start the eyedropper next
+                    // frame (via the pending marker) so an Esc leaves no change.
+                    if e.applied != e.original {
+                        action = Some(PanelAction::RecolorPreview {
+                            ids: e.ids.clone(),
+                            to: e.original,
+                        });
+                    }
+                    ui.data_mut(|d| {
+                        d.insert_temp::<(Vec<NodeId>, [f32; 4])>(
+                            pending_pick_id,
+                            (e.ids.clone(), e.original),
+                        )
+                    });
+                    edit = None;
+                } else if apply || click_away {
                     action = Some(PanelAction::RecolorCommit {
                         ids: e.ids.clone(),
                         from: e.original,

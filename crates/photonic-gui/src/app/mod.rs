@@ -6450,6 +6450,73 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::UpdateNodesFill { node_ids, fill } => {
+                    // Apply one fill to the whole selection as a single undoable
+                    // batch. Covers path and text nodes (the fill-bearing kinds).
+                    if let photonic_core::style::FillKind::Solid(c) = &fill.kind {
+                        self.pending_recent_color = Some(*c);
+                    }
+                    let mut cmds: Vec<Command> = Vec::new();
+                    for id in &node_ids {
+                        if let Some(node) = doc.nodes.get(id) {
+                            let mut new_node = node.clone();
+                            let changed = match &mut new_node.kind {
+                                SceneNodeKind::Path(pn) => {
+                                    pn.fill = fill.clone();
+                                    true
+                                }
+                                SceneNodeKind::Text(tn) => {
+                                    tn.fill = fill.clone();
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if changed {
+                                cmds.push(Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                });
+                            }
+                        }
+                    }
+                    if !cmds.is_empty() {
+                        history.execute(Command::Batch(cmds), doc);
+                        doc_modified = true;
+                    }
+                }
+                PanelAction::UpdateNodesStroke { node_ids, stroke } => {
+                    if stroke.enabled {
+                        self.pending_recent_color = Some(stroke.color);
+                    }
+                    let mut cmds: Vec<Command> = Vec::new();
+                    for id in &node_ids {
+                        if let Some(node) = doc.nodes.get(id) {
+                            let mut new_node = node.clone();
+                            let changed = match &mut new_node.kind {
+                                SceneNodeKind::Path(pn) => {
+                                    pn.stroke = stroke.clone();
+                                    true
+                                }
+                                SceneNodeKind::Text(tn) => {
+                                    tn.stroke = stroke.clone();
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if changed {
+                                cmds.push(Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                });
+                            }
+                        }
+                    }
+                    if !cmds.is_empty() {
+                        history.execute(Command::Batch(cmds), doc);
+                        doc_modified = true;
+                    }
+                }
+
                 PanelAction::UpdateNodeOuterGlow { node_id, glow } => {
                     if let Some(node) = doc.nodes.get(&node_id) {
                         let mut new_node = node.clone();
@@ -12956,6 +13023,37 @@ impl PhotonicApp {
                     *doc_modified = true;
                 }
             }
+            Some(EyedropperTarget::NodesStroke { node_ids }) => {
+                // Broadcast the sampled color to every selected node's stroke,
+                // as one undoable batch; each node keeps its own width/dash.
+                let mut cmds: Vec<Command> = Vec::new();
+                for id in &node_ids {
+                    if let Some(node) = doc.get_node(id) {
+                        let mut updated = node.clone();
+                        let changed = match &mut updated.kind {
+                            SceneNodeKind::Path(pn) => {
+                                pn.stroke.color = picked;
+                                true
+                            }
+                            SceneNodeKind::Text(tn) => {
+                                tn.stroke.color = picked;
+                                true
+                            }
+                            _ => false,
+                        };
+                        if changed {
+                            cmds.push(Command::UpdateNode {
+                                old: node.clone(),
+                                new: updated,
+                            });
+                        }
+                    }
+                }
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
             Some(EyedropperTarget::NodeOuterGlow { node_id }) => {
                 if let Some(node) = doc.get_node(&node_id) {
                     let mut updated = node.clone();
@@ -12996,6 +13094,80 @@ impl PhotonicApp {
                         doc,
                     );
                     *doc_modified = true;
+                }
+            }
+            Some(EyedropperTarget::NodesFillSolid { node_ids }) => {
+                // Broadcast the sampled color as a solid fill to the whole
+                // selection, as one undoable batch.
+                let new_fill = Fill::solid(picked);
+                let mut cmds: Vec<Command> = Vec::new();
+                for id in &node_ids {
+                    if let Some(node) = doc.get_node(id) {
+                        let mut updated = node.clone();
+                        let changed = match &mut updated.kind {
+                            SceneNodeKind::Path(pn) => {
+                                pn.fill = new_fill.clone();
+                                true
+                            }
+                            SceneNodeKind::Text(tn) => {
+                                tn.fill = new_fill.clone();
+                                true
+                            }
+                            _ => false,
+                        };
+                        if changed {
+                            cmds.push(Command::UpdateNode {
+                                old: node.clone(),
+                                new: updated,
+                            });
+                        }
+                    }
+                }
+                if !cmds.is_empty() {
+                    history.execute(Command::Batch(cmds), doc);
+                    *doc_modified = true;
+                }
+            }
+            Some(EyedropperTarget::RecolorSwatch { ids, from }) => {
+                // Recolor every matching object from its shared `from` color to
+                // the sampled color, as one undoable batch — mirrors the
+                // RecolorCommit path but with the color chosen via the canvas.
+                let from_color = photonic_core::Color {
+                    r: from[0],
+                    g: from[1],
+                    b: from[2],
+                    a: from[3],
+                };
+                if picked != from_color {
+                    let mut cmds: Vec<Command> = Vec::new();
+                    for id in &ids {
+                        if let Some(node) = doc.nodes.get(id) {
+                            let mut old_node = node.clone();
+                            let mut new_node = node.clone();
+                            match &mut old_node.kind {
+                                SceneNodeKind::Path(p) => {
+                                    p.fill.kind = FillKind::Solid(from_color)
+                                }
+                                SceneNodeKind::Text(t) => {
+                                    t.fill.kind = FillKind::Solid(from_color)
+                                }
+                                _ => {}
+                            }
+                            match &mut new_node.kind {
+                                SceneNodeKind::Path(p) => p.fill.kind = FillKind::Solid(picked),
+                                SceneNodeKind::Text(t) => t.fill.kind = FillKind::Solid(picked),
+                                _ => {}
+                            }
+                            cmds.push(Command::UpdateNode {
+                                old: old_node,
+                                new: new_node,
+                            });
+                        }
+                    }
+                    if !cmds.is_empty() {
+                        history.execute(Command::Batch(cmds), doc);
+                        *doc_modified = true;
+                    }
                 }
             }
             // Handled directly in the eyedropper overlay (samples raster pixels
