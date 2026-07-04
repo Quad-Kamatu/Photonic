@@ -3,6 +3,23 @@
 #![allow(clippy::too_many_arguments)]
 use super::*;
 
+fn anchors_in_screen_rect(
+    bez: &kurbo::BezPath,
+    transform: &photonic_core::transform::Transform,
+    view: &CanvasView,
+    rect: egui::Rect,
+) -> Vec<usize> {
+    path_anchor_points(bez)
+        .into_iter()
+        .filter_map(|(idx, point)| {
+            let (cx, cy) = transform.apply(point.x, point.y);
+            let (sx, sy) = view.canvas_to_screen(cx, cy);
+            rect.contains(egui::pos2(sx as f32, sy as f32))
+                .then_some(idx)
+        })
+        .collect()
+}
+
 impl PhotonicApp {
     /// Drop point-edit selection state that an external document change (undo,
     /// redo, deletion) may have invalidated: the anchor indices in
@@ -244,9 +261,9 @@ impl PhotonicApp {
         let add_sel = shift || ctrl;
 
         // hover_pos is used ONLY for the visual highlight — NOT for hit-testing on
-        // click/drag events.  All interaction positions come from interact_pointer_pos()
-        // so that the test point is at the press location, not the current cursor position
-        // (by the time drag_started fires the cursor may have moved off the anchor).
+        // click/drag events. Drag-start hit tests use pointer.press_origin(), because
+        // interact_pointer_pos() is the current cursor position and may already have
+        // crossed onto the path by the time egui's drag threshold is reached.
         let hover_canvas = ui
             .input(|i| i.pointer.hover_pos())
             .map(|p| view.screen_to_canvas(p.x as f64, p.y as f64));
@@ -395,10 +412,13 @@ impl PhotonicApp {
             });
         });
 
-        // ── Drag start: use interact_pointer_pos() — the press location ───────
+        // ── Drag start: hit-test the original pointer-down position ───────────
         // Priority: bezier handle > corner widget > anchor point > shape body.
         if response.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(press_pos) = response.interact_pointer_pos() {
+            let press_pos = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            if let Some(press_pos) = press_pos {
                 let (cx, cy) = view.screen_to_canvas(press_pos.x as f64, press_pos.y as f64);
                 let edit_node = self.point_edit_node.and_then(|nid| doc.nodes.get(&nid));
 
@@ -680,17 +700,7 @@ impl PhotonicApp {
                     .and_then(|node| match &node.kind {
                         SceneNodeKind::Path(pn) => {
                             let bez = pn.path_data.to_bez_path();
-                            Some(
-                                path_anchor_points(&bez)
-                                    .into_iter()
-                                    .filter_map(|(idx, p)| {
-                                        let (cx, cy) = node.transform.apply(p.x, p.y);
-                                        let (sx, sy) = view.canvas_to_screen(cx, cy);
-                                        rect.contains(egui::pos2(sx as f32, sy as f32))
-                                            .then_some(idx)
-                                    })
-                                    .collect::<Vec<usize>>(),
-                            )
+                            Some(anchors_in_screen_rect(&bez, &node.transform, view, rect))
                         }
                         _ => None,
                     })
@@ -917,5 +927,31 @@ impl PhotonicApp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marquee_collects_all_transformed_anchors_inside_screen_rect() {
+        let mut bez = kurbo::BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((10.0, 10.0));
+        bez.line_to((30.0, 30.0));
+
+        let transform = photonic_core::transform::Transform::translate(5.0, 7.0);
+        let mut view = CanvasView::default();
+        view.zoom = 2.0;
+        view.pan_x = 3.0;
+        view.pan_y = 4.0;
+
+        // The transformed screen anchors are (13,18), (33,38), and (73,78).
+        let rect = egui::Rect::from_min_max(egui::pos2(10.0, 15.0), egui::pos2(40.0, 45.0));
+        assert_eq!(
+            anchors_in_screen_rect(&bez, &transform, &view, rect),
+            vec![0, 1]
+        );
     }
 }
