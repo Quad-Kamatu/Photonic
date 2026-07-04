@@ -1,6 +1,7 @@
 pub mod annotations;
 pub mod audit;
 pub mod canvas;
+pub mod charts;
 pub mod clipboard;
 pub mod color_guide;
 pub mod document;
