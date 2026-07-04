@@ -7,10 +7,6 @@ pub use crate::handlers::typography::{
     set_opentype_features, get_opentype_features, bind_text_variable, unbind_text_variable,
     link_text_frames, unlink_text_frames,
 };
-use crate::handlers::shared::{
-    random::xorshift64,
-    styling::{apply_stroke_paint, apply_style},
-};
 pub use crate::handlers::shapes::{
     create_shape, create_path, create_curvature_path, create_flare, create_spiral, create_grid, create_polar_grid, create_heart, create_gear, create_wave_pattern, create_freehand_path, build_shape_from_points, create_speech_bubble, create_cross, create_arrow_shape, create_donut, create_sunburst, create_parametric_shape, create_truchet_tiling, add_anchor_points, delete_anchor_point, average_anchor_points, convert_anchor_points, zig_zag_path, pucker_bloat, roughen_path, twirl_path, round_corners, scallop_path, crystallize_path, simplify_path, smooth_path, reverse_path_direction, offset_path, join_paths, scissors_cut, outline_stroke, point_on_path, measure_path, noise_deform, warp_envelope,
 };
@@ -41,59 +37,8 @@ pub use crate::handlers::charts::{
     create_bar_chart, create_line_chart, create_pie_chart, create_radar_chart,
     create_scatter_plot, create_stacked_bar_chart,
 };
-use crate::protocol::{
-    AddAnchorPointsArgs, AddDropShadowArgs, AdjustColorsArgs,
-    AlignAnchor, AlignNodesArgs, AlignOperation, ApplyCharacterStyleArgs, ApplyFlexLayoutArgs,
-    ApplyGridLayoutArgs, ApplyParagraphStyleArgs, ApplyStackLayoutArgs, ApplyTransformArgs,
-    ArrayMode, AutoNameNodesArgs, AverageAnchorPointsArgs, BindTextVariableArgs, BlendColorsArgs,
-    BlendObjectsArgs, BuildShapeFromPointsArgs, CenterOnCanvasArgs,
-    CheckStyleContinuityArgs, CleanUpArgs, ClearBlendSpineArgs,
-    ClearSymbolOverridesArgs, ClearTabStopsArgs, ClearTextAreaArgs, ClearTextPathArgs,
-    ConvertAnchorMode, ConvertAnchorPointsArgs, ConvertToGrayscaleArgs, CopyAppearanceArgs,
-    CreateArrayArgs, CreateArrowShapeArgs, CreateCharacterStyleArgs,
-    CreateCrossArgs, CreateCurvaturePathArgs, CreateDonutArgs, CreateFlareArgs,
-    CreateFreehandPathArgs, CreateGearArgs, CreateGridArgs, CreateHeartArgs,
-    CreateParagraphStyleArgs, CreateParametricShapeArgs, CreatePathArgs,
-    CreatePolarGridArgs, CreateShapeArgs,
-    CreateSpeechBubbleArgs, CreateSpiralArgs, CreateSunburstArgs,
-    CreateTextArgs, CreateTruchetTilingArgs, CreateWavePatternArgs, CrossAxisAlign,
-    CrystallizePathArgs, DeleteAnchorPointArgs, DeleteCharacterStyleArgs, DeleteNodeArgs,
-    DeleteParagraphStyleArgs, DeselectAllArgs, DistributeNoOverlapArgs, DistributeOnPathArgs,
-    DuplicateNodesArgs, EnterIsolationModeArgs, ExitIsolationModeArgs,
-    ExpandBlendArgs, ExportTaggedAssetsArgs, FindNodesArgs, FindReplaceStyleArgs,
-    FindReplaceTextArgs, FitToCanvasArgs, FlattenGroupArgs, FlattenTransparencyArgs, FlipNodesArgs,
-    GetCssPreviewArgs, GetNodeArgs, GetNodePromptsArgs, GetOpenTypeFeaturesArgs,
-    GetRecentColorsArgs, GroupNodesArgs, HatchFillArgs, InspectNodeArgs, InvertColorsArgs,
-    JoinPathsArgs, LassoSelectArgs, LayoutMode, LayoutNodesArgs, LinkTextFramesArgs,
-    MagicWandSelectArgs,
-    MeasureDistanceArgs, MeasurePathArgs, MeasureTarget, MirrorCopyArgs, MoveToLayerArgs,
-    NoiseDeformArgs, ObjectKindFilter, OffsetPathArgs, OutlineStrokeArgs, ParametricShapeType,
-    PointOnPathArgs, PuckerBloatArgs, RandomizeColorsArgs, RecolorArtworkArgs,
-    RemoveStyleArgs,
-    ReorderNodeArgs, ReorderOperation, ReverseBlendSpineArgs, ReverseNodeOrderArgs,
-    ReversePathDirectionArgs, RotateCopiesArgs, RoughenPathArgs, RoundCornersArgs,
-    SampleColorAtArgs, ScallopPathArgs, ScatterCopiesArgs, ScissorsCutArgs, SelectAllArgs,
-    SelectByKindArgs, SelectInsideGroupArgs, SelectSameArgs, SelectSameAttribute,
-    SelectSimilarArgs, SetBlendModeArgs, SetBlendSpineArgs, SetCharacterMetricsArgs,
-    SetFontStyleArgs, SetFontWeightArgs, SetLockedArgs, SetNodePromptArgs, SetOpacityArgs,
-    SetPaintArgs,
-    SetOpenTypeFeaturesArgs, SetParagraphOptionsArgs, SetSelectionArgs, SetSymbolOverrideArgs,
-    SetTabStopsArgs, SetTextAreaArgs, SetTextDecorationArgs, SetTextDirectionArgs, SetTextPathArgs,
-    SetVisibilityArgs, ShapeType, SimplifyPathArgs, SmoothPathArgs, SnapToPixelArgs,
-    SplitIntoGridArgs, StippleFillArgs, StyleTransferArgs, SwapFillStrokeArgs,
-    TagNodeForExportArgs, TagNodesArgs, ToolResult, TransformCopiesArgs, TwirlPathArgs,
-    UnbindTextVariableArgs, UndoNodeArgs, UngroupNodesArgs, UnlinkTextFramesArgs, UpdateNodeArgs,
-    WarpEnvelopeArgs, ZigZagPathArgs,
-};
-use crate::server::AppState;
 use kurbo;
-use photonic_core::{
-    history::Command,
-    layer::BlendMode,
-    node::{GroupNode, NodeId, PathNode, SceneNode, SceneNodeKind},
-    path::PathData,
-    transform::Transform,
-};
+use photonic_core::node::{SceneNode, SceneNodeKind};
 
 
 
