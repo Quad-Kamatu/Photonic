@@ -2,6 +2,7 @@
 
 pub mod handlers;
 pub mod protocol;
+pub mod schema_gen;
 pub mod server;
 
 pub use server::{McpServer, McpServerConfig};
