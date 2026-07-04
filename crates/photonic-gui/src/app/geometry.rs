@@ -220,6 +220,24 @@ pub(crate) fn path_anchor_points(bez: &BezPath) -> Vec<(usize, Point)> {
         .collect()
 }
 
+/// Screen-space positions of a path's on-curve anchor points (endpoints only,
+/// no sampled points along curves). Applies `transform` (local → canvas) then
+/// `view` (canvas → screen).
+pub(crate) fn anchor_screen_points_xf(
+    bez: &BezPath,
+    view: &CanvasView,
+    transform: &photonic_core::transform::Transform,
+) -> Vec<egui::Pos2> {
+    path_anchor_points(bez)
+        .into_iter()
+        .map(|(_, p)| {
+            let (cx, cy) = transform.apply(p.x, p.y);
+            let (sx, sy) = view.canvas_to_screen(cx, cy);
+            egui::pos2(sx as f32, sy as f32)
+        })
+        .collect()
+}
+
 /// Find the element index of the anchor point nearest to `(cursor_cx, cursor_cy)`
 /// in canvas space, within `threshold_px` pixels on screen.
 pub(crate) fn nearest_anchor_screen(

@@ -1,5 +1,6 @@
 pub mod boolean;
 pub mod constraints;
+pub mod fit_curves;
 pub mod join;
 pub mod merge;
 pub mod offset;

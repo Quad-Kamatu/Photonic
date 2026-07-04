@@ -255,14 +255,60 @@ struct SimplifyDialog {
     node_id: NodeId,
     node_name: String,
     tolerance: f64,
+    /// When true, fit smooth cubic Béziers (min anchors) instead of the
+    /// straight-line Ramer-Douglas-Peucker reduction.
+    fit_curves: bool,
+    /// Corner-angle threshold (degrees) for curve-fit mode: joins gentler than
+    /// this fuse into a curve, sharper ones stay as cusps.
+    corner_angle_deg: f64,
+    /// Curve-fit mode: also flatten & re-fit existing curve segments (vs.
+    /// preserving them and only fitting straight-line runs).
+    refit_existing: bool,
     /// Anchor-point count of the original path, captured when the dialog opens.
     orig_points: usize,
-    /// Simplified result cached for `cached_tol`, so RDP runs only on a
-    /// tolerance change (or first build), not every frame.
+    /// Result cached for the parameters below, so the (potentially expensive)
+    /// op runs only when a parameter changes, not every frame.
     preview: Option<PathData>,
-    /// Tolerance the cached `preview` was built for. `NaN` means "not built
+    /// Parameters the cached `preview` was built for. `NaN` tol means "not built
     /// yet" so the first comparison always misses and forces a build.
     cached_tol: f64,
+    cached_fit: bool,
+    cached_angle: f64,
+    cached_refit: bool,
+}
+
+impl SimplifyDialog {
+    /// Recompute the preview from the current parameters if any changed.
+    fn refresh(&mut self, path: &PathData) {
+        let stale = self.preview.is_none()
+            || self.cached_tol != self.tolerance
+            || self.cached_fit != self.fit_curves
+            || self.cached_angle != self.corner_angle_deg
+            || self.cached_refit != self.refit_existing;
+        if stale {
+            self.preview = Some(self.compute(path));
+            self.cached_tol = self.tolerance;
+            self.cached_fit = self.fit_curves;
+            self.cached_angle = self.corner_angle_deg;
+            self.cached_refit = self.refit_existing;
+        }
+    }
+
+    /// Run the selected operation on `path` with the current parameters.
+    fn compute(&self, path: &PathData) -> PathData {
+        if self.fit_curves {
+            photonic_core::ops::fit_curves::fit_curves(
+                path,
+                &photonic_core::ops::fit_curves::FitOptions {
+                    accuracy: self.tolerance,
+                    corner_angle_deg: self.corner_angle_deg,
+                    refit_existing: self.refit_existing,
+                },
+            )
+        } else {
+            photonic_core::ops::simplify::simplify_path(path, self.tolerance)
+        }
+    }
 }
 
 // ─── Merge Vertices by Distance dialog ────────────────────────────────────────
@@ -4162,28 +4208,23 @@ impl PhotonicApp {
                 if let Some(dlg) = self.simplify_dialog.as_mut() {
                     if let Some(node) = doc.nodes.get(&dlg.node_id) {
                         if let SceneNodeKind::Path(pn) = &node.kind {
-                            if dlg.preview.is_none() || dlg.cached_tol != dlg.tolerance {
-                                dlg.preview = Some(photonic_core::ops::simplify::simplify_path(
-                                    &pn.path_data,
-                                    dlg.tolerance,
-                                ));
-                                dlg.cached_tol = dlg.tolerance;
-                            }
+                            dlg.refresh(&pn.path_data);
                             if let Some(preview) = &dlg.preview {
-                                let pts = bez_to_screen_points_xf(
-                                    &preview.to_bez_path(),
-                                    view,
-                                    &node.transform,
-                                );
+                                let bez = preview.to_bez_path();
+                                // Smooth wireframe: sample curves so fitted
+                                // Béziers render as curves, not chords.
+                                let pts = bez_to_screen_points_xf(&bez, view, &node.transform);
                                 if pts.len() >= 2 {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(110, 86, 207);
                                     painter.add(egui::Shape::line(
-                                        pts.clone(),
+                                        pts,
                                         egui::Stroke::new(1.5, accent),
                                     ));
-                                    for p in &pts {
-                                        painter.circle_filled(*p, 2.0, accent);
+                                    // Dots at real anchor points only (not every
+                                    // sampled point along a curve).
+                                    for p in anchor_screen_points_xf(&bez, view, &node.transform) {
+                                        painter.circle_filled(p, 2.0, accent);
                                     }
                                 }
                             }
@@ -8135,9 +8176,15 @@ impl PhotonicApp {
                         node_id,
                         node_name: name,
                         tolerance: 1.0,
+                        fit_curves: false,
+                        corner_angle_deg: 20.0,
+                        refit_existing: false,
                         orig_points,
                         preview: None,
                         cached_tol: f64::NAN,
+                        cached_fit: false,
+                        cached_angle: f64::NAN,
+                        cached_refit: false,
                     });
                 }
 
@@ -13994,13 +14041,7 @@ impl PhotonicApp {
             let dlg = self.simplify_dialog.as_mut().unwrap();
             if let Some(node) = doc.nodes.get(&dlg.node_id) {
                 if let SceneNodeKind::Path(pn) = &node.kind {
-                    if dlg.preview.is_none() || dlg.cached_tol != dlg.tolerance {
-                        dlg.preview = Some(photonic_core::ops::simplify::simplify_path(
-                            &pn.path_data,
-                            dlg.tolerance,
-                        ));
-                        dlg.cached_tol = dlg.tolerance;
-                    }
+                    dlg.refresh(&pn.path_data);
                 }
             }
             dlg.preview
@@ -14016,20 +14057,61 @@ impl PhotonicApp {
             .show(ctx, |ui| {
                 ui.label(format!("Node: {}", node_name));
                 ui.add_space(6.0);
+
+                let dlg = self.simplify_dialog.as_mut().unwrap();
+                ui.checkbox(&mut dlg.fit_curves, "Fit curves")
+                    .on_hover_text(
+                        "Fit smooth Bézier curves to the fewest anchor points \
+                         (turns a polyline arch into one curve). Off = reduce to \
+                         straight segments.",
+                    );
+
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Tolerance");
+                    ui.label(if dlg.fit_curves {
+                        "Fit tolerance"
+                    } else {
+                        "Tolerance"
+                    });
                     ui.add(
-                        egui::DragValue::new(&mut self.simplify_dialog.as_mut().unwrap().tolerance)
-                            .range(0.01..=100.0)
-                            .speed(0.05)
+                        egui::Slider::new(&mut dlg.tolerance, 0.05..=50.0)
+                            .logarithmic(true)
                             .max_decimals(2),
                     );
                 });
                 ui.label(
-                    RichText::new("Larger = more aggressive reduction")
-                        .weak()
-                        .small(),
+                    RichText::new(if dlg.fit_curves {
+                        "Higher = more aggressive (fewer anchors, looser fit)"
+                    } else {
+                        "Larger = more aggressive reduction"
+                    })
+                    .weak()
+                    .small(),
                 );
+
+                if dlg.fit_curves {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Corner angle");
+                        ui.add(
+                            egui::Slider::new(&mut dlg.corner_angle_deg, 0.0..=90.0)
+                                .suffix("°")
+                                .max_decimals(0),
+                        );
+                    });
+                    ui.label(
+                        RichText::new("Bends gentler than this smooth into a curve; sharper stay corners")
+                            .weak()
+                            .small(),
+                    );
+                    ui.add_space(2.0);
+                    ui.checkbox(&mut dlg.refit_existing, "Refit existing curves")
+                        .on_hover_text(
+                            "On: flatten and re-fit segments that are already \
+                             curved. Off: keep existing curves, fit only \
+                             straight-line runs.",
+                        );
+                }
                 ui.add_space(4.0);
                 match new_points {
                     Some(new) => {
@@ -14069,17 +14151,24 @@ impl PhotonicApp {
                 self.simplify_dialog = None;
             }
             Action::Apply => {
-                // Reuse the preview the dialog/overlay already computed for this
-                // tolerance instead of re-running RDP.
-                let cached = self.simplify_dialog.as_mut().and_then(|d| d.preview.take());
-                self.simplify_dialog = None;
+                // Reuse the preview the dialog/overlay already computed for the
+                // current parameters; fall back to recomputing in the selected
+                // mode if the cache is somehow empty.
+                let dlg = self.simplify_dialog.take();
                 if let Some(node) = doc.nodes.get(&node_id) {
                     if let SceneNodeKind::Path(pn) = &node.kind {
-                        let simplified = cached.unwrap_or_else(|| {
-                            photonic_core::ops::simplify::simplify_path(&pn.path_data, tolerance)
-                        });
+                        let result = dlg
+                            .as_ref()
+                            .and_then(|d| d.preview.clone())
+                            .unwrap_or_else(|| match &dlg {
+                                Some(d) => d.compute(&pn.path_data),
+                                None => photonic_core::ops::simplify::simplify_path(
+                                    &pn.path_data,
+                                    tolerance,
+                                ),
+                            });
                         let mut new_path = pn.clone();
-                        new_path.path_data = simplified;
+                        new_path.path_data = result;
                         let mut new_node = node.clone();
                         new_node.kind = SceneNodeKind::Path(new_path);
                         let cmd = Command::UpdateNode {
