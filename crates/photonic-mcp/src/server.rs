@@ -1079,6 +1079,18 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::document::export_selection_as_svg(state, a).await,
             ))
         }
+        "export_icon_set" => {
+            let a: ExportIconSetArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::document::export_icon_set(state, a).await,
+            ))
+        }
+        "preview_selection" => {
+            let a: PreviewSelectionArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::document::preview_selection(state, a).await,
+            ))
+        }
         "inspect_node" => {
             let a: InspectNodeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::readonly(
@@ -1532,6 +1544,13 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::document::load_swatch_library(state, a).await,
             ))
         }
+        "import_design_tokens" => {
+            let a: ImportDesignTokensArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::import_design_tokens(state, a).await,
+            ))
+        }
         "define_graphic_style" => {
             let a: DefineGraphicStyleArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -1670,6 +1689,10 @@ pub(crate) async fn dispatch_tool_inner(
             Ok(ToolOutput::mutating(
                 handlers::document::apply_gradient_swatch(state, a).await,
             ))
+        }
+        "set_paint" => {
+            let a: SetPaintArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::nodes::set_paint(state, a).await))
         }
         "delete_gradient_swatch" => {
             let a: DeleteGradientSwatchArgs =
@@ -4062,7 +4085,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_selection_as_svg",
-            "description": "Export specific nodes (or the current selection) as a clean, minimal SVG with a tight viewBox computed from their bounding boxes. No artboard background rect is included. Each node's name is slugified and used as the SVG id attribute, making the output immediately pasteable into HTML or React. Optionally wrap the output in a React functional component.",
+            "description": "Export specific nodes (or the current selection) as a clean, minimal SVG. Each node's name is slugified into the SVG id attribute, making the output immediately pasteable into HTML or React. Identical gradient/pattern paints are deduplicated into a single shared <defs> entry. Coordinates and path data are rounded to `precision` decimals (default 4) so exports stay compact. Use `normalize: \"square\"` to frame the icon in a uniform centered square viewBox (so a set of icons all export at the same aspect ratio and scale). Optionally wrap the output in a React functional component.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4078,6 +4101,93 @@ pub fn tool_list() -> Value {
                     "component_name": {
                         "type": "string",
                         "description": "Component name when as_react_component is true (default: 'SvgIcon')"
+                    },
+                    "precision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 6,
+                        "description": "Decimal places for coordinates and path data (default: 4). Prevents 15-decimal path bloat."
+                    },
+                    "normalize": {
+                        "type": "string",
+                        "enum": ["tight", "square"],
+                        "description": "viewBox framing. 'tight' (default) = union bounding box; 'square' = uniform centered square so a set of icons frames identically."
+                    },
+                    "pad": {
+                        "type": "number",
+                        "description": "Padding as a fraction of the square side when normalize='square' (e.g. 0.1 = 10%). Default 0."
+                    }
+                }
+            }
+        },
+        {
+            "name": "export_icon_set",
+            "description": "Batch-export a set of icons to normalized .svg files in a single call — the canonical icon-pipeline workflow. Given a list of {name, node_ids} entries (or, if omitted, every top-level group in the document named by its group name), each icon is exported with a uniform square viewBox (so the whole set renders at a consistent scale) and compact rounded path data. If `out_dir` is given the .svg files are written to disk (one per icon, filenames slugified + de-duplicated); otherwise each icon's SVG string is returned inline. Replaces the drop-out-to-a-Python-script post-pass for uniform icon sizing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "icons": {
+                        "type": "array",
+                        "description": "Icons to export. Omit to export every top-level group in the document.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Output file name (a .svg extension is added if absent)." },
+                                "node_ids": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Node IDs comprising this icon (a single group id is fine)."
+                                }
+                            },
+                            "required": ["name", "node_ids"]
+                        }
+                    },
+                    "out_dir": {
+                        "type": "string",
+                        "description": "Directory to write the .svg files into. If omitted, SVGs are returned inline instead of written to disk."
+                    },
+                    "precision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 6,
+                        "description": "Decimal places for coordinates and path data (default: 4)."
+                    },
+                    "normalize": {
+                        "type": "string",
+                        "enum": ["tight", "square"],
+                        "description": "viewBox framing (default: 'square' for uniform icon sizing)."
+                    },
+                    "pad": {
+                        "type": "number",
+                        "description": "Padding fraction for square normalization (default: 0.1)."
+                    }
+                }
+            }
+        },
+        {
+            "name": "preview_selection",
+            "description": "Render the selection (or given nodes) at target display sizes over light AND dark backgrounds, returned as a single contact-sheet PNG (base64 in data.data_base64). Icons live or die at their real size and against their real surface — this closes that loop without round-tripping through an app. Rows = backgrounds, columns = sizes; each icon is centered in a square cell (aspect ratio preserved). Only the selected nodes are drawn (others hidden), so neighbors don't bleed in.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Nodes to preview. If omitted or empty, uses the current selection."
+                    },
+                    "sizes": {
+                        "type": "array",
+                        "items": { "type": "integer", "minimum": 1, "maximum": 1024 },
+                        "description": "Target pixel sizes (default: [24, 32, 48])."
+                    },
+                    "backgrounds": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Background swatch hex colors to composite over (default: [\"#ffffff\", \"#0b0b12\"])."
+                    },
+                    "pad": {
+                        "type": "number",
+                        "description": "Padding as a fraction of the icon's square size (default: 0.15)."
                     }
                 }
             }
@@ -4423,6 +4533,36 @@ pub fn tool_list() -> Value {
                         "type": "string",
                         "enum": ["json", "css", "tailwind", "style-dictionary"],
                         "description": "Output format (default: json). css → :root { --color-1: … }, tailwind → theme.extend block, style-dictionary → W3C Design Token format with $type annotations."
+                    }
+                }
+            }
+        },
+        {
+            "name": "import_design_tokens",
+            "description": "Counterpart to export_design_tokens: register named color swatches from a design-tokens payload so brand colors can be referenced by name (via apply_color_swatch) instead of hard-coded into every fill/gradient. Accepts CSS custom properties (:root { --brand-primary: #2f56cf }), flat or nested JSON, and Style Dictionary ({ \"value\": \"#hex\" }) — auto-detected. Hex values are normalized; existing swatches with the same name are updated. When the brand palette shifts, re-importing re-themes everything referencing those swatches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Inline tokens text (CSS, JSON, or style-dictionary). Provide this OR `path`."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Path to a tokens file to read. Provide this OR `content`."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["auto", "css", "json"],
+                        "description": "Parse hint (default: auto — CSS if it doesn't start with { or [, else JSON)."
+                    },
+                    "prefix": {
+                        "type": "string",
+                        "description": "Optional prefix prepended to every imported swatch name (e.g. 'brand/')."
+                    },
+                    "clear_existing": {
+                        "type": "boolean",
+                        "description": "Clear all existing swatches before importing (default: false)."
                     }
                 }
             }
@@ -5762,6 +5902,40 @@ pub fn tool_list() -> Value {
                     "name": { "type": "string", "description": "Name of the gradient swatch to apply." }
                 },
                 "required": ["node_ids", "name"]
+            }
+        },
+        {
+            "name": "set_paint",
+            "description": "Apply ONE paint to MANY nodes in a single undoable call — each node re-fit to its own bounding box. The paint uses the same object shape as `fill` (solid / linear / radial / fluid / mesh / pattern). For gradients, set `paint.units` to \"bbox\" with 0–1 `coords` to reuse one relative gradient (e.g. left→right blue→purple) across an entire icon set with zero per-node coordinate math — the coords are resolved to each node's bounding box automatically. `target` chooses the fill (default) or stroke slot; strokes accept gradient/pattern paints too (#201), so a whole set of gradient-stroked line icons is one call — no outline_stroke→delete→refill workaround.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Node IDs or names to paint."
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["fill", "stroke"],
+                        "description": "Which paint slot to set (default: fill)."
+                    },
+                    "paint": {
+                        "type": "object",
+                        "description": "The paint (same shape as `fill`). For a bbox-relative gradient: { \"type\": \"gradient\", \"gradient_type\": \"linear\", \"colors\": [\"#2f56cf\",\"#7c3aed\"], \"coords\": [0,0,1,0], \"units\": \"bbox\" }.",
+                        "properties": {
+                            "type": { "type": "string", "enum": ["none","solid","gradient","fluid_gradient","mesh_gradient","pattern"] },
+                            "color": { "type": "string" },
+                            "gradient_type": { "type": "string", "enum": ["linear","radial"] },
+                            "colors": { "type": "array", "items": { "type": "string" } },
+                            "offsets": { "type": "array", "items": { "type": "number" } },
+                            "coords": { "type": "array", "items": { "type": "number" } },
+                            "units": { "type": "string", "enum": ["user","bbox","objectBoundingBox"], "description": "Coordinate space for `coords`. 'user' (default) = absolute; 'bbox' = 0–1 relative to each node's bounding box." }
+                        },
+                        "required": ["type"]
+                    }
+                },
+                "required": ["node_ids", "paint"]
             }
         },
         {

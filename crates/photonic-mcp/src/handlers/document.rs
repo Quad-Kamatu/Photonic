@@ -9,11 +9,13 @@ use crate::protocol::{
     DeleteGradientSwatchArgs, DeleteGrammarRuleArgs, DeleteGraphicStyleArgs, DeleteLayerArgs,
     DeletePatternArgs, DeleteSpotColorArgs, DeleteSymbolArgs, DeleteVariableArgs,
     DeleteWidthProfileArgs, DeleteWorkspaceArgs, DetectRhythmsArgs, DiffCheckpointsArgs,
-    DuplicateLayerArgs, ExportDesignTokensArgs, ExportPdfArgs, ExportRasterArgs,
+    DuplicateLayerArgs, ExportDesignTokensArgs, ExportIconSetArgs, ExportPdfArgs, ExportRasterArgs,
     ExportSelectionArgs, ExportSvgArgs, FitToMarginsArgs, GetCanvasOverviewArgs,
-    GetDocumentStateArgs, JumpToHistoryArgs, ListHistoryArgs, LoadSwatchLibraryArgs,
+    GetDocumentStateArgs, ImportDesignTokensArgs, JumpToHistoryArgs, ListHistoryArgs,
+    LoadSwatchLibraryArgs,
     LoadSymbolLibraryArgs, LoadWorkspaceArgs, MeasureDistancesArgs, PlaceSymbolArgs,
-    PlayActionArgs, RegisterEventTriggerArgs, RemoveDimensionArgs, RemoveEventTriggerArgs,
+    PlayActionArgs, PreviewSelectionArgs, RegisterEventTriggerArgs, RemoveDimensionArgs,
+    RemoveEventTriggerArgs,
     RemoveExportProfileArgs, ReorderLayersArgs, ResizeCanvasArgs, RestoreCheckpointArgs,
     RunExportProfileArgs, SaveGradientSwatchArgs, SaveWorkspaceArgs, SetActiveLayerArgs,
     SetArtboardMarginsArgs, SetDocumentBleedArgs, SetVariableValueArgs, SpraySymbolInstancesArgs,
@@ -648,6 +650,240 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
     )
 }
 
+/// Lazily-initialized offscreen renderer shared by `preview_selection`. Created
+/// once on first use (creating a wgpu device is expensive). The GUI app already
+/// runs a HeadlessRenderer alongside the live context, so this coexists safely.
+static PREVIEW_RENDERER: tokio::sync::OnceCell<std::sync::Arc<photonic_render::HeadlessRenderer>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn preview_renderer() -> std::sync::Arc<photonic_render::HeadlessRenderer> {
+    PREVIEW_RENDERER
+        .get_or_init(|| async {
+            std::sync::Arc::new(photonic_render::HeadlessRenderer::new().await)
+        })
+        .await
+        .clone()
+}
+
+/// #204: render the selection at target display sizes over light AND dark
+/// backgrounds as a single contact-sheet PNG — judge small-size legibility and
+/// on-surface contrast without leaving Photonic.
+pub async fn preview_selection(state: &AppState, args: PreviewSelectionArgs) -> ToolResult {
+    tracing::debug!("tool: preview_selection");
+    use photonic_core::node::SceneNodeKind;
+
+    let sizes: Vec<u32> = args
+        .sizes
+        .clone()
+        .unwrap_or_else(|| vec![24, 32, 48])
+        .into_iter()
+        .filter(|s| *s > 0 && *s <= 1024)
+        .collect();
+    if sizes.is_empty() {
+        return ToolResult::error("No valid `sizes` (each must be 1–1024).");
+    }
+    let bg_hexes = args
+        .backgrounds
+        .clone()
+        .unwrap_or_else(|| vec!["#ffffff".into(), "#0b0b12".into()]);
+    let mut backgrounds: Vec<[u8; 3]> = Vec::new();
+    for hex in &bg_hexes {
+        match photonic_core::color::Color::from_hex(hex) {
+            Some(c) => backgrounds.push([
+                (c.r * 255.0).round() as u8,
+                (c.g * 255.0).round() as u8,
+                (c.b * 255.0).round() as u8,
+            ]),
+            None => return ToolResult::error(format!("Invalid background color '{hex}'")),
+        }
+    }
+    if backgrounds.is_empty() {
+        return ToolResult::error("At least one background is required.");
+    }
+
+    // Snapshot the document + resolve the selection under the lock, then release.
+    let (render_doc, region, node_count) = {
+        let doc = state.document.lock().await;
+        let ids: Vec<photonic_core::node::NodeId> = match &args.node_ids {
+            Some(raw) if !raw.is_empty() => raw
+                .iter()
+                .filter_map(|s| {
+                    uuid::Uuid::parse_str(s)
+                        .ok()
+                        .or_else(|| doc.find_node_by_name(s).map(|n| n.id))
+                })
+                .collect(),
+            _ => doc.selection.ids().copied().collect(),
+        };
+        if ids.is_empty() {
+            return ToolResult::error("No nodes specified and no active selection");
+        }
+
+        // Kept set = the selected nodes plus all descendants of any selected group,
+        // so a selected group renders whole and unrelated icons are excluded.
+        let mut keep: std::collections::HashSet<photonic_core::node::NodeId> =
+            ids.iter().copied().collect();
+        let mut stack: Vec<photonic_core::node::NodeId> = ids.clone();
+        while let Some(id) = stack.pop() {
+            if let Some(SceneNodeKind::Group(g)) = doc.nodes.get(&id).map(|n| &n.kind) {
+                for c in &g.children {
+                    if keep.insert(*c) {
+                        stack.push(*c);
+                    }
+                }
+            }
+        }
+
+        // Union world-space bbox of the selected (top-level) nodes.
+        let mut bbox: Option<(f64, f64, f64, f64)> = None;
+        for id in &ids {
+            if let Some(node) = doc.nodes.get(id) {
+                if let Some(lb) = node.local_bounds() {
+                    let (x0, y0) = node.transform.apply(lb.x0, lb.y0);
+                    let (x1, y1) = node.transform.apply(lb.x1, lb.y1);
+                    let (nx0, ny0) = (x0.min(x1), y0.min(y1));
+                    let (nx1, ny1) = (x0.max(x1), y0.max(y1));
+                    bbox = Some(match bbox {
+                        None => (nx0, ny0, nx1, ny1),
+                        Some((ax0, ay0, ax1, ay1)) => {
+                            (ax0.min(nx0), ay0.min(ny0), ax1.max(nx1), ay1.max(ny1))
+                        }
+                    });
+                }
+            }
+        }
+        let Some((bx0, by0, bx1, by1)) = bbox else {
+            return ToolResult::error("Selection has no measurable bounds to preview.");
+        };
+
+        // Expand to a centered square + padding so aspect ratio is preserved.
+        let bw = (bx1 - bx0).max(1e-6);
+        let bh = (by1 - by0).max(1e-6);
+        let cx = (bx0 + bx1) / 2.0;
+        let cy = (by0 + by1) / 2.0;
+        let pad = args.pad.unwrap_or(0.15).max(0.0);
+        let side = bw.max(bh) * (1.0 + 2.0 * pad);
+        let region = (cx - side / 2.0, cy - side / 2.0, side, side);
+
+        // Clone the doc and hide everything outside the kept set so only the
+        // selection renders inside the region.
+        let mut clone = doc.clone();
+        for (id, node) in clone.nodes.iter_mut() {
+            if !keep.contains(id) {
+                node.visible = false;
+            }
+        }
+        (clone, region, ids.len())
+    };
+
+    // Render each size once (transparent bg, fit to the square region) off-thread.
+    let renderer = preview_renderer().await;
+    let sizes_for_job = sizes.clone();
+    let rendered: Vec<(u32, Vec<u8>)> = tokio::task::spawn_blocking(move || {
+        use photonic_render::{ExportBackground, ExportOptions};
+        let opts = ExportOptions {
+            background: ExportBackground::Transparent,
+            region: Some(region),
+            ..Default::default()
+        };
+        sizes_for_job
+            .into_iter()
+            .map(|s| {
+                let (px, _, _) = renderer.render_rgba_with_opts(&render_doc, s, s, &opts);
+                (s, px)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+
+    if rendered.iter().all(|(_, px)| px.is_empty()) {
+        return ToolResult::error("Renderer returned no pixels (GPU readback failed).");
+    }
+
+    // Assemble the contact sheet: rows = backgrounds, columns = sizes.
+    let margin: u32 = 10;
+    let max_size = *sizes.iter().max().unwrap();
+    let cell = max_size + 2 * margin;
+    let cols = sizes.len() as u32;
+    let rows = backgrounds.len() as u32;
+    let sheet_w = cols * cell;
+    let sheet_h = rows * cell;
+    let mut sheet = image::RgbaImage::new(sheet_w, sheet_h);
+
+    for (r, bg) in backgrounds.iter().enumerate() {
+        let r = r as u32;
+        // Fill this row band with the background swatch.
+        for y in (r * cell)..((r + 1) * cell) {
+            for x in 0..sheet_w {
+                sheet.put_pixel(x, y, image::Rgba([bg[0], bg[1], bg[2], 255]));
+            }
+        }
+        for (c, (s, px)) in rendered.iter().enumerate() {
+            if px.is_empty() {
+                continue;
+            }
+            let c = c as u32;
+            let s = *s;
+            let ox = c * cell + (cell - s) / 2;
+            let oy = r * cell + (cell - s) / 2;
+            // Alpha-composite the icon over the already-painted background.
+            for iy in 0..s {
+                for ix in 0..s {
+                    let idx = ((iy * s + ix) * 4) as usize;
+                    if idx + 3 >= px.len() {
+                        continue;
+                    }
+                    let a = px[idx + 3] as f32 / 255.0;
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let dst = sheet.get_pixel(ox + ix, oy + iy).0;
+                    let blend = |fg: u8, bg: u8| -> u8 {
+                        (fg as f32 * a + bg as f32 * (1.0 - a)).round() as u8
+                    };
+                    sheet.put_pixel(
+                        ox + ix,
+                        oy + iy,
+                        image::Rgba([
+                            blend(px[idx], dst[0]),
+                            blend(px[idx + 1], dst[1]),
+                            blend(px[idx + 2], dst[2]),
+                            255,
+                        ]),
+                    );
+                }
+            }
+        }
+    }
+
+    // Encode the sheet as PNG.
+    let mut out = Vec::new();
+    if image::DynamicImage::ImageRgba8(sheet)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .is_err()
+    {
+        return ToolResult::error("Failed to encode contact-sheet PNG.");
+    }
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
+    ToolResult::text(format!(
+        "Preview contact sheet — {node_count} node(s), sizes {:?}, {} background(s), {}×{} px",
+        sizes, rows, sheet_w, sheet_h
+    ))
+    .with_data(serde_json::json!({
+        "format": "png",
+        "bytes": out.len(),
+        "mime": "image/png",
+        "data_base64": b64,
+        "sizes": sizes,
+        "backgrounds": bg_hexes,
+        "width": sheet_w,
+        "height": sheet_h,
+    }))
+}
+
 fn resize_png(png_bytes: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     use image::{imageops::FilterType, ImageFormat};
     let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png).ok()?;
@@ -752,7 +988,8 @@ pub async fn export_selection_as_svg(state: &AppState, args: ExportSelectionArgs
         return ToolResult::error("No nodes specified and no active selection");
     }
 
-    let svg = photonic_core::export::export_nodes_as_svg(&doc, &ids);
+    let opts = selection_svg_opts(args.precision, args.normalize.as_deref(), args.pad);
+    let svg = photonic_core::export::export_nodes_as_svg_opts(&doc, &ids, &opts);
 
     let output = if args.as_react_component {
         let name = args.component_name.as_deref().unwrap_or("SvgIcon");
@@ -781,6 +1018,182 @@ pub async fn export_selection_as_svg(state: &AppState, args: ExportSelectionArgs
         "bytes": byte_count,
         "node_count": ids.len()
     }))
+}
+
+/// Build [`SvgSelectionOptions`] from MCP args (shared by selection + icon-set
+/// export). `default_square` picks the framing when `normalize` is unspecified.
+fn selection_svg_opts_ex(
+    precision: Option<u8>,
+    normalize: Option<&str>,
+    pad: Option<f64>,
+    default_square: bool,
+) -> photonic_core::export::SvgSelectionOptions {
+    use photonic_core::export::{SvgNormalize, SvgSelectionOptions};
+    let normalize = match normalize.map(|s| s.to_ascii_lowercase()) {
+        Some(ref s) if s == "square" => SvgNormalize::Square {
+            pad: pad.unwrap_or(0.1).max(0.0),
+        },
+        Some(ref s) if s == "tight" => SvgNormalize::Tight,
+        _ if default_square => SvgNormalize::Square {
+            pad: pad.unwrap_or(0.1).max(0.0),
+        },
+        _ => SvgNormalize::Tight,
+    };
+    SvgSelectionOptions {
+        precision: precision.unwrap_or(4).clamp(1, 6),
+        optimize: true,
+        normalize,
+    }
+}
+
+fn selection_svg_opts(
+    precision: Option<u8>,
+    normalize: Option<&str>,
+    pad: Option<f64>,
+) -> photonic_core::export::SvgSelectionOptions {
+    selection_svg_opts_ex(precision, normalize, pad, false)
+}
+
+/// #203: batch-export N tagged groups to normalized `.svg` files (or inline) in
+/// one call — the canonical icon-pipeline workflow, no external post-pass needed.
+pub async fn export_icon_set(state: &AppState, args: ExportIconSetArgs) -> ToolResult {
+    tracing::debug!("tool: export_icon_set");
+    let doc = state.document.lock().await;
+    let opts = selection_svg_opts_ex(args.precision, args.normalize.as_deref(), args.pad, true);
+
+    // Resolve the icon list: explicit entries, or every top-level group.
+    struct Resolved {
+        name: String,
+        ids: Vec<photonic_core::node::NodeId>,
+    }
+    let mut resolved: Vec<Resolved> = Vec::new();
+    match &args.icons {
+        Some(entries) if !entries.is_empty() => {
+            for e in entries {
+                let ids: Vec<_> = e
+                    .node_ids
+                    .iter()
+                    .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                    .collect();
+                if ids.is_empty() {
+                    return ToolResult::error(format!("Icon '{}' has no valid node_ids", e.name));
+                }
+                resolved.push(Resolved {
+                    name: e.name.clone(),
+                    ids,
+                });
+            }
+        }
+        _ => {
+            // Every top-level group across all layers, in draw order.
+            for layer_id in &doc.layer_order {
+                let Some(layer) = doc.layers.get(layer_id) else {
+                    continue;
+                };
+                for node_id in &layer.node_ids {
+                    if let Some(node) = doc.nodes.get(node_id) {
+                        if matches!(node.kind, SceneNodeKind::Group(_)) {
+                            resolved.push(Resolved {
+                                name: node.name.clone(),
+                                ids: vec![*node_id],
+                            });
+                        }
+                    }
+                }
+            }
+            if resolved.is_empty() {
+                return ToolResult::error(
+                    "No icons given and no top-level groups found. Pass `icons` explicitly \
+                     or group each icon's paths first.",
+                );
+            }
+        }
+    }
+
+    // De-duplicate + sanitize output file names.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut written: Vec<serde_json::Value> = Vec::new();
+    let mut files_ok = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for icon in &resolved {
+        let svg = photonic_core::export::export_nodes_as_svg_opts(&doc, &icon.ids, &opts);
+        let mut base = slugify_filename(&icon.name);
+        if base.is_empty() {
+            base = "icon".to_string();
+        }
+        // Ensure unique stem.
+        let mut stem = base.clone();
+        let mut n = 2;
+        while !used.insert(stem.clone()) {
+            stem = format!("{base}-{n}");
+            n += 1;
+        }
+        let file_name = format!("{stem}.svg");
+
+        if let Some(dir) = &args.out_dir {
+            let path = std::path::Path::new(dir).join(&file_name);
+            match std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, &svg)) {
+                Ok(_) => {
+                    files_ok += 1;
+                    written.push(serde_json::json!({
+                        "name": file_name,
+                        "path": path.to_string_lossy(),
+                        "bytes": svg.len(),
+                    }));
+                }
+                Err(e) => errors.push(format!("{file_name}: {e}")),
+            }
+        } else {
+            written.push(serde_json::json!({
+                "name": file_name,
+                "svg": svg,
+                "bytes": svg.len(),
+            }));
+        }
+    }
+
+    if !errors.is_empty() {
+        return ToolResult::error(format!(
+            "Icon-set export had {} error(s): {}",
+            errors.len(),
+            errors.join("; ")
+        ));
+    }
+
+    let summary = if args.out_dir.is_some() {
+        format!(
+            "Exported {} icon(s) to {}",
+            files_ok,
+            args.out_dir.as_deref().unwrap_or("")
+        )
+    } else {
+        format!("Exported {} icon(s) (inline)", written.len())
+    };
+    ToolResult::text(summary).with_data(serde_json::json!({
+        "count": written.len(),
+        "icons": written,
+        "out_dir": args.out_dir,
+    }))
+}
+
+/// Slugify a name into a safe file stem (alnum + dash), lower-cased.
+fn slugify_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = true;
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 // ─── Design Token Export ──────────────────────────────────────────────────────
@@ -1828,6 +2241,69 @@ pub async fn load_swatch_library(state: &AppState, args: LoadSwatchLibraryArgs) 
         added,
         palette.len() - added
     ))
+}
+
+/// #207: import named color swatches from a design-tokens payload (CSS custom
+/// properties / JSON / style-dictionary) — the counterpart to
+/// `export_design_tokens`. Registered swatches are referenceable by name.
+pub async fn import_design_tokens(state: &AppState, args: ImportDesignTokensArgs) -> ToolResult {
+    tracing::debug!("tool: import_design_tokens");
+    use photonic_core::ColorSwatch;
+
+    // Resolve the source text.
+    let text = match (&args.content, &args.path) {
+        (Some(c), _) if !c.trim().is_empty() => c.clone(),
+        (_, Some(p)) => match std::fs::read_to_string(p) {
+            Ok(s) => s,
+            Err(e) => return ToolResult::error(format!("Failed to read tokens file '{p}': {e}")),
+        },
+        _ => return ToolResult::error("Provide either `content` (inline tokens) or `path`."),
+    };
+
+    // (name, hex) pairs parsed from the payload (shared with the GUI import).
+    let tokens = photonic_core::tokens::parse_token_colors(&text, args.format.as_deref());
+
+    if tokens.is_empty() {
+        return ToolResult::error(
+            "No color tokens found. Expected CSS custom properties (--name: #hex) or JSON \
+             with hex color values.",
+        );
+    }
+
+    let prefix = args.prefix.clone().unwrap_or_default();
+    let mut doc = state.document.lock().await;
+    if args.clear_existing {
+        doc.color_swatches.clear();
+    }
+
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    let mut names: Vec<String> = Vec::new();
+    for (name, hex) in &tokens {
+        let full = format!("{prefix}{name}");
+        // Normalize to #rrggbb; skip anything unparseable.
+        let Some(color) = photonic_core::color::Color::from_hex(hex) else {
+            continue;
+        };
+        let norm = color.to_hex();
+        if let Some(existing) = doc.color_swatches.iter_mut().find(|s| s.name == full) {
+            existing.color_hex = norm.clone();
+            updated += 1;
+        } else {
+            doc.color_swatches.push(ColorSwatch::new(&full, &norm));
+            added += 1;
+        }
+        names.push(full);
+    }
+
+    ToolResult::text(format!(
+        "Imported design tokens: {added} swatch(es) added, {updated} updated."
+    ))
+    .with_data(serde_json::json!({
+        "added": added,
+        "updated": updated,
+        "swatches": names,
+    }))
 }
 
 // ─── Graphic Styles ───────────────────────────────────────────────────────────

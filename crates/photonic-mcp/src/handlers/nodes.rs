@@ -35,6 +35,7 @@ use crate::protocol::{
     SelectByKindArgs, SelectInsideGroupArgs, SelectSameArgs, SelectSameAttribute,
     SelectSimilarArgs, SetBlendModeArgs, SetBlendSpineArgs, SetCharacterMetricsArgs,
     SetFontStyleArgs, SetFontWeightArgs, SetLockedArgs, SetNodePromptArgs, SetOpacityArgs,
+    SetPaintArgs,
     SetOpenTypeFeaturesArgs, SetParagraphOptionsArgs, SetSelectionArgs, SetSymbolOverrideArgs,
     SetTabStopsArgs, SetTextAreaArgs, SetTextDecorationArgs, SetTextDirectionArgs, SetTextPathArgs,
     SetVisibilityArgs, ShapeType, SimplifyPathArgs, SmoothPathArgs, SnapToPixelArgs,
@@ -68,6 +69,153 @@ fn apply_style(
         path_node.stroke = stroke_arg.to_stroke()?;
     }
     Ok(())
+}
+
+/// #202: apply one paint to many nodes in a single undoable call, each re-fit to
+/// its own bounding box (bbox-relative gradients). Reuses the `fill` paint shape.
+pub async fn set_paint(state: &AppState, args: SetPaintArgs) -> ToolResult {
+    use photonic_core::history::Command;
+
+    if args.node_ids.is_empty() {
+        return ToolResult::error("node_ids must not be empty.");
+    }
+    let target = args
+        .target
+        .as_deref()
+        .unwrap_or("fill")
+        .to_ascii_lowercase();
+    if target != "fill" && target != "stroke" {
+        return ToolResult::error(format!(
+            "Invalid target '{target}' (expected \"fill\" or \"stroke\")."
+        ));
+    }
+
+    let mut doc = state.document.lock().await;
+    let mut commands = Vec::new();
+    let mut applied = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+
+    for id_str in &args.node_ids {
+        let nid = uuid::Uuid::parse_str(id_str)
+            .ok()
+            .or_else(|| doc.find_node_by_name(id_str).map(|n| n.id));
+        let Some(nid) = nid else {
+            skipped.push(id_str.clone());
+            continue;
+        };
+        let Some(node) = doc.nodes.get(&nid) else {
+            skipped.push(id_str.clone());
+            continue;
+        };
+
+        // World-space bounding box (x, y, w, h) for bbox-relative resolution.
+        let bbox = node
+            .local_bounds()
+            .map(|lb| {
+                let (x0, y0) = node.transform.apply(lb.x0, lb.y0);
+                let (x1, y1) = node.transform.apply(lb.x1, lb.y1);
+                (
+                    x0.min(x1),
+                    y0.min(y1),
+                    (x1 - x0).abs().max(1e-6),
+                    (y1 - y0).abs().max(1e-6),
+                )
+            })
+            .unwrap_or((0.0, 0.0, 1.0, 1.0));
+
+        let fill = match args.paint.resolved_for_bbox(bbox).to_fill() {
+            Ok(f) => f,
+            Err(e) => return ToolResult::error(e),
+        };
+
+        let mut new_node = node.clone();
+        let ok = match &mut new_node.kind {
+            SceneNodeKind::Path(pn) => {
+                if target == "fill" {
+                    pn.fill = fill;
+                } else {
+                    apply_stroke_paint(&mut pn.stroke, &fill);
+                }
+                true
+            }
+            SceneNodeKind::Text(tn) => {
+                if target == "fill" {
+                    tn.fill = fill;
+                } else {
+                    apply_stroke_paint(&mut tn.stroke, &fill);
+                }
+                true
+            }
+            _ => false,
+        };
+        if ok {
+            commands.push(Command::UpdateNode {
+                old: node.clone(),
+                new: new_node,
+            });
+            applied += 1;
+        } else {
+            skipped.push(id_str.clone());
+        }
+    }
+
+    if commands.is_empty() {
+        return ToolResult::error(format!(
+            "No paintable nodes found ({} skipped).",
+            skipped.len()
+        ));
+    }
+
+    let mut history = state.history.lock().await;
+    for cmd in commands {
+        history.execute_discrete(cmd, &mut doc);
+    }
+    drop(history);
+
+    ToolResult::text(format!(
+        "Applied {target} paint to {applied} node(s){}.",
+        if skipped.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} skipped)", skipped.len())
+        }
+    ))
+    .with_data(serde_json::json!({
+        "applied_count": applied,
+        "target": target,
+        "skipped": skipped,
+    }))
+}
+
+/// Apply a `fill` paint onto a stroke slot. Solid → flat stroke color (clears any
+/// gradient paint); gradient/pattern → `stroke.paint` (#201); `none` → disabled.
+/// Preserves/initializes width and enables the stroke.
+fn apply_stroke_paint(
+    stroke: &mut photonic_core::style::Stroke,
+    fill: &photonic_core::style::Fill,
+) {
+    use photonic_core::style::FillKind;
+    match &fill.kind {
+        FillKind::None => {
+            stroke.enabled = false;
+            stroke.paint = None;
+        }
+        FillKind::Solid(c) => {
+            stroke.color = *c;
+            stroke.paint = None;
+            stroke.enabled = true;
+            if stroke.width <= 0.0 {
+                stroke.width = 1.0;
+            }
+        }
+        other => {
+            stroke.paint = Some(other.clone());
+            stroke.enabled = true;
+            if stroke.width <= 0.0 {
+                stroke.width = 1.0;
+            }
+        }
+    }
 }
 
 pub async fn create_shape(state: &AppState, args: CreateShapeArgs) -> ToolResult {

@@ -789,6 +789,10 @@ impl PhotonicRenderer {
             fill_is_none: bool,
             stroke_enabled: bool,
             stroke_color: [f32; 4],
+            /// Gradient/pattern stroke paint (#201). `None` = flat `stroke_color`.
+            stroke_paint: Option<FillKind>,
+            /// Combined opacity (stroke.opacity × node.opacity) for paint sampling.
+            stroke_paint_opacity: f32,
             stroke_width: f32,
             stroke_cap: photonic_core::style::LineCap,
             stroke_join: photonic_core::style::LineJoin,
@@ -942,6 +946,8 @@ impl PhotonicRenderer {
                             fill_is_none: matches!(path_node.fill.kind, FillKind::None),
                             stroke_enabled: sc.enabled && sc.width > 0.0,
                             stroke_color: [sc.color.r, sc.color.g, sc.color.b, stroke_alpha],
+                            stroke_paint: sc.paint.clone(),
+                            stroke_paint_opacity: sc.opacity * node.opacity,
                             stroke_width: sc.width as f32,
                             stroke_cap: sc.line_cap,
                             stroke_join: sc.line_join,
@@ -1187,9 +1193,15 @@ impl PhotonicRenderer {
                 for pos in &mesh.vertices {
                     let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
                     let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                    // Gradient/pattern stroke paint (#201): sample per vertex,
+                    // exactly like the fill path. `None` = flat stroke color.
+                    let color = match &node.stroke_paint {
+                        Some(kind) => kind.sample_at(x, y, node.stroke_paint_opacity),
+                        None => node.stroke_color,
+                    };
                     verts.push(Vertex {
                         position: [x as f32, y as f32],
-                        color: node.stroke_color,
+                        color,
                     });
                 }
                 for &i in &mesh.indices {

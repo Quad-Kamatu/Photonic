@@ -3134,6 +3134,11 @@ impl PhotonicApp {
                                             });
                                         });
                                         ui.checkbox(&mut self.prefs.show_rulers, "Show Rulers");
+                                        // #208: icon-design aids.
+                                        ui.checkbox(&mut self.prefs.show_keyline_grid, "Icon Keyline Grid")
+                                            .on_hover_text("Overlay the Material/Apple icon keyline template (square, circle, portrait & landscape safe areas) centered on the artboard (#208).");
+                                        ui.checkbox(&mut self.prefs.snap_to_pixel, "Snap to Pixel")
+                                            .on_hover_text("Snap drawing/moving to whole document pixels for crisp icon geometry (#208).");
                                         // The three view-preview modes are mutually exclusive:
                                         // enabling one clears the others.
                                         if ui.checkbox(&mut self.outline_mode, "Outline Mode")
@@ -4312,6 +4317,54 @@ impl PhotonicApp {
                             );
                         }
                     }
+                }
+
+                // ── Icon keyline template (#208) ─────────────────────────────
+                // Draws the classic Material/Apple keyline safe-area shapes —
+                // square, circle, portrait & landscape rects — centered on the
+                // artboard, treating the whole artboard as the icon box. Gives
+                // deterministic optical alignment for a set of icons.
+                if self.prefs.show_keyline_grid {
+                    let painter = ui.painter_at(rect);
+                    let key_color = egui::Color32::from_rgba_unmultiplied(255, 120, 0, 150);
+                    let ks = egui::Stroke::new(1.0, key_color);
+                    let dw = doc.width;
+                    let dh = doc.height;
+                    let (cx, cy) = (dw / 2.0, dh / 2.0);
+                    // Material keyline ratios on the 24-grid icon box (÷24).
+                    let sq = 18.0 / 24.0; // square keyline
+                    let circ = 20.0 / 24.0; // circle keyline diameter
+                    let long = 20.0 / 24.0; // portrait/landscape long side
+                    let short = 16.0 / 24.0; // portrait/landscape short side
+                    let to_screen = |x: f64, y: f64| {
+                        let (sx, sy) = view.canvas_to_screen(x, y);
+                        egui::pos2(sx as f32, sy as f32)
+                    };
+                    let centered_rect = |fw: f64, fh: f64| {
+                        let hw = dw * fw / 2.0;
+                        let hh = dh * fh / 2.0;
+                        egui::Rect::from_two_pos(
+                            to_screen(cx - hw, cy - hh),
+                            to_screen(cx + hw, cy + hh),
+                        )
+                    };
+                    // Square keyline.
+                    painter.rect_stroke(centered_rect(sq, sq), 0.0, ks);
+                    // Portrait & landscape keylines.
+                    painter.rect_stroke(centered_rect(short, long), 2.0, ks);
+                    painter.rect_stroke(centered_rect(long, short), 2.0, ks);
+                    // Circle keyline (use the smaller artboard dimension for radius).
+                    let r = (dw.min(dh) * circ / 2.0 * view.zoom) as f32;
+                    painter.circle_stroke(to_screen(cx, cy), r, ks);
+                    // Center cross-hairs.
+                    painter.line_segment(
+                        [to_screen(cx, 0.0), to_screen(cx, dh)],
+                        egui::Stroke::new(1.0, key_color.gamma_multiply(0.5)),
+                    );
+                    painter.line_segment(
+                        [to_screen(0.0, cy), to_screen(dw, cy)],
+                        egui::Stroke::new(1.0, key_color.gamma_multiply(0.5)),
+                    );
                 }
 
                 // ── Ruler strips ─────────────────────────────────────────────
@@ -9960,6 +10013,13 @@ impl PhotonicApp {
                     doc_modified = true;
                 }
 
+                PanelAction::ImportDesignTokens => {
+                    // #207 GUI equivalent: pick a tokens file and register swatches.
+                    if self.import_design_tokens_dialog(doc) {
+                        doc_modified = true;
+                    }
+                }
+
                 PanelAction::SaveWidthProfile { stroke_width, name } => {
                     use photonic_core::WidthProfile;
                     // Uniform 2-point profile — same width at both ends
@@ -13455,6 +13515,9 @@ impl PhotonicApp {
         if self.prefs.snap_to_grid {
             let g = self.prefs.grid_size as f64;
             (v / g).round() * g
+        } else if self.prefs.snap_to_pixel {
+            // #208: snap to whole document pixels for crisp icon geometry.
+            v.round()
         } else {
             v
         }

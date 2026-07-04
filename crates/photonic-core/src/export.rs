@@ -3,7 +3,7 @@
 use crate::{
     layer::BlendMode,
     node::{NodeId, SceneNode, SceneNodeKind, TextAlign},
-    style::{Fill, FillKind, GradientKind, LineCap, LineJoin, Stroke, StrokeAlign},
+    style::{Fill, FillKind, Gradient, GradientKind, LineCap, LineJoin, Stroke, StrokeAlign},
     transform::Transform,
     Color, Document,
 };
@@ -34,6 +34,140 @@ impl Default for SvgExportOptions {
     }
 }
 
+/// How a selection SVG frames its content in the `viewBox`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SvgNormalize {
+    /// Tight union bbox of the selected nodes (legacy default).
+    Tight,
+    /// Center the content in a uniform square viewBox. `pad` is the padding as a
+    /// fraction of the square side (e.g. `0.1` = 10% breathing room each way), so
+    /// every icon in a set comes out at the same aspect ratio and scale.
+    Square { pad: f64 },
+}
+
+impl Default for SvgNormalize {
+    fn default() -> Self {
+        SvgNormalize::Tight
+    }
+}
+
+/// Options controlling selection / icon SVG export.
+#[derive(Debug, Clone)]
+pub struct SvgSelectionOptions {
+    /// Decimal places for coordinates and path data, clamped 1–6 (default: `4`).
+    /// Fixes bloated 15-decimal path data on selection exports.
+    pub precision: u8,
+    /// Light optimization pass: trim trailing zeros (always on when set) — pairs
+    /// with `precision` to keep icon SVGs compact.
+    pub optimize: bool,
+    /// viewBox framing (tight bbox vs. uniform centered square).
+    pub normalize: SvgNormalize,
+}
+
+impl Default for SvgSelectionOptions {
+    fn default() -> Self {
+        Self {
+            precision: 4,
+            optimize: true,
+            normalize: SvgNormalize::Tight,
+        }
+    }
+}
+
+// ─── Shared SVG emit context ──────────────────────────────────────────────────
+
+/// Threaded through the node emitters: accumulates `<defs>` while deduplicating
+/// structurally-identical paint definitions (one shared `<linearGradient>` per
+/// unique paint instead of `grad-0`, `grad-1`, … clones) and carries the numeric
+/// precision used for coordinates and path data.
+struct SvgCtx {
+    defs: String,
+    counter: usize,
+    /// Maps a paint's structural signature → the id already emitted for it.
+    cache: HashMap<String, String>,
+    /// Decimal places for def coordinates / gradient stops.
+    coord_p: usize,
+    /// `None` ⇒ emit full-precision path `d` via the cached string (full-document
+    /// export, unchanged). `Some(p)` ⇒ re-emit path `d` rounded to `p` decimals.
+    path_p: Option<usize>,
+}
+
+impl SvgCtx {
+    fn new(coord_p: usize, path_p: Option<usize>) -> Self {
+        Self {
+            defs: String::new(),
+            counter: 0,
+            cache: HashMap::new(),
+            coord_p,
+            path_p,
+        }
+    }
+
+    /// Intern a paint def by its structural signature `sig`. Returns the shared id
+    /// (emitting the def via `make_def(id)` only the first time it is seen).
+    fn intern(&mut self, prefix: &str, sig: String, make_def: impl FnOnce(&str) -> String) -> String {
+        if let Some(id) = self.cache.get(&sig) {
+            return id.clone();
+        }
+        let id = format!("{prefix}-{}", self.counter);
+        self.counter += 1;
+        let def = make_def(&id);
+        self.defs.push_str(&def);
+        self.cache.insert(sig, id);
+        format!("{prefix}-{}", self.counter - 1)
+    }
+}
+
+/// Format a float to `p` decimals, trimming trailing zeros and a bare `-0`.
+fn fmt(v: f64, p: usize) -> String {
+    let s = format!("{:.*}", p, v);
+    if s.contains('.') {
+        let t = s.trim_end_matches('0').trim_end_matches('.');
+        if t.is_empty() || t == "-" || t == "-0" {
+            "0".to_string()
+        } else {
+            t.to_string()
+        }
+    } else if s == "-0" {
+        "0".to_string()
+    } else {
+        s
+    }
+}
+
+/// Re-emit a path's geometry as an SVG `d` string with coordinates rounded to `p`
+/// decimals (absolute commands). Used when a precision cap is requested so icon
+/// exports don't carry 15-decimal path data.
+fn path_d_rounded(path: &crate::path::PathData, p: usize) -> String {
+    use kurbo::PathEl;
+    let bez = path.to_bez_path();
+    let mut out = String::new();
+    for el in bez.elements() {
+        match el {
+            PathEl::MoveTo(pt) => out.push_str(&format!("M{} {}", fmt(pt.x, p), fmt(pt.y, p))),
+            PathEl::LineTo(pt) => out.push_str(&format!("L{} {}", fmt(pt.x, p), fmt(pt.y, p))),
+            PathEl::QuadTo(c, pt) => out.push_str(&format!(
+                "Q{} {} {} {}",
+                fmt(c.x, p),
+                fmt(c.y, p),
+                fmt(pt.x, p),
+                fmt(pt.y, p)
+            )),
+            PathEl::CurveTo(c1, c2, pt) => out.push_str(&format!(
+                "C{} {} {} {} {} {}",
+                fmt(c1.x, p),
+                fmt(c1.y, p),
+                fmt(c2.x, p),
+                fmt(c2.y, p),
+                fmt(pt.x, p),
+                fmt(pt.y, p)
+            )),
+            PathEl::ClosePath => out.push('Z'),
+        }
+    }
+    out
+}
+
 // ─── Full-document export ─────────────────────────────────────────────────────
 
 /// Export `doc` as an SVG string.
@@ -45,10 +179,11 @@ impl Default for SvgExportOptions {
 /// - Gradients are collected into a `<defs>` block.
 /// - Transforms use SVG `matrix(a,b,c,d,e,f)` syntax (identity is omitted).
 pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
-    let mut defs = String::new();
-    let mut body = String::new();
-    let mut grad_counter: usize = 0;
     let p = opts.precision.clamp(1, 6) as usize;
+    // Full-document export preserves full-precision path `d` (path_p = None) for
+    // back-compatibility; only viewBox/coord values honor `precision`.
+    let mut ctx = SvgCtx::new(p, None);
+    let mut body = String::new();
 
     // Pre-build node ID map when semantic IDs are enabled.
     let id_map: Option<HashMap<NodeId, String>> = if opts.semantic_ids {
@@ -100,26 +235,17 @@ pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
 
         for node_id in &layer.node_ids {
             if let Some(node) = doc.nodes.get(node_id) {
-                emit_node_inner(
-                    node,
-                    doc,
-                    &mut defs,
-                    &mut body,
-                    &mut grad_counter,
-                    4,
-                    None,
-                    id_map.as_ref(),
-                );
+                emit_node_inner(node, doc, &mut ctx, &mut body, 4, None, id_map.as_ref());
             }
         }
 
         body.push_str("  </g>\n");
     }
 
-    let defs_block = if defs.is_empty() {
+    let defs_block = if ctx.defs.is_empty() {
         String::new()
     } else {
-        format!("  <defs>\n{}  </defs>\n", defs)
+        format!("  <defs>\n{}  </defs>\n", ctx.defs)
     };
 
     format!(
@@ -146,9 +272,19 @@ pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
 /// - viewBox is the union of all selected nodes' world-space bounding boxes;
 ///   falls back to full document dimensions if no bounds can be computed.
 pub fn export_nodes_as_svg(doc: &Document, node_ids: &[NodeId]) -> String {
-    let mut defs = String::new();
+    export_nodes_as_svg_opts(doc, node_ids, &SvgSelectionOptions::default())
+}
+
+/// Export a subset of nodes as SVG with explicit precision / normalization /
+/// dedup options (see [`SvgSelectionOptions`]).
+pub fn export_nodes_as_svg_opts(
+    doc: &Document,
+    node_ids: &[NodeId],
+    opts: &SvgSelectionOptions,
+) -> String {
+    let cp = opts.precision.clamp(1, 6) as usize;
+    let mut ctx = SvgCtx::new(cp, Some(cp));
     let mut body = String::new();
-    let mut grad_counter: usize = 0;
     let mut combined_bbox: Option<kurbo::Rect> = None;
 
     // Collect nodes in document order (layer order → z-order within layer).
@@ -172,36 +308,47 @@ pub fn export_nodes_as_svg(doc: &Document, node_ids: &[NodeId]) -> String {
                     });
                 }
                 let slug = slugify(&node.name);
-                emit_node_inner(
-                    node,
-                    doc,
-                    &mut defs,
-                    &mut body,
-                    &mut grad_counter,
-                    2,
-                    Some(&slug),
-                    None,
-                );
+                emit_node_inner(node, doc, &mut ctx, &mut body, 2, Some(&slug), None);
             }
         }
     }
 
-    let (vx, vy, vw, vh) = match combined_bbox {
+    let tight = match combined_bbox {
         Some(r) => (r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0),
         None => (0.0, 0.0, doc.width as f64, doc.height as f64),
     };
 
-    let defs_block = if defs.is_empty() {
+    // Frame the viewBox per the normalization mode. Content coordinates are never
+    // moved — a square/normalized frame is achieved purely by widening the
+    // viewBox and centering it on the content, so every icon in a set lands at a
+    // uniform aspect ratio and scale without geometry rewrites.
+    let (vx, vy, vw, vh) = match opts.normalize {
+        SvgNormalize::Tight => tight,
+        SvgNormalize::Square { pad } => {
+            let (tx, ty, tw, th) = tight;
+            let cx = tx + tw / 2.0;
+            let cy = ty + th / 2.0;
+            let base = tw.max(th).max(1e-6);
+            let side = base * (1.0 + 2.0 * pad.max(0.0));
+            (cx - side / 2.0, cy - side / 2.0, side, side)
+        }
+    };
+
+    let defs_block = if ctx.defs.is_empty() {
         String::new()
     } else {
-        format!("  <defs>\n{}  </defs>\n", defs)
+        format!("  <defs>\n{}  </defs>\n", ctx.defs)
     };
 
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" \
          xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
-         width=\"{vw:.4}\" height=\"{vh:.4}\" viewBox=\"{vx:.4} {vy:.4} {vw:.4} {vh:.4}\">\n\
+         width=\"{vw}\" height=\"{vh}\" viewBox=\"{vx} {vy} {vw} {vh}\">\n\
          {defs_block}{body}</svg>",
+        vw = fmt(vw, cp),
+        vh = fmt(vh, cp),
+        vx = fmt(vx, cp),
+        vy = fmt(vy, cp),
     )
 }
 
@@ -296,9 +443,8 @@ fn slugify(name: &str) -> String {
 fn emit_node_inner(
     node: &SceneNode,
     doc: &Document,
-    defs: &mut String,
+    ctx: &mut SvgCtx,
     body: &mut String,
-    grad_counter: &mut usize,
     indent: usize,
     // Explicit ID override (used by selection export).
     id_override: Option<&str>,
@@ -331,23 +477,19 @@ fn emit_node_inner(
         String::new()
     };
 
-    let filter = filter_attrs(node, defs);
+    let filter = filter_attrs(node, &mut ctx.defs);
 
     match &node.kind {
         SceneNodeKind::Path(p) => {
-            let fill = fill_attrs(&p.fill, defs, grad_counter);
-            let stroke = stroke_attrs(&p.stroke, affine_scale(&node.transform));
+            let fill = fill_attrs(&p.fill, ctx);
+            let stroke = stroke_attrs(&p.stroke, affine_scale(&node.transform), ctx);
+            let d = match ctx.path_p {
+                Some(prec) => path_d_rounded(&p.path_data, prec),
+                None => p.path_data.as_svg().to_string(),
+            };
             body.push_str(&format!(
                 "{}<path{}{}{}{}{}{}{} d=\"{}\"/>\n",
-                pad,
-                id_attr,
-                transform,
-                opacity,
-                blend,
-                filter,
-                fill,
-                stroke,
-                p.path_data.as_svg(),
+                pad, id_attr, transform, opacity, blend, filter, fill, stroke, d,
             ));
         }
         SceneNodeKind::Group(g) => {
@@ -357,23 +499,14 @@ fn emit_node_inner(
             ));
             for child_id in &g.children {
                 if let Some(child) = doc.nodes.get(child_id) {
-                    emit_node_inner(
-                        child,
-                        doc,
-                        defs,
-                        body,
-                        grad_counter,
-                        indent + 2,
-                        None,
-                        id_map,
-                    );
+                    emit_node_inner(child, doc, ctx, body, indent + 2, None, id_map);
                 }
             }
             body.push_str(&format!("{}</g>\n", pad));
         }
         SceneNodeKind::Text(t) => {
-            let fill = fill_attrs(&t.fill, defs, grad_counter);
-            let stroke = stroke_attrs(&t.stroke, affine_scale(&node.transform));
+            let fill = fill_attrs(&t.fill, ctx);
+            let stroke = stroke_attrs(&t.stroke, affine_scale(&node.transform), ctx);
             let anchor = match t.align {
                 TextAlign::Left => "start",
                 TextAlign::Center => "middle",
@@ -499,25 +632,94 @@ fn filter_attrs(node: &SceneNode, defs: &mut String) -> String {
     format!(" filter=\"url(#{})\"", id)
 }
 
-fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
+/// Wrap a paint-def id into a ` fill="url(#id)"` (or `stroke=`) attribute, adding
+/// a `-opacity` attribute when the paint opacity is below 1.
+fn paint_url_attr(prop: &str, id: &str, opacity: f32) -> String {
+    if (opacity - 1.0).abs() < 0.001 {
+        format!(" {prop}=\"url(#{id})\"")
+    } else {
+        format!(" {prop}=\"url(#{id})\" {prop}-opacity=\"{opacity:.4}\"")
+    }
+}
+
+/// Emit stops for a linear/radial gradient with coordinate precision `p`.
+fn gradient_stops(g: &Gradient, p: usize) -> String {
+    g.stops
+        .iter()
+        .map(|s| {
+            let hex = s.color.to_hex();
+            if (s.color.a - 1.0).abs() < 0.001 {
+                format!(
+                    "      <stop offset=\"{}\" stop-color=\"{}\"/>\n",
+                    fmt(s.offset as f64, p),
+                    hex
+                )
+            } else {
+                format!(
+                    "      <stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{:.4}\"/>\n",
+                    fmt(s.offset as f64, p),
+                    hex,
+                    s.color.a
+                )
+            }
+        })
+        .collect()
+}
+
+/// Intern a linear/radial gradient def (deduped) and return its shared id.
+fn gradient_ref(ctx: &mut SvgCtx, g: &Gradient) -> String {
+    let p = ctx.coord_p;
+    let stops = gradient_stops(g, p);
+    match g.kind {
+        GradientKind::Linear => {
+            let (x1, y1, x2, y2) = if g.coords.len() >= 4 {
+                (g.coords[0], g.coords[1], g.coords[2], g.coords[3])
+            } else {
+                (0.0, 0.0, 1.0, 0.0)
+            };
+            let (fx1, fy1, fx2, fy2) = (fmt(x1, p), fmt(y1, p), fmt(x2, p), fmt(y2, p));
+            let sig = format!("lin|{fx1}|{fy1}|{fx2}|{fy2}|{stops}");
+            ctx.intern("grad", sig, |id| {
+                format!(
+                    "    <linearGradient id=\"{id}\" x1=\"{fx1}\" y1=\"{fy1}\" x2=\"{fx2}\" \
+                     y2=\"{fy2}\" gradientUnits=\"userSpaceOnUse\">\n{stops}    </linearGradient>\n",
+                )
+            })
+        }
+        GradientKind::Radial => {
+            let (cx, cy, r) = if g.coords.len() >= 5 {
+                (g.coords[0], g.coords[1], g.coords[4])
+            } else {
+                (0.5, 0.5, 0.5)
+            };
+            let (fcx, fcy, fr) = (fmt(cx, p), fmt(cy, p), fmt(r, p));
+            let sig = format!("rad|{fcx}|{fcy}|{fr}|{stops}");
+            ctx.intern("grad", sig, |id| {
+                format!(
+                    "    <radialGradient id=\"{id}\" cx=\"{fcx}\" cy=\"{fcy}\" r=\"{fr}\" \
+                     gradientUnits=\"userSpaceOnUse\">\n{stops}    </radialGradient>\n",
+                )
+            })
+        }
+    }
+}
+
+fn fill_attrs(fill: &Fill, ctx: &mut SvgCtx) -> String {
     if !fill.enabled {
         return " fill=\"none\"".to_string();
     }
+    let p = ctx.coord_p;
     match &fill.kind {
         FillKind::None => " fill=\"none\"".to_string(),
         FillKind::Solid(c) => solid_fill_attr(c, fill.opacity),
         FillKind::FluidGradient(fg) => {
-            // Export as a radial gradient approximation: first point = center,
-            // remaining points as stops at increasing radii (best-effort SVG).
+            // Export as a radial gradient approximation: centroid center, first→last color.
             if fg.points.is_empty() {
                 return " fill=\"none\"".to_string();
             }
             if fg.points.len() == 1 {
                 return solid_fill_attr(&fg.points[0].color, fill.opacity);
             }
-            let id = format!("grad-{}", *counter);
-            *counter += 1;
-            // Use centroid as gradient center
             let cx: f64 = fg.points.iter().map(|p| p.x).sum::<f64>() / fg.points.len() as f64;
             let cy: f64 = fg.points.iter().map(|p| p.y).sum::<f64>() / fg.points.len() as f64;
             let max_r: f64 = fg
@@ -526,24 +728,23 @@ fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
                 .map(|p| ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt())
                 .fold(0.0_f64, f64::max)
                 .max(1.0);
-            // Use first point's color at center, average of outer points at edge
             let first = &fg.points[0];
             let last = &fg.points[fg.points.len() - 1];
+            let (fcx, fcy, fr) = (fmt(cx, p), fmt(cy, p), fmt(max_r, p));
             let stops = format!(
                 "      <stop offset=\"0\" stop-color=\"{}\"/>\n\
-                       <stop offset=\"1\" stop-color=\"{}\"/>\n",
+                 \x20     <stop offset=\"1\" stop-color=\"{}\"/>\n",
                 first.color.to_hex(),
                 last.color.to_hex()
             );
-            defs.push_str(&format!(
-                "    <radialGradient id=\"{id}\" cx=\"{cx}\" cy=\"{cy}\" r=\"{max_r}\" \
-                 gradientUnits=\"userSpaceOnUse\">\n{stops}    </radialGradient>\n",
-            ));
-            if (fill.opacity - 1.0).abs() < 0.001 {
-                format!(" fill=\"url(#{id})\"")
-            } else {
-                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
-            }
+            let sig = format!("rad|{fcx}|{fcy}|{fr}|{stops}");
+            let id = ctx.intern("grad", sig, |id| {
+                format!(
+                    "    <radialGradient id=\"{id}\" cx=\"{fcx}\" cy=\"{fcy}\" r=\"{fr}\" \
+                     gradientUnits=\"userSpaceOnUse\">\n{stops}    </radialGradient>\n",
+                )
+            });
+            paint_url_attr("fill", &id, fill.opacity)
         }
         FillKind::MeshGradient(mg) => {
             // Export as a linear gradient approximation between first and last vertex colours.
@@ -553,136 +754,88 @@ fn fill_attrs(fill: &Fill, defs: &mut String, counter: &mut usize) -> String {
             if mg.vertices.len() == 1 {
                 return solid_fill_attr(&mg.vertices[0].color, fill.opacity);
             }
-            let id = format!("grad-{}", *counter);
-            *counter += 1;
             let first = &mg.vertices[0];
             let last = &mg.vertices[mg.vertices.len() - 1];
+            let (x1, y1, x2, y2) = (
+                fmt(first.x, p),
+                fmt(first.y, p),
+                fmt(last.x, p),
+                fmt(last.y, p),
+            );
             let stops = format!(
                 "      <stop offset=\"0\" stop-color=\"{}\"/>\n\
-                       <stop offset=\"1\" stop-color=\"{}\"/>\n",
+                 \x20     <stop offset=\"1\" stop-color=\"{}\"/>\n",
                 first.color.to_hex(),
                 last.color.to_hex()
             );
-            defs.push_str(&format!(
-                "    <linearGradient id=\"{id}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" \
-                 gradientUnits=\"userSpaceOnUse\">\n{stops}    </linearGradient>\n",
-                first.x, first.y, last.x, last.y,
-            ));
-            if (fill.opacity - 1.0).abs() < 0.001 {
-                format!(" fill=\"url(#{id})\"")
-            } else {
-                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
-            }
+            let sig = format!("lin|{x1}|{y1}|{x2}|{y2}|{stops}");
+            let id = ctx.intern("grad", sig, |id| {
+                format!(
+                    "    <linearGradient id=\"{id}\" x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" \
+                     y2=\"{y2}\" gradientUnits=\"userSpaceOnUse\">\n{stops}    </linearGradient>\n",
+                )
+            });
+            paint_url_attr("fill", &id, fill.opacity)
         }
         FillKind::Gradient(g) => {
-            let id = format!("grad-{}", *counter);
-            *counter += 1;
-
-            let stops: String = g
-                .stops
-                .iter()
-                .map(|s| {
-                    let hex = s.color.to_hex();
-                    if (s.color.a - 1.0).abs() < 0.001 {
-                        format!(
-                            "      <stop offset=\"{}\" stop-color=\"{}\"/>\n",
-                            s.offset, hex
-                        )
-                    } else {
-                        format!(
-                            "      <stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{:.4}\"/>\n",
-                            s.offset, hex, s.color.a
-                        )
-                    }
-                })
-                .collect();
-
-            match g.kind {
-                GradientKind::Linear => {
-                    let (x1, y1, x2, y2) = if g.coords.len() >= 4 {
-                        (g.coords[0], g.coords[1], g.coords[2], g.coords[3])
-                    } else {
-                        (0.0, 0.0, 1.0, 0.0)
-                    };
-                    defs.push_str(&format!(
-                        "    <linearGradient id=\"{id}\" x1=\"{x1}\" y1=\"{y1}\" \
-                         x2=\"{x2}\" y2=\"{y2}\" gradientUnits=\"userSpaceOnUse\">\n\
-                         {stops}\
-                         </linearGradient>\n",
-                    ));
-                }
-                GradientKind::Radial => {
-                    let (cx, cy, r) = if g.coords.len() >= 5 {
-                        (g.coords[0], g.coords[1], g.coords[4])
-                    } else {
-                        (0.5, 0.5, 0.5)
-                    };
-                    defs.push_str(&format!(
-                        "    <radialGradient id=\"{id}\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" \
-                         gradientUnits=\"userSpaceOnUse\">\n\
-                         {stops}\
-                         </radialGradient>\n",
-                    ));
-                }
-            }
-
-            if (fill.opacity - 1.0).abs() < 0.001 {
-                format!(" fill=\"url(#{id})\"")
-            } else {
-                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
-            }
+            let id = gradient_ref(ctx, g);
+            paint_url_attr("fill", &id, fill.opacity)
         }
-        FillKind::Pattern(p) => {
-            use base64::Engine;
-            let id = format!("pat-{}", *counter);
-            *counter += 1;
+        FillKind::Pattern(pat) => {
+            let id = pattern_ref(ctx, pat);
+            paint_url_attr("fill", &id, fill.opacity)
+        }
+    }
+}
 
-            let tw = p.tile.width.max(1);
-            let th = p.tile.height.max(1);
-            // The pattern cell is the tile plus its inter-tile gutter.
-            let cell_w = tw as f64 + p.spacing.max(0.0);
-            let cell_h = th as f64 + p.spacing.max(0.0);
+/// Intern a pattern def (deduped by tile bytes + transform) and return its id.
+fn pattern_ref(ctx: &mut SvgCtx, p: &crate::style::PatternFill) -> String {
+    {
+        use base64::Engine;
 
-            let png = p.tile.to_png();
-            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let tw = p.tile.width.max(1);
+        let th = p.tile.height.max(1);
+        // The pattern cell is the tile plus its inter-tile gutter.
+        let cell_w = tw as f64 + p.spacing.max(0.0);
+        let cell_h = th as f64 + p.spacing.max(0.0);
 
-            // patternTransform mirrors PatternFill's document-space transform:
-            // translate(offset) → rotate(deg) → scale(s). SVG applies these
-            // right-to-left, matching the inverse-transform sample order.
-            let deg = p.rotation.to_degrees();
-            let mut xform = String::new();
-            if p.offset[0] != 0.0 || p.offset[1] != 0.0 {
-                xform.push_str(&format!("translate({} {}) ", p.offset[0], p.offset[1]));
-            }
-            if deg.abs() > 1e-9 {
-                xform.push_str(&format!("rotate({deg}) "));
-            }
-            if (p.scale - 1.0).abs() > 1e-9 {
-                xform.push_str(&format!("scale({}) ", p.scale));
-            }
-            let xform = xform.trim_end();
-            let xform_attr = if xform.is_empty() {
-                String::new()
-            } else {
-                format!(" patternTransform=\"{xform}\"")
-            };
+        let png = p.tile.to_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
 
-            // Grid layout is exact; brick/hex staggers are approximated by the
-            // grid cell here — on-canvas/headless remain the source of truth.
-            defs.push_str(&format!(
+        // patternTransform mirrors PatternFill's document-space transform:
+        // translate(offset) → rotate(deg) → scale(s). SVG applies these
+        // right-to-left, matching the inverse-transform sample order.
+        let deg = p.rotation.to_degrees();
+        let mut xform = String::new();
+        if p.offset[0] != 0.0 || p.offset[1] != 0.0 {
+            xform.push_str(&format!("translate({} {}) ", p.offset[0], p.offset[1]));
+        }
+        if deg.abs() > 1e-9 {
+            xform.push_str(&format!("rotate({deg}) "));
+        }
+        if (p.scale - 1.0).abs() > 1e-9 {
+            xform.push_str(&format!("scale({}) ", p.scale));
+        }
+        let xform = xform.trim_end();
+        let xform_attr = if xform.is_empty() {
+            String::new()
+        } else {
+            format!(" patternTransform=\"{xform}\"")
+        };
+
+        // Grid layout is exact; brick/hex staggers are approximated by the grid
+        // cell here — on-canvas/headless remain the source of truth. Dedupe by the
+        // full tile bytes + geometry so repeated tiles share one <pattern>.
+        let sig = format!("pat|{cell_w}|{cell_h}|{xform_attr}|{b64}");
+        ctx.intern("pat", sig, move |id| {
+            format!(
                 "    <pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" \
                  width=\"{cell_w}\" height=\"{cell_h}\"{xform_attr}>\n\
                  \x20     <image x=\"0\" y=\"0\" width=\"{tw}\" height=\"{th}\" \
                  href=\"data:image/png;base64,{b64}\"/>\n\
                  \x20 </pattern>\n",
-            ));
-
-            if (fill.opacity - 1.0).abs() < 0.001 {
-                format!(" fill=\"url(#{id})\"")
-            } else {
-                format!(" fill=\"url(#{id})\" fill-opacity=\"{:.4}\"", fill.opacity)
-            }
-        }
+            )
+        })
     }
 }
 
@@ -708,11 +861,23 @@ fn affine_scale(t: &Transform) -> f64 {
 /// divided by it so that, once the element's `transform="matrix(...)"` scales it
 /// back up, the stroke renders at its authored width in canvas units — a
 /// non-scaling stroke, consistent with the live canvas and raster export.
-fn stroke_attrs(stroke: &Stroke, obj_scale: f64) -> String {
+fn stroke_attrs(stroke: &Stroke, obj_scale: f64, ctx: &mut SvgCtx) -> String {
     if !stroke.enabled || stroke.width <= 0.0 {
         return " stroke=\"none\"".to_string();
     }
-    let hex = stroke.color.to_hex();
+    // Non-solid stroke paint (#201): a gradient/pattern stroke exports as
+    // `stroke="url(#id)"`, reusing the same deduped paint defs as fills. Solid or
+    // unsupported paints fall through to the flat `color` path below.
+    let paint_ref: Option<String> = match &stroke.paint {
+        Some(FillKind::Gradient(g)) => Some(gradient_ref(ctx, g)),
+        Some(FillKind::Pattern(p)) => Some(pattern_ref(ctx, p)),
+        _ => None,
+    };
+    let hex = match &stroke.paint {
+        // A solid override paint recolors the stroke.
+        Some(FillKind::Solid(c)) => c.to_hex(),
+        _ => stroke.color.to_hex(),
+    };
     let opacity = stroke.color.a * stroke.opacity;
     let cap = match stroke.line_cap {
         LineCap::Butt => "butt",
@@ -730,8 +895,13 @@ fn stroke_attrs(stroke: &Stroke, obj_scale: f64) -> String {
         StrokeAlign::Inside => " stroke-alignment=\"inner\"",
         StrokeAlign::Outside => " stroke-alignment=\"outer\"",
     };
+    // Gradient/pattern paint wins over the flat color when present.
+    let stroke_val = match &paint_ref {
+        Some(id) => format!("url(#{id})"),
+        None => hex,
+    };
     let mut s = format!(
-        " stroke=\"{hex}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\"{align_attr}",
+        " stroke=\"{stroke_val}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\"{align_attr}",
         stroke.width / obj_scale,
     );
     if join == "miter" && (stroke.miter_limit - 4.0).abs() > 0.001 {
@@ -1185,6 +1355,153 @@ mod tests {
         assert!(
             svg.contains("filter=\"url(#fx"),
             "path should reference the filter:\n{svg}"
+        );
+    }
+
+    /// #205: two paths sharing a byte-identical gradient must emit ONE
+    /// `<linearGradient>` def, referenced twice — not `grad-0` + `grad-1` clones.
+    #[test]
+    fn identical_gradients_are_deduped() {
+        use crate::node::{PathNode, SceneNode, SceneNodeKind};
+        use crate::path::PathData;
+        use crate::style::{Fill, Gradient, GradientStop};
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let layer_id = doc.layer_order[0];
+        let grad = || {
+            Gradient::linear(
+                0.0,
+                0.0,
+                100.0,
+                0.0,
+                vec![
+                    GradientStop::new(0.0, Color::new(0.0, 0.0, 1.0, 1.0)),
+                    GradientStop::new(1.0, Color::new(0.5, 0.0, 0.5, 1.0)),
+                ],
+            )
+        };
+        for name in ["a", "b"] {
+            let mut pn = PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0));
+            pn.fill = Fill::gradient(grad());
+            let node = SceneNode::new(name, layer_id, SceneNodeKind::Path(pn));
+            let nid = node.id;
+            doc.nodes.insert(nid, node);
+            doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+        }
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        let def_count = svg.matches("<linearGradient").count();
+        assert_eq!(def_count, 1, "identical gradients should dedupe to 1 def:\n{svg}");
+        assert_eq!(
+            svg.matches("url(#grad-0)").count(),
+            2,
+            "both paths should reference the single shared gradient:\n{svg}"
+        );
+    }
+
+    /// #201: a gradient stroke paint must export as `stroke="url(#…)"`, and when a
+    /// fill and stroke share the SAME gradient, both reference ONE deduped def.
+    #[test]
+    fn gradient_stroke_exports_url_and_dedupes_with_fill() {
+        use crate::node::{PathNode, SceneNode, SceneNodeKind};
+        use crate::path::PathData;
+        use crate::style::{Fill, FillKind, Gradient, GradientStop, Stroke};
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let layer_id = doc.layer_order[0];
+        let grad = || {
+            Gradient::linear(
+                0.0,
+                0.0,
+                100.0,
+                0.0,
+                vec![
+                    GradientStop::new(0.0, Color::new(0.18, 0.34, 0.81, 1.0)),
+                    GradientStop::new(1.0, Color::new(0.49, 0.23, 0.93, 1.0)),
+                ],
+            )
+        };
+        let mut pn = PathNode::new(PathData::rect(0.0, 0.0, 40.0, 40.0))
+            .with_stroke(Stroke::solid(Color::BLACK, 6.0));
+        pn.fill = Fill::gradient(grad());
+        // Same gradient on the stroke paint.
+        pn.stroke.paint = Some(FillKind::Gradient(grad()));
+        let node = SceneNode::new("icon", layer_id, SceneNodeKind::Path(pn));
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(
+            svg.contains("stroke=\"url(#grad-0)\""),
+            "gradient stroke should export as url ref:\n{svg}"
+        );
+        assert!(
+            svg.contains("fill=\"url(#grad-0)\""),
+            "fill should share the same deduped gradient id:\n{svg}"
+        );
+        assert_eq!(
+            svg.matches("<linearGradient").count(),
+            1,
+            "fill+stroke sharing one gradient must emit a single def:\n{svg}"
+        );
+    }
+
+    /// #206: selection export must round path `d` to the requested precision
+    /// instead of emitting 15-decimal coordinates.
+    #[test]
+    fn selection_export_respects_precision() {
+        use crate::node::{PathNode, SceneNode, SceneNodeKind};
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let layer_id = doc.layer_order[0];
+        // A path with an ugly high-precision coordinate.
+        let pd = PathData::from_svg("M0.123456789 0.987654321 L10 10 Z").unwrap();
+        let node = SceneNode::new("icon", layer_id, SceneNodeKind::Path(PathNode::new(pd)));
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+
+        let opts = SvgSelectionOptions {
+            precision: 3,
+            ..Default::default()
+        };
+        let svg = export_nodes_as_svg_opts(&doc, &[nid], &opts);
+        assert!(
+            svg.contains("M0.123 0.988"),
+            "path d should be rounded to 3 decimals:\n{svg}"
+        );
+        assert!(
+            !svg.contains("0.123456"),
+            "no 15-decimal coordinates should survive:\n{svg}"
+        );
+    }
+
+    /// #203: `Square` normalization must produce a 1:1 (square) viewBox centered on
+    /// the content, so a wide icon and a tall icon frame identically.
+    #[test]
+    fn selection_export_square_normalize_is_uniform() {
+        use crate::node::{PathNode, SceneNode, SceneNodeKind};
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 400.0, 400.0);
+        let layer_id = doc.layer_order[0];
+        // Wide rectangle: 80×20.
+        let pd = PathData::rect(10.0, 40.0, 80.0, 20.0);
+        let node = SceneNode::new("wide", layer_id, SceneNodeKind::Path(PathNode::new(pd)));
+        let nid = node.id;
+        doc.nodes.insert(nid, node);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(nid);
+
+        let opts = SvgSelectionOptions {
+            normalize: SvgNormalize::Square { pad: 0.0 },
+            ..Default::default()
+        };
+        let svg = export_nodes_as_svg_opts(&doc, &[nid], &opts);
+        // viewBox side should be max(80,20) = 80 in both dimensions.
+        assert!(
+            svg.contains("width=\"80\" height=\"80\""),
+            "square normalize should yield an 80×80 viewBox:\n{svg}"
         );
     }
 

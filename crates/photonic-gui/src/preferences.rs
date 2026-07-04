@@ -30,6 +30,15 @@ pub struct AppPreferences {
     /// Measurement unit used for ruler labels and the live cursor readout.
     #[serde(default)]
     pub document_units: photonic_core::DocumentUnit,
+    /// Icon keyline template overlay (#208): draws the classic Material/Apple
+    /// keyline safe-area shapes (square, circle, portrait, landscape) centered on
+    /// the artboard so icon geometry can be aligned to a consistent grid.
+    #[serde(default)]
+    pub show_keyline_grid: bool,
+    /// Snap drawing/moving to whole document pixels (#208). Additive with grid /
+    /// object snapping; makes icon geometry land on crisp integer coordinates.
+    #[serde(default)]
+    pub snap_to_pixel: bool,
 
     // TOOL DEFAULTS
     pub default_fill_color: [f32; 4],
@@ -162,6 +171,8 @@ impl Default for AppPreferences {
             snap_tolerance_px: 6.0,
             snap_show_guides: true,
             document_units: photonic_core::DocumentUnit::Px,
+            show_keyline_grid: false,
+            snap_to_pixel: false,
             default_fill_color: [0.22, 0.47, 0.87, 1.0],
             default_stroke_enabled: false,
             default_stroke_color: [0.0, 0.0, 0.0, 1.0],

@@ -184,8 +184,20 @@ fn render_path_node(
                 sc.miter_limit as f32,
             );
             if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
-                let rgb = [sc.color.r, sc.color.g, sc.color.b];
-                composite_coverage(base, w, view, cov, bbox, blend_mode, |_, _| (rgb, alpha));
+                match &sc.paint {
+                    // Gradient/pattern stroke paint (#201): sample per pixel, like fills.
+                    Some(kind) => {
+                        let paint_opacity = sc.opacity * node_opacity * gop;
+                        composite_coverage(base, w, view, cov, bbox, blend_mode, |cx, cy| {
+                            let c = kind.sample_at(cx, cy, paint_opacity);
+                            ([c[0], c[1], c[2]], c[3])
+                        });
+                    }
+                    None => {
+                        let rgb = [sc.color.r, sc.color.g, sc.color.b];
+                        composite_coverage(base, w, view, cov, bbox, blend_mode, |_, _| (rgb, alpha));
+                    }
+                }
             }
         }
     }

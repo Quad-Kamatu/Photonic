@@ -1134,6 +1134,9 @@ fn build_geometry(
             let sc = &path_node.stroke;
             let alpha = sc.color.a * sc.opacity * node.opacity * gop;
             let stroke_color = [sc.color.r, sc.color.g, sc.color.b, alpha];
+            // Gradient/pattern stroke paint (#201): sample the paint per stroke
+            // vertex, exactly as the fill path does. `None` = flat stroke color.
+            let stroke_paint_opacity = sc.opacity * node.opacity * gop;
 
             // Non-scaling stroke: cancel the object transform's uniform scale so
             // the stroke width stays constant regardless of object size, exactly
@@ -1151,9 +1154,13 @@ fn build_geometry(
                 for pos in &mesh.vertices {
                     let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
                     let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                    let color = match &sc.paint {
+                        Some(kind) => kind.sample_at(x, y, stroke_paint_opacity),
+                        None => stroke_color,
+                    };
                     verts.push(Vertex {
                         position: [x as f32, y as f32],
-                        color: stroke_color,
+                        color,
                     });
                 }
                 for &i in &mesh.indices {

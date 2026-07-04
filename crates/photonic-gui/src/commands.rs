@@ -304,6 +304,26 @@ pub static REGISTRY: &[CommandDef] = &[
         default: None,
     },
     CommandDef {
+        id: "view.toggle_keyline_grid",
+        label: "Toggle Icon Keyline Grid",
+        default: None,
+    },
+    CommandDef {
+        id: "view.toggle_snap_pixel",
+        label: "Toggle Snap to Pixel",
+        default: None,
+    },
+    CommandDef {
+        id: "assets.import_design_tokens",
+        label: "Import Design Tokens…",
+        default: None,
+    },
+    CommandDef {
+        id: "document.export_icon_set",
+        label: "Export Icon Set…",
+        default: None,
+    },
+    CommandDef {
         id: "view.fit",
         label: "Fit to View",
         default: None,

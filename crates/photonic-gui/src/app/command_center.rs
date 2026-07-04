@@ -7,6 +7,25 @@
 use super::*;
 use crate::commands::{self, CommandId};
 
+/// Sanitize a node name into a safe file stem (lowercase alnum + dashes).
+fn sanitize_stem(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = true;
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 /// Z-order move requested by an arrange command.
 #[derive(Clone, Copy)]
 enum ZMove {
@@ -110,6 +129,12 @@ impl PhotonicApp {
             "view.overprint_preview" => self.toggle_overprint_preview(),
             "view.toggle_guides" => self.guides_visible = !self.guides_visible,
             "view.toggle_grid" => self.prefs.show_grid = !self.prefs.show_grid,
+            "view.toggle_keyline_grid" => {
+                self.prefs.show_keyline_grid = !self.prefs.show_keyline_grid
+            }
+            "view.toggle_snap_pixel" => self.prefs.snap_to_pixel = !self.prefs.snap_to_pixel,
+            "assets.import_design_tokens" => modified = self.import_design_tokens_dialog(doc),
+            "document.export_icon_set" => self.export_icon_set_dialog(doc),
             "view.fit" => self.fit_pending = true,
             "view.toggle_audit" => self.audit.panel_open = !self.audit.panel_open,
             "palette.open" => self.command_palette_open = true,
@@ -123,6 +148,103 @@ impl PhotonicApp {
             }
         }
         modified
+    }
+
+    /// #207 (GUI equivalent of the `import_design_tokens` MCP tool): pick a
+    /// tokens file (CSS / JSON / Style Dictionary) and register named color
+    /// swatches from it. Returns true if any swatch was added.
+    pub(crate) fn import_design_tokens_dialog(&mut self, doc: &mut Document) -> bool {
+        let Some(path) = run_file_dialog(|| {
+            rfd::FileDialog::new()
+                .add_filter("Design tokens", &["json", "css", "tokens", "txt"])
+                .add_filter("All files", &["*"])
+                .pick_file()
+        }) else {
+            return false;
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.set_import_status(format!("Import failed: {e}"));
+                return false;
+            }
+        };
+        let hint = match path.extension().and_then(|e| e.to_str()) {
+            Some("css") => Some("css"),
+            Some("json") | Some("tokens") => Some("json"),
+            _ => None,
+        };
+        let tokens = photonic_core::tokens::parse_token_colors(&text, hint);
+        let mut added = 0usize;
+        let mut updated = 0usize;
+        for (name, hex) in tokens {
+            let Some(c) = photonic_core::color::Color::from_hex(&hex) else {
+                continue;
+            };
+            let norm = c.to_hex();
+            if let Some(existing) = doc.color_swatches.iter_mut().find(|s| s.name == name) {
+                existing.color_hex = norm;
+                updated += 1;
+            } else {
+                doc.color_swatches
+                    .push(photonic_core::ColorSwatch::new(&name, &norm));
+                added += 1;
+            }
+        }
+        self.set_import_status(format!(
+            "Imported design tokens: {added} added, {updated} updated"
+        ));
+        added > 0 || updated > 0
+    }
+
+    /// #203 (GUI equivalent of `export_icon_set`): pick a folder and write every
+    /// top-level group as a normalized (uniform square) `.svg`.
+    fn export_icon_set_dialog(&mut self, doc: &Document) {
+        let Some(dir) = run_file_dialog(|| rfd::FileDialog::new().pick_folder()) else {
+            return;
+        };
+        use photonic_core::export::{SvgNormalize, SvgSelectionOptions};
+        let opts = SvgSelectionOptions {
+            precision: 4,
+            optimize: true,
+            normalize: SvgNormalize::Square { pad: 0.1 },
+        };
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut count = 0usize;
+        for layer_id in &doc.layer_order {
+            let Some(layer) = doc.layers.get(layer_id) else {
+                continue;
+            };
+            for nid in &layer.node_ids {
+                let Some(node) = doc.nodes.get(nid) else {
+                    continue;
+                };
+                if !matches!(node.kind, photonic_core::node::SceneNodeKind::Group(_)) {
+                    continue;
+                }
+                let svg = photonic_core::export::export_nodes_as_svg_opts(doc, &[*nid], &opts);
+                let mut base = sanitize_stem(&node.name);
+                if base.is_empty() {
+                    base = "icon".into();
+                }
+                let mut stem = base.clone();
+                let mut n = 2;
+                while !used.insert(stem.clone()) {
+                    stem = format!("{base}-{n}");
+                    n += 1;
+                }
+                if std::fs::write(dir.join(format!("{stem}.svg")), svg).is_ok() {
+                    count += 1;
+                }
+            }
+        }
+        self.set_import_status(format!("Exported {count} icon(s) to {}", dir.display()));
+    }
+
+    /// Surface a short status line for import/export actions. The visible result
+    /// is the updated swatch panel / written files; this logs a summary.
+    fn set_import_status(&mut self, msg: String) {
+        tracing::info!("{msg}");
     }
 
     /// Paste the in-process clipboard with an optional offset (10px = "paste",

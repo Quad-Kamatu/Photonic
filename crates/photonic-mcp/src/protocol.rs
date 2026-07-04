@@ -124,6 +124,30 @@ pub struct ExportDesignTokensArgs {
     pub format: Option<String>,
 }
 
+/// Arguments for `import_design_tokens` tool — the counterpart to
+/// `export_design_tokens`. Registers named color swatches from a tokens payload
+/// (CSS custom properties, JSON, or style-dictionary), so brand colors can be
+/// referenced by name (via `apply_color_swatch`) instead of hard-coded per icon.
+#[derive(Debug, Deserialize, Default)]
+pub struct ImportDesignTokensArgs {
+    /// Inline tokens text (CSS `:root{--x:#hex}`, JSON, or style-dictionary).
+    /// Provide this OR `path`.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Path to a tokens file to read. Provide this OR `content`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Parse hint: "auto" (default) | "css" | "json".
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Optional prefix prepended to every imported swatch name (e.g. "brand/").
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Clear all existing swatches before importing (default: false).
+    #[serde(default)]
+    pub clear_existing: bool,
+}
+
 /// Arguments for `list_audit_log` tool
 #[derive(Debug, Deserialize, Default)]
 pub struct ListAuditLogArgs {
@@ -148,6 +172,26 @@ pub struct ExportSvgArgs {
     pub precision: Option<u8>,
 }
 
+/// Arguments for the `preview_selection` tool (issue #204) — render the selection
+/// at target display sizes over light/dark backgrounds as a contact sheet, so
+/// small-size legibility can be judged inside Photonic without a round-trip.
+#[derive(Debug, Deserialize, Default)]
+pub struct PreviewSelectionArgs {
+    /// Node IDs to preview. If omitted/empty, uses the current selection.
+    #[serde(default)]
+    pub node_ids: Option<Vec<String>>,
+    /// Target pixel sizes to render (default: [24, 32, 48]).
+    #[serde(default)]
+    pub sizes: Option<Vec<u32>>,
+    /// Background swatches (hex) to composite each size over
+    /// (default: ["#ffffff", "#0b0b12"]).
+    #[serde(default)]
+    pub backgrounds: Option<Vec<String>>,
+    /// Padding as a fraction of the icon's square size (default: 0.15).
+    #[serde(default)]
+    pub pad: Option<f64>,
+}
+
 /// Arguments for the `export_pdf` tool.
 #[derive(Debug, Deserialize, Default)]
 pub struct ExportPdfArgs {
@@ -168,6 +212,50 @@ pub struct ExportSelectionArgs {
     pub as_react_component: bool,
     /// Component name when `as_react_component` is true (default: "SvgIcon").
     pub component_name: Option<String>,
+    /// Decimal precision for coordinates AND path data, clamped 1–6 (default: 4).
+    /// Prevents bloated 15-decimal selection exports.
+    #[serde(default)]
+    pub precision: Option<u8>,
+    /// viewBox framing: `"tight"` (default) = union bbox; `"square"` = a uniform
+    /// centered square so a set of icons all export at the same aspect/scale.
+    #[serde(default)]
+    pub normalize: Option<String>,
+    /// Padding as a fraction of the square side when `normalize: "square"`
+    /// (e.g. 0.1 = 10% breathing room). Default 0.
+    #[serde(default)]
+    pub pad: Option<f64>,
+}
+
+/// One icon in an `export_icon_set` batch.
+#[derive(Debug, Deserialize)]
+pub struct IconSetEntryArg {
+    /// Output file name (a `.svg` extension is added if absent).
+    pub name: String,
+    /// Node IDs comprising this icon (a single group id is fine).
+    pub node_ids: Vec<String>,
+}
+
+/// Arguments for the `export_icon_set` tool — batch-export N tagged groups to
+/// normalized `.svg` files in one call (the canonical icon-pipeline workflow).
+#[derive(Debug, Deserialize, Default)]
+pub struct ExportIconSetArgs {
+    /// Explicit list of icons to export. If omitted, every top-level group in the
+    /// document is exported, named by its (slugified) group name.
+    #[serde(default)]
+    pub icons: Option<Vec<IconSetEntryArg>>,
+    /// Directory to write the `.svg` files into. If omitted, the SVGs are returned
+    /// inline in the tool result instead of written to disk.
+    #[serde(default)]
+    pub out_dir: Option<String>,
+    /// Decimal precision for coordinates and path data, clamped 1–6 (default: 4).
+    #[serde(default)]
+    pub precision: Option<u8>,
+    /// viewBox framing: `"square"` (default here) or `"tight"`.
+    #[serde(default)]
+    pub normalize: Option<String>,
+    /// Padding fraction for square normalization (default 0.1).
+    #[serde(default)]
+    pub pad: Option<f64>,
 }
 
 /// Arguments for `zig_zag_path` tool
@@ -2055,6 +2143,14 @@ pub enum FillArg {
         offsets: Option<Vec<f32>>,
         #[serde(default)]
         coords: Option<Vec<f64>>,
+        /// Coordinate space for `coords`. `"user"` (default) = absolute
+        /// document/world coordinates. `"bbox"` (a.k.a. `"objectBoundingBox"`) =
+        /// coordinates are 0–1 relative to the target node's bounding box, and
+        /// are resolved to absolute coords per node when applied via `set_paint`.
+        /// Lets one "left→right blue→purple" gradient be reused across every icon
+        /// with zero per-node coordinate bookkeeping.
+        #[serde(default)]
+        units: Option<String>,
     },
     /// Fluid (free-point) gradient: colors blended via inverse-distance weighting.
     ///
@@ -2132,6 +2228,59 @@ pub enum FillArg {
 }
 
 impl FillArg {
+    /// If this is a bbox-units gradient, return a copy with `coords` resolved to
+    /// absolute user-space against `bbox` = (x, y, w, h); otherwise clone
+    /// unchanged. This is how one relative gradient definition is re-fit to each
+    /// node's own bounding box (issue #202).
+    pub fn resolved_for_bbox(&self, bbox: (f64, f64, f64, f64)) -> FillArg {
+        let (bx, by, bw, bh) = bbox;
+        match self {
+            FillArg::Gradient {
+                gradient_type,
+                colors,
+                offsets,
+                coords,
+                units,
+            } if matches!(
+                units.as_deref(),
+                Some("bbox") | Some("objectBoundingBox") | Some("object_bounding_box")
+            ) =>
+            {
+                let is_radial = gradient_type.as_deref() == Some("radial");
+                let c = coords.clone().unwrap_or_else(|| {
+                    if is_radial {
+                        vec![0.5, 0.5, 0.5]
+                    } else {
+                        vec![0.0, 0.0, 1.0, 0.0]
+                    }
+                });
+                let g = |i: usize, d: f64| c.get(i).copied().unwrap_or(d);
+                let resolved = if is_radial {
+                    let cx = bx + g(0, 0.5) * bw;
+                    let cy = by + g(1, 0.5) * bh;
+                    // Radius as a fraction of the larger box dimension.
+                    let r = g(2, 0.5) * bw.max(bh);
+                    vec![cx, cy, r]
+                } else {
+                    vec![
+                        bx + g(0, 0.0) * bw,
+                        by + g(1, 0.0) * bh,
+                        bx + g(2, 1.0) * bw,
+                        by + g(3, 0.0) * bh,
+                    ]
+                };
+                FillArg::Gradient {
+                    gradient_type: gradient_type.clone(),
+                    colors: colors.clone(),
+                    offsets: offsets.clone(),
+                    coords: Some(resolved),
+                    units: None,
+                }
+            }
+            other => other.clone(),
+        }
+    }
+
     /// Convert to a `photonic_core::style::Fill`. Returns an error if colors can't be parsed.
     pub fn to_fill(&self) -> Result<photonic_core::style::Fill, String> {
         use photonic_core::style::{
@@ -2150,6 +2299,7 @@ impl FillArg {
                 colors,
                 offsets,
                 coords,
+                units: _,
             } => {
                 let parsed: Result<Vec<Color>, _> = colors
                     .iter()
@@ -2258,6 +2408,21 @@ impl FillArg {
     }
 }
 
+/// Arguments for the `set_paint` tool — apply one paint to many nodes at once,
+/// each re-fit to its own bounding box (issue #202). The paint uses the same
+/// object shape as `fill`; a gradient may set `"units": "bbox"` with 0–1 coords
+/// to be resolved per node.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SetPaintArgs {
+    /// Nodes (ids or names) to paint. Order is irrelevant.
+    pub node_ids: Vec<String>,
+    /// Which paint slot to set: `"fill"` (default) or `"stroke"`.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// The paint to apply (same shape as `fill`).
+    pub paint: FillArg,
+}
+
 /// Stroke specification from an MCP client.
 #[derive(Debug, Deserialize, Clone)]
 pub struct StrokeArg {
@@ -2287,6 +2452,11 @@ pub struct StrokeArg {
     /// Arrowhead at the path end: "none" | "filled_arrow" | "open_arrow". Default "none".
     #[serde(default)]
     pub arrowhead_end: Option<String>,
+    /// Optional non-solid stroke paint (gradient/pattern), same object shape as
+    /// `fill` (#201). When a gradient/pattern, the stroke geometry is painted
+    /// with it instead of the flat `color`; a solid paint just sets the color.
+    #[serde(default)]
+    pub paint: Option<FillArg>,
 }
 
 impl StrokeArg {
@@ -2350,6 +2520,20 @@ impl StrokeArg {
         }
         if let Some(ah) = &self.arrowhead_end {
             stroke.arrowhead_end = parse_arrowhead(ah);
+        }
+        // Non-solid stroke paint (#201): a gradient/pattern paints the stroke
+        // geometry; a solid paint just recolors it.
+        if let Some(paint) = &self.paint {
+            use photonic_core::style::FillKind;
+            let f = paint.to_fill()?;
+            match f.kind {
+                FillKind::None => {}
+                FillKind::Solid(c) => {
+                    stroke.color = c;
+                    stroke.paint = None;
+                }
+                other => stroke.paint = Some(other),
+            }
         }
         Ok(stroke)
     }
@@ -4593,4 +4777,50 @@ pub enum DocumentEvent {
     LayerRemoved { layer_id: Uuid },
     DocumentChanged,
     RenderComplete { frame_ms: f32, node_count: usize },
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+
+    /// #202: a bbox-units linear gradient resolves its 0–1 coords against the
+    /// target node's bounding box into absolute user-space coords.
+    #[test]
+    fn bbox_gradient_resolves_to_node_box() {
+        let g = FillArg::Gradient {
+            gradient_type: Some("linear".into()),
+            colors: vec!["#2f56cf".into(), "#7c3aed".into()],
+            offsets: None,
+            coords: Some(vec![0.0, 0.0, 1.0, 0.0]),
+            units: Some("bbox".into()),
+        };
+        // Box at (100, 200) sized 50×80.
+        let resolved = g.resolved_for_bbox((100.0, 200.0, 50.0, 80.0));
+        match resolved {
+            FillArg::Gradient { coords, units, .. } => {
+                assert_eq!(coords, Some(vec![100.0, 200.0, 150.0, 200.0]));
+                assert!(units.is_none(), "units should be cleared after resolution");
+            }
+            _ => panic!("expected a gradient"),
+        }
+    }
+
+    /// A user-space (default) gradient is returned unchanged.
+    #[test]
+    fn userspace_gradient_is_untouched() {
+        let g = FillArg::Gradient {
+            gradient_type: Some("linear".into()),
+            colors: vec!["#000".into(), "#fff".into()],
+            offsets: None,
+            coords: Some(vec![0.0, 0.0, 100.0, 0.0]),
+            units: None,
+        };
+        let resolved = g.resolved_for_bbox((10.0, 10.0, 5.0, 5.0));
+        match resolved {
+            FillArg::Gradient { coords, .. } => {
+                assert_eq!(coords, Some(vec![0.0, 0.0, 100.0, 0.0]));
+            }
+            _ => panic!("expected a gradient"),
+        }
+    }
 }

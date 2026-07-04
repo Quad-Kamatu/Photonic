@@ -11,6 +11,43 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+### Added
+
+- **Gradient (and pattern) strokes** (#201). Strokes are no longer limited to a
+  single solid colour — a `Stroke` can now carry any paint (linear/radial
+  gradient, pattern), rendered on-canvas, in headless/raster export, and in SVG
+  (`stroke="url(#…)"`). Line icons with a gradient outline are now a first-class
+  paint instead of an outline-stroke→delete→refill workaround. Set one via the
+  new `set_paint` tool (`target: "stroke"`) or a `stroke.paint` object.
+- **`set_paint` MCP tool** (#202): apply one paint to many nodes in a single
+  undoable call, each re-fit to its own bounding box. Gradients accept
+  `units: "bbox"` with 0–1 coordinates, so one relative gradient (e.g. left→right
+  blue→purple) styles a whole icon set with zero per-node coordinate maths.
+- **`export_icon_set` MCP tool + "Export Icon Set…" command** (#203): batch-export
+  tagged groups (or every top-level group) to normalised, uniform-square `.svg`
+  files in one step — no external post-pass to make an icon set render at a
+  consistent scale.
+- **`preview_selection` MCP tool** (#204): render the selection at target display
+  sizes over light AND dark backgrounds as one contact-sheet PNG, to judge
+  small-size legibility and on-surface contrast without leaving Photonic.
+- **`import_design_tokens` MCP tool + "Import tokens…" swatch action** (#207):
+  register named brand swatches from a CSS / JSON / Style-Dictionary tokens file
+  (the counterpart to `export_design_tokens`). Paints can then reference brand
+  colour by name, and re-importing re-themes everything at once.
+- **Icon keyline grid + snap-to-pixel** (#208): a View toggle overlays the classic
+  Material/Apple icon keyline template (square, circle, portrait & landscape safe
+  areas) on the artboard, and "Snap to Pixel" lands drawing/moving on crisp
+  integer coordinates.
+
+### Changed
+
+- **Selection SVG export is compact and consistent** (#205, #206, #203).
+  `export_selection_as_svg` now rounds coordinates and path data to a `precision`
+  (default 4 — no more 15-decimal path bloat), deduplicates byte-identical
+  gradient/pattern defs into a single shared `<defs>` entry (across fills *and*
+  strokes), and takes `normalize: "square"` to frame each icon in a uniform
+  centred square viewBox.
+
 ### Fixed
 
 - **Eyedropper now samples raster images** (and transformed shapes). In-canvas

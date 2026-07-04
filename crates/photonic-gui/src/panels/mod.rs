@@ -499,6 +499,8 @@ pub enum PanelAction {
         library: String,
         clear_existing: bool,
     },
+    /// #207: import named color swatches from a design-tokens file (opens a picker).
+    ImportDesignTokens,
     /// Apply a named width profile to the selected path node.
     ApplyWidthProfile {
         node_id: NodeId,
@@ -5705,6 +5707,14 @@ fn draw_color_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                         });
                     }
                 });
+                // #207: import brand swatches from a design-tokens file.
+                if ui
+                    .small_button("Import tokens…")
+                    .on_hover_text("Register named swatches from a CSS/JSON/Style-Dictionary tokens file")
+                    .clicked()
+                {
+                    action = Some(PanelAction::ImportDesignTokens);
+                }
             });
         ui.add_space(4.0);
     }

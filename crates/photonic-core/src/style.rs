@@ -314,6 +314,12 @@ pub struct Stroke {
     /// using the profile's samples instead of the uniform `width`.
     #[serde(default)]
     pub width_profile_id: Option<Uuid>,
+    /// Optional non-solid paint for the stroke (gradient / pattern / etc.). When
+    /// `Some`, the stroke geometry is painted with this [`FillKind`] instead of
+    /// the flat `color` — e.g. a gradient-stroked line icon. `None` = solid
+    /// `color` stroke (the default; back-compatible with older documents).
+    #[serde(default)]
+    pub paint: Option<FillKind>,
 }
 
 impl Stroke {
@@ -333,6 +339,7 @@ impl Stroke {
             arrowhead_start: ArrowheadStyle::None,
             arrowhead_end: ArrowheadStyle::None,
             width_profile_id: None,
+            paint: None,
         }
     }
 
@@ -352,6 +359,7 @@ impl Stroke {
             arrowhead_start: ArrowheadStyle::None,
             arrowhead_end: ArrowheadStyle::None,
             width_profile_id: None,
+            paint: None,
         }
     }
 }

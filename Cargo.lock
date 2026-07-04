@@ -3933,6 +3933,7 @@ dependencies = [
  "mlua",
  "photonic-core",
  "photonic-matte",
+ "photonic-render",
  "regex",
  "serde",
  "serde_json",
