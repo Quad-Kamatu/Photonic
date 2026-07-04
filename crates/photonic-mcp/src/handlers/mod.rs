@@ -7,4 +7,5 @@ pub mod document;
 pub mod layers;
 pub mod nodes;
 pub mod raster;
+pub(crate) mod shared;
 pub mod transforms;
