@@ -12,6 +12,7 @@ pub mod nodes;
 pub mod pathfinder;
 pub mod raster;
 pub mod selection;
+pub mod shapes;
 pub(crate) mod shared;
 pub mod transform;
 pub mod transforms;
