@@ -1,0 +1,245 @@
+use super::*;
+
+impl PhotonicRenderer {
+    /// Single-sample colour texture (render target + sampleable) for the
+    /// per-frame effects layer.
+    pub(crate) fn make_fx_tex(&self, w: u32, h: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fx_tex"),
+            size: wgpu::Extent3d {
+                width: w.max(1),
+                height: h.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    }
+
+    /// Bind group for the blur shader: source texture + sampler + params.
+    fn effects_blur_bg(
+        &self,
+        src: &wgpu::TextureView,
+        sigma: f32,
+        horizontal: bool,
+    ) -> wgpu::BindGroup {
+        let params = BlurParams {
+            sigma,
+            horizontal: horizontal as u32,
+            _pad: [0.0; 2],
+        };
+        let buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx_blur_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx_blur_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Render each pending blur job (silhouette → H-blur → V-blur) and
+    /// accumulate them into a single straight-alpha effects texture.
+    pub(crate) fn render_effects_layer(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        w: u32,
+        h: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let fx_a = self.make_fx_tex(w, h);
+        let fx_b = self.make_fx_tex(w, h);
+        let accum = self.make_fx_tex(w, h);
+        let (a_view, b_view, accum_view) = (
+            fx_a.create_view(&Default::default()),
+            fx_b.create_view(&Default::default()),
+            accum.create_view(&Default::default()),
+        );
+
+        let mut accum_cleared = false;
+        for job in &self.pending_blur_jobs {
+            if job.idxs.is_empty() {
+                continue;
+            }
+            let sigma = (job.radius_doc * self.view.zoom).max(0.0) as f32;
+            let vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_vbuf"),
+                    contents: bytemuck::cast_slice(&job.verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_ibuf"),
+                    contents: bytemuck::cast_slice(&job.idxs),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            // Pass A: silhouette → fx_a (cleared transparent).
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_silhouette"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &a_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.fill_pipeline_1spp);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..job.idxs.len() as u32, 0, 0..1);
+            }
+            // Pass B: horizontal blur fx_a → fx_b.
+            {
+                let bg = self.effects_blur_bg(&a_view, sigma, true);
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_blur_h"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &b_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline_alpha);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..6, 0..1);
+            }
+            // Pass C: vertical blur fx_b → accum (accumulate).
+            {
+                let bg = self.effects_blur_bg(&b_view, sigma, false);
+                let load = if accum_cleared {
+                    wgpu::LoadOp::Load
+                } else {
+                    accum_cleared = true;
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                };
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fx_blur_v"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &accum_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline_alpha);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+        (accum, accum_view)
+    }
+
+    /// Composite the artboard rect, the effects layer, and the sharp shapes onto
+    /// `target` (single-sample) over a cleared background.
+    pub(crate) fn composite_effects(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        vertices: &[Vertex],
+        artboard_indices: &[u32],
+        fx_view: &wgpu::TextureView,
+        doc_view: &wgpu::TextureView,
+    ) {
+        // Pass 1: clear to the canvas background and draw the artboard rect.
+        {
+            let vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_artboard_vbuf"),
+                    contents: bytemuck::cast_slice(vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fx_artboard_ibuf"),
+                    contents: bytemuck::cast_slice(artboard_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx_composite_artboard"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(BG),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if !artboard_indices.is_empty() {
+                pass.set_pipeline(&self.fill_pipeline_1spp);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..artboard_indices.len() as u32, 0, 0..1);
+            }
+        }
+        // Passes 2 & 3: effects layer, then sharp shapes (both straight-alpha).
+        for layer in [fx_view, doc_view] {
+            let bg = self.effects_blur_bg(layer, 0.0, true);
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx_composite_layer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blur_pipeline_alpha);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..6, 0..1);
+        }
+    }
+}
