@@ -111,6 +111,10 @@ pub enum PanelAction {
     /// Apply the same stroke to every listed node at once (multi-selection edit).
     /// Recorded as a single undoable batch.
     UpdateNodesStroke { node_ids: Vec<NodeId>, stroke: Stroke },
+    /// Convert each listed path's stroke into a filled outline shape (Illustrator
+    /// "Outline Stroke"). Paths without an enabled, positive-width stroke are
+    /// skipped. Recorded as a single undoable batch.
+    OutlineStroke { node_ids: Vec<NodeId> },
     /// Deep-clone a node and insert the copy at a small offset.
     DuplicateNode { node_id: NodeId },
     /// Remove a specific node by ID.
@@ -145,8 +149,6 @@ pub enum PanelAction {
     OpenSimplifyDialog { node_id: NodeId },
     /// Open the Merge Vertices by Distance (weld) dialog for a path node.
     OpenMergeVerticesDialog { node_id: NodeId },
-    /// Convert the stroke of a path node into a new filled outline path.
-    OutlineStroke { node_id: NodeId },
     /// Invert the fill/stroke colors of the given nodes. Empty vec = use selection.
     InvertColors { node_ids: Vec<NodeId> },
     /// Convert fill/stroke colors to grayscale. Empty vec = use selection.
@@ -818,7 +820,9 @@ impl PanelAction {
             WheelAction::AddAnchorPoints(id) => Self::AddAnchorPoints { node_id: id },
             WheelAction::SimplifyPath(id) => Self::OpenSimplifyDialog { node_id: id },
             WheelAction::MergeVertices(id) => Self::OpenMergeVerticesDialog { node_id: id },
-            WheelAction::OutlineStroke(id) => Self::OutlineStroke { node_id: id },
+            WheelAction::OutlineStroke(id) => Self::OutlineStroke {
+                node_ids: vec![id],
+            },
             WheelAction::ReversePathDirection(id) => Self::ReversePathDirection { node_id: id },
             WheelAction::AverageAnchorPoints(id) => Self::AverageAnchorPoints { node_id: id },
             WheelAction::ClosePath(id) => Self::JoinPaths { node_ids: vec![id] },
@@ -2147,6 +2151,27 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                 EyedropperTarget::NodeStroke { node_id: nid }
                             }));
                         }
+
+                        // Outline Stroke — convert the stroke into a fillable
+                        // shape (Illustrator's Object ▸ Path ▸ Outline Stroke).
+                        if pn.stroke.enabled && pn.stroke.width > 0.0 {
+                            ui.add_space(4.0);
+                            let targets: Vec<NodeId> = if multi {
+                                selected_ids.to_vec()
+                            } else {
+                                vec![nid]
+                            };
+                            if ui
+                                .button("Outline Stroke")
+                                .on_hover_text(
+                                    "Convert the stroke into a filled shape you can \
+                                     edit, like Illustrator's Outline Stroke",
+                                )
+                                .clicked()
+                            {
+                                action = Some(PanelAction::OutlineStroke { node_ids: targets });
+                            }
+                        }
                     });
             }
 
@@ -2391,14 +2416,8 @@ fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                         {
                             action = Some(PanelAction::ConvertToGrayscale { node_ids: vec![nid] });
                         }
-                        if pn.stroke.enabled {
-                            if ui.button("Outline Stroke")
-                                .on_hover_text("Convert this stroke into a filled closed path")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::OutlineStroke { node_id: nid });
-                            }
-                        }
+                        // Outline Stroke lives in the Stroke section (next to the
+                        // stroke it converts).
                         if ui.button("Expand (+2 px)")
                             .on_hover_text("Offset path outward by 2 px, creating a copy")
                             .clicked()

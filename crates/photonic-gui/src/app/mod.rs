@@ -6735,6 +6735,87 @@ impl PhotonicApp {
                     doc_modified = true;
                 }
 
+                PanelAction::OutlineStroke { node_ids } => {
+                    // Illustrator "Outline Stroke": turn each path's stroke into a
+                    // filled shape. If the path also has a fill, keep the fill on
+                    // the original (stroke removed) and add the outline above it;
+                    // otherwise the stroke becomes the shape in place.
+                    use photonic_core::ops::stroke_outline::{
+                        outline_stroke_with_scale as do_outline, transform_uniform_scale,
+                    };
+                    use photonic_core::style::{Fill, FillKind, Stroke as CoreStroke};
+                    let mut cmds: Vec<Command> = Vec::new();
+                    let mut new_selection: Vec<NodeId> = Vec::new();
+                    for id in &node_ids {
+                        let Some(node) = doc.nodes.get(id) else {
+                            continue;
+                        };
+                        let SceneNodeKind::Path(pn) = &node.kind else {
+                            continue;
+                        };
+                        if !pn.stroke.enabled || pn.stroke.width <= 0.0 {
+                            continue;
+                        }
+                        // Photonic strokes are non-scaling: divide the width by the
+                        // object's transform scale so the outline matches the drawn
+                        // stroke. The outline node keeps this same transform.
+                        let obj_scale = transform_uniform_scale(&node.transform.matrix);
+                        let Ok(outline) = do_outline(&pn.path_data, &pn.stroke, obj_scale) else {
+                            continue;
+                        };
+                        // Outline fill = stroke color, with stroke opacity folded in.
+                        let mut fill_color = pn.stroke.color;
+                        fill_color.a *= pn.stroke.opacity;
+                        let outline_fill = Fill::solid(fill_color);
+                        let has_fill = pn.fill.enabled && !matches!(pn.fill.kind, FillKind::None);
+
+                        if has_fill {
+                            let mut original_no_stroke = node.clone();
+                            if let SceneNodeKind::Path(p) = &mut original_no_stroke.kind {
+                                p.stroke = CoreStroke::none();
+                            }
+                            let mut outline_node = node.clone();
+                            outline_node.id = uuid::Uuid::new_v4();
+                            outline_node.name = format!("{} Outline", node.name);
+                            if let SceneNodeKind::Path(p) = &mut outline_node.kind {
+                                p.path_data = outline;
+                                p.fill = outline_fill;
+                                p.stroke = CoreStroke::none();
+                                p.is_compound = true;
+                            }
+                            let layer_id = outline_node.layer_id;
+                            new_selection.push(outline_node.id);
+                            cmds.push(Command::UpdateNode {
+                                old: node.clone(),
+                                new: original_no_stroke,
+                            });
+                            cmds.push(Command::AddNode {
+                                node: outline_node,
+                                layer_id: Some(layer_id),
+                            });
+                        } else {
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Path(p) = &mut new_node.kind {
+                                p.path_data = outline;
+                                p.fill = outline_fill;
+                                p.stroke = CoreStroke::none();
+                                p.is_compound = true;
+                            }
+                            new_selection.push(*id);
+                            cmds.push(Command::UpdateNode {
+                                old: node.clone(),
+                                new: new_node,
+                            });
+                        }
+                    }
+                    if !cmds.is_empty() {
+                        history.execute(Command::Batch(cmds), doc);
+                        doc.selection = Selection::from_ids(new_selection.iter().copied());
+                        self.selected_id = new_selection.first().copied();
+                        doc_modified = true;
+                    }
+                }
+
                 PanelAction::StartRasterColorRange { node_id } => {
                     // Arm the eyedropper; the click samples the raster's own
                     // pixels and begins the preview session.
@@ -8091,50 +8172,6 @@ impl PhotonicApp {
                         case_sensitive: true,
                         selection_only: false,
                     });
-                }
-
-                PanelAction::OutlineStroke { node_id } => {
-                    use photonic_core::ops::stroke_outline::outline_stroke as do_outline;
-                    use photonic_core::style::{Fill, FillKind};
-                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
-                        if let SceneNodeKind::Path(ref pn) = node.kind {
-                            if pn.stroke.enabled {
-                                if let Ok(outline_data) = do_outline(&pn.path_data, &pn.stroke) {
-                                    let layer_id = node.layer_id;
-                                    let stroke_color = pn.stroke.color;
-                                    let stroke_opacity = pn.stroke.opacity;
-                                    let mut outline_pn = PathNode::new(outline_data);
-                                    outline_pn.fill = Fill {
-                                        kind: FillKind::Solid(stroke_color),
-                                        opacity: stroke_opacity,
-                                        enabled: true,
-                                    };
-                                    outline_pn.stroke = photonic_core::style::Stroke::none();
-                                    let outline_node = SceneNode::new(
-                                        &format!("{} outline", node.name),
-                                        layer_id,
-                                        SceneNodeKind::Path(outline_pn),
-                                    );
-                                    let mut updated_orig = node.clone();
-                                    if let SceneNodeKind::Path(ref mut op) = updated_orig.kind {
-                                        op.stroke.enabled = false;
-                                    }
-                                    let batch = Command::Batch(vec![
-                                        Command::AddNode {
-                                            node: outline_node,
-                                            layer_id: Some(layer_id),
-                                        },
-                                        Command::UpdateNode {
-                                            old: node,
-                                            new: updated_orig,
-                                        },
-                                    ]);
-                                    history.execute(batch, doc);
-                                    doc_modified = true;
-                                }
-                            }
-                        }
-                    }
                 }
 
                 PanelAction::InvertColors { node_ids } => {

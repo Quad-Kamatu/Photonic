@@ -10766,7 +10766,9 @@ pub async fn average_anchor_points(state: &AppState, args: AverageAnchorPointsAr
 // ── outline_stroke ─────────────────────────────────────────────────────────────
 
 pub async fn outline_stroke(state: &AppState, args: OutlineStrokeArgs) -> ToolResult {
-    use photonic_core::ops::stroke_outline::outline_stroke as do_outline;
+    use photonic_core::ops::stroke_outline::{
+        outline_stroke_with_scale as do_outline, transform_uniform_scale,
+    };
     use photonic_core::style::{Fill, FillKind, Stroke};
 
     if args.node_ids.is_empty() {
@@ -10798,7 +10800,10 @@ pub async fn outline_stroke(state: &AppState, args: OutlineStrokeArgs) -> ToolRe
             }
         };
 
-        let outline_data = match do_outline(&pn.path_data, &pn.stroke) {
+        // Non-scaling stroke: divide width by the object's transform scale so
+        // the outline matches the drawn stroke (the outline keeps this transform).
+        let obj_scale = transform_uniform_scale(&node.transform.matrix);
+        let outline_data = match do_outline(&pn.path_data, &pn.stroke, obj_scale) {
             Ok(d) => d,
             Err(_) => {
                 skipped += 1;
