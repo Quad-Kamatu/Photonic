@@ -453,6 +453,7 @@ fn import_element(
                         clip_children: false,
                         clip_node_id: None,
                         blend_spine_id: None,
+                        live_boolean: None,
                     }),
                     transform: local_transform,
                     opacity: style.opacity,

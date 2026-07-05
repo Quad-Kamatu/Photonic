@@ -1583,6 +1583,7 @@ mod tests {
                 clip_children: false,
                 clip_node_id: None,
                 blend_spine_id: None,
+                live_boolean: None,
             }),
         );
         let gid = doc.add_node(group, Some(layer_id));

@@ -523,6 +523,68 @@ mod tests {
         RasterImage::from_rgba(w, h, px).expect("valid raster")
     }
 
+    /// #25: a live-boolean SUBTRACT group renders as its resolved path — the
+    /// overlap is a hole, the rest of the bottom operand is filled — proving the
+    /// render pipeline resolves the boolean (not just SVG export).
+    #[test]
+    fn live_boolean_subtract_renders_a_hole() {
+        use photonic_core::node::GroupNode;
+        use photonic_core::ops::boolean::BooleanOp;
+        const W: f64 = 60.0;
+        const H: f64 = 60.0;
+        let mut doc = Document::new("t", W, H);
+        let lid = doc.layer_order[0];
+
+        // A: blue square covering canvas 10..50.
+        let mut a_pn = PathNode::new(PathData::rect(10.0, 10.0, 40.0, 40.0));
+        a_pn.fill = Fill::solid(Color::BLUE);
+        let a = SceneNode::new("a", lid, SceneNodeKind::Path(a_pn));
+        // B: square covering canvas 30..70 — subtracted from A.
+        let b = SceneNode::new(
+            "b",
+            lid,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(30.0, 30.0, 40.0, 40.0))),
+        );
+        let (aid, bid) = (a.id, b.id);
+        // Register operands without placing them in a layer (the group owns them).
+        doc.nodes.insert(aid, a);
+        doc.nodes.insert(bid, b);
+        let mut group = GroupNode::new();
+        group.children = vec![aid, bid];
+        group.live_boolean = Some(BooleanOp::Subtract);
+        doc.add_node(SceneNode::new("bool", lid, SceneNodeKind::Group(group)), None);
+
+        let (w, h) = (W as u32, H as u32);
+        let mut view = CanvasView::new(w, h);
+        view.fit_to_rect(0.0, 0.0, doc.width, doc.height);
+        let mut base = vec![0u8; (w * h * 4) as usize];
+        for px in base.chunks_exact_mut(4) {
+            px.copy_from_slice(&[40, 40, 40, 255]);
+        }
+        composite_document(&mut base, w, h, &doc, &view);
+
+        let at = |cx: f64, cy: f64| -> [u8; 4] {
+            let (sx, sy) = view.canvas_to_screen(cx, cy);
+            let px = (sx.round() as i64).clamp(0, w as i64 - 1) as u32;
+            let py = (sy.round() as i64).clamp(0, h as i64 - 1) as u32;
+            let i = ((py * w + px) * 4) as usize;
+            [base[i], base[i + 1], base[i + 2], base[i + 3]]
+        };
+
+        // (20,20): in A, outside B → kept → blue.
+        let kept = at(20.0, 20.0);
+        assert!(
+            kept[2] > 200 && kept[0] < 60 && kept[1] < 60,
+            "kept region should be blue, got {kept:?}"
+        );
+        // (40,40): in A∩B → subtracted → background grey shows through.
+        let hole = at(40.0, 40.0);
+        assert!(
+            hole[0] > 20 && hole[0] < 60 && hole[2] < 60,
+            "subtracted overlap should be a hole (background), got {hole:?}"
+        );
+    }
+
     /// The core bug fix: a vector node placed *between* two raster layers must
     /// composite in true z-order, not above all rasters.
     #[test]

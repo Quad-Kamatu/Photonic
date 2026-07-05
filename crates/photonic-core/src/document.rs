@@ -1148,7 +1148,10 @@ impl Document {
                 return;
             }
             match &node.kind {
-                SceneNodeKind::Group(g) => {
+                // A live-boolean group renders as a single resolved path, so it
+                // is treated as a leaf here (resolved in `resolve_render_node`)
+                // rather than descending into its operands (#25).
+                SceneNodeKind::Group(g) if g.live_boolean.is_none() => {
                     for child_id in &g.children {
                         self.collect_draw_nodes(child_id, out);
                     }
@@ -1183,6 +1186,31 @@ impl Document {
         node: &'a SceneNode,
     ) -> std::borrow::Cow<'a, SceneNode> {
         use std::borrow::Cow;
+        // Live-boolean group (#25): render as its single resolved path, styled by
+        // the bottom-most path child, keeping the group's transform/opacity/blend.
+        if let SceneNodeKind::Group(g) = &node.kind {
+            if g.live_boolean.is_some() {
+                if let Some(path) = self.resolve_live_boolean(node.id) {
+                    let mut pn = crate::node::PathNode::new(path);
+                    if let Some((fill, stroke)) = g
+                        .children
+                        .iter()
+                        .filter_map(|c| self.nodes.get(c))
+                        .find_map(|c| match &c.kind {
+                            SceneNodeKind::Path(p) => Some((p.fill.clone(), p.stroke.clone())),
+                            _ => None,
+                        })
+                    {
+                        pn.fill = fill;
+                        pn.stroke = stroke;
+                    }
+                    let mut resolved = node.clone();
+                    resolved.kind = SceneNodeKind::Path(pn);
+                    return Cow::Owned(resolved);
+                }
+            }
+            return Cow::Borrowed(node);
+        }
         let Some(sym_id) = node.symbol_ref else {
             return Cow::Borrowed(node);
         };
@@ -1334,6 +1362,38 @@ impl Document {
         } else {
             false
         }
+    }
+
+    /// Resolve a **live boolean** group (#25) to its single computed path, or
+    /// `None` if the group has no `live_boolean` operator or no path children.
+    /// Direct path children are transformed into the group's local space and
+    /// folded left-to-right (bottom child first) with the operator. Non-path
+    /// children are ignored. A failed boolean step keeps the accumulator so a
+    /// degenerate operand can't wipe the whole result.
+    pub fn resolve_live_boolean(&self, group_id: NodeId) -> Option<crate::path::PathData> {
+        use crate::node::SceneNodeKind;
+        let node = self.nodes.get(&group_id)?;
+        let SceneNodeKind::Group(g) = &node.kind else {
+            return None;
+        };
+        let op = g.live_boolean?;
+        let mut acc: Option<crate::path::PathData> = None;
+        for cid in &g.children {
+            let Some(child) = self.nodes.get(cid) else {
+                continue;
+            };
+            let SceneNodeKind::Path(pn) = &child.kind else {
+                continue;
+            };
+            let mut bez = pn.path_data.to_bez_path();
+            bez.apply_affine(child.transform.to_kurbo());
+            let pd = crate::path::PathData::from_bez_path(&bez);
+            acc = Some(match acc {
+                None => pd,
+                Some(a) => crate::ops::boolean::boolean_op(&a, &pd, op).unwrap_or(a),
+            });
+        }
+        acc
     }
 
     /// Mutable access to a container's ordered child-id list.
@@ -1524,6 +1584,109 @@ mod tests {
         style::Fill,
         Color,
     };
+
+    #[test]
+    fn live_boolean_group_resolves_union_intersection_and_round_trips() {
+        use crate::node::GroupNode;
+        use crate::ops::boolean::BooleanOp;
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let lid = doc.layer_order[0];
+        // Two overlapping 10×10 rects: A=(0,0,10,10), B=(5,5,15,15).
+        let a = SceneNode::new(
+            "a",
+            lid,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        let b = SceneNode::new(
+            "b",
+            lid,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(5.0, 5.0, 10.0, 10.0))),
+        );
+        let (aid, bid) = (a.id, b.id);
+        doc.add_node(a, Some(lid));
+        doc.add_node(b, Some(lid));
+        let mut group = GroupNode::new();
+        group.children = vec![aid, bid];
+        group.live_boolean = Some(BooleanOp::Union);
+        let gnode = SceneNode::new("bool", lid, SceneNodeKind::Group(group));
+        let gid = gnode.id;
+        doc.add_node(gnode, Some(lid));
+
+        let bbox = |d: &Document| d.resolve_live_boolean(gid).unwrap().bounding_box().unwrap();
+        let ub = bbox(&doc);
+        assert!(
+            (ub.x0).abs() < 1e-6 && (ub.y0).abs() < 1e-6 && (ub.x1 - 15.0).abs() < 1e-6,
+            "union bbox should span (0,0)-(15,15), got {ub:?}"
+        );
+
+        set_bool(&mut doc, gid, Some(BooleanOp::Intersect));
+        let ib = bbox(&doc);
+        assert!(
+            (ib.x0 - 5.0).abs() < 1e-6 && (ib.x1 - 10.0).abs() < 1e-6,
+            "intersection bbox should span (5,5)-(10,10), got {ib:?}"
+        );
+
+        // A live-boolean group serializes/deserializes (serde default None otherwise).
+        set_bool(&mut doc, gid, Some(BooleanOp::Subtract));
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            &back.nodes.get(&gid).unwrap().kind,
+            SceneNodeKind::Group(g) if g.live_boolean == Some(BooleanOp::Subtract)
+        ));
+
+        // Plain group → no resolved path.
+        set_bool(&mut doc, gid, None);
+        assert!(doc.resolve_live_boolean(gid).is_none());
+    }
+
+    fn set_bool(doc: &mut Document, gid: NodeId, op: Option<crate::ops::boolean::BooleanOp>) {
+        if let SceneNodeKind::Group(g) = &mut doc.nodes.get_mut(&gid).unwrap().kind {
+            g.live_boolean = op;
+        }
+    }
+
+    #[test]
+    fn live_boolean_group_svg_exports_single_resolved_path() {
+        use crate::export::{export_svg, SvgExportOptions};
+        use crate::node::GroupNode;
+        use crate::ops::boolean::BooleanOp;
+        use crate::style::Fill;
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let lid = doc.layer_order[0];
+        let a = SceneNode::new(
+            "a",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_fill(Fill::solid(Color::from_hex("#ff0000").unwrap())),
+            ),
+        );
+        let b = SceneNode::new(
+            "b",
+            lid,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(5.0, 5.0, 10.0, 10.0))),
+        );
+        let (aid, bid) = (a.id, b.id);
+        doc.add_node(a, Some(lid));
+        doc.add_node(b, Some(lid));
+        let mut group = GroupNode::new();
+        group.children = vec![aid, bid];
+        group.live_boolean = Some(BooleanOp::Union);
+        doc.add_node(
+            SceneNode::new("bool", lid, SceneNodeKind::Group(group)),
+            Some(lid),
+        );
+
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        // The group emits a single <path> (the union), not nested child rects,
+        // and it carries the bottom child's red fill.
+        assert!(svg.contains("<path"), "expected a resolved path in {svg}");
+        assert!(
+            svg.to_lowercase().contains("ff0000"),
+            "resolved path should take the bottom child's red fill, got {svg}"
+        );
+    }
 
     #[test]
     fn per_document_history_cap_round_trips_and_defaults_none() {

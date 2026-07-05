@@ -493,16 +493,46 @@ fn emit_node_inner(
             ));
         }
         SceneNodeKind::Group(g) => {
-            body.push_str(&format!(
-                "{}<g{}{}{}{}{}>\n",
-                pad, id_attr, transform, opacity, blend, filter
-            ));
-            for child_id in &g.children {
-                if let Some(child) = doc.nodes.get(child_id) {
-                    emit_node_inner(child, doc, ctx, body, indent + 2, None, id_map);
+            // Live boolean (#25): emit the single resolved path styled by the
+            // bottom-most path child, instead of the stacked children.
+            let resolved = if g.live_boolean.is_some() {
+                doc.resolve_live_boolean(node.id)
+            } else {
+                None
+            };
+            if let Some(resolved) = resolved {
+                let (fill, stroke) = g
+                    .children
+                    .iter()
+                    .filter_map(|c| doc.nodes.get(c))
+                    .find_map(|c| match &c.kind {
+                        SceneNodeKind::Path(p) => Some((
+                            fill_attrs(&p.fill, ctx),
+                            stroke_attrs(&p.stroke, affine_scale(&node.transform), ctx),
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let d = match ctx.path_p {
+                    Some(prec) => path_d_rounded(&resolved, prec),
+                    None => resolved.as_svg().to_string(),
+                };
+                body.push_str(&format!(
+                    "{}<path{}{}{}{}{}{}{} d=\"{}\"/>\n",
+                    pad, id_attr, transform, opacity, blend, filter, fill, stroke, d,
+                ));
+            } else {
+                body.push_str(&format!(
+                    "{}<g{}{}{}{}{}>\n",
+                    pad, id_attr, transform, opacity, blend, filter
+                ));
+                for child_id in &g.children {
+                    if let Some(child) = doc.nodes.get(child_id) {
+                        emit_node_inner(child, doc, ctx, body, indent + 2, None, id_map);
+                    }
                 }
+                body.push_str(&format!("{}</g>\n", pad));
             }
-            body.push_str(&format!("{}</g>\n", pad));
         }
         SceneNodeKind::Text(t) => {
             let fill = fill_attrs(&t.fill, ctx);

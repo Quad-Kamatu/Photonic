@@ -577,6 +577,13 @@ pub struct GroupNode {
     /// When set, this path node is used as the spine for blend interpolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend_spine_id: Option<NodeId>,
+    /// When set, this group is a **live (non-destructive) boolean** (#25): its
+    /// direct path children are folded left-to-right with this operator and the
+    /// group renders/exports as the single resolved path (styled by the bottom
+    /// child), while the operands stay individually editable. `None` = an
+    /// ordinary stacking group. See [`Document::resolve_live_boolean`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_boolean: Option<crate::ops::boolean::BooleanOp>,
 }
 
 impl GroupNode {
@@ -586,6 +593,7 @@ impl GroupNode {
             clip_children: false,
             clip_node_id: None,
             blend_spine_id: None,
+            live_boolean: None,
         }
     }
 }

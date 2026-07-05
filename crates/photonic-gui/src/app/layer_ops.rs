@@ -24,6 +24,7 @@ impl PhotonicApp {
                 clip_children: false,
                 clip_node_id: None,
                 blend_spine_id: None,
+                live_boolean: None,
             });
             let group = SceneNode::new("Group", layer_id, group_kind);
             let group_id = group.id;

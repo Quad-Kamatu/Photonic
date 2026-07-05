@@ -638,6 +638,7 @@ pub async fn create_array(state: &AppState, args: CreateArrayArgs) -> ToolResult
             clip_children: false,
             clip_node_id: None,
             blend_spine_id: None,
+            live_boolean: None,
         });
         let group_name = format!("{} Array", src_name);
         let mut group_node = SceneNode::new(&group_name, target_layer, group_kind);

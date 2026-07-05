@@ -180,6 +180,7 @@ pub async fn group_nodes(state: &AppState, args: GroupNodesArgs) -> ToolResult {
         clip_children: false,
         clip_node_id: None,
         blend_spine_id: None,
+        live_boolean: None,
     });
     let group = SceneNode::new(&group_name, layer_id, group_kind);
     let group_id = group.id;
