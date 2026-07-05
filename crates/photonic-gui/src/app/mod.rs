@@ -2064,7 +2064,15 @@ impl PhotonicApp {
         } else {
             ctx.set_visuals(crate::theme::build_light_theme());
         }
-        ctx.set_pixels_per_point(self.prefs.ui_scale);
+        // Apply the user's UI scale as a *zoom factor* composed on top of the
+        // window's native scale factor — NOT as an absolute pixels-per-point.
+        // Using an absolute ppp here decouples egui's layout/hit-testing from the
+        // native scale factor egui-winit feeds in, so on any monitor whose scale
+        // factor ≠ this value (HiDPI / fractional scaling) widgets get drawn at
+        // one scale but hit-tested at another — the screen renders off-centre and
+        // clicks miss. `set_zoom_factor` keeps layout, pointer mapping, screen
+        // rect, and tessellation all coherent across resolutions.
+        ctx.set_zoom_factor(self.prefs.ui_scale);
 
         // Lazily upload the embedded Photonic logo for the top toolbar (once).
         if self.logo_texture.is_none() {

@@ -586,7 +586,6 @@ impl PhotonicWinitApp {
         // 3. Run egui (doc lock is held only for the duration of this closure)
         let raw_input = state.egui_state.take_egui_input(&state.window);
         let (w, h) = state.renderer.size();
-        let pixels_per_point = state.window.scale_factor() as f32;
 
         let doc_arc = Arc::clone(&self.document);
         let mcp_ok = self.mcp_running.load(Ordering::Relaxed);
@@ -721,9 +720,13 @@ impl PhotonicWinitApp {
         let tris = state
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
+        // Scale the GPU pass with the *same* pixels-per-point egui tessellated
+        // at (native scale factor × user zoom). Using the bare native scale
+        // factor here while egui tessellates at the zoomed ppp would draw the UI
+        // at the wrong size/offset on any non-1.0-scale monitor.
         let screen_desc = ScreenDescriptor {
             size_in_pixels: [w, h],
-            pixels_per_point,
+            pixels_per_point: full_output.pixels_per_point,
         };
 
         for (id, delta) in &full_output.textures_delta.set {
