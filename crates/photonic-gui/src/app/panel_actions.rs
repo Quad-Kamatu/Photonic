@@ -2340,8 +2340,7 @@ impl PhotonicApp {
                         );
                         node.transform =
                             photonic_core::transform::Transform::translate(canvas_x, canvas_y);
-                        history.execute(Command::AddNode { node, layer_id: None }, doc);
-                        doc_modified = true;
+                        self.tool_commit_add(node, doc, history, &mut doc_modified);
                     } else {
                         let tool = match shape {
                             ShapeKind::Shape(p) => Tool::from_primitive(p),
@@ -2361,14 +2360,7 @@ impl PhotonicApp {
                                 shape.label(),
                                 doc.node_count() + 1,
                             );
-                            history.execute(
-                                Command::AddNode {
-                                    node,
-                                    layer_id: None,
-                                },
-                                doc,
-                            );
-                            doc_modified = true;
+                            self.tool_commit_add(node, doc, history, &mut doc_modified);
                         }
                     }
                 }

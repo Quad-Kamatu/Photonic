@@ -1779,6 +1779,15 @@ impl PhotonicApp {
         // deliberate click-to-deselect isn't immediately undone.
         let entered_direct_select =
             self.active_tool == Tool::DirectSelect && self.last_tool != Tool::DirectSelect;
+        // Central tool-lifecycle seam (#190): on a tool switch, fire the previous
+        // tool's `on_deactivate` then the new tool's `on_activate`, so cross-tool
+        // switch behaviour lives in one place (the DirectSelect seed below is a
+        // candidate to migrate into `DirectSelectTool::on_activate`).
+        if self.active_tool != self.last_tool {
+            let (prev, cur) = (self.last_tool, self.active_tool);
+            crate::tools::tool_for(prev).on_deactivate(self);
+            crate::tools::tool_for(cur).on_activate(self);
+        }
         self.last_tool = self.active_tool;
         if entered_direct_select {
             self.seed_direct_select_from_selection(doc);
@@ -4990,8 +4999,7 @@ impl PhotonicApp {
                             let mut node =
                                 SceneNode::new(format!("Text {}", num), Default::default(), kind);
                             node.transform = photonic_core::transform::Transform::translate(cx, cy);
-                            history.execute(Command::AddNode { node, layer_id: None }, doc);
-                            doc_modified = true;
+                            self.tool_commit_add(node, doc, history, &mut doc_modified);
                         }
                     }
                     return;
@@ -5053,8 +5061,7 @@ impl PhotonicApp {
                                     self.active_tool.label(),
                                     doc.node_count() + 1,
                                 );
-                                history.execute(Command::AddNode { node, layer_id: None }, doc);
-                                doc_modified = true;
+                                self.tool_commit_add(node, doc, history, &mut doc_modified);
                             }
                         }
                     }
@@ -5079,8 +5086,7 @@ impl PhotonicApp {
                                 self.active_tool.label(),
                                 doc.node_count() + 1,
                             );
-                            history.execute(Command::AddNode { node, layer_id: None }, doc);
-                            doc_modified = true;
+                            self.tool_commit_add(node, doc, history, &mut doc_modified);
                         }
                     }
                 }

@@ -1,6 +1,9 @@
 use egui_phosphor::regular as ph;
 use photonic_core::PrimitiveKind;
 
+mod tool_trait;
+pub use tool_trait::{tool_for, CanvasTool};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Tool {
     #[default]

@@ -38,7 +38,7 @@ fn draw_layer_node_row(
             let clip = g.clip_node_id.is_some();
             let row = ui.horizontal(|ui| {
                 grip(ui, node_id);
-                let tri = if open { "▾" } else { "▸" };
+                let tri = if open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
                 if ui
                     .add(egui::Label::new(RichText::new(tri).weak()).sense(egui::Sense::click()))
                     .clicked()

@@ -1348,6 +1348,21 @@ impl PhotonicApp {
         (screen - egui::pos2(sfx as f32, sfy as f32)).length() <= CLOSE_RADIUS
     }
 
+    /// Central chokepoint for a tool creating a node (#190): always routes
+    /// through history so the edit is undoable. Cross-tool per-creation behaviour
+    /// (tagging, logging, default-style hooks) belongs here so it applies to
+    /// every tool at once — the reason tools now share a [`CanvasTool`] parent.
+    pub(crate) fn tool_commit_add(
+        &self,
+        node: SceneNode,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        history.execute(Command::AddNode { node, layer_id: None }, doc);
+        *doc_modified = true;
+    }
+
     /// Commit a finalised pen `path` as a new document node (fill + optional
     /// default stroke). Shared by the double-click and click-to-close paths.
     fn finalize_pen_node(
@@ -1370,8 +1385,7 @@ impl PhotonicApp {
             "Pen",
             doc.node_count() + 1,
         );
-        history.execute(Command::AddNode { node, layer_id: None }, doc);
-        *doc_modified = true;
+        self.tool_commit_add(node, doc, history, doc_modified);
     }
 
     // ── Direct Selection tool handler ─────────────────────────────────────────
