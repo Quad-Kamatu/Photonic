@@ -290,6 +290,9 @@ pub enum PanelAction {
     MergeLayers { layer_ids: Vec<LayerId> },
     /// Flatten all layers in the document into a single layer.
     FlattenArtwork,
+    /// Reorder the layer stack to `new_order` (bottom→top), e.g. from a
+    /// drag-to-reorder in the Layers panel (#169). Applied as one undoable step.
+    ReorderLayers { new_order: Vec<LayerId> },
     /// Set the color tag of a layer (None = clear).
     SetLayerColor {
         layer_id: LayerId,

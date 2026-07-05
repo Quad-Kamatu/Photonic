@@ -116,7 +116,15 @@ pub fn draw_layers_panel(
         };
         let lid = *layer_id;
 
-        ui.horizontal(|ui| {
+        let row = ui.horizontal(|ui| {
+            // Drag handle — grab to reorder the layer stack (#169).
+            ui.dnd_drag_source(egui::Id::new(("layer_grip", lid)), lid, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(ph::DOTS_SIX_VERTICAL).weak())
+                        .selectable(false),
+                )
+                .on_hover_text("Drag to reorder layer");
+            });
             // Checkbox for multi-layer selection (used by Merge Layers).
             let mut checked = selected_layer_ids.contains(&lid);
             if ui.checkbox(&mut checked, "").changed() {
@@ -214,6 +222,39 @@ pub fn draw_layers_panel(
                     }
                 });
         });
+
+        // ── Drag-to-reorder drop handling (#169) ─────────────────────────────
+        // Show an insertion line while a layer is dragged over this row, and on
+        // release rebuild the stack order and emit a single undoable reorder.
+        if row.response.dnd_hover_payload::<LayerId>().is_some() {
+            let rect = row.response.rect;
+            let top = ui
+                .input(|i| i.pointer.hover_pos())
+                .is_none_or(|p| p.y < rect.center().y);
+            let y = if top { rect.top() } else { rect.bottom() };
+            ui.painter().hline(
+                rect.x_range(),
+                y,
+                egui::Stroke::new(2.0, Color32::from_rgb(110, 86, 207)),
+            );
+        }
+        if let Some(payload) = row.response.dnd_release_payload::<LayerId>() {
+            let dragged = *payload;
+            if dragged != lid {
+                let before = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .is_none_or(|p| p.y < row.response.rect.center().y);
+                // Work in UI order (top→bottom = layer_order reversed).
+                let mut ui_order: Vec<LayerId> = doc.layer_order.iter().rev().copied().collect();
+                ui_order.retain(|&x| x != dragged);
+                if let Some(idx) = ui_order.iter().position(|&x| x == lid) {
+                    let at = (if before { idx } else { idx + 1 }).min(ui_order.len());
+                    ui_order.insert(at, dragged);
+                    let new_order: Vec<LayerId> = ui_order.into_iter().rev().collect();
+                    action = Some(PanelAction::ReorderLayers { new_order });
+                }
+            }
+        }
     }
 
     // Show "Merge Selected" when 2+ layers are checked.

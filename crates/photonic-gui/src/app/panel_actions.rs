@@ -2462,6 +2462,24 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::ReorderLayers { new_order } => {
+                    // Drag-to-reorder (#169). Only a real change, and only if the
+                    // new order is a permutation of the existing stack.
+                    let old_order = doc.layer_order.clone();
+                    let same_set = new_order.len() == old_order.len()
+                        && new_order.iter().all(|id| old_order.contains(id));
+                    if same_set && new_order != old_order {
+                        history.execute(
+                            Command::ReorderLayers {
+                                old_order,
+                                new_order,
+                            },
+                            doc,
+                        );
+                        doc_modified = true;
+                    }
+                }
+
                 PanelAction::SetLayerColor { layer_id, color } => {
                     if let Some(layer) = doc.layers.get(&layer_id) {
                         let cmd = Command::UpdateLayer {
