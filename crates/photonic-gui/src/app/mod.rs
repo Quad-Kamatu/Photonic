@@ -834,6 +834,12 @@ pub struct PhotonicApp {
     pub history_graph: Vec<HistoryGraphNode>,
     /// HEAD node id in the edit tree, cached alongside `history_graph`.
     pub history_current: u64,
+    /// Shared flag the MCP modal sets to ask the host (winit app) to re-spawn
+    /// the MCP server thread after it has failed (#170). `None` until wired up by
+    /// the host after construction.
+    pub mcp_restart_requested: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Whether the MCP server status/restart modal is open (#170).
+    pub show_mcp_modal: bool,
     /// Bleed input (mm) for print settings panel.
     pub bleed_mm_input: f64,
     /// Slug input (mm) for print settings panel.
@@ -1114,6 +1120,8 @@ impl Default for PhotonicApp {
             action_names: Vec::new(),
             history_graph: Vec::new(),
             history_current: 0,
+            mcp_restart_requested: None,
+            show_mcp_modal: false,
             bleed_mm_input: 0.0,
             slug_mm_input: 0.0,
             construction_angle: 45.0,
@@ -1978,6 +1986,9 @@ impl PhotonicApp {
         if self.show_whats_new {
             self.draw_whats_new(ctx);
         }
+        if self.show_mcp_modal {
+            self.draw_mcp_modal(ctx, mcp_running);
+        }
 
         // ── Pending crash reports (#59) ───────────────────────────────────────
         // Local capture is always on; this only governs *offering* to send. Scan
@@ -2310,11 +2321,25 @@ impl PhotonicApp {
                         view.zoom * 100.0,
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if mcp_running {
-                            ui.label(RichText::new(format!("MCP :7842 {}", ph::CHECK)).color(Color32::from_rgb(52, 211, 153)));
+                        // Clickable MCP status indicator → opens the MCP modal
+                        // (status + restart, #170).
+                        let (mcp_txt, mcp_col) = if mcp_running {
+                            (
+                                format!("MCP :7842 {}", ph::CHECK),
+                                Color32::from_rgb(52, 211, 153),
+                            )
                         } else {
-                            ui.label(RichText::new(format!("MCP offline {}", ph::X)).color(Color32::from_rgb(248, 113, 113)))
-                                .on_hover_text("MCP server failed to bind — another Photonic instance may be running on port 7842");
+                            (
+                                format!("MCP offline {}", ph::X),
+                                Color32::from_rgb(248, 113, 113),
+                            )
+                        };
+                        if ui
+                            .add(egui::Button::new(RichText::new(mcp_txt).color(mcp_col)).frame(false))
+                            .on_hover_text("MCP server — click for details and restart")
+                            .clicked()
+                        {
+                            self.show_mcp_modal = true;
                         }
                         ui.separator();
                         // Console toggle

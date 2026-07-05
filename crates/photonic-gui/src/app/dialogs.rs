@@ -839,6 +839,90 @@ impl PhotonicApp {
         }
     }
 
+    /// MCP server status + restart modal (#170). Opened by clicking the MCP
+    /// indicator in the status bar. Shows whether the server is listening, its
+    /// endpoint, and — when it has failed — a button to re-spawn it without
+    /// relaunching the app. The actual re-spawn happens in the winit host, which
+    /// polls `mcp_restart_requested` each frame.
+    pub(crate) fn draw_mcp_modal(&mut self, ctx: &egui::Context, mcp_running: bool) {
+        let mut open = true;
+        egui::Window::new(format!("{}  MCP Server", ph::PLUGS_CONNECTED))
+            .id(egui::Id::new("mcp_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                if mcp_running {
+                    ui.label(
+                        RichText::new(format!("{}  Running", ph::CHECK))
+                            .strong()
+                            .color(Color32::from_rgb(52, 211, 153)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Endpoint:  http://127.0.0.1:7842/mcp")
+                            .monospace()
+                            .small(),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Registered in ~/.claude.json, so Claude Code can drive this document.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!("{}  Offline", ph::X))
+                            .strong()
+                            .color(Color32::from_rgb(248, 113, 113)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "The server isn't listening on port 7842 — most often because another \
+                             Photonic instance is already using it. Close the other instance (or \
+                             free the port), then restart.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let can_restart = !mcp_running && self.mcp_restart_requested.is_some();
+                    if ui
+                        .add_enabled(
+                            can_restart,
+                            egui::Button::new(format!("{}  Restart server", ph::ARROW_CLOCKWISE)),
+                        )
+                        .on_hover_text("Re-spawn the MCP server thread")
+                        .clicked()
+                    {
+                        if let Some(flag) = &self.mcp_restart_requested {
+                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        self.file_status = Some("Restarting MCP server…".to_string());
+                    }
+                    if mcp_running {
+                        ui.label(RichText::new("Already running — nothing to restart.").weak().small());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            self.show_mcp_modal = false;
+                        }
+                    });
+                });
+            });
+        if !open {
+            self.show_mcp_modal = false;
+        }
+    }
+
     pub(crate) fn run_export(&mut self, doc: &Document) {
         let Some(dlg) = &self.export_dialog else {
             return;

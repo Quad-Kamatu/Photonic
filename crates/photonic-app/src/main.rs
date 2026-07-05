@@ -173,31 +173,20 @@ fn main() -> Result<()> {
     }
 
     // ── GUI mode: MCP server on background thread, winit on main thread ───────
+    // The server runs on a detached thread; if it fails to bind (e.g. the port is
+    // held by another instance) the thread exits and `mcp_running` stays false.
+    // The GUI can then request a re-spawn via `mcp_restart_requested` (#170), which
+    // the winit host polls each frame — so keep clones of the spawn ingredients.
     let mcp_running = Arc::new(AtomicBool::new(false));
-    {
-        let doc_for_mcp = Arc::clone(&document_arc);
-        let hist_for_mcp = Arc::clone(&history_arc);
-        let tx_for_mcp = capture_tx;
-        let running_flag = Arc::clone(&mcp_running);
-        let audit_for_mcp = Arc::clone(&audit_log);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime");
-            let mcp_server = McpServer::new(
-                doc_for_mcp,
-                hist_for_mcp,
-                tx_for_mcp,
-                mcp_config,
-                running_flag,
-                audit_for_mcp,
-            );
-            if let Err(e) = rt.block_on(mcp_server.run()) {
-                tracing::error!("MCP server error: {}", e);
-            }
-        });
-    }
+    let mcp_restart_requested = Arc::new(AtomicBool::new(false));
+    spawn_mcp_server(
+        Arc::clone(&document_arc),
+        Arc::clone(&history_arc),
+        capture_tx.clone(),
+        mcp_config.clone(),
+        Arc::clone(&mcp_running),
+        Arc::clone(&audit_log),
+    );
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -206,6 +195,9 @@ fn main() -> Result<()> {
         document: document_arc,
         history: history_arc,
         mcp_running,
+        mcp_restart_requested,
+        mcp_capture_tx: capture_tx,
+        mcp_config,
         capture_rx: Some(capture_rx),
         state: None,
         show_welcome: args.file.is_none(),
@@ -258,6 +250,12 @@ struct PhotonicWinitApp {
     document: Arc<Mutex<Document>>,
     history: Arc<Mutex<CommandHistory>>,
     mcp_running: Arc<AtomicBool>,
+    /// Set by the GUI's MCP modal to request a server re-spawn; polled each frame
+    /// by `maybe_restart_mcp` (#170).
+    mcp_restart_requested: Arc<AtomicBool>,
+    /// Spawn ingredients retained so the server can be re-created on restart.
+    mcp_capture_tx: std::sync::mpsc::Sender<oneshot::Sender<Vec<u8>>>,
+    mcp_config: McpServerConfig,
     capture_rx: Option<std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>>,
     state: Option<RenderState>,
     show_welcome: bool,
@@ -351,6 +349,50 @@ impl WindowState {
                 && x + i64::from(self.width) > left
                 && y + i64::from(self.height) > top
         })
+    }
+}
+
+/// Spawn the MCP server on a detached background thread with its own tokio
+/// runtime. On error (e.g. the port is already bound) the thread logs and exits,
+/// leaving `running_flag` false so the GUI can offer a restart (#170).
+fn spawn_mcp_server(
+    document: Arc<Mutex<Document>>,
+    history: Arc<Mutex<CommandHistory>>,
+    capture_tx: std::sync::mpsc::Sender<oneshot::Sender<Vec<u8>>>,
+    config: McpServerConfig,
+    running_flag: Arc<AtomicBool>,
+    audit: Arc<std::sync::Mutex<AuditLog>>,
+) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let server = McpServer::new(document, history, capture_tx, config, running_flag, audit);
+        if let Err(e) = rt.block_on(server.run()) {
+            tracing::error!("MCP server error: {}", e);
+        }
+    });
+}
+
+impl PhotonicWinitApp {
+    /// If the GUI requested a restart (via the MCP modal) and the server isn't
+    /// already up, re-spawn it (#170). Idempotent per request — the flag is
+    /// consumed with a swap so a single click yields a single re-spawn.
+    fn maybe_restart_mcp(&self) {
+        if self.mcp_restart_requested.swap(false, Ordering::Relaxed)
+            && !self.mcp_running.load(Ordering::Relaxed)
+        {
+            info!("Restarting MCP server on user request");
+            spawn_mcp_server(
+                Arc::clone(&self.document),
+                Arc::clone(&self.history),
+                self.mcp_capture_tx.clone(),
+                self.mcp_config.clone(),
+                Arc::clone(&self.mcp_running),
+                Arc::clone(&self.audit_log),
+            );
+        }
     }
 }
 
@@ -454,6 +496,7 @@ impl ApplicationHandler for PhotonicWinitApp {
             PhotonicApp::new()
         };
         gui.audit.log = Some(Arc::clone(&self.audit_log));
+        gui.mcp_restart_requested = Some(Arc::clone(&self.mcp_restart_requested));
 
         self.state = Some(RenderState {
             window,
@@ -520,6 +563,9 @@ impl ApplicationHandler for PhotonicWinitApp {
 
 impl PhotonicWinitApp {
     fn render_frame(&mut self) {
+        // Honor a pending MCP restart request from the GUI modal (#170) before we
+        // take a mutable borrow of `self.state` for the frame.
+        self.maybe_restart_mcp();
         let Some(state) = &mut self.state else { return };
 
         // 1. Build document geometry + push camera
