@@ -1320,20 +1320,16 @@ mod tests {
         use crate::style::{Fill, FillKind, Gradient, GradientKind, GradientStop};
 
         let mut doc = Document::new("t", 100.0, 100.0);
-        let grad = Gradient {
-            kind: GradientKind::Linear,
-            stops: vec![
-                GradientStop {
-                    offset: 0.0,
-                    color: Color::new(0.0, 1.0, 0.0, 1.0),
-                },
-                GradientStop {
-                    offset: 1.0,
-                    color: Color::new(0.0, 0.0, 1.0, 1.0),
-                },
+        let grad = Gradient::linear(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            vec![
+                GradientStop::new(0.0, Color::new(0.0, 1.0, 0.0, 1.0)),
+                GradientStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
             ],
-            coords: vec![0.0, 0.0, 100.0, 0.0],
-        };
+        );
         let mut p = PathNode::new(PathData::rect(0.0, 0.0, 50.0, 50.0));
         p.fill = Fill {
             kind: FillKind::Gradient(grad),

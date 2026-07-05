@@ -42,8 +42,9 @@ pub use photon_file::{load_photon, save_photon, PHOTON_FORMAT_VERSION};
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
-    interpolate_stops, ArrowheadStyle, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
-    GradientKind, GradientStop, MeshGradient, MeshGradientVertex, Stroke,
+    interpolate_stops, interpolate_stops_with, ArrowheadStyle, Fill, FillKind, FluidGradient,
+    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop, MeshGradient,
+    MeshGradientVertex, Stroke,
 };
 pub use transform::Transform;
 pub use units::{from_px, to_px, DocumentUnit};

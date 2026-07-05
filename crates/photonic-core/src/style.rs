@@ -398,6 +398,9 @@ pub struct Gradient {
     /// For linear: [x0, y0, x1, y1] in document/world space
     /// For radial: [cx, cy, fx, fy, r] (center, focal point, radius)
     pub coords: Vec<f64>,
+    /// Color space used to blend between stops.
+    #[serde(default)]
+    pub interpolation: GradientInterpolation,
 }
 
 impl Gradient {
@@ -406,6 +409,7 @@ impl Gradient {
             kind: GradientKind::Linear,
             stops,
             coords: vec![x0, y0, x1, y1],
+            interpolation: GradientInterpolation::default(),
         }
     }
 
@@ -414,6 +418,7 @@ impl Gradient {
             kind: GradientKind::Radial,
             stops,
             coords: vec![cx, cy, cx, cy, r],
+            interpolation: GradientInterpolation::default(),
         }
     }
 
@@ -453,7 +458,7 @@ impl Gradient {
                 (dist / r).clamp(0.0, 1.0) as f32
             }
         };
-        interpolate_stops(&self.stops, t)
+        interpolate_stops_with(&self.stops, t, self.interpolation)
     }
 }
 
@@ -469,12 +474,41 @@ pub struct GradientStop {
     /// Position in [0.0, 1.0]
     pub offset: f32,
     pub color: Color,
+    /// Position (0..1) within the segment to the *next* stop at which the color
+    /// reaches the halfway blend — Illustrator's "midpoint". 0.5 = linear.
+    #[serde(default = "default_midpoint")]
+    pub midpoint: f32,
+}
+
+fn default_midpoint() -> f32 {
+    0.5
 }
 
 impl GradientStop {
     pub fn new(offset: f32, color: Color) -> Self {
-        Self { offset, color }
+        Self {
+            offset,
+            color,
+            midpoint: 0.5,
+        }
     }
+
+    /// Builder: set the transition midpoint to the next stop (0..1).
+    pub fn with_midpoint(mut self, midpoint: f32) -> Self {
+        self.midpoint = midpoint.clamp(0.0, 1.0);
+        self
+    }
+}
+
+/// Color space used to interpolate between a gradient's stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientInterpolation {
+    /// Straight per-channel blend in gamma sRGB (classic; can look muddy).
+    #[default]
+    Srgb,
+    /// Perceptually-uniform blend in OKLab (avoids the desaturated "gray band").
+    Oklab,
 }
 
 // ─── Fluid (free-point) gradient ─────────────────────────────────────────────
@@ -672,27 +706,30 @@ impl MeshGradient {
 // ─── Stop interpolation helper ────────────────────────────────────────────────
 
 /// Interpolate a colour from a sorted stop list at parameter `t ∈ [0, 1]`.
+/// Sample stops at `t` in gamma sRGB (back-compat; honours per-stop midpoints).
 pub fn interpolate_stops(stops: &[GradientStop], t: f32) -> [f32; 4] {
+    interpolate_stops_with(stops, t, GradientInterpolation::Srgb)
+}
+
+/// Sample stops at `t`, honouring each stop's midpoint and blending in the
+/// requested color space.
+pub fn interpolate_stops_with(
+    stops: &[GradientStop],
+    t: f32,
+    interp: GradientInterpolation,
+) -> [f32; 4] {
+    let endpoint = |s: &GradientStop| [s.color.r, s.color.g, s.color.b, s.color.a];
     if stops.is_empty() {
         return [0.5, 0.5, 0.5, 1.0];
     }
-    if stops.len() == 1 {
-        let s = &stops[0];
-        return [s.color.r, s.color.g, s.color.b, s.color.a];
+    if stops.len() == 1 || t <= stops[0].offset {
+        return endpoint(&stops[0]);
     }
-
-    // Before first stop
-    if t <= stops[0].offset {
-        let s = &stops[0];
-        return [s.color.r, s.color.g, s.color.b, s.color.a];
-    }
-    // After last stop
     let last = &stops[stops.len() - 1];
     if t >= last.offset {
-        return [last.color.r, last.color.g, last.color.b, last.color.a];
+        return endpoint(last);
     }
 
-    // Find surrounding pair
     for i in 0..stops.len() - 1 {
         let s0 = &stops[i];
         let s1 = &stops[i + 1];
@@ -703,18 +740,147 @@ pub fn interpolate_stops(stops: &[GradientStop], t: f32) -> [f32; 4] {
             } else {
                 0.0
             };
-            let lerp = |a: f32, b: f32| a + (b - a) * local_t;
-            return [
-                lerp(s0.color.r, s1.color.r),
-                lerp(s0.color.g, s1.color.g),
-                lerp(s0.color.b, s1.color.b),
-                lerp(s0.color.a, s1.color.a),
-            ];
+            // Remap by the segment midpoint so the halfway blend lands at
+            // `s0.midpoint` within the segment (0.5 = linear).
+            let m = s0.midpoint.clamp(0.02, 0.98);
+            let tt = if local_t <= m {
+                0.5 * local_t / m
+            } else {
+                0.5 + 0.5 * (local_t - m) / (1.0 - m)
+            };
+            let a = endpoint(s0);
+            let b = endpoint(s1);
+            return match interp {
+                GradientInterpolation::Srgb => lerp_rgba(a, b, tt),
+                GradientInterpolation::Oklab => {
+                    let la = srgb_to_oklab(a);
+                    let lb = srgb_to_oklab(b);
+                    let mixed = lerp_rgba(la, lb, tt);
+                    oklab_to_srgb(mixed)
+                }
+            };
         }
     }
+    endpoint(&stops[stops.len() - 1])
+}
 
-    let s = &stops[stops.len() - 1];
-    [s.color.r, s.color.g, s.color.b, s.color.a]
+fn lerp_rgba(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+// ── OKLab helpers for perceptual gradient interpolation (Björn Ottosson) ──
+// Operate on gamma sRGB `[f32; 4]`; the L/a/b triple is carried in slots 0..3
+// with alpha preserved in slot 3 (linear).
+
+fn srgb_gamma_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+fn srgb_linear_to_gamma(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn srgb_to_oklab(rgba: [f32; 4]) -> [f32; 4] {
+    let r = srgb_gamma_to_linear(rgba[0]);
+    let g = srgb_gamma_to_linear(rgba[1]);
+    let b = srgb_gamma_to_linear(rgba[2]);
+    let l = 0.412_221_47 * r + 0.536_332_54 * g + 0.051_445_995 * b;
+    let m = 0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b;
+    let s = 0.088_302_46 * r + 0.281_718_84 * g + 0.629_978_7 * b;
+    let l_ = l.cbrt();
+    let m_ = m.cbrt();
+    let s_ = s.cbrt();
+    [
+        0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
+        1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
+        0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_,
+        rgba[3],
+    ]
+}
+
+fn oklab_to_srgb(lab: [f32; 4]) -> [f32; 4] {
+    let l_ = lab[0] + 0.396_337_78 * lab[1] + 0.215_803_76 * lab[2];
+    let m_ = lab[0] - 0.105_561_346 * lab[1] - 0.063_854_17 * lab[2];
+    let s_ = lab[0] - 0.089_484_18 * lab[1] - 1.291_485_5 * lab[2];
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+    let r = 4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s;
+    let g = -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s;
+    let b = -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s;
+    [
+        srgb_linear_to_gamma(r.clamp(0.0, 1.0)),
+        srgb_linear_to_gamma(g.clamp(0.0, 1.0)),
+        srgb_linear_to_gamma(b.clamp(0.0, 1.0)),
+        lab[3],
+    ]
+}
+
+#[cfg(test)]
+mod gradient_interp_tests {
+    use super::*;
+
+    fn stops() -> Vec<GradientStop> {
+        vec![
+            GradientStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+            GradientStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
+        ]
+    }
+
+    #[test]
+    fn midpoint_half_is_linear() {
+        // Default midpoint 0.5 → exact channel average at t=0.5.
+        let c = interpolate_stops(&stops(), 0.5);
+        assert!((c[0] - 0.5).abs() < 1e-4 && (c[2] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn midpoint_shifts_halfway_point() {
+        // Midpoint at 0.25 → the halfway color arrives earlier (t=0.25).
+        let mut s = stops();
+        s[0].midpoint = 0.25;
+        let c = interpolate_stops(&s, 0.25);
+        assert!((c[0] - 0.5).abs() < 1e-3, "expected half-red at t=0.25, got {c:?}");
+    }
+
+    #[test]
+    fn oklab_midpoint_avoids_srgb_average() {
+        // At t=0.5 the OKLab blend of red↔blue differs from the sRGB average
+        // (the perceptual path does not pass through the same muddy midpoint).
+        let s = stops();
+        let srgb = interpolate_stops_with(&s, 0.5, GradientInterpolation::Srgb);
+        let oklab = interpolate_stops_with(&s, 0.5, GradientInterpolation::Oklab);
+        let diff: f32 = (0..3).map(|i| (srgb[i] - oklab[i]).abs()).sum();
+        assert!(diff > 0.05, "oklab should differ from srgb midpoint: {srgb:?} vs {oklab:?}");
+    }
+
+    #[test]
+    fn oklab_endpoints_are_exact() {
+        let s = stops();
+        let a = interpolate_stops_with(&s, 0.0, GradientInterpolation::Oklab);
+        let b = interpolate_stops_with(&s, 1.0, GradientInterpolation::Oklab);
+        assert!((a[0] - 1.0).abs() < 1e-3 && a[2].abs() < 1e-3);
+        assert!(b[0].abs() < 1e-3 && (b[2] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn legacy_stop_deserializes_with_default_midpoint() {
+        let json = r#"{"offset":0.3,"color":{"r":1.0,"g":0.0,"b":0.0,"a":1.0}}"#;
+        let s: GradientStop = serde_json::from_str(json).unwrap();
+        assert_eq!(s.midpoint, 0.5);
+    }
 }
 
 #[cfg(test)]

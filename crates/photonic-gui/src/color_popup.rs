@@ -16,9 +16,14 @@
 use egui::{
     epaint::Vertex, Color32, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2,
 };
+use photonic_core::style::{
+    interpolate_stops_with, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
+    GradientInterpolation, GradientKind, GradientStop, MeshGradient, MeshGradientVertex,
+};
 use photonic_core::Color;
 
 use crate::color_convert as cc;
+use crate::panels::FillColorSlot;
 
 const ACCENT: Color32 = Color32::from_rgb(130, 105, 225);
 
@@ -901,4 +906,913 @@ fn unit_drag(
 
 fn approx(a: [f32; 3], b: [f32; 3]) -> bool {
     (0..3).all(|i| (a[i] - b[i]).abs() < 1.0 / 512.0)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Fill-aware picker: solid + gradients with a slide-out gradient drawer.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const DRAWER_W: f32 = 214.0;
+
+/// Config for the fill-aware picker.
+pub struct FillPickerConfig<'a> {
+    /// Config for the embedded color picker (recents, swatches, eyedropper…).
+    pub color: PickerConfig<'a>,
+    /// Saved gradients (name, fill) offered as one-click swatches.
+    pub gradient_swatches: &'a [(String, Fill)],
+    /// Show the "save gradient" button (caller must handle
+    /// [`FillOutcome::save_gradient`]).
+    pub allow_save_gradient: bool,
+}
+
+/// What the fill picker reported this frame.
+#[derive(Default)]
+pub struct FillOutcome {
+    pub changed: bool,
+    /// A stop/point wants the canvas eyedropper.
+    pub eyedropper: Option<FillColorSlot>,
+    /// Save the active solid color to swatches.
+    pub add_swatch: Option<[f32; 4]>,
+    /// Save the current gradient fill to the gradient library.
+    pub save_gradient: Option<Fill>,
+}
+
+/// Fill type, including the two gradient sub-kinds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FillType {
+    None,
+    Solid,
+    Linear,
+    Radial,
+    Fluid,
+    Mesh,
+    Pattern,
+}
+
+impl FillType {
+    fn of(f: &Fill) -> Self {
+        match &f.kind {
+            FillKind::None => Self::None,
+            FillKind::Solid(_) => Self::Solid,
+            FillKind::Gradient(g) => match g.kind {
+                GradientKind::Linear => Self::Linear,
+                GradientKind::Radial => Self::Radial,
+            },
+            FillKind::FluidGradient(_) => Self::Fluid,
+            FillKind::MeshGradient(_) => Self::Mesh,
+            FillKind::Pattern(_) => Self::Pattern,
+        }
+    }
+    fn is_gradient(self) -> bool {
+        matches!(self, Self::Linear | Self::Radial | Self::Fluid | Self::Mesh)
+    }
+    /// Whether this fill type gets the slide-out drawer (gradients + pattern).
+    fn has_drawer(self) -> bool {
+        self.is_gradient() || self == Self::Pattern
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Solid => "Solid",
+            Self::Linear => "Linear",
+            Self::Radial => "Radial",
+            Self::Fluid => "Fluid",
+            Self::Mesh => "Mesh",
+            Self::Pattern => "Pattern",
+        }
+    }
+}
+
+fn col_to_arr(c: Color) -> [f32; 4] {
+    [c.r, c.g, c.b, c.a]
+}
+fn arr_to_col(a: [f32; 4]) -> Color {
+    Color {
+        r: a[0],
+        g: a[1],
+        b: a[2],
+        a: a[3],
+    }
+}
+
+impl ColorPopup {
+    /// The fill-aware picker: fill-type tabs + the color area (editing the active
+    /// stop) + a gradient drawer that slides out for gradient fills.
+    pub fn fill_picker(ui: &mut Ui, fill: &mut Fill, cfg: &FillPickerConfig) -> FillOutcome {
+        let mut out = FillOutcome::default();
+        let id = ui.make_persistent_id("fill_picker");
+        let ftype = FillType::of(fill);
+
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(WIDTH);
+                // Fill-type tabs.
+                if let Some(new_type) = fill_type_tabs(ui, ftype) {
+                    if new_type != ftype {
+                        *fill = build_default_fill(new_type, fill);
+                        out.changed = true;
+                    }
+                }
+                ui.add_space(4.0);
+                // Active color area (edits the selected stop/point).
+                fill_active_color(ui, fill, id, cfg, &mut out);
+            });
+
+            // Slide-out gradient/pattern drawer.
+            let want = FillType::of(fill).has_drawer();
+            let openf = ui
+                .ctx()
+                .animate_bool_with_time(id.with("drawer"), want, 0.15);
+            if openf > 0.01 {
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.set_width(DRAWER_W * openf);
+                    if openf > 0.55 {
+                        gradient_drawer(ui, fill, id, cfg, &mut out);
+                    }
+                });
+            }
+        });
+        out
+    }
+}
+
+/// Fill-type tab row. Returns the newly chosen type.
+fn fill_type_tabs(ui: &mut Ui, current: FillType) -> Option<FillType> {
+    let mut chosen = None;
+    ui.horizontal_wrapped(|ui| {
+        for t in [
+            FillType::Solid,
+            FillType::Linear,
+            FillType::Radial,
+            FillType::Fluid,
+            FillType::Mesh,
+            FillType::Pattern,
+        ] {
+            let selected = current == t
+                || (t == FillType::Solid && current == FillType::None);
+            if ui
+                .add(egui::SelectableLabel::new(selected, t.label()))
+                .clicked()
+            {
+                chosen = Some(t);
+            }
+        }
+    });
+    chosen
+}
+
+/// Build a sensible default fill when switching type, inheriting a base color.
+fn build_default_fill(t: FillType, old: &Fill) -> Fill {
+    let base = match &old.kind {
+        FillKind::Solid(c) => *c,
+        FillKind::Gradient(g) => g.stops.first().map(|s| s.color).unwrap_or(Color::BLACK),
+        FillKind::FluidGradient(fg) => fg.points.first().map(|p| p.color).unwrap_or(Color::BLACK),
+        FillKind::MeshGradient(mg) => mg.vertices.first().map(|v| v.color).unwrap_or(Color::BLACK),
+        _ => Color::BLACK,
+    };
+    let white = Color::WHITE;
+    let mut f = match t {
+        FillType::None => Fill::solid(base),
+        FillType::Solid => Fill::solid(base),
+        FillType::Linear => Fill::gradient(Gradient::linear(
+            0.0,
+            0.0,
+            200.0,
+            0.0,
+            vec![GradientStop::new(0.0, base), GradientStop::new(1.0, white)],
+        )),
+        FillType::Radial => Fill::gradient(Gradient::radial(
+            100.0,
+            100.0,
+            100.0,
+            vec![GradientStop::new(0.0, base), GradientStop::new(1.0, white)],
+        )),
+        FillType::Fluid => Fill::fluid_gradient(FluidGradient::new(vec![
+            FluidGradientPoint::new(50.0, 50.0, base),
+            FluidGradientPoint::new(150.0, 50.0, white),
+            FluidGradientPoint::new(100.0, 150.0, Color::new(1.0, 0.5, 0.0, 1.0)),
+        ])),
+        FillType::Mesh => Fill::mesh_gradient(MeshGradient::new(
+            2,
+            2,
+            vec![
+                MeshGradientVertex::new(0.0, 0.0, base),
+                MeshGradientVertex::new(200.0, 0.0, Color::new(1.0, 0.2, 0.2, 1.0)),
+                MeshGradientVertex::new(0.0, 200.0, Color::new(0.2, 1.0, 0.2, 1.0)),
+                MeshGradientVertex::new(200.0, 200.0, Color::new(0.2, 0.2, 1.0, 1.0)),
+            ],
+        )),
+        FillType::Pattern => {
+            Fill::pattern(photonic_core::style::PatternFill::new(crate::panels::default_checker_tile()))
+        }
+    };
+    f.opacity = old.opacity;
+    f.enabled = true;
+    f
+}
+
+/// egui memory id holding the active stop/point index for a fill.
+fn active_index(ui: &Ui, id: egui::Id, count: usize) -> usize {
+    let i: usize = ui.data(|d| d.get_temp(id.with("active")).unwrap_or(0));
+    i.min(count.saturating_sub(1))
+}
+fn set_active_index(ui: &Ui, id: egui::Id, i: usize) {
+    ui.data_mut(|d| d.insert_temp(id.with("active"), i));
+}
+
+/// The color area — edits the fill's solid color, or the selected gradient
+/// stop/point.
+fn fill_active_color(
+    ui: &mut Ui,
+    fill: &mut Fill,
+    id: egui::Id,
+    cfg: &FillPickerConfig,
+    out: &mut FillOutcome,
+) {
+    // Extract the active color + a slot for eyedropper targeting.
+    let (mut rgba, slot): (Option<[f32; 4]>, FillColorSlot) = match &fill.kind {
+        FillKind::None => (None, FillColorSlot::Solid),
+        FillKind::Solid(c) => (Some(col_to_arr(*c)), FillColorSlot::Solid),
+        FillKind::Gradient(g) => {
+            let ai = active_index(ui, id, g.stops.len());
+            (
+                g.stops.get(ai).map(|s| col_to_arr(s.color)),
+                FillColorSlot::GradientStop(ai),
+            )
+        }
+        FillKind::FluidGradient(fg) => {
+            let ai = active_index(ui, id, fg.points.len());
+            (
+                fg.points.get(ai).map(|p| col_to_arr(p.color)),
+                FillColorSlot::FluidPoint(ai),
+            )
+        }
+        FillKind::MeshGradient(mg) => {
+            let ai = active_index(ui, id, mg.vertices.len());
+            (
+                mg.vertices.get(ai).map(|v| col_to_arr(v.color)),
+                FillColorSlot::MeshVertex(ai),
+            )
+        }
+        FillKind::Pattern(_) => (None, FillColorSlot::Solid),
+    };
+
+    match &mut rgba {
+        Some(rgba) => {
+            let p = ColorPopup::picker_body(ui, rgba, &cfg.color);
+            if p.eyedropper_clicked {
+                out.eyedropper = Some(slot.clone());
+            }
+            if p.add_swatch.is_some() {
+                out.add_swatch = p.add_swatch;
+            }
+            if p.changed {
+                let c = arr_to_col(*rgba);
+                match (&mut fill.kind, &slot) {
+                    (FillKind::Solid(sc), _) => *sc = c,
+                    (FillKind::Gradient(g), FillColorSlot::GradientStop(i)) => {
+                        if let Some(s) = g.stops.get_mut(*i) {
+                            s.color = c;
+                        }
+                    }
+                    (FillKind::FluidGradient(fg), FillColorSlot::FluidPoint(i)) => {
+                        if let Some(pt) = fg.points.get_mut(*i) {
+                            pt.color = c;
+                        }
+                    }
+                    (FillKind::MeshGradient(mg), FillColorSlot::MeshVertex(i)) => {
+                        if let Some(v) = mg.vertices.get_mut(*i) {
+                            v.color = c;
+                        }
+                    }
+                    _ => {}
+                }
+                out.changed = true;
+            }
+        }
+        None => {
+            if matches!(fill.kind, FillKind::Pattern(_)) {
+                ui.label(egui::RichText::new("Pattern fill — see drawer").weak().small());
+            } else {
+                ui.label(egui::RichText::new("No fill").weak());
+                if ui.button("Add solid color").clicked() {
+                    *fill = Fill::solid(Color::BLACK);
+                    out.changed = true;
+                }
+            }
+        }
+    }
+}
+
+/// The slide-out gradient drawer: stop bar / point list, geometry, interpolation,
+/// and gradient swatches.
+fn gradient_drawer(
+    ui: &mut Ui,
+    fill: &mut Fill,
+    id: egui::Id,
+    cfg: &FillPickerConfig,
+    out: &mut FillOutcome,
+) {
+    let is_pattern = matches!(fill.kind, FillKind::Pattern(_));
+    ui.label(
+        egui::RichText::new(if is_pattern { "PATTERN" } else { "GRADIENT" })
+            .small()
+            .color(ACCENT),
+    );
+    match &mut fill.kind {
+        FillKind::Gradient(g) => {
+            gradient_stop_drawer(ui, g, id, out);
+        }
+        FillKind::FluidGradient(fg) => {
+            if fluid_drawer(ui, fg, id) {
+                out.changed = true;
+            }
+        }
+        FillKind::MeshGradient(mg) => {
+            if mesh_drawer(ui, mg, id) {
+                out.changed = true;
+            }
+        }
+        FillKind::Pattern(p) => {
+            if pattern_drawer(ui, p) {
+                out.changed = true;
+            }
+        }
+        _ => {}
+    }
+
+    // Gradient library.
+    if cfg.allow_save_gradient || !cfg.gradient_swatches.is_empty() {
+        ui.add_space(4.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("SAVED").small().weak());
+            if cfg.allow_save_gradient
+                && matches!(fill.kind, FillKind::Gradient(_))
+                && ui
+                    .small_button(egui_phosphor::regular::PLUS)
+                    .on_hover_text("Save this gradient")
+                    .clicked()
+            {
+                out.save_gradient = Some(fill.clone());
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (name, gfill) in cfg.gradient_swatches {
+                if gradient_swatch_button(ui, gfill).on_hover_text(name).clicked() {
+                    *fill = gfill.clone();
+                    out.changed = true;
+                }
+            }
+        });
+    }
+}
+
+/// Linear/Radial drawer: interpolation toggle, stop bar, stop actions, geometry.
+fn gradient_stop_drawer(ui: &mut Ui, g: &mut Gradient, id: egui::Id, out: &mut FillOutcome) {
+    let mut changed = false;
+
+    // Interpolation space (T2).
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Blend").small().weak());
+        let mut interp = g.interpolation;
+        if ui
+            .selectable_value(&mut interp, GradientInterpolation::Srgb, "sRGB")
+            .clicked()
+            | ui.selectable_value(&mut interp, GradientInterpolation::Oklab, "OKLab")
+                .on_hover_text("Perceptual blend — avoids the muddy gray midpoint")
+                .clicked()
+        {
+            g.interpolation = interp;
+            changed = true;
+        }
+    });
+
+    // Stop bar.
+    let mut active = active_index(ui, id, g.stops.len());
+    changed |= gradient_bar(ui, g, &mut active);
+    set_active_index(ui, id, active);
+
+    // Active-stop controls: offset, midpoint, actions.
+    ui.horizontal(|ui| {
+        if let Some(s) = g.stops.get_mut(active) {
+            let mut off = s.offset;
+            if ui
+                .add(egui::DragValue::new(&mut off).speed(0.005).range(0.0..=1.0).prefix("pos "))
+                .changed()
+            {
+                s.offset = off;
+                changed = true;
+            }
+            let mut mid = s.midpoint * 100.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut mid)
+                        .speed(0.5)
+                        .range(2.0..=98.0)
+                        .suffix("%")
+                        .prefix("mid "),
+                )
+                .on_hover_text("Midpoint of the blend to the next stop")
+                .changed()
+            {
+                s.midpoint = mid / 100.0;
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.small_button(egui_phosphor::regular::PLUS).on_hover_text("Add stop").clicked() {
+            let off = g.stops.get(active).map(|s| s.offset).unwrap_or(0.5);
+            let c = interpolate_stops_with(&g.stops, off, g.interpolation);
+            g.stops.insert(active + 1, GradientStop::new((off + 0.1).min(1.0), arr_to_col(c)));
+            changed = true;
+        }
+        if ui.small_button(egui_phosphor::regular::COPY).on_hover_text("Duplicate stop").clicked() {
+            if let Some(s) = g.stops.get(active).cloned() {
+                g.stops.insert(active + 1, s);
+                changed = true;
+            }
+        }
+        if g.stops.len() > 2
+            && ui.small_button(egui_phosphor::regular::TRASH).on_hover_text("Delete stop").clicked()
+        {
+            g.stops.remove(active);
+            changed = true;
+        }
+        if ui
+            .small_button(egui_phosphor::regular::ARROWS_LEFT_RIGHT)
+            .on_hover_text("Reverse")
+            .clicked()
+        {
+            for s in g.stops.iter_mut() {
+                s.offset = 1.0 - s.offset;
+            }
+            g.stops.reverse();
+            changed = true;
+        }
+        if ui
+            .small_button(egui_phosphor::regular::DOTS_THREE_OUTLINE)
+            .on_hover_text("Distribute evenly")
+            .clicked()
+        {
+            let n = g.stops.len();
+            if n > 1 {
+                for (i, s) in g.stops.iter_mut().enumerate() {
+                    s.offset = i as f32 / (n - 1) as f32;
+                }
+                changed = true;
+            }
+        }
+    });
+
+    // Geometry.
+    ui.add_space(2.0);
+    match g.kind {
+        GradientKind::Linear => changed |= linear_geometry(ui, g),
+        GradientKind::Radial => changed |= radial_geometry(ui, g),
+    }
+
+    if changed {
+        out.changed = true;
+    }
+}
+
+/// The interactive gradient preview bar with draggable, selectable stops.
+fn gradient_bar(ui: &mut Ui, g: &mut Gradient, active: &mut usize) -> bool {
+    let h = 26.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click_and_drag());
+    paint_checker(ui.painter(), rect);
+    let interp = g.interpolation;
+    let stops = g.stops.clone();
+    paint_gradient(ui.painter(), rect, 48, 1, |fx, _| {
+        let c = interpolate_stops_with(&stops, fx, interp);
+        Color32::from_rgba_unmultiplied(
+            (c[0] * 255.0) as u8,
+            (c[1] * 255.0) as u8,
+            (c[2] * 255.0) as u8,
+            (c[3] * 255.0) as u8,
+        )
+    });
+    ui.painter()
+        .rect_stroke(rect, egui::Rounding::same(3.0), Stroke::new(1.0, Color32::from_gray(90)));
+
+    let x_of = |off: f32| rect.left() + off.clamp(0.0, 1.0) * rect.width();
+    let frac_of = |x: f32| ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+
+    let mut changed = false;
+
+    // Select nearest stop on press; add a stop on double-click.
+    if resp.double_clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let off = frac_of(p.x);
+            let c = interpolate_stops_with(&g.stops, off, interp);
+            g.stops.push(GradientStop::new(off, arr_to_col(c)));
+            g.stops.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
+            *active = g
+                .stops
+                .iter()
+                .position(|s| (s.offset - off).abs() < 1e-4)
+                .unwrap_or(0);
+            changed = true;
+        }
+    } else if resp.drag_started() || resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            *active = g
+                .stops
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    (a.offset - frac_of(p.x))
+                        .abs()
+                        .partial_cmp(&(b.offset - frac_of(p.x)).abs())
+                        .unwrap()
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+    if resp.dragged() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            if let Some(s) = g.stops.get_mut(*active) {
+                s.offset = frac_of(p.x);
+                changed = true;
+            }
+        }
+    }
+
+    // Draw stop handles.
+    for (i, s) in g.stops.iter().enumerate() {
+        let x = x_of(s.offset);
+        let top = rect.top();
+        let bot = rect.bottom();
+        let sel = i == *active;
+        let stroke = if sel {
+            Stroke::new(2.0, Color32::WHITE)
+        } else {
+            Stroke::new(1.0, Color32::from_black_alpha(180))
+        };
+        ui.painter().line_segment([Pos2::new(x, top), Pos2::new(x, bot)], stroke);
+        let b = cc::rgba_to_bytes(col_to_arr(s.color));
+        ui.painter().circle(
+            Pos2::new(x, bot + 4.0),
+            if sel { 5.0 } else { 4.0 },
+            Color32::from_rgb(b[0], b[1], b[2]),
+            stroke,
+        );
+    }
+    ui.add_space(8.0); // room for the handle circles below the bar
+    changed
+}
+
+fn linear_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
+    if g.coords.len() < 4 {
+        return false;
+    }
+    let (x0, y0, x1, y1) = (g.coords[0], g.coords[1], g.coords[2], g.coords[3]);
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let mut angle = dy.atan2(dx).to_degrees();
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::DragValue::new(&mut angle).speed(1.0).suffix("°").prefix("angle "))
+            .changed()
+        {
+            let cx = (x0 + x1) * 0.5;
+            let cy = (y0 + y1) * 0.5;
+            let r = angle.to_radians();
+            let hx = r.cos() * len * 0.5;
+            let hy = r.sin() * len * 0.5;
+            g.coords[0] = cx - hx;
+            g.coords[1] = cy - hy;
+            g.coords[2] = cx + hx;
+            g.coords[3] = cy + hy;
+            changed = true;
+        }
+        let mut l = len;
+        if ui
+            .add(egui::DragValue::new(&mut l).speed(1.0).range(1.0..=100000.0).prefix("len "))
+            .changed()
+        {
+            let cx = (x0 + x1) * 0.5;
+            let cy = (y0 + y1) * 0.5;
+            let r = angle.to_radians();
+            g.coords[0] = cx - r.cos() * l * 0.5;
+            g.coords[1] = cy - r.sin() * l * 0.5;
+            g.coords[2] = cx + r.cos() * l * 0.5;
+            g.coords[3] = cy + r.sin() * l * 0.5;
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn radial_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
+    if g.coords.len() < 5 {
+        return false;
+    }
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut cx = g.coords[0];
+        let mut cy = g.coords[1];
+        if ui.add(egui::DragValue::new(&mut cx).speed(1.0).prefix("cx ")).changed() {
+            g.coords[0] = cx;
+            g.coords[2] = cx;
+            changed = true;
+        }
+        if ui.add(egui::DragValue::new(&mut cy).speed(1.0).prefix("cy ")).changed() {
+            g.coords[1] = cy;
+            g.coords[3] = cy;
+            changed = true;
+        }
+        let mut r = g.coords[4];
+        if ui
+            .add(egui::DragValue::new(&mut r).speed(1.0).range(1.0..=100000.0).prefix("r "))
+            .changed()
+        {
+            g.coords[4] = r;
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
+    let mut changed = false;
+    let mut active = active_index(ui, id, fg.points.len());
+    let mut remove = None;
+    ui.label(egui::RichText::new("Points").small().weak());
+    egui::ScrollArea::vertical().max_height(150.0).id_salt("fluid_pts").show(ui, |ui| {
+        for i in 0..fg.points.len() {
+            ui.horizontal(|ui| {
+                let sel = i == active;
+                if mini_swatch(ui, [fg.points[i].color.r, fg.points[i].color.g, fg.points[i].color.b], fg.points[i].color.a, true).clicked() {
+                    active = i;
+                }
+                if sel {
+                    ui.label(egui::RichText::new("●").small().color(ACCENT));
+                }
+                let mut x = fg.points[i].x as f32;
+                let mut y = fg.points[i].y as f32;
+                if ui.add(egui::DragValue::new(&mut x).speed(1.0).prefix("x")).changed() {
+                    fg.points[i].x = x as f64;
+                    changed = true;
+                }
+                if ui.add(egui::DragValue::new(&mut y).speed(1.0).prefix("y")).changed() {
+                    fg.points[i].y = y as f64;
+                    changed = true;
+                }
+                if fg.points.len() > 1 && ui.small_button(egui_phosphor::regular::X).clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+    });
+    if let Some(i) = remove {
+        fg.points.remove(i);
+        changed = true;
+    }
+    ui.horizontal(|ui| {
+        if ui.small_button("+ Point").clicked() {
+            fg.points.push(FluidGradientPoint::new(100.0, 100.0, Color::WHITE));
+            active = fg.points.len() - 1;
+            changed = true;
+        }
+        let mut power = fg.power;
+        if ui.add(egui::DragValue::new(&mut power).speed(0.1).range(0.5..=8.0).prefix("power ")).changed() {
+            fg.power = power;
+            changed = true;
+        }
+    });
+    set_active_index(ui, id, active);
+    changed
+}
+
+fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
+    let mut changed = false;
+    let mut active = active_index(ui, id, mg.vertices.len());
+    ui.label(egui::RichText::new(format!("Grid {}×{}", mg.rows, mg.cols)).small().weak());
+    egui::ScrollArea::vertical().max_height(150.0).id_salt("mesh_grid").show(ui, |ui| {
+        for row in 0..mg.rows {
+            ui.horizontal(|ui| {
+                for col in 0..mg.cols {
+                    let idx = (row * mg.cols + col) as usize;
+                    if let Some(v) = mg.vertices.get(idx) {
+                        let sel = idx == active;
+                        let r = mini_swatch(ui, [v.color.r, v.color.g, v.color.b], v.color.a, false);
+                        if r.clicked() {
+                            active = idx;
+                        }
+                        if sel {
+                            ui.painter().rect_stroke(r.rect.expand(1.0), egui::Rounding::same(3.0), Stroke::new(2.0, ACCENT));
+                        }
+                    }
+                }
+            });
+        }
+    });
+    ui.horizontal(|ui| {
+        if mg.rows < 8 && ui.small_button("+ Row").clicked() {
+            let cols = mg.cols;
+            let last_row_y = mg.vertices.get(((mg.rows - 1) * cols) as usize).map(|v| v.y).unwrap_or(0.0);
+            for c in 0..cols {
+                let x = mg.vertices.get(((mg.rows - 1) * cols + c) as usize).map(|v| v.x).unwrap_or(0.0);
+                mg.vertices.push(MeshGradientVertex::new(x, last_row_y + 50.0, Color::WHITE));
+            }
+            mg.rows += 1;
+            changed = true;
+        }
+        if mg.cols < 8 && ui.small_button("+ Col").clicked() {
+            let old_cols = mg.cols;
+            mg.cols += 1;
+            let mut nv = Vec::new();
+            for r in 0..mg.rows {
+                for c in 0..old_cols {
+                    nv.push(mg.vertices[(r * old_cols + c) as usize].clone());
+                }
+                let last = &mg.vertices[((r + 1) * old_cols - 1) as usize];
+                nv.push(MeshGradientVertex::new(last.x + 50.0, last.y, Color::WHITE));
+            }
+            mg.vertices = nv;
+            changed = true;
+        }
+    });
+    set_active_index(ui, id, active);
+    changed
+}
+
+/// A small gradient preview swatch button.
+fn gradient_swatch_button(ui: &mut Ui, fill: &Fill) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 16.0), Sense::click());
+    if let FillKind::Gradient(g) = &fill.kind {
+        let stops = g.stops.clone();
+        let interp = g.interpolation;
+        paint_gradient(ui.painter(), rect, 24, 1, |fx, _| {
+            let c = interpolate_stops_with(&stops, fx, interp);
+            Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
+        });
+    } else {
+        ui.painter().rect_filled(rect, egui::Rounding::same(3.0), Color32::from_gray(80));
+    }
+    let stroke = if resp.hovered() {
+        Stroke::new(2.0, ACCENT)
+    } else {
+        Stroke::new(1.0, Color32::from_gray(80))
+    };
+    ui.painter().rect_stroke(rect, egui::Rounding::same(3.0), stroke);
+    resp
+}
+
+fn pattern_drawer(ui: &mut Ui, p: &mut photonic_core::style::PatternFill) -> bool {
+    use photonic_core::style::PatternTileType;
+    let mut changed = false;
+    ui.label(
+        egui::RichText::new(format!("Tile {}×{}px", p.tile.width, p.tile.height))
+            .small()
+            .weak(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for (label, t) in [
+            ("Grid", PatternTileType::Grid),
+            ("Brick", PatternTileType::BrickByRow),
+            ("Brick↕", PatternTileType::BrickByColumn),
+            ("Hex", PatternTileType::Hex),
+        ] {
+            if ui.selectable_label(p.tile_type == t, label).clicked() {
+                p.tile_type = t;
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut scale = p.scale;
+        if ui
+            .add(egui::DragValue::new(&mut scale).speed(0.01).range(0.05..=20.0).prefix("scale "))
+            .changed()
+        {
+            p.scale = scale;
+            changed = true;
+        }
+        let mut rot = p.rotation.to_degrees();
+        if ui
+            .add(egui::DragValue::new(&mut rot).speed(1.0).suffix("°").prefix("rot "))
+            .changed()
+        {
+            p.rotation = rot.to_radians();
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        let mut spacing = p.spacing;
+        if ui
+            .add(egui::DragValue::new(&mut spacing).speed(0.5).range(0.0..=200.0).prefix("gap "))
+            .changed()
+        {
+            p.spacing = spacing;
+            changed = true;
+        }
+    });
+    changed
+}
+
+impl ColorPopup {
+    /// A floating fill picker window (fill-type tabs + gradient drawer).
+    pub fn fill_window(
+        ctx: &egui::Context,
+        id_salt: impl std::hash::Hash,
+        title: &str,
+        pos: Pos2,
+        fill: &mut Fill,
+        open: &mut bool,
+        cfg: &FillPickerConfig,
+    ) -> FillOutcome {
+        let mut out = FillOutcome::default();
+        egui::Window::new(title)
+            .id(egui::Id::new(id_salt))
+            .collapsible(false)
+            .resizable(false)
+            .default_pos(pos)
+            .constrain(true)
+            .open(open)
+            .show(ctx, |ui| {
+                out = Self::fill_picker(ui, fill, cfg);
+            });
+        out
+    }
+
+    /// A fill preview **swatch button** that opens the fill picker in a popup.
+    /// Renders a wide swatch showing the current fill.
+    pub fn fill_swatch_popup(
+        ui: &mut Ui,
+        fill: &mut Fill,
+        cfg: &FillPickerConfig,
+    ) -> FillOutcome {
+        let mut out = FillOutcome::default();
+        let size = Vec2::new(48.0, ui.spacing().interact_size.y.max(18.0));
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        paint_fill_preview(ui.painter(), rect, fill);
+        ui.painter()
+            .rect_stroke(rect, egui::Rounding::same(3.0), Stroke::new(1.0, Color32::from_gray(90)));
+
+        let popup_id = resp.id.with("fill_popup");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &resp,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                out = Self::fill_picker(ui, fill, cfg);
+            },
+        );
+        out
+    }
+}
+
+/// Paint a preview of any fill kind into `rect` (checkerboard under alpha).
+fn paint_fill_preview(painter: &egui::Painter, rect: Rect, fill: &Fill) {
+    paint_checker(painter, rect);
+    match &fill.kind {
+        FillKind::None => {}
+        FillKind::Solid(c) => {
+            let b = cc::rgba_to_bytes(col_to_arr(*c));
+            painter.rect_filled(
+                rect,
+                egui::Rounding::same(3.0),
+                Color32::from_rgba_unmultiplied(b[0], b[1], b[2], b[3]),
+            );
+        }
+        FillKind::Gradient(g) => {
+            let stops = g.stops.clone();
+            let interp = g.interpolation;
+            paint_gradient(painter, rect, 32, 1, |fx, _| {
+                let c = interpolate_stops_with(&stops, fx, interp);
+                Color32::from_rgba_unmultiplied(
+                    (c[0] * 255.0) as u8,
+                    (c[1] * 255.0) as u8,
+                    (c[2] * 255.0) as u8,
+                    (c[3] * 255.0) as u8,
+                )
+            });
+        }
+        FillKind::FluidGradient(fg) => {
+            let c = fg.points.first().map(|p| col_to_arr(p.color)).unwrap_or([0.5; 4]);
+            let b = cc::rgba_to_bytes(c);
+            painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_rgb(b[0], b[1], b[2]));
+        }
+        FillKind::MeshGradient(mg) => {
+            let c = mg.vertices.first().map(|v| col_to_arr(v.color)).unwrap_or([0.5; 4]);
+            let b = cc::rgba_to_bytes(c);
+            painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_rgb(b[0], b[1], b[2]));
+        }
+        FillKind::Pattern(_) => {
+            painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_gray(120));
+        }
+    }
 }

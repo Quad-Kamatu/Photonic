@@ -4,15 +4,12 @@ use photonic_core::{
     layer::LayerId,
     node::NodeId,
     ops::boolean::BooleanOp,
-    style::{
-        FluidGradient, FluidGradientPoint, Gradient, GradientKind, GradientStop, LineJoin,
-        MeshGradient, MeshGradientVertex, PatternFill, Stroke,
-    },
-    Color, Document, Fill, GaussianGlow, GlowEffect, PrimitiveKind, SceneNode, SceneNodeKind,
+    style::{LineJoin, Stroke},
+    Document, Fill, GaussianGlow, GlowEffect, PrimitiveKind, SceneNode, SceneNodeKind,
 };
 use uuid::Uuid;
 
-use crate::color_popup::ColorPopup;
+use crate::color_popup::{ColorPopup, FillPickerConfig, PickerConfig};
 use crate::radial_wheel::WheelAction;
 use crate::tools::Tool;
 
@@ -37,7 +34,7 @@ use inspector::*;
 use modify::*;
 
 pub(crate) use editors::{
-    draw_fill_editor, draw_gaussian_glow_editor, draw_glow_editor, draw_stroke_editor,
+    default_checker_tile, draw_gaussian_glow_editor, draw_glow_editor, draw_stroke_editor,
 };
 pub use layers_panel::draw_layers_panel;
 pub use toolbar::draw_toolbar;
@@ -1316,17 +1313,6 @@ pub(crate) fn draw_drawer(
 
 
 // ─── Fill editor ─────────────────────────────────────────────────────────────
-
-/// Discriminant used by the UI to select gradient type (avoids cloning the full kind).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FillType {
-    Solid,
-    Linear,
-    Radial,
-    Fluid,
-    Mesh,
-    Pattern,
-}
 
 /// Render a small eyedropper icon button. Returns `true` when clicked.
 pub(crate) fn eyedropper_btn(ui: &mut Ui) -> bool {

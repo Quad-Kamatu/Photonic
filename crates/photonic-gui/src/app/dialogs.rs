@@ -273,7 +273,6 @@ impl PhotonicApp {
         doc: &mut Document,
         history: &mut CommandHistory,
     ) -> bool {
-        use photonic_core::style::FillKind;
         let Some(popup) = self.color_popup else {
             return false;
         };
@@ -288,24 +287,7 @@ impl PhotonicApp {
             }
         };
 
-        // Seed the picker from the node's current fill/stroke color.
-        let seed = match (&node.kind, popup.stroke) {
-            (SceneNodeKind::Path(pn), true) => pn.stroke.color,
-            (SceneNodeKind::Path(pn), false) => match &pn.fill.kind {
-                FillKind::Solid(c) => *c,
-                _ => photonic_core::Color::WHITE,
-            },
-            _ => photonic_core::Color::WHITE,
-        };
-        let mut rgba = [seed.r, seed.g, seed.b, seed.a];
-
-        let title = if popup.stroke {
-            "Stroke Color"
-        } else {
-            "Fill Color"
-        };
-
-        // Feed the picker Photonic's recent colors + document swatches.
+        // Shared color-picker context: recents + document color swatches.
         let recents: Vec<[f32; 4]> = doc
             .recent_colors
             .iter()
@@ -316,7 +298,7 @@ impl PhotonicApp {
             .iter()
             .filter_map(|s| crate::color_convert::parse_hex(&s.color_hex))
             .collect();
-        let cfg = crate::color_popup::PickerConfig {
+        let color_cfg = crate::color_popup::PickerConfig {
             alpha: true,
             recents: &recents,
             swatches: &swatches,
@@ -324,50 +306,93 @@ impl PhotonicApp {
             allow_add_swatch: true,
             contrast_ref: None,
         };
-
+        let anchor = ("radial_color_popup", popup.pos.x as i32, popup.pos.y as i32);
         let mut open = true;
-        // Fold the anchor into the id so re-opening at a new spot spawns a fresh
-        // window there (then it stays draggable).
-        let out = crate::color_popup::ColorPopup::window(
-            ctx,
-            ("radial_color_popup", popup.pos.x as i32, popup.pos.y as i32),
-            title,
-            popup.pos,
-            &mut rgba,
-            &mut open,
-            &cfg,
-        );
-
         let mut doc_modified = false;
-        if out.changed {
-            let new_color = photonic_core::Color {
-                r: rgba[0],
-                g: rgba[1],
-                b: rgba[2],
-                a: rgba[3],
+        let add_swatch: Option<[f32; 4]>;
+        let mut save_gradient: Option<photonic_core::style::Fill> = None;
+        let node_id = popup.node_id;
+
+        if popup.stroke {
+            // ── Stroke: solid color only (strokes carry a single color). ──
+            let seed = match &node.kind {
+                SceneNodeKind::Path(pn) => pn.stroke.color,
+                _ => photonic_core::Color::WHITE,
             };
-            let mut new_node = node.clone();
-            if let SceneNodeKind::Path(pn) = &mut new_node.kind {
-                if popup.stroke {
-                    pn.stroke.color = new_color;
-                    pn.stroke.enabled = true;
-                } else {
-                    pn.fill.kind = FillKind::Solid(new_color);
-                    pn.fill.enabled = true;
-                }
-            }
-            history.execute(
-                Command::UpdateNode {
-                    old: node,
-                    new: new_node,
-                },
-                doc,
+            let mut rgba = [seed.r, seed.g, seed.b, seed.a];
+            let out = crate::color_popup::ColorPopup::window(
+                ctx, anchor, "Stroke Color", popup.pos, &mut rgba, &mut open, &color_cfg,
             );
-            doc_modified = true;
+            if out.changed {
+                let mut new_node = node.clone();
+                if let SceneNodeKind::Path(pn) = &mut new_node.kind {
+                    pn.stroke.color = photonic_core::Color {
+                        r: rgba[0],
+                        g: rgba[1],
+                        b: rgba[2],
+                        a: rgba[3],
+                    };
+                    pn.stroke.enabled = true;
+                }
+                history.execute(Command::UpdateNode { old: node, new: new_node }, doc);
+                doc_modified = true;
+            }
+            add_swatch = out.add_swatch;
+            if out.eyedropper_clicked {
+                self.pending_panel_actions
+                    .push(PanelAction::StartEyedropper(EyedropperTarget::NodeStroke { node_id }));
+                self.color_popup = None;
+            }
+        } else {
+            // ── Fill: full fill picker with the slide-out gradient drawer. ──
+            let mut fill = match &node.kind {
+                SceneNodeKind::Path(pn) => pn.fill.clone(),
+                _ => photonic_core::style::Fill::solid(photonic_core::Color::WHITE),
+            };
+            let grad_swatches: Vec<(String, photonic_core::style::Fill)> = doc
+                .gradient_swatches
+                .iter()
+                .filter_map(|gs| {
+                    serde_json::from_str::<photonic_core::style::Fill>(&gs.fill_json)
+                        .ok()
+                        .map(|f| (gs.name.clone(), f))
+                })
+                .collect();
+            let fill_cfg = crate::color_popup::FillPickerConfig {
+                color: color_cfg,
+                gradient_swatches: &grad_swatches,
+                allow_save_gradient: true,
+            };
+            let out = crate::color_popup::ColorPopup::fill_window(
+                ctx, anchor, "Fill", popup.pos, &mut fill, &mut open, &fill_cfg,
+            );
+            if out.changed {
+                let mut new_node = node.clone();
+                if let SceneNodeKind::Path(pn) = &mut new_node.kind {
+                    fill.enabled = true;
+                    pn.fill = fill;
+                }
+                history.execute(Command::UpdateNode { old: node, new: new_node }, doc);
+                doc_modified = true;
+            }
+            add_swatch = out.add_swatch;
+            save_gradient = out.save_gradient;
+            if let Some(slot) = out.eyedropper {
+                use crate::panels::FillColorSlot as S;
+                let target = match slot {
+                    S::Solid => EyedropperTarget::NodeFillSolid { node_id },
+                    S::GradientStop(idx) => EyedropperTarget::NodeFillGradStop { node_id, idx },
+                    S::FluidPoint(idx) => EyedropperTarget::NodeFillFluid { node_id, idx },
+                    S::MeshVertex(idx) => EyedropperTarget::NodeFillMesh { node_id, idx },
+                };
+                self.pending_panel_actions
+                    .push(PanelAction::StartEyedropper(target));
+                self.color_popup = None;
+            }
         }
 
-        // "Add to swatches": append a document color swatch for the current color.
-        if let Some(c) = out.add_swatch {
+        // "Add to swatches": append a document color swatch for the picked color.
+        if let Some(c) = add_swatch {
             let hex = crate::color_convert::format_hex(c, false);
             if !doc.color_swatches.iter().any(|s| s.color_hex.eq_ignore_ascii_case(&hex)) {
                 let mut n = doc.color_swatches.len() + 1;
@@ -384,21 +409,21 @@ impl PhotonicApp {
             }
         }
 
-        // Eyedropper: hand off to the canvas sampler for this node's slot and
-        // close the picker so canvas clicks reach the sampler.
-        if out.eyedropper_clicked {
-            let target = if popup.stroke {
-                EyedropperTarget::NodeStroke {
-                    node_id: popup.node_id,
-                }
-            } else {
-                EyedropperTarget::NodeFillSolid {
-                    node_id: popup.node_id,
-                }
-            };
-            self.pending_panel_actions
-                .push(PanelAction::StartEyedropper(target));
-            self.color_popup = None;
+        // "Save gradient": append the current gradient to the gradient library.
+        if let Some(gfill) = save_gradient {
+            if let Ok(json) = serde_json::to_string(&gfill) {
+                let mut n = doc.gradient_swatches.len() + 1;
+                let name = loop {
+                    let cand = format!("Gradient {n}");
+                    if !doc.gradient_swatches.iter().any(|s| s.name == cand) {
+                        break cand;
+                    }
+                    n += 1;
+                };
+                doc.gradient_swatches
+                    .push(photonic_core::document::GradientSwatch::new(name, json));
+                doc_modified = true;
+            }
         }
 
         if !open {

@@ -233,23 +233,52 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                 .small(),
                             );
                         }
-                        let mut fill_drop: Option<FillColorSlot> = None;
-                        if let Some(new_fill) = draw_fill_editor(ui, &pn.fill, &mut fill_drop) {
+                        // Consolidated fill editor: a fill swatch that opens the
+                        // color picker with the slide-out gradient drawer.
+                        let mut fill = pn.fill.clone();
+                        let recents: Vec<[f32; 4]> = doc
+                            .recent_colors
+                            .iter()
+                            .map(|c| [c.r, c.g, c.b, c.a])
+                            .collect();
+                        let cswatches: Vec<[f32; 4]> = doc
+                            .color_swatches
+                            .iter()
+                            .filter_map(|s| crate::color_convert::parse_hex(&s.color_hex))
+                            .collect();
+                        let gswatches: Vec<(String, Fill)> = doc
+                            .gradient_swatches
+                            .iter()
+                            .filter_map(|gs| {
+                                serde_json::from_str::<Fill>(&gs.fill_json)
+                                    .ok()
+                                    .map(|f| (gs.name.clone(), f))
+                            })
+                            .collect();
+                        let fcfg = FillPickerConfig {
+                            color: PickerConfig {
+                                alpha: true,
+                                recents: &recents,
+                                swatches: &cswatches,
+                                eyedropper: true,
+                                allow_add_swatch: false,
+                                contrast_ref: None,
+                            },
+                            gradient_swatches: &gswatches,
+                            allow_save_gradient: false,
+                        };
+                        let fout = ColorPopup::fill_swatch_popup(ui, &mut fill, &fcfg);
+                        if fout.changed {
                             action = Some(if multi {
                                 PanelAction::UpdateNodesFill {
                                     node_ids: selected_ids.to_vec(),
-                                    fill: new_fill,
+                                    fill,
                                 }
                             } else {
-                                PanelAction::UpdateNodeFill {
-                                    node_id: nid,
-                                    fill: new_fill,
-                                }
+                                PanelAction::UpdateNodeFill { node_id: nid, fill }
                             });
                         }
-                        if let Some(slot) = fill_drop {
-                            // The solid-fill eyedropper broadcasts to the whole
-                            // selection; per-stop/point slots stay on the primary.
+                        if let Some(slot) = fout.eyedropper {
                             action = Some(PanelAction::StartEyedropper(match slot {
                                 FillColorSlot::Solid if multi => {
                                     EyedropperTarget::NodesFillSolid {
@@ -260,19 +289,14 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                     EyedropperTarget::NodeFillSolid { node_id: nid }
                                 }
                                 FillColorSlot::GradientStop(i) => {
-                                    EyedropperTarget::NodeFillGradStop {
-                                        node_id: nid,
-                                        idx: i,
-                                    }
+                                    EyedropperTarget::NodeFillGradStop { node_id: nid, idx: i }
                                 }
-                                FillColorSlot::FluidPoint(i) => EyedropperTarget::NodeFillFluid {
-                                    node_id: nid,
-                                    idx: i,
-                                },
-                                FillColorSlot::MeshVertex(i) => EyedropperTarget::NodeFillMesh {
-                                    node_id: nid,
-                                    idx: i,
-                                },
+                                FillColorSlot::FluidPoint(i) => {
+                                    EyedropperTarget::NodeFillFluid { node_id: nid, idx: i }
+                                }
+                                FillColorSlot::MeshVertex(i) => {
+                                    EyedropperTarget::NodeFillMesh { node_id: nid, idx: i }
+                                }
                             }));
                         }
                         // ── Recent colors swatches ──────────────────────────
