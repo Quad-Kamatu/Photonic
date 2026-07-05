@@ -374,35 +374,16 @@ impl PhotonicApp {
                                             .small(),
                                         );
                                         ui.add_space(4.0);
-                                        use crate::preferences::HistoryLimitMode;
+                                        // Retention is size-only (#197): a single byte budget governs
+                                        // trimming; you get a proactive warning before anything drops.
                                         ui.horizontal(|ui| {
-                                            ui.label("Limit by:");
-                                            ui.selectable_value(&mut self.prefs.history_limit_mode, HistoryLimitMode::Steps, "Steps")
-                                                .on_hover_text("Cap the number of undo steps retained");
-                                            ui.selectable_value(&mut self.prefs.history_limit_mode, HistoryLimitMode::Size, "Size")
-                                                .on_hover_text("Cap the serialized size of the saved history");
+                                            ui.label("Max history size (MB):");
+                                            ui.add(egui::DragValue::new(&mut self.prefs.history_max_mb)
+                                                .speed(1.0)
+                                                .range(1.0..=4000.0)
+                                                .fixed_decimals(0))
+                                                .on_hover_text("Budget for the history payload specifically — the document's own size is separate. You'll be warned before the oldest edits start dropping.");
                                         });
-                                        ui.add_space(4.0);
-                                        match self.prefs.history_limit_mode {
-                                            HistoryLimitMode::Steps => {
-                                                ui.horizontal(|ui| {
-                                                    ui.label("Max steps:");
-                                                    ui.add(egui::DragValue::new(&mut self.prefs.history_max_steps)
-                                                        .speed(10.0)
-                                                        .range(10..=100_000));
-                                                });
-                                            }
-                                            HistoryLimitMode::Size => {
-                                                ui.horizontal(|ui| {
-                                                    ui.label("Max history size (MB):");
-                                                    ui.add(egui::DragValue::new(&mut self.prefs.history_max_mb)
-                                                        .speed(1.0)
-                                                        .range(1.0..=4000.0)
-                                                        .fixed_decimals(0))
-                                                        .on_hover_text("Budget for the history payload specifically — the document's own size is separate.");
-                                                });
-                                            }
-                                        }
                                         ui.add_space(4.0);
                                         // Live readout. history_byte_size serializes the whole history, so
                                         // throttle it to ~2 Hz even while this page is visible.

@@ -551,6 +551,28 @@ mod tests {
     }
 
     #[test]
+    fn size_pressure_rises_toward_budget_and_none_without_cap() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(100_000);
+        // No cap → no pressure reading.
+        assert!(history.size_pressure().is_none());
+
+        push_n_nodes(&mut history, &mut doc, 20);
+        let full = history.history_byte_size();
+        // Budget with headroom → pressure well under 1.0.
+        history.set_limits(100_000, Some(full * 4));
+        let p = history.size_pressure().unwrap();
+        assert!(p > 0.0 && p < 0.5, "expected low pressure with a roomy budget, got {p}");
+
+        // A tight budget trims the payload back to (at most just over) budget.
+        history.set_limits(100_000, Some(full / 2));
+        assert!(
+            history.size_pressure().unwrap() <= 1.05,
+            "size cap should keep the payload at/under budget"
+        );
+    }
+
+    #[test]
     fn size_cap_trims_until_within_budget() {
         let mut doc = make_doc();
         let mut history = CommandHistory::new(100_000);

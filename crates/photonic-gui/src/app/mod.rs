@@ -629,6 +629,9 @@ pub struct PhotonicApp {
     /// egui time (seconds) of the last throttled history size-cap check, so
     /// size-mode enforcement runs ~every 1.5 s instead of every frame.
     last_history_size_check: f64,
+    /// Latch so the proactive "history approaching size limit" warning (#197)
+    /// fires once per breach of the soft threshold, re-arming when pressure drops.
+    history_pressure_warned: bool,
     /// Throttled cache for the History settings readout: (egui time, bytes).
     /// `history_byte_size()` serializes the whole history, so the readout reuses
     /// this for ~0.5 s rather than recomputing on every repaint.
@@ -1063,6 +1066,7 @@ impl Default for PhotonicApp {
             hotbar_cache: None,
             last_canvas_rect: None,
             last_history_size_check: 0.0,
+            history_pressure_warned: false,
             cached_history_bytes: (f64::NEG_INFINITY, 0),
 
             claude_chat: ClaudeChatState::default(),
@@ -1742,9 +1746,26 @@ impl PhotonicApp {
             if now - self.last_history_size_check >= 1.5 {
                 self.last_history_size_check = now;
                 history.enforce_size();
+                // Proactive warning (#197): warn *before* the cap starts dropping
+                // steps. Fires once per breach of the ~85% soft threshold; re-arms
+                // (`history_pressure_warned`) once pressure falls back under ~70%.
+                if let Some(p) = history.size_pressure() {
+                    if p >= 0.85 && !self.history_pressure_warned {
+                        self.history_pressure_warned = true;
+                        self.file_status = Some(format!(
+                            "Project history is at {:.0}% of its {:.0} MB limit — raise it in \
+                             Edit ▸ Behavior ▸ Project History before the oldest edits start dropping.",
+                            (p * 100.0).min(100.0),
+                            self.prefs.history_max_mb,
+                        ));
+                    } else if p < 0.70 {
+                        self.history_pressure_warned = false;
+                    }
+                }
             }
         }
-        // Surface a one-time warning when the cap forced oldest steps to drop.
+        // Final notice if the cap actually had to drop the oldest steps (so
+        // trimming is never silent even when the proactive warning was dismissed).
         if let Some(msg) = history.take_limit_warning() {
             self.file_status = Some(msg);
         }

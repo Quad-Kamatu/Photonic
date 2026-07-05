@@ -144,10 +144,11 @@ fn default_right_drawer_width() -> f32 {
 /// How the project-history retention limit is measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum HistoryLimitMode {
-    /// Cap by number of undo steps.
-    #[default]
+    /// Cap by number of undo steps. Retained only for back-compat deserialization
+    /// of older preference files; retention is size-only now (#197).
     Steps,
-    /// Cap by serialized size of the history payload (MB).
+    /// Cap by serialized size of the history payload (MB). The only mode used.
+    #[default]
     Size,
 }
 
@@ -194,7 +195,7 @@ impl Default for AppPreferences {
             default_stroke_width: 1.0,
             console_open_on_start: false,
             nudge_distance: 1.0,
-            history_limit_mode: HistoryLimitMode::Steps,
+            history_limit_mode: HistoryLimitMode::Size,
             history_max_steps: 200,
             history_max_mb: 50.0,
             auto_check_updates: true,
@@ -239,16 +240,14 @@ impl AppPreferences {
 
     /// Resolve the configured history retention limits as
     /// `(max_steps, size_limit_bytes)` for [`photonic_core::CommandHistory::set_limits`].
-    /// In Steps mode the size cap is `None`; in Size mode a high step ceiling
-    /// keeps memory bounded while the byte budget does the trimming.
+    ///
+    /// Retention is **size-only** (#197): the serialized byte budget does the
+    /// real trimming and a high internal step ceiling is only a runaway backstop.
+    /// The legacy `history_limit_mode`/`history_max_steps` fields are retained for
+    /// back-compat deserialization but no longer govern retention.
     pub fn history_limits(&self) -> (usize, Option<u64>) {
-        match self.history_limit_mode {
-            HistoryLimitMode::Steps => (self.history_max_steps.max(1), None),
-            HistoryLimitMode::Size => {
-                let bytes = (self.history_max_mb.max(0.1) * 1_048_576.0) as u64;
-                (HISTORY_SIZE_MODE_STEP_CEILING, Some(bytes))
-            }
-        }
+        let bytes = (self.history_max_mb.max(0.1) * 1_048_576.0) as u64;
+        (HISTORY_SIZE_MODE_STEP_CEILING, Some(bytes))
     }
 
     /// Current usage score for a hotbar item within a bucket (0 if unseen).

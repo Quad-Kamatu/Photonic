@@ -190,6 +190,18 @@ impl CommandHistory {
         self.pending_warning.take()
     }
 
+    /// Fraction of the configured size budget the serialized history currently
+    /// occupies (`bytes / limit`), or `None` when no size cap is set. Lets the
+    /// GUI warn *before* the cap starts trimming (#197). Serializes the history,
+    /// so callers should throttle (the GUI reuses its ~1.5 s size-check cadence).
+    pub fn size_pressure(&self) -> Option<f32> {
+        let limit = self.size_limit_bytes?;
+        if limit == 0 {
+            return Some(f32::INFINITY);
+        }
+        Some(self.history_byte_size() as f32 / limit as f32)
+    }
+
     /// Apply a command and push it onto the undo stack.
     /// Schedules a debounced checkpoint — the snapshot is written after 30 s of
     /// inactivity via [`tick_checkpoint`], so burst operations (e.g. drag) do
