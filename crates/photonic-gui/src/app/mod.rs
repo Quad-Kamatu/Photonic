@@ -1788,7 +1788,13 @@ impl PhotonicApp {
         // Cheap and idempotent when unchanged, so it's safe every frame. In
         // size-limited mode the byte cap is re-checked on a throttle (below)
         // rather than here, since measuring it serializes the history.
-        let (max_steps, size_limit) = self.prefs.history_limits();
+        let (max_steps, default_size) = self.prefs.history_limits();
+        // A per-document cap (#195, set at new-file time) overrides the global
+        // default for this file.
+        let size_limit = doc
+            .history_max_mb
+            .map(|mb| (mb.max(0.1) * 1_048_576.0) as u64)
+            .or(default_size);
         history.set_limits(max_steps, size_limit);
         if size_limit.is_some() {
             let now = ctx.input(|i| i.time);
@@ -2078,10 +2084,12 @@ impl PhotonicApp {
                         slug_mm,
                         margin,
                         artboards,
+                        history_max_mb,
                     } => {
                         let mut new_doc = photonic_core::Document::new(name, width, height);
                         new_doc.bleed_mm = bleed_mm;
                         new_doc.slug_mm = slug_mm;
+                        new_doc.history_max_mb = Some(history_max_mb);
                         new_doc.margin_top = margin;
                         new_doc.margin_right = margin;
                         new_doc.margin_bottom = margin;

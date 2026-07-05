@@ -701,6 +701,11 @@ pub struct Document {
     /// Artboard safe-area margin from the left edge, in document units.
     #[serde(default)]
     pub margin_left: f64,
+    /// Per-document edit-history size cap in MB (#195). `None` = use the global
+    /// preference default. Set from the new-document flow and persisted in
+    /// `.photon` so a project's history budget travels with the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_max_mb: Option<f64>,
     /// Script event triggers — named actions to fire on specific document events.
     #[serde(default)]
     pub event_triggers: Vec<EventTrigger>,
@@ -844,6 +849,7 @@ impl Document {
             margin_right: 0.0,
             margin_bottom: 0.0,
             margin_left: 0.0,
+            history_max_mb: None,
             event_triggers: Vec::new(),
             workspaces: Vec::new(),
             dimensions: Vec::new(),
@@ -1518,6 +1524,21 @@ mod tests {
         style::Fill,
         Color,
     };
+
+    #[test]
+    fn per_document_history_cap_round_trips_and_defaults_none() {
+        // Fresh documents don't pin a history cap (falls back to global prefs).
+        let mut doc = Document::new("t", 100.0, 100.0);
+        assert!(doc.history_max_mb.is_none());
+        // A set value survives serialize → deserialize (#195).
+        doc.history_max_mb = Some(120.0);
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.history_max_mb, Some(120.0));
+        // Old files without the field deserialize to None.
+        let no_field = serde_json::to_string(&Document::new("t", 100.0, 100.0)).unwrap();
+        assert!(!no_field.contains("history_max_mb"), "None should skip the key");
+    }
 
     /// Build a minimal document with one layer and the supplied path nodes
     /// (given in bottom-to-top order).

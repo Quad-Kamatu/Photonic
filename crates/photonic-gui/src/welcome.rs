@@ -303,6 +303,8 @@ pub enum WelcomeAction {
         margin: f64,
         /// Number of same-size artboards to create, laid out in a grid (>= 1).
         artboards: usize,
+        /// Per-document edit-history size cap in MB (#195).
+        history_max_mb: f64,
     },
     OpenFile(PathBuf),
     OpenBrowse,
@@ -370,6 +372,8 @@ pub struct WelcomeState {
     slug_mm: f64,
     margin: f64,
     num_artboards: usize,
+    /// Per-document history size cap (MB) for the new file (#195).
+    history_mb: f64,
     size_search: String,
     // ── Open panel ──
     open_tab: OpenTab,
@@ -396,6 +400,7 @@ impl WelcomeState {
             slug_mm: 0.0,
             margin: 0.0,
             num_artboards: 1,
+            history_mb: 50.0,
             size_search: String::new(),
             open_tab: OpenTab::Recent,
             disk_roots: load_disk_roots(),
@@ -729,6 +734,7 @@ impl WelcomeState {
                         slug_mm: self.slug_mm,
                         margin: self.margin,
                         artboards: self.num_artboards,
+                        history_max_mb: self.history_mb,
                     });
                 }
             });
@@ -970,6 +976,24 @@ impl WelcomeState {
                 for c in [1_usize, 2, 4, 6] {
                     if mini_toggle(ui, &format!("{c}"), self.num_artboards == c) {
                         self.num_artboards = c;
+                    }
+                }
+            });
+            ui.add_space(14.0);
+
+            // Per-document edit-history size cap (#195).
+            field_label_centered(ui, "History budget", "Edit-history size cap for this file (MB).");
+            centered_row(ui, "history_mb", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut self.history_mb)
+                        .speed(1.0)
+                        .range(1.0..=4000.0)
+                        .max_decimals(0)
+                        .suffix(" MB"),
+                );
+                for m in [25.0_f64, 50.0, 100.0, 250.0] {
+                    if mini_toggle(ui, &format!("{}", m as i64), (self.history_mb - m).abs() < 0.5) {
+                        self.history_mb = m;
                     }
                 }
             });
