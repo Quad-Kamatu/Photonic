@@ -57,6 +57,33 @@ pub struct ActiveGuide {
     pub distance: f64,
 }
 
+/// One equal-spacing arrangement detected this frame (#66): the dragged object
+/// sits between two others with equal gaps. Carries enough to draw the two gap
+/// brackets + a shared distance label.
+#[derive(Clone, Copy, Debug)]
+pub struct SpacingHint {
+    /// True when the gaps run along X (a horizontal row); false = along Y.
+    pub along_x: bool,
+    /// The equal gap, in canvas units.
+    pub gap: f64,
+    /// The constant perpendicular coordinate to draw the brackets at (a `y` when
+    /// `along_x`, else an `x`) — the dragged object's centre on that axis.
+    pub perp: f64,
+    /// The first gap segment `(start, end)` along the distribution axis.
+    pub seg1: (f64, f64),
+    /// The second gap segment `(start, end)`.
+    pub seg2: (f64, f64),
+}
+
+/// Per-axis result of [`resolve_equal_spacing`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EqualSpacing {
+    pub dx: Option<f64>,
+    pub dy: Option<f64>,
+    pub hint_x: Option<SpacingHint>,
+    pub hint_y: Option<SpacingHint>,
+}
+
 /// Result of [`resolve_snap`].
 #[derive(Clone, Debug, Default)]
 pub struct SnapResult {
@@ -66,6 +93,8 @@ pub struct SnapResult {
     pub corrected: (f64, f64),
     /// Active alignments this frame — at most one per axis (so at most two).
     pub active: Vec<ActiveGuide>,
+    /// Equal-spacing hints that fired this frame (#66).
+    pub spacing: Vec<SpacingHint>,
 }
 
 /// Canvas-space axis-aligned bounding box of a node, `(x0, y0, x1, y1)`.
@@ -228,6 +257,105 @@ pub fn resolve_snap(
     result
 }
 
+/// Canvas AABBs `(x0, y0, x1, y1)` of every visible, non-locked node except
+/// `exclude` — the geometry equal-spacing detection reasons over.
+pub fn collect_node_aabbs(doc: &Document, exclude: &[NodeId]) -> Vec<(f64, f64, f64, f64)> {
+    let mut out = Vec::new();
+    for node in doc.nodes_in_draw_order() {
+        if node.locked || exclude.contains(&node.id) {
+            continue;
+        }
+        if let Some(aabb) = world_aabb(node) {
+            out.push(aabb);
+        }
+    }
+    out
+}
+
+/// Detect equal-spacing arrangements (#66): a dragged object placed between two
+/// others with (nearly) equal gaps. For each axis independently, finds the pair
+/// (left/right or top/bottom, whose perpendicular bands overlap the dragged
+/// object) that centres it with the smallest within-tolerance shift, and returns
+/// that shift plus a [`SpacingHint`] describing the two equal gaps to draw.
+pub fn resolve_equal_spacing(
+    moving: (f64, f64, f64, f64),
+    others: &[(f64, f64, f64, f64)],
+    tolerance: f64,
+) -> EqualSpacing {
+    let (mx0, my0, mx1, my1) = moving;
+    let mw = mx1 - mx0;
+    let mh = my1 - my0;
+    let mcx = (mx0 + mx1) / 2.0;
+    let mcy = (my0 + my1) / 2.0;
+    let mut out = EqualSpacing::default();
+
+    // ── X distribution: L … moving … R (Y-bands overlap the dragged object) ──
+    let y_overlap = |o: &(f64, f64, f64, f64)| o.1 < my1 && o.3 > my0;
+    let mut best_x: Option<(f64, f64, SpacingHint)> = None; // (|shift|, shift, hint)
+    for l in others.iter().filter(|o| y_overlap(o) && o.2 <= mx0 + tolerance) {
+        for r in others.iter().filter(|o| y_overlap(o) && o.0 >= mx1 - tolerance) {
+            let total = r.0 - l.2; // room between L's right and R's left
+            if total <= mw {
+                continue; // no room for the dragged object + two gaps
+            }
+            let gap = (total - mw) / 2.0;
+            let shift = (l.2 + gap) - mx0; // move so left gap == right gap
+            if shift.abs() > tolerance {
+                continue;
+            }
+            if best_x.as_ref().is_none_or(|(s, ..)| shift.abs() < *s) {
+                let (sx0, sx1) = (mx0 + shift, mx1 + shift);
+                let hint = SpacingHint {
+                    along_x: true,
+                    gap,
+                    perp: mcy,
+                    seg1: (l.2, sx0),
+                    seg2: (sx1, r.0),
+                };
+                best_x = Some((shift.abs(), shift, hint));
+            }
+        }
+    }
+    if let Some((_, shift, hint)) = best_x {
+        out.dx = Some(shift);
+        out.hint_x = Some(hint);
+    }
+
+    // ── Y distribution: T … moving … B (X-bands overlap the dragged object) ──
+    let x_overlap = |o: &(f64, f64, f64, f64)| o.0 < mx1 && o.2 > mx0;
+    let mut best_y: Option<(f64, f64, SpacingHint)> = None;
+    for t in others.iter().filter(|o| x_overlap(o) && o.3 <= my0 + tolerance) {
+        for b in others.iter().filter(|o| x_overlap(o) && o.1 >= my1 - tolerance) {
+            let total = b.1 - t.3;
+            if total <= mh {
+                continue;
+            }
+            let gap = (total - mh) / 2.0;
+            let shift = (t.3 + gap) - my0;
+            if shift.abs() > tolerance {
+                continue;
+            }
+            if best_y.as_ref().is_none_or(|(s, ..)| shift.abs() < *s) {
+                let (sy0, sy1) = (my0 + shift, my1 + shift);
+                let hint = SpacingHint {
+                    along_x: false,
+                    gap,
+                    perp: mcx,
+                    seg1: (t.3, sy0),
+                    seg2: (sy1, b.1),
+                };
+                best_y = Some((shift.abs(), shift, hint));
+            }
+        }
+    }
+    if let Some((_, shift, hint)) = best_y {
+        out.dy = Some(shift);
+        out.hint_y = Some(hint);
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +432,41 @@ mod tests {
         let res = resolve_snap((100.0, 40.0, 140.0, 60.0), &cands, 6.0);
         assert_eq!(res.active.len(), 1);
         assert_eq!(res.active[0].distance, 30.0);
+    }
+
+    #[test]
+    fn equal_spacing_centers_between_two_on_x() {
+        // L: x[0,10], R: x[90,100], both y[0,10]. Moving width 10 nudged just off
+        // centre (x0=43) should snap to x0=45 (equal 35px gaps on both sides).
+        let l = (0.0, 0.0, 10.0, 10.0);
+        let r = (90.0, 0.0, 100.0, 10.0);
+        let moving = (43.0, 0.0, 53.0, 10.0);
+        let res = resolve_equal_spacing(moving, &[l, r], 6.0);
+        assert!((res.dx.unwrap() - 2.0).abs() < 1e-9, "should shift +2 to centre");
+        let h = res.hint_x.unwrap();
+        assert!((h.gap - 35.0).abs() < 1e-9);
+        assert_eq!(h.seg1, (10.0, 45.0));
+        assert_eq!(h.seg2, (55.0, 90.0));
+        assert!(res.dy.is_none());
+    }
+
+    #[test]
+    fn equal_spacing_none_when_gap_mismatch_exceeds_tolerance() {
+        let l = (0.0, 0.0, 10.0, 10.0);
+        let r = (55.0, 0.0, 65.0, 10.0); // R too close → centred x0 far from tentative
+        let moving = (43.0, 0.0, 53.0, 10.0);
+        let res = resolve_equal_spacing(moving, &[l, r], 5.0);
+        assert!(res.dx.is_none());
+    }
+
+    #[test]
+    fn equal_spacing_centers_between_two_on_y() {
+        let t = (0.0, 0.0, 10.0, 10.0);
+        let b = (0.0, 90.0, 10.0, 100.0);
+        let moving = (0.0, 43.0, 10.0, 53.0);
+        let res = resolve_equal_spacing(moving, &[t, b], 6.0);
+        assert!((res.dy.unwrap() - 2.0).abs() < 1e-9);
+        assert!((res.hint_y.unwrap().gap - 35.0).abs() < 1e-9);
+        assert!(res.dx.is_none());
     }
 }

@@ -818,10 +818,31 @@ impl PhotonicApp {
                             let candidates = crate::snap::collect_snap_candidates(doc, &moving);
                             let tol = (self.prefs.snap_tolerance_px as f64) / view.zoom.max(1e-6);
                             let tentative = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
-                            let snap = crate::snap::resolve_snap(tentative, &candidates, tol);
+                            let mut snap = crate::snap::resolve_snap(tentative, &candidates, tol);
                             dx += snap.corrected.0;
                             dy += snap.corrected.1;
-                            if !snap.active.is_empty() {
+                            // Equal-spacing distribution hints (#66) — only on an
+                            // axis that edge/center snapping didn't already claim.
+                            let others = crate::snap::collect_node_aabbs(doc, &moving);
+                            let post = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
+                            let sp = crate::snap::resolve_equal_spacing(post, &others, tol);
+                            if snap.corrected.0 == 0.0 {
+                                if let Some(d) = sp.dx {
+                                    dx += d;
+                                    if let Some(h) = sp.hint_x {
+                                        snap.spacing.push(h);
+                                    }
+                                }
+                            }
+                            if snap.corrected.1 == 0.0 {
+                                if let Some(d) = sp.dy {
+                                    dy += d;
+                                    if let Some(h) = sp.hint_y {
+                                        snap.spacing.push(h);
+                                    }
+                                }
+                            }
+                            if !snap.active.is_empty() || !snap.spacing.is_empty() {
                                 self.last_snap_result = Some(snap);
                             }
                         }

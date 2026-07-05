@@ -3316,6 +3316,62 @@ impl PhotonicApp {
                                 );
                             }
                         }
+                        // Equal-spacing distribution hints (#66): two gap brackets
+                        // (with end ticks) + the shared px value, in orange.
+                        let scol = egui::Color32::from_rgb(255, 140, 0);
+                        let sstroke = egui::Stroke::new(1.5, scol);
+                        for sp in &snap.spacing {
+                            let gap_px = (sp.gap * view.zoom).round() as i64;
+                            for seg in [sp.seg1, sp.seg2] {
+                                if sp.along_x {
+                                    let (x0, y) = view.canvas_to_screen(seg.0, sp.perp);
+                                    let (x1, _) = view.canvas_to_screen(seg.1, sp.perp);
+                                    let (x0, x1, y) = (x0 as f32, x1 as f32, y as f32);
+                                    painter.line_segment(
+                                        [egui::pos2(x0, y), egui::pos2(x1, y)],
+                                        sstroke,
+                                    );
+                                    for x in [x0, x1] {
+                                        painter.line_segment(
+                                            [egui::pos2(x, y - 4.0), egui::pos2(x, y + 4.0)],
+                                            sstroke,
+                                        );
+                                    }
+                                    if gap_px > 0 {
+                                        painter.text(
+                                            egui::pos2((x0 + x1) * 0.5, y - 6.0),
+                                            egui::Align2::CENTER_BOTTOM,
+                                            format!("{gap_px}px"),
+                                            egui::FontId::proportional(10.0),
+                                            scol,
+                                        );
+                                    }
+                                } else {
+                                    let (x, y0) = view.canvas_to_screen(sp.perp, seg.0);
+                                    let (_, y1) = view.canvas_to_screen(sp.perp, seg.1);
+                                    let (x, y0, y1) = (x as f32, y0 as f32, y1 as f32);
+                                    painter.line_segment(
+                                        [egui::pos2(x, y0), egui::pos2(x, y1)],
+                                        sstroke,
+                                    );
+                                    for y in [y0, y1] {
+                                        painter.line_segment(
+                                            [egui::pos2(x - 4.0, y), egui::pos2(x + 4.0, y)],
+                                            sstroke,
+                                        );
+                                    }
+                                    if gap_px > 0 {
+                                        painter.text(
+                                            egui::pos2(x + 6.0, (y0 + y1) * 0.5),
+                                            egui::Align2::LEFT_CENTER,
+                                            format!("{gap_px}px"),
+                                            egui::FontId::proportional(10.0),
+                                            scol,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
