@@ -11,6 +11,67 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+### Added
+
+- **Branching edit history (undo-tree).** Editing after an undo no longer throws
+  away your redo path — it forks a new branch, so nothing you've done is ever
+  lost. The History panel now shows the full tree as a VS-Code-style commit
+  graph, and you can right-click any commit node (#174) to jump to, branch from,
+  or act on that point in time.
+- **Reimagined workspace UI.** The left drawer and its icon rail are now floating
+  rounded cards, the hotbar is a centred content-width pill pinned under the top
+  toolbar, and a mirrored right-hand icon rail toggles the Layers, AI Chat, and
+  History drawers (replacing the old fixed right panel). The "What's New" popup
+  now renders inline markdown and nested bullets.
+- **Live boolean / compound shapes** (#25). A group can carry a live boolean
+  operator (union, subtract, …): it renders and exports as the single resolved
+  path while its operands stay individually editable — edit an operand and the
+  boolean updates. Create one from the new **`make_live_boolean`** MCP tool.
+- **Branch merging foundation** (#25). A pure 3-way document merge
+  (`merge_3way`) that combines non-conflicting changes from two diverged edit-
+  tree branches against their common ancestor and reports the rest as
+  resolvable conflicts — the groundwork for true branch merges.
+- **Layers panel is now a drag-and-drop folder tree** (#169, #210). Drag rows to
+  reorder them, drag a node onto a group to reparent it (with a cycle guard and
+  undo), expand/collapse groups as folders, and add a new layer straight from
+  the Layers sidebar button.
+- **Smarter snapping** (#211, #66). Objects now snap to artboard/canvas edges,
+  centre, and margins, and to path anchor points, and show equal-spacing
+  distribution hints while you drag — so aligning and evenly distributing
+  objects by hand just works.
+- **Import & Export controls in the Document tab** (#176): reach the common
+  bring-in / send-out actions from the Document panel without hunting through
+  menus.
+- **Click the MCP status indicator for a control modal** (#170): see the tool
+  server's state and restart it in place, instead of it being a passive dot.
+- **Per-document edit-history budget** (#195, #196, #197). New files get a
+  history size cap chosen at creation, raster edits are stored as just the
+  changed region rather than whole snapshots (#196), and you get a proactive
+  warning as a document approaches its history limit.
+- **Larger hotbar icons.** The adaptive hotbar's icons are bumped up a couple of
+  points so the row reads clearly at the top of the canvas.
+
+### Changed
+
+- **Under the hood: unified tool architecture** (#190). Canvas tools now share a
+  common parent trait with a single mutation chokepoint and lifecycle seam. This
+  is an internal cleanup — every tool behaves exactly as before — that makes the
+  drawing tools consistent and easier to extend. Please report anything that
+  behaves differently after updating.
+
+### Fixed
+
+- **The UI is now centred and clickable on every display** — including HiDPI and
+  fractionally-scaled monitors. The opening screen (and in fact the whole editor)
+  could render off-centre with clicks landing beside the widgets on any monitor
+  whose scale factor wasn't 1.0; a pixels-per-point mismatch in the window layer
+  is corrected, with no change on standard-scale displays.
+- **Tool-created shapes are now fully undoable** (#190). Creating a shape, text,
+  pen, or duplicated object through a canvas tool now always records a proper
+  history step, so undo/redo can't skip past it.
+- **Raster edit history is bounded by real memory use** (#194), not just its
+  serialized size — keeping the in-memory footprint of image edits in check.
+
 ## [0.2.0] - 2026-07-04
 
 ### Added
