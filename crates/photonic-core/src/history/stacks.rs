@@ -76,6 +76,19 @@ impl CommandHistory {
             .unwrap_or(0)
     }
 
+    /// Rough **in-memory** footprint of the retained edit tree, in bytes —
+    /// dominated by raster pixel/mask buffers held by history commands. The
+    /// serialized size stores raster nodes compressed (base64 PNG), so it can be
+    /// ~10× smaller than the live cost of the undo stack; this is what the size
+    /// cap uses to keep actual memory bounded on raster-heavy edits (#194).
+    pub fn history_memory_estimate(&self) -> u64 {
+        self.nodes
+            .values()
+            .filter_map(|n| n.command.as_ref())
+            .map(|c| c.mem_estimate())
+            .sum()
+    }
+
     /// Ceiling on the total number of retained tree nodes. The step limit bounds
     /// the *current path* depth; this bounds the whole tree so many sibling
     /// branches can't grow memory without bound. Generous relative to the step
@@ -137,7 +150,11 @@ impl CommandHistory {
         // `node_cap`, so at most O(cap) rounds. Prefer dropping the oldest state
         // (re-root) while above the retained-steps floor, then prune off-path
         // branches, then as a last resort re-root down to a single step.
-        while self.history_byte_size() > limit {
+        // Trim while EITHER the serialized (.photon) size OR the in-memory
+        // footprint exceeds the budget. The memory arm is what actually bounds
+        // raster-heavy history (#194): compressed serialization badly
+        // underestimates the live cost of the undo stack's bitmap clones.
+        while self.history_byte_size() > limit || self.history_memory_estimate() > limit {
             let progressed = if self.depth_of(self.current) > Self::MIN_RETAINED_STEPS {
                 self.reroot_once()
             } else if self.prune_oldest_offpath_leaf() {
@@ -155,8 +172,8 @@ impl CommandHistory {
             dropped = true;
         }
 
-        // Exact size now drives the (accurate) warning and the re-arm latch.
-        let actual = self.history_byte_size();
+        // The larger of the two measures drives the warning + re-arm latch.
+        let actual = self.history_byte_size().max(self.history_memory_estimate());
         if actual > limit {
             self.latch_warning(
                 "Project history exceeds its size limit because of saved \
@@ -199,7 +216,9 @@ impl CommandHistory {
         if limit == 0 {
             return Some(f32::INFINITY);
         }
-        Some(self.history_byte_size() as f32 / limit as f32)
+        // Whichever measure is closer to the cap — memory dominates on raster.
+        let used = self.history_byte_size().max(self.history_memory_estimate());
+        Some(used as f32 / limit as f32)
     }
 
     /// Apply a command and push it onto the undo stack.

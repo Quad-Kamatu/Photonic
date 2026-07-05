@@ -1617,6 +1617,56 @@ mod tests {
             SceneNodeKind::Group(g) if !g.children.contains(&bid));
         assert!(back_out, "undo should pull B out of the group");
     }
+
+    #[test]
+    fn raster_history_bounded_by_memory_cap() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+        let mut doc = make_doc();
+        let lid = doc.active_layer_id.unwrap();
+        let node = SceneNode::new(
+            "ras",
+            lid,
+            SceneNodeKind::Raster(RasterNode {
+                image: RasterImage::new(100, 100), // 100*100*4 = 40 KB pixels
+                mask: None,
+                source_uri: None,
+                adjustment: None,
+            }),
+        );
+        let rid = node.id;
+        let mut h = CommandHistory::new(100_000);
+        h.execute(
+            Command::AddNode {
+                node,
+                layer_id: Some(lid),
+            },
+            &mut doc,
+        );
+        // Ten raster edits, each an UpdateNode holding two ~40 KB bitmaps.
+        for _ in 0..10 {
+            let old = doc.nodes.get(&rid).unwrap().clone();
+            let mut new = old.clone();
+            if let SceneNodeKind::Raster(r) = &mut new.kind {
+                r.image.pixels[0] = r.image.pixels[0].wrapping_add(1);
+            }
+            h.execute(Command::UpdateNode { old, new }, &mut doc);
+        }
+        let before_depth = h.undo_depth();
+        assert!(
+            h.history_memory_estimate() > 400_000,
+            "expected a sizeable in-memory raster history"
+        );
+
+        // A ~150 KB cap must trim by *memory* even though the compressed
+        // serialized size of blank bitmaps is tiny.
+        h.set_limits(100_000, Some(150_000));
+        assert!(
+            h.history_memory_estimate() <= 150_000 || h.undo_depth() <= 5,
+            "memory cap did not bound raster history"
+        );
+        assert!(h.undo_depth() < before_depth, "nothing was trimmed");
+    }
 }
 
 /// A reversible command that can be applied to a Document.
@@ -1772,6 +1822,21 @@ pub enum Command {
 }
 
 impl Command {
+    /// Rough in-memory footprint of this command in bytes — dominated by any
+    /// raster node buffers it clones (an UpdateNode on a raster edit holds two
+    /// full bitmaps). Used to bound history *memory* (#194), which the compressed
+    /// serialized size underestimates by ~10×.
+    pub fn mem_estimate(&self) -> u64 {
+        const BASE: u64 = 128;
+        match self {
+            Command::AddNode { node, .. } => BASE + node.mem_estimate(),
+            Command::RemoveNodeFull { node } => BASE + node.mem_estimate(),
+            Command::UpdateNode { old, new } => BASE + old.mem_estimate() + new.mem_estimate(),
+            Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
+            _ => BASE,
+        }
+    }
+
     /// Return a short human-readable description of this command.
     pub fn description(&self) -> String {
         match self {

@@ -264,6 +264,21 @@ pub struct SceneNode {
 }
 
 impl SceneNode {
+    /// Rough in-memory footprint of this node in bytes — dominated by raster
+    /// pixel + mask buffers. Non-raster nodes are tiny by comparison, so a small
+    /// constant suffices. Used to bound the *memory* cost of edit history (#194),
+    /// which the compressed serialized size (base64 PNG) badly underestimates.
+    pub fn mem_estimate(&self) -> u64 {
+        const BASE: u64 = 256;
+        match &self.kind {
+            SceneNodeKind::Raster(r) => {
+                BASE + r.image.pixels.len() as u64
+                    + r.mask.as_ref().map_or(0, |m| m.data.len() as u64)
+            }
+            _ => BASE,
+        }
+    }
+
     pub fn new(name: impl Into<String>, layer_id: LayerId, kind: SceneNodeKind) -> Self {
         Self {
             id: Uuid::new_v4(),
