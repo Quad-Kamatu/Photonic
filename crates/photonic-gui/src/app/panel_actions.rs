@@ -2635,6 +2635,43 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::DeleteLayer { layer_id } => {
+                    self.do_delete_layer(layer_id, doc, history, &mut doc_modified);
+                }
+
+                PanelAction::SetLayerVisible { layer_id, visible } => {
+                    self.do_set_layer_flag(layer_id, Some(visible), None, doc, history, &mut doc_modified);
+                }
+
+                PanelAction::SetLayerLocked { layer_id, locked } => {
+                    self.do_set_layer_flag(layer_id, None, Some(locked), doc, history, &mut doc_modified);
+                }
+
+                PanelAction::AddSublayer => {
+                    self.do_add_sublayer(doc, history, &mut doc_modified);
+                }
+
+                PanelAction::AddLayerMaskSmart => {
+                    self.do_add_layer_mask_smart(doc, history, &mut doc_modified);
+                }
+
+                PanelAction::AddAdjustmentLayer { kind } => {
+                    self.do_add_adjustment_layer(&kind, doc, history, &mut doc_modified);
+                }
+
+                PanelAction::OpenColorPopup { node_id, stroke } => {
+                    // Anchor the picker at the current pointer (the radial-menu
+                    // click site); fall back to a sensible default off-screen.
+                    let pos = ctx
+                        .pointer_latest_pos()
+                        .unwrap_or(egui::pos2(240.0, 240.0));
+                    self.color_popup = Some(ColorPopupState {
+                        node_id,
+                        stroke,
+                        pos,
+                    });
+                }
+
                 PanelAction::AlignNodes {
                     operation,
                     key_object_id,
@@ -5126,23 +5163,26 @@ impl PhotonicApp {
                 }
 
                 PanelAction::BranchCreate { name } => {
-                    history.branch_create(name, doc);
-                    self.branch_names = history.branch_list();
+                    // Name the current history state (label the HEAD commit).
+                    history.branch_create(name);
                 }
 
                 PanelAction::BranchSwitch { name } => {
-                    if let Some(snapshot) = history.branch_switch(&name) {
-                        *doc = snapshot;
+                    // Non-destructive jump to the named commit.
+                    if history.branch_switch(&name, doc) {
                         self.selected_id = None;
                         doc.selection.clear();
-                        self.branch_names = history.branch_list();
                         doc_modified = true;
                     }
                 }
 
                 PanelAction::BranchDelete { name } => {
                     history.branch_delete(&name);
-                    self.branch_names = history.branch_list();
+                }
+
+                PanelAction::LabelHistoryNode { id, name } => {
+                    // Set or clear a specific commit's name (right-click naming).
+                    history.set_node_label(id, name);
                 }
 
                 PanelAction::BindTextVariable {

@@ -1,6 +1,10 @@
 use super::*;
 
 /// Draw the vertical tools panel. Returns the newly selected tool if changed.
+///
+/// Every registered [`Tool`] is surfaced here, organised into intent-based
+/// sections. The large shapes family collapses into a single hover fly-out
+/// (Illustrator-style) so it stays compact without hiding any variant.
 pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Option<Tool> {
     let mut chosen = None;
 
@@ -13,135 +17,174 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
         );
         ui.add_space(2.0);
         for tool in pinned_tools {
-            let label = format!("{} {}", tool.icon(), tool.label());
-            if ui.selectable_label(*tool == active, label).clicked() {
-                chosen = Some(*tool);
-            }
+            tool_row(ui, active, *tool, &mut chosen);
         }
         ui.separator();
-        ui.add_space(2.0);
     }
 
-    ui.label(
-        RichText::new("TOOLS")
-            .small()
-            .color(Color32::from_rgb(80, 80, 110)),
+    // ── Select & navigate ─────────────────────────────────────────────────
+    section_header(ui, "SELECT");
+    for tool in [
+        Tool::Select,
+        Tool::DirectSelect,
+        Tool::Pan,
+        Tool::MagicWand,
+        Tool::Lasso,
+    ] {
+        tool_row(ui, active, tool, &mut chosen);
+    }
+
+    // ── Shapes (fly-out group covering every shape primitive) ─────────────
+    section_header(ui, "SHAPES");
+    tool_group(
+        ui,
+        active,
+        "shapes_popover",
+        "Shapes",
+        &[
+            Tool::Rectangle,
+            Tool::RoundedRect,
+            Tool::Ellipse,
+            Tool::Polygon,
+            Tool::Star,
+            Tool::Spiral,
+            Tool::Line,
+            Tool::Arc,
+            Tool::Grid,
+            Tool::PolarGrid,
+        ],
+        &mut chosen,
     );
-    ui.add_space(2.0);
 
-    // ── Selection & navigation ────────────────────────────────────────────
-    for tool in [Tool::Select, Tool::DirectSelect, Tool::Pan] {
-        let label = format!("{} {}", tool.icon(), tool.label());
-        if ui.selectable_label(tool == active, label).clicked() {
-            chosen = Some(tool);
-        }
+    // ── Draw ──────────────────────────────────────────────────────────────
+    section_header(ui, "DRAW");
+    for tool in [Tool::Pen, Tool::Pencil, Tool::ShapeBuilder, Tool::Text] {
+        tool_row(ui, active, tool, &mut chosen);
     }
 
-    // ── Shapes group (Rectangle / Ellipse / Polygon / Star) ──────────────
-    // A single button that shows the active shape's icon and opens a
-    // hover popover for switching between shape types.
-    {
-        let popup_id = ui.make_persistent_id("shapes_popover");
-        let is_shape_active = active.is_shape_creator();
-
-        // Active shape's icon/label, or Rectangle as the default
-        let (group_icon, group_label) = if is_shape_active {
-            (active.icon(), active.label())
-        } else {
-            (Tool::Rectangle.icon(), "Shapes")
-        };
-
-        // "›" indicator signals that sub-tools are available
-        let btn_text = format!("{} {}  ›", group_icon, group_label);
-        let response = ui.selectable_label(is_shape_active, &btn_text);
-
-        // Open the popover on hover
-        if response.hovered() {
-            ui.memory_mut(|m| m.open_popup(popup_id));
-        }
-
-        // Direct click (without hovering into the popover) activates the
-        // currently-shown shape, or Rectangle when no shape is active.
-        if response.clicked() && !is_shape_active {
-            chosen = Some(Tool::Rectangle);
-        }
-
-        // Render the popover to the right of the button
-        if ui.memory(|m| m.is_popup_open(popup_id)) {
-            let pos = egui::pos2(response.rect.right() + 4.0, response.rect.top());
-
-            let area_resp = egui::Area::new(popup_id)
-                .kind(egui::UiKind::Popup)
-                .order(egui::Order::Foreground)
-                .pivot(egui::Align2::LEFT_TOP)
-                .fixed_pos(pos)
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style())
-                        .show(ui, |ui| {
-                            ui.set_min_width(110.0);
-                            let mut picked: Option<Tool> = None;
-                            for shape in [
-                                Tool::Rectangle,
-                                Tool::Ellipse,
-                                Tool::Polygon,
-                                Tool::Star,
-                                Tool::Spiral,
-                            ] {
-                                let label = format!("{} {}", shape.icon(), shape.label());
-                                if ui.selectable_label(shape == active, label).clicked() {
-                                    picked = Some(shape);
-                                }
-                            }
-                            picked
-                        })
-                        .inner
-                });
-
-            // Close when the pointer leaves both the button and the popover
-            let popup_rect = area_resp.response.rect;
-            let pointer_in_popup = ui
-                .ctx()
-                .pointer_latest_pos()
-                .map(|p| popup_rect.contains(p))
-                .unwrap_or(false);
-
-            if !response.hovered() && !pointer_in_popup {
-                ui.memory_mut(|m| m.close_popup());
-            }
-
-            if let Some(tool) = area_resp.inner {
-                chosen = Some(tool);
-                ui.memory_mut(|m| m.close_popup());
-            }
-        }
-    }
-
-    // ── Drawing tools ─────────────────────────────────────────────────────
-    for tool in [Tool::Pen, Tool::ShapeBuilder, Tool::Text] {
-        let label = format!("{} {}", tool.icon(), tool.label());
-        if ui.selectable_label(tool == active, label).clicked() {
-            chosen = Some(tool);
-        }
-    }
-
-    // ── Path editing tools ─────────────────────────────────────────────────
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(2.0);
+    // ── Path editing ──────────────────────────────────────────────────────
+    section_header(ui, "EDIT PATH");
     for tool in [
         Tool::Scissors,
         Tool::Knife,
         Tool::Eraser,
-        Tool::MagicWand,
-        Tool::Lasso,
-        Tool::Pencil,
+        Tool::Smooth,
+        Tool::Width,
     ] {
-        let label = format!("{} {}", tool.icon(), tool.label());
-        if ui.selectable_label(tool == active, label).clicked() {
-            chosen = Some(tool);
-        }
+        tool_row(ui, active, tool, &mut chosen);
+    }
+
+    // ── Raster painting ───────────────────────────────────────────────────
+    section_header(ui, "PAINT");
+    for tool in [Tool::RasterBrush, Tool::RasterEraser] {
+        tool_row(ui, active, tool, &mut chosen);
     }
 
     chosen
 }
 
+/// A small, muted section heading with consistent spacing above/below.
+fn section_header(ui: &mut Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(text)
+            .small()
+            .color(Color32::from_rgb(80, 80, 110)),
+    );
+    ui.add_space(2.0);
+}
+
+/// One selectable tool row with its description as a hover tooltip. Sets
+/// `chosen` when clicked.
+fn tool_row(ui: &mut Ui, active: Tool, tool: Tool, chosen: &mut Option<Tool>) {
+    let label = format!("{} {}", tool.icon(), tool.label());
+    if ui
+        .selectable_label(tool == active, label)
+        .on_hover_text(tool.description())
+        .clicked()
+    {
+        *chosen = Some(tool);
+    }
+}
+
+/// A collapsed tool family: a single button that shows the active member (or a
+/// generic group label when none is active) and opens a hover fly-out popover
+/// listing every member. Keeps large families compact without hiding variants.
+fn tool_group(
+    ui: &mut Ui,
+    active: Tool,
+    id_salt: &str,
+    group_label: &str,
+    members: &[Tool],
+    chosen: &mut Option<Tool>,
+) {
+    let popup_id = ui.make_persistent_id(id_salt);
+    let active_member = members.iter().copied().find(|t| *t == active);
+    let default = members.first().copied().unwrap_or(active);
+
+    // Show the active member when one is selected, otherwise the group label.
+    let (group_icon, text) = match active_member {
+        Some(t) => (t.icon(), t.label()),
+        None => (default.icon(), group_label),
+    };
+
+    // "›" signals that sub-tools are available behind the fly-out.
+    let btn_text = format!("{} {}  ›", group_icon, text);
+    let response = ui.selectable_label(active_member.is_some(), &btn_text);
+
+    // Hover opens the fly-out.
+    if response.hovered() {
+        ui.memory_mut(|m| m.open_popup(popup_id));
+    }
+
+    // A direct click (no hover into the popover) activates the default member.
+    if response.clicked() && active_member.is_none() {
+        *chosen = Some(default);
+    }
+
+    if ui.memory(|m| m.is_popup_open(popup_id)) {
+        let pos = egui::pos2(response.rect.right() + 4.0, response.rect.top());
+
+        let area_resp = egui::Area::new(popup_id)
+            .kind(egui::UiKind::Popup)
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::LEFT_TOP)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| {
+                        ui.set_min_width(120.0);
+                        let mut picked: Option<Tool> = None;
+                        for &member in members {
+                            let label = format!("{} {}", member.icon(), member.label());
+                            if ui
+                                .selectable_label(member == active, label)
+                                .on_hover_text(member.description())
+                                .clicked()
+                            {
+                                picked = Some(member);
+                            }
+                        }
+                        picked
+                    })
+                    .inner
+            });
+
+        // Close when the pointer leaves both the button and the popover.
+        let popup_rect = area_resp.response.rect;
+        let pointer_in_popup = ui
+            .ctx()
+            .pointer_latest_pos()
+            .map(|p| popup_rect.contains(p))
+            .unwrap_or(false);
+
+        if !response.hovered() && !pointer_in_popup {
+            ui.memory_mut(|m| m.close_popup());
+        }
+
+        if let Some(tool) = area_resp.inner {
+            *chosen = Some(tool);
+            ui.memory_mut(|m| m.close_popup());
+        }
+    }
+}

@@ -11,6 +11,7 @@ impl CommandHistory {
                 command: None,
                 children: vec![],
                 primary_child: None,
+                label: None,
             },
         );
         Self {
@@ -263,6 +264,11 @@ impl CommandHistory {
         let id = self.next_id;
         self.next_id += 1;
         let parent = self.current;
+        // A branch name rides with its tip: extending a *labeled* commit moves the
+        // name onto the new commit (git-style branch advance), so a named branch
+        // tracks the latest work on that line. Editing off an unlabeled node
+        // (e.g. after jumping back into history) forks a fresh, unnamed lane.
+        let inherited_label = self.nodes.get_mut(&parent).and_then(|p| p.label.take());
         self.nodes.insert(
             id,
             HistNode {
@@ -271,6 +277,7 @@ impl CommandHistory {
                 command: Some(cmd),
                 children: vec![],
                 primary_child: None,
+                label: inherited_label,
             },
         );
         if let Some(p) = self.nodes.get_mut(&parent) {

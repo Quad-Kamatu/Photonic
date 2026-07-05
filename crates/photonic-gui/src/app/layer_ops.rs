@@ -2,6 +2,7 @@
 //! merge-layers) extracted from app::mod. Methods on PhotonicApp.
 #![allow(clippy::too_many_arguments)]
 use super::*;
+use photonic_core::layer::LayerId;
 
 impl PhotonicApp {
     /// Group the currently selected nodes. Requires 2+ nodes in selection.
@@ -238,5 +239,280 @@ impl PhotonicApp {
             history.execute(Command::Batch(cmds), doc);
             *doc_modified = true;
         }
+    }
+
+    /// The layer new content should target: the active layer, else the topmost
+    /// layer in the stack.
+    fn target_layer_id(doc: &Document) -> Option<LayerId> {
+        doc.active_layer_id.or_else(|| doc.layer_order.last().copied())
+    }
+
+    /// Delete a layer and everything it contains. Refuses to remove the last
+    /// remaining layer. If the deleted layer was active, activation moves to a
+    /// surviving layer. One undoable step.
+    pub(crate) fn do_delete_layer(
+        &mut self,
+        layer_id: LayerId,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        if !doc.layers.contains_key(&layer_id) || doc.layer_order.len() < 2 {
+            return;
+        }
+        let mut cmds = vec![Command::RemoveLayer { layer_id }];
+        // Re-home the active pointer to a survivor before the layer is gone.
+        if doc.active_layer_id == Some(layer_id) {
+            let survivor = doc
+                .layer_order
+                .iter()
+                .copied()
+                .find(|id| *id != layer_id);
+            cmds.push(Command::SetActiveLayer {
+                old_id: doc.active_layer_id,
+                new_id: survivor,
+            });
+        }
+        history.execute(Command::Batch(cmds), doc);
+        // Drop any dangling node selection that pointed into the removed layer.
+        if self.selected_id.is_some_and(|id| !doc.nodes.contains_key(&id)) {
+            self.selected_id = None;
+            doc.selection.clear();
+        }
+        *doc_modified = true;
+    }
+
+    /// Toggle a layer's visibility or lock flag (only the provided field is
+    /// changed). Recorded via `UpdateLayer` so it round-trips through undo.
+    pub(crate) fn do_set_layer_flag(
+        &mut self,
+        layer_id: LayerId,
+        visible: Option<bool>,
+        locked: Option<bool>,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        let Some(layer) = doc.layers.get(&layer_id) else {
+            return;
+        };
+        let new_visible = visible.unwrap_or(layer.visible);
+        let new_locked = locked.unwrap_or(layer.locked);
+        if new_visible == layer.visible && new_locked == layer.locked {
+            return;
+        }
+        history.execute(
+            Command::UpdateLayer {
+                layer_id,
+                old_name: layer.name.clone(),
+                new_name: layer.name.clone(),
+                old_visible: layer.visible,
+                new_visible,
+                old_locked: layer.locked,
+                new_locked,
+                old_color: layer.color,
+                new_color: layer.color,
+                old_is_template: layer.is_template,
+                new_is_template: layer.is_template,
+            },
+            doc,
+        );
+        *doc_modified = true;
+    }
+
+    /// Create a new empty group ("sublayer") nesting container at the top of the
+    /// active layer and select it. Objects can then be dragged into it in the
+    /// Layers tree. One undoable step.
+    pub(crate) fn do_add_sublayer(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        let Some(layer_id) = Self::target_layer_id(doc) else {
+            return;
+        };
+        let group_kind = SceneNodeKind::Group(GroupNode {
+            children: Vec::new(),
+            clip_children: false,
+            clip_node_id: None,
+            blend_spine_id: None,
+            live_boolean: None,
+        });
+        let group = SceneNode::new("Sublayer", layer_id, group_kind);
+        let group_id = group.id;
+        history.execute(
+            Command::AddNode {
+                node: group,
+                layer_id: Some(layer_id),
+            },
+            doc,
+        );
+        self.selected_id = Some(group_id);
+        doc.selection = Selection::single(group_id);
+        *doc_modified = true;
+    }
+
+    /// Add a layer mask using the smartest interpretation of the selection:
+    /// a raster alpha mask when a single raster node is selected, otherwise a
+    /// clipping mask built from a 2+ selection (topmost object clips the rest).
+    pub(crate) fn do_add_layer_mask_smart(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        // ── Raster branch: give a selected raster node an editable alpha mask.
+        if let Some(sel) = self.selected_id {
+            if let Some(node) = doc.nodes.get(&sel) {
+                if let SceneNodeKind::Raster(r) = &node.kind {
+                    if r.mask.is_none() {
+                        let w = r.image.width.max(1);
+                        let h = r.image.height.max(1);
+                        let mut new_node = node.clone();
+                        if let SceneNodeKind::Raster(rn) = &mut new_node.kind {
+                            rn.mask = Some(photonic_core::Mask::full(w, h));
+                        }
+                        history.execute(
+                            Command::UpdateNode {
+                                old: node.clone(),
+                                new: new_node,
+                            },
+                            doc,
+                        );
+                        *doc_modified = true;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // ── Vector branch: 2+ selected → group them and clip to the top object.
+        if doc.selection.count() >= 2 {
+            let sel_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
+            if let Some((layer_id, mut indexed)) = doc.nodes_layer_and_indices(&sel_ids) {
+                indexed.sort_by_key(|(_, idx)| *idx);
+                let children: Vec<NodeId> = indexed.iter().map(|(id, _)| *id).collect();
+                let insert_index = indexed[0].1;
+                let clip_node_id = children.last().copied();
+                let group_kind = SceneNodeKind::Group(GroupNode {
+                    children: children.clone(),
+                    clip_children: false,
+                    clip_node_id,
+                    blend_spine_id: None,
+                    live_boolean: None,
+                });
+                let group = SceneNode::new("Clip Mask", layer_id, group_kind);
+                let group_id = group.id;
+                history.execute(
+                    Command::GroupNodes {
+                        group,
+                        layer_id,
+                        insert_index,
+                        children,
+                    },
+                    doc,
+                );
+                self.selected_id = Some(group_id);
+                doc.selection = Selection::single(group_id);
+                *doc_modified = true;
+            }
+        }
+    }
+
+    /// Create a non-destructive adjustment layer of `kind` (MCP adjustment
+    /// vocabulary) at the top of the active layer, seeded with neutral defaults
+    /// so it initially changes nothing until tuned in the Inspector.
+    pub(crate) fn do_add_adjustment_layer(
+        &mut self,
+        kind: &str,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        let Some(layer_id) = Self::target_layer_id(doc) else {
+            return;
+        };
+        let spec = default_adjustment_spec(kind);
+        let name = format!("{} (adjustment)", adjustment_label(kind));
+        let node = SceneNode::new(
+            name,
+            layer_id,
+            SceneNodeKind::Raster(photonic_core::RasterNode::adjustment_layer(spec)),
+        );
+        let node_id = node.id;
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: Some(layer_id),
+            },
+            doc,
+        );
+        self.selected_id = Some(node_id);
+        doc.selection = Selection::single(node_id);
+        *doc_modified = true;
+    }
+}
+
+/// The curated adjustment types offered in the Layers-panel slide-up tray, as
+/// `(mcp_kind, display_label)` pairs. Order defines the tile grid order.
+pub(crate) const ADJUSTMENT_TILES: &[(&str, &str)] = &[
+    ("brightness_contrast", "Bright"),
+    ("levels", "Levels"),
+    ("curves", "Curves"),
+    ("exposure", "Exposure"),
+    ("hue_saturation", "Hue/Sat"),
+    ("vibrance", "Vibrance"),
+    ("black_and_white", "B&W"),
+    ("invert", "Invert"),
+    ("posterize", "Poster"),
+    ("threshold", "Thresh"),
+];
+
+/// Short display label for an adjustment kind (falls back to the raw name).
+pub(crate) fn adjustment_label(kind: &str) -> &str {
+    ADJUSTMENT_TILES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, label)| *label)
+        .unwrap_or(kind)
+}
+
+/// Build a neutral (identity) [`AdjustmentSpec`] for a curated adjustment kind
+/// so a freshly-created adjustment layer is a no-op until the user tunes it.
+fn default_adjustment_spec(kind: &str) -> photonic_core::AdjustmentSpec {
+    use photonic_core::AdjustmentSpec as A;
+    match kind {
+        "levels" => A::Levels {
+            in_black: 0.0,
+            in_white: 1.0,
+            gamma: 1.0,
+            out_black: 0.0,
+            out_white: 1.0,
+        },
+        "curves" => A::Curves {
+            rgb: Vec::new(),
+            red: Vec::new(),
+            green: Vec::new(),
+            blue: Vec::new(),
+        },
+        "exposure" => A::Exposure { stops: 0.0 },
+        "hue_saturation" => A::HueSaturation {
+            hue: 0.0,
+            saturation: 0.0,
+            lightness: 0.0,
+        },
+        "vibrance" => A::Vibrance { amount: 0.0 },
+        "black_and_white" => A::BlackAndWhite {
+            weights: [0.299, 0.587, 0.114],
+        },
+        "invert" => A::Invert,
+        "posterize" => A::Posterize { levels: 4 },
+        "threshold" => A::Threshold { level: 0.5 },
+        // brightness_contrast + any unknown kind → neutral brightness/contrast.
+        _ => A::BrightnessContrast {
+            brightness: 0.0,
+            contrast: 0.0,
+        },
     }
 }

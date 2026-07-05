@@ -16,11 +16,11 @@ fn short_hash(abs: usize, label: &str) -> String {
 /// the document to that point, crossing branches when needed.
 pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     use std::collections::{HashMap, HashSet};
-    if !ctx.matches("History") {
-        return;
-    }
     let graph = ctx.history_graph;
     let current = ctx.history_current;
+    let last_saved = ctx.history_last_saved;
+    // The drawer search filters history entries (not property sections).
+    let query = ctx.q.clone();
     let mut action: Option<PanelAction> = None;
 
     // Look-ups.
@@ -73,6 +73,54 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     });
     ui.add_space(6.0);
 
+    // ── Name the current branch ───────────────────────────────────────────────
+    // A branch is a name that rides with the tip: it advances onto each new commit
+    // you make on this line. Naming and switching are non-destructive.
+    ui.horizontal(|ui| {
+        let hint = if cur_node.and_then(|n| n.label.as_ref()).is_some() {
+            "Rename this branch…"
+        } else {
+            "Name this branch…"
+        };
+        ui.add(
+            egui::TextEdit::singleline(&mut *ctx.branch_name_input)
+                .hint_text(hint)
+                .desired_width(ui.available_width() - 52.0),
+        );
+        let name = ctx.branch_name_input.trim().to_string();
+        if ui
+            .add_enabled(!name.is_empty(), egui::Button::new(ph::BOOKMARK_SIMPLE).small())
+            .on_hover_text("Name this branch — the name follows your edits along this line")
+            .clicked()
+        {
+            action = Some(PanelAction::BranchCreate { name });
+            ctx.branch_name_input.clear();
+        }
+    });
+
+    // ── Branches — quick, non-destructive switches (jump to the branch tip) ────
+    let named: Vec<(&str, u64)> = graph
+        .iter()
+        .filter_map(|n| n.label.as_deref().map(|l| (l, n.id)))
+        .collect();
+    if !named.is_empty() {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            for (label, id) in &named {
+                let is_here = *id == current;
+                if ui
+                    .selectable_label(is_here, format!("{} {label}", ph::BOOKMARK_SIMPLE))
+                    .on_hover_text("Switch to this branch (jump to its tip)")
+                    .clicked()
+                {
+                    action = Some(PanelAction::JumpToHistoryNode { id: *id });
+                }
+            }
+        });
+    }
+    ui.add_space(6.0);
+
     if edit_count == 0 {
         ui.label(
             RichText::new("No edits yet — the graph fills in as you work.")
@@ -82,6 +130,77 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         if action.is_some() {
             ctx.action = action;
         }
+        return;
+    }
+
+    // ── Search mode: flat filtered list of matching commits ───────────────────
+    // When the drawer search has a query, show a simple newest-first list of the
+    // history entries whose description matches, instead of the lane graph — the
+    // graph's shape isn't meaningful once nodes are filtered out.
+    if !query.is_empty() {
+        let mut any = false;
+        egui::ScrollArea::vertical()
+            .max_height(340.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for node in graph.iter() {
+                    let hay = format!(
+                        "{} {}",
+                        node.description,
+                        node.label.as_deref().unwrap_or("")
+                    )
+                    .to_lowercase();
+                    if node.is_root || !hay.contains(&query) {
+                        continue;
+                    }
+                    any = true;
+                    let saved = last_saved == Some(node.id);
+                    ui.horizontal(|ui| {
+                        let mut lead = String::new();
+                        if node.is_current {
+                            lead.push_str(&format!("{} ", ph::GIT_COMMIT));
+                        }
+                        if saved {
+                            lead.push_str(&format!("{} ", ph::FLOPPY_DISK));
+                        }
+                        if let Some(l) = &node.label {
+                            lead.push_str(&format!("{} {l}  ", ph::BOOKMARK_SIMPLE));
+                        }
+                        if ui
+                            .selectable_label(
+                                node.is_current,
+                                format!("{lead}{}", node.description),
+                            )
+                            .on_hover_text("Jump to this state")
+                            .clicked()
+                        {
+                            action = Some(PanelAction::JumpToHistoryNode { id: node.id });
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    RichText::new(short_hash(node.id as usize, &node.description))
+                                        .monospace()
+                                        .weak()
+                                        .small(),
+                                );
+                            },
+                        );
+                    });
+                }
+            });
+        if !any {
+            ui.label(
+                RichText::new("No history entries match your search.")
+                    .weak()
+                    .small(),
+            );
+        }
+        if action.is_some() {
+            ctx.action = action;
+        }
+        ui.add_space(6.0);
         return;
     }
 
@@ -227,6 +346,13 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         } else {
             painter.circle_stroke(center, node_r, egui::Stroke::new(1.4, base));
         }
+        // "Last Save": teal outer ring on the node matching the on-disk file —
+        // legible even when it coincides with the white HEAD marker.
+        let saved_here = last_saved == Some(node.id);
+        let save_col = Color32::from_rgb(88, 200, 160);
+        if saved_here {
+            painter.circle_stroke(center, node_r + 3.5, egui::Stroke::new(1.6, save_col));
+        }
 
         // Right edge: HEAD pill or short commit id.
         let cy = center.y;
@@ -263,7 +389,34 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         } else {
             text_dim
         };
-        let tw = (text_right - text_left).max(10.0);
+        // A small floppy glyph precedes the message on the last-saved node.
+        let mut msg_left = text_left;
+        if saved_here {
+            let fg = ui.painter().layout_no_wrap(
+                ph::FLOPPY_DISK.to_string(),
+                font.clone(),
+                save_col,
+            );
+            painter.galley(egui::pos2(text_left, cy - fg.size().y * 0.5), fg.clone(), save_col);
+            msg_left = text_left + fg.size().x + 4.0;
+        }
+        // Named states render a purple ref pill (like a git branch tag) before the
+        // message, shifting it right.
+        if let Some(l) = &node.label {
+            let lab_col = Color32::from_rgb(150, 130, 235);
+            let lg = ui.painter().layout_no_wrap(
+                format!("{} {l}", ph::BOOKMARK_SIMPLE),
+                font.clone(),
+                Color32::WHITE,
+            );
+            let pad = egui::vec2(5.0, 1.5);
+            let size = lg.size() + pad * 2.0;
+            let pr = egui::Rect::from_min_size(egui::pos2(msg_left, cy - size.y * 0.5), size);
+            painter.rect_filled(pr, egui::Rounding::same(3.0), lab_col);
+            painter.galley(pr.min + pad, lg, Color32::WHITE);
+            msg_left = pr.right() + 6.0;
+        }
+        let tw = (text_right - msg_left).max(10.0);
         let mut job = egui::text::LayoutJob::single_section(
             node.description.clone(),
             egui::TextFormat {
@@ -277,9 +430,11 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         job.wrap.break_anywhere = true;
         job.wrap.overflow_character = Some('…');
         let g = ui.fonts(|f| f.layout_job(job));
-        painter.galley(egui::pos2(text_left, cy - g.size().y * 0.5), g, tcol);
+        painter.galley(egui::pos2(msg_left, cy - g.size().y * 0.5), g, tcol);
 
-        let resp = resp.on_hover_text(if node.is_current {
+        let resp = resp.on_hover_text(if saved_here {
+            "Last saved to disk here".to_string()
+        } else if node.is_current {
             "Current state — right-click for options".to_string()
         } else {
             "Click to jump here · right-click for options".to_string()
@@ -289,9 +444,9 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         if resp.clicked() {
             action = Some(PanelAction::JumpToHistoryNode { id: node.id });
         }
-        // Right-click: branch / navigation affordances (#174). Branching is
-        // implicit in the undo-tree — jumping to a commit and then editing forks
-        // a new branch — so "Branch from here" simply navigates HEAD to it.
+        // Right-click: jump + naming affordances. Branching is implicit in the
+        // undo-tree — jumping to a commit and then editing forks a new branch —
+        // and a "named branch" is just a label you attach to a commit here.
         resp.context_menu(|ui| {
             ui.label(
                 RichText::new(node.description.clone())
@@ -299,101 +454,64 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                     .color(Color32::from_rgb(200, 204, 222)),
             );
             ui.separator();
-            if !node.is_current {
-                if ui
+            if !node.is_current
+                && ui
                     .button("Jump to this state")
                     .on_hover_text("Move the document to this commit (reversible)")
                     .clicked()
-                {
-                    action = Some(PanelAction::JumpToHistoryNode { id: node.id });
-                    ui.close_menu();
-                }
-                if ui
-                    .button("Branch from here")
-                    .on_hover_text("Jump here — your next edit starts a new branch off this commit")
-                    .clicked()
-                {
-                    action = Some(PanelAction::JumpToHistoryNode { id: node.id });
-                    ui.close_menu();
-                }
-            }
-            if !node.is_root && ui.button("Copy commit id").clicked() {
-                let id = short_hash(node.id as usize, &node.description);
-                ui.output_mut(|o| o.copied_text = id);
+            {
+                action = Some(PanelAction::JumpToHistoryNode { id: node.id });
                 ui.close_menu();
+            }
+            // ── Start / name a branch at this commit ──────────────────────
+            if !node.is_root {
+                let buf_id = ui.id().with(("hist_name", node.id));
+                let mut buf = ui.data_mut(|d| {
+                    d.get_temp::<String>(buf_id)
+                        .unwrap_or_else(|| node.label.clone().unwrap_or_default())
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut buf)
+                            .hint_text("Name a branch here…")
+                            .desired_width(150.0),
+                    );
+                    let can = !buf.trim().is_empty();
+                    if ui
+                        .add_enabled(can, egui::Button::new(ph::BOOKMARK_SIMPLE))
+                        .on_hover_text("Name a branch at this commit (it follows future edits)")
+                        .clicked()
+                    {
+                        action = Some(PanelAction::LabelHistoryNode {
+                            id: node.id,
+                            name: Some(buf.trim().to_string()),
+                        });
+                        ui.close_menu();
+                    }
+                });
+                ui.data_mut(|d| d.insert_temp(buf_id, buf));
+                if node.label.is_some()
+                    && ui
+                        .button("Delete branch name")
+                        .on_hover_text("Remove this branch name (keeps the commit)")
+                        .clicked()
+                {
+                    action = Some(PanelAction::LabelHistoryNode {
+                        id: node.id,
+                        name: None,
+                    });
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Copy commit id").clicked() {
+                    let id = short_hash(node.id as usize, &node.description);
+                    ui.output_mut(|o| o.copied_text = id);
+                    ui.close_menu();
+                }
             }
         });
     }
     ui.add_space(6.0);
-
-    if action.is_some() {
-        ctx.action = action;
-    }
-}
-
-pub(crate) fn draw_branches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
-    let branch_names = ctx.branch_names;
-    let branch_name_input = &mut *ctx.branch_name_input;
-    let q = ctx.q.as_str();
-    let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
-    let forced_open = ctx.forced_open;
-    let mut action: Option<PanelAction> = None;
-    // ── Branches ──────────────────────────────────────────────────────────────
-    if matches("Branches") {
-        egui::CollapsingHeader::new("Branches")
-            .default_open(false)
-            .open(forced_open)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Fork the document state into named branches.")
-                        .weak()
-                        .small(),
-                );
-                ui.add_space(2.0);
-                // Save new branch
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(branch_name_input)
-                            .hint_text("Branch name…")
-                            .desired_width(ui.available_width() - 60.0),
-                    );
-                    let can_save = !branch_name_input.trim().is_empty();
-                    if ui
-                        .add_enabled(can_save, egui::Button::new("Save").small())
-                        .clicked()
-                    {
-                        let name = branch_name_input.trim().to_string();
-                        action = Some(PanelAction::BranchCreate { name });
-                        branch_name_input.clear();
-                    }
-                });
-                ui.add_space(4.0);
-                if branch_names.is_empty() {
-                    ui.label(RichText::new("No branches yet.").weak().small());
-                } else {
-                    for name in branch_names {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(name).small());
-                            if ui
-                                .small_button("Switch")
-                                .on_hover_text(format!("Restore branch '{}'", name))
-                                .clicked()
-                            {
-                                action = Some(PanelAction::BranchSwitch { name: name.clone() });
-                            }
-                            if ui
-                                .small_button(ph::X)
-                                .on_hover_text(format!("Delete branch '{}'", name))
-                                .clicked()
-                            {
-                                action = Some(PanelAction::BranchDelete { name: name.clone() });
-                            }
-                        });
-                    }
-                }
-            });
-        ui.add_space(4.0);
-    }
 
     if action.is_some() {
         ctx.action = action;

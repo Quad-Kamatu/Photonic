@@ -12,11 +12,15 @@ use hit_test::*;
 mod command_center;
 mod direct_select;
 mod erase_tools;
-mod layer_ops;
+pub(crate) mod layer_ops;
 mod rulers;
 mod tool_handlers;
 mod width_tool;
 mod menu_drawer;
+mod tabs;
+pub(crate) mod autosave;
+mod close_guard;
+mod recovery;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -40,6 +44,17 @@ use crate::{
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
 };
+
+/// A floating fill/stroke color picker raised from the radial menu.
+#[derive(Clone, Copy)]
+pub(crate) struct ColorPopupState {
+    /// Path node whose color is being edited.
+    pub node_id: NodeId,
+    /// Edit the stroke color when true, otherwise the solid fill color.
+    pub stroke: bool,
+    /// Screen-space anchor where the picker first appears.
+    pub pos: egui::Pos2,
+}
 
 /// Cached hotbar ordering. Rebuilt only when the signature (context bucket,
 /// single-group flag, or mode) changes — never per click or per frame — so the
@@ -461,6 +476,35 @@ struct ArtboardDrag {
     orig_nodes: Vec<photonic_core::node::SceneNode>,
 }
 
+/// One open document and its per-document state, for the multi-document tab bar.
+///
+/// The engine fields (`document`/`history`/`view`) are authoritative only while
+/// this tab is **parked** (inactive). For the active tab they hold stale
+/// placeholders — its live state is the `&mut Document/CommandHistory/CanvasView`
+/// threaded through [`PhotonicApp::draw`] plus `PhotonicApp::{current_file,
+/// selected_id}`. The tab-bar meta (`title`, `dirty`, `last_saved_node`) is kept
+/// current for the active tab every frame.
+pub struct DocTab {
+    /// Parked document contents (swapped into the shared Arc when activated).
+    pub document: Document,
+    /// Parked undo/redo history.
+    pub history: CommandHistory,
+    /// Parked viewport pan/zoom.
+    pub view: CanvasView,
+    /// Path of this doc's .photon file (None = never saved to a user file).
+    pub current_file: Option<std::path::PathBuf>,
+    /// Selected node in this doc.
+    pub selected_id: Option<NodeId>,
+    /// Tab-bar label (document name / file stem).
+    pub title: String,
+    /// Unsaved changes since the last save/autosave.
+    pub dirty: bool,
+    /// Recovery-folder autosave file for an untitled doc (cleaned up on real save).
+    pub recovery_path: Option<std::path::PathBuf>,
+    /// History node id matching the on-disk file — drives the "Last Save" marker.
+    pub last_saved_node: Option<u64>,
+}
+
 pub struct PhotonicApp {
     pub active_tool: Tool,
     /// The tool that was active on the previous frame. Used to edge-detect
@@ -691,11 +735,49 @@ pub struct PhotonicApp {
     /// Find / Replace Text dialog — Some while open.
     find_replace_text_dialog: Option<FindReplaceTextDialog>,
 
+    // ── Multi-document tabs ───────────────────────────────────────────────────
+    /// All open documents, in tab-bar order. The ACTIVE tab's live engine state
+    /// (Document / CommandHistory / CanvasView) lives in the shared `Arc<Mutex>`s
+    /// and `self.current_file` / `self.selected_id`; its `DocTab` engine fields
+    /// are stale placeholders while active (only `title`/`dirty`/`last_saved_node`
+    /// are kept current for it each frame). Inactive tabs are fully parked here.
+    /// Switching is a `mem::swap` between the `&mut` params and a parked tab —
+    /// the renderer/MCP/REPL keep reading the same shared Arc. Empty only briefly
+    /// before the first document is installed.
+    pub tabs: Vec<DocTab>,
+    /// Index into `tabs` of the active document.
+    pub active_tab: usize,
+    /// Set by tab UI / handlers to request a switch to this index next; applied
+    /// inside `draw` where the `&mut doc/history/view` params are available.
+    pending_tab_switch: Option<usize>,
+    /// Set by tab UI to request closing this index; applied inside `draw`.
+    pending_tab_close: Option<usize>,
+    /// Monotonic counter for naming fresh "Untitled N" documents.
+    untitled_counter: usize,
+
+    // ── Autosave & close guards ───────────────────────────────────────────────
+    /// Frame-clock time (`ctx.input().time`) of the last autosave pass.
+    last_autosave: Option<f64>,
+    /// The app is trying to quit: show the unsaved-changes-on-quit modal.
+    pub close_requested: bool,
+    /// Resolved: the host may now exit the event loop (polled in `main.rs`).
+    pub close_confirmed: bool,
+    /// Pending close of a single dirty tab awaiting the Save/Discard/Cancel modal.
+    close_tab_prompt: Option<usize>,
+    /// Untitled-document autosaves found in the recovery folder at launch, awaiting
+    /// the restore/discard prompt. Empty once handled.
+    recovery_candidates: Vec<std::path::PathBuf>,
+    /// Whether the recovery folder has been scanned this session (one-shot).
+    recovery_scanned: bool,
+
     // ── Welcome screen ────────────────────────────────────────────────────────
     /// Show the welcome/new-document screen instead of the editor.
     pub show_welcome: bool,
     /// State for the welcome screen (form fields + recent docs list).
     pub welcome: crate::welcome::WelcomeState,
+    /// In-editor File ▸ New modal — Some while open, holding the shared
+    /// new-document form (same flow as the welcome screen's New Canvas panel).
+    new_document_modal: Option<crate::welcome::NewDocumentForm>,
 
     // ── Smooth viewport animation ─────────────────────────────────────────────
     smooth: SmoothViewState,
@@ -711,6 +793,9 @@ pub struct PhotonicApp {
     // ── Radial wheel ──────────────────────────────────────────────────────────
     /// Open right-click selection wheel, or None when closed.
     radial_wheel: Option<WheelState>,
+
+    /// Floating fill/stroke color picker raised from the radial menu, or None.
+    color_popup: Option<ColorPopupState>,
 
     // ── Audit panel ───────────────────────────────────────────────────────────
     pub audit: AuditPanelState,
@@ -826,10 +911,8 @@ pub struct PhotonicApp {
     /// Latest rhythm patterns from the rhythm detector (shown in the GUI panel).
     pub rhythm_findings: Vec<String>,
 
-    // ── Branches ─────────────────────────────────────────────────────────────
-    /// Cached list of branch names from CommandHistory (refreshed on branch actions).
-    pub branch_names: Vec<String>,
-    /// Text input for naming a new branch in the Branches panel.
+    // ── Named states ─────────────────────────────────────────────────────────
+    /// Text input for naming the current history state (a labeled commit).
     pub branch_name_input: String,
 
     /// Selected swatch library name for the Color Swatches panel dropdown.
@@ -1122,6 +1205,17 @@ impl Default for PhotonicApp {
             simplify_dialog: None,
             merge_vertices_dialog: None,
             find_replace_text_dialog: None,
+            tabs: Vec::new(),
+            active_tab: 0,
+            pending_tab_switch: None,
+            pending_tab_close: None,
+            untitled_counter: 0,
+            last_autosave: None,
+            close_requested: false,
+            close_confirmed: false,
+            close_tab_prompt: None,
+            recovery_candidates: Vec::new(),
+            recovery_scanned: false,
             smooth: SmoothViewState::default(),
             prefs: AppPreferences::default(),
             active_drawer: None,
@@ -1129,8 +1223,10 @@ impl Default for PhotonicApp {
 
             show_welcome: false,
             welcome: crate::welcome::WelcomeState::new(),
+            new_document_modal: None,
 
             radial_wheel: None,
+            color_popup: None,
 
             audit: AuditPanelState::default(),
 
@@ -1138,7 +1234,6 @@ impl Default for PhotonicApp {
 
             composition_findings: Vec::new(),
             rhythm_findings: Vec::new(),
-            branch_names: Vec::new(),
             branch_name_input: String::new(),
             swatch_library_selected: String::new(),
             graphic_style_name_input: String::new(),
@@ -1630,7 +1725,6 @@ impl PhotonicApp {
         let selected_node = self.selected_id.and_then(|id| doc.nodes.get(&id));
         let selection_count = doc.selection.node_ids.len();
         let selected_ids = doc.selection.node_ids.iter().cloned().collect::<Vec<_>>();
-        let branch_names = self.branch_names.clone();
         // Keep the Edit History list live — recompute from the current undo/redo
         // stacks each frame so it never goes stale after an edit. Pull a deeper
         // slice than the old flat list needed so the commit graph shows real depth.
@@ -1681,7 +1775,6 @@ impl PhotonicApp {
             rmbg_model_cached: self.rmbg_model_cached,
             composition_findings: &self.composition_findings,
             rhythm_findings: &self.rhythm_findings,
-            branch_names: &branch_names,
             branch_name_input: &mut self.branch_name_input,
             swatch_library_selected: &mut self.swatch_library_selected,
             graphic_style_name_input: &mut self.graphic_style_name_input,
@@ -1695,6 +1788,7 @@ impl PhotonicApp {
             action_names: &self.action_names,
             history_graph: &self.history_graph,
             history_current: self.history_current,
+            history_last_saved: self.tabs.get(self.active_tab).and_then(|t| t.last_saved_node),
             doc_export: &mut self.doc_export,
             bleed_mm_input: &mut self.bleed_mm_input,
             slug_mm_input: &mut self.slug_mm_input,
@@ -1731,6 +1825,33 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // ── Quit-from-welcome shortcut ────────────────────────────────────────
+        // The quit prompt only runs in the editor (past the welcome early-return).
+        // On the welcome screen there are no open documents to lose, so confirm the
+        // pending quit immediately.
+        if self.close_requested && self.show_welcome {
+            self.close_requested = false;
+            self.close_confirmed = true;
+        }
+
+        // ── First-launch recovery scan ────────────────────────────────────────
+        // Surface any untitled-document autosaves left by a previous crash so the
+        // restore/discard prompt can offer them.
+        if !self.recovery_scanned {
+            self.recovery_scanned = true;
+            self.recovery_candidates = crate::app::autosave::recovery_dir()
+                .map(|dir| {
+                    std::fs::read_dir(&dir)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|x| x == "photon"))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
 
         // ── Orphaned color-range preview guard ────────────────────────────────
         // A live color-range session previews directly in the document and is
@@ -2088,57 +2209,22 @@ impl PhotonicApp {
             }
         }
 
+        // ── Crash-recovery prompt (over welcome or editor) ───────────────────
+        // Offer to restore untitled autosaves left by a previous session before
+        // anything else. Re-enter cleanly next frame once resolved.
+        if !self.recovery_candidates.is_empty()
+            && self.draw_recovery_prompt(ctx, doc, view, history)
+        {
+            return doc_modified;
+        }
+
         // ── Welcome screen (shown before the editor on first launch) ─────────
         if self.show_welcome {
             if let Some(action) = self.welcome.draw(ctx) {
                 use crate::welcome::WelcomeAction;
                 match action {
-                    WelcomeAction::CreateNew {
-                        name,
-                        width,
-                        height,
-                        bleed_mm,
-                        slug_mm,
-                        margin,
-                        artboards,
-                        history_max_mb,
-                    } => {
-                        let mut new_doc = photonic_core::Document::new(name, width, height);
-                        new_doc.bleed_mm = bleed_mm;
-                        new_doc.slug_mm = slug_mm;
-                        new_doc.history_max_mb = Some(history_max_mb);
-                        new_doc.margin_top = margin;
-                        new_doc.margin_right = margin;
-                        new_doc.margin_bottom = margin;
-                        new_doc.margin_left = margin;
-                        // Multiple artboards: lay out N same-size boards in a grid.
-                        if artboards > 1 {
-                            let gap = (width * 0.06).max(40.0);
-                            let cols = (artboards as f64).sqrt().ceil().max(1.0) as usize;
-                            let mut boards = Vec::with_capacity(artboards);
-                            for i in 0..artboards {
-                                let col = (i % cols) as f64;
-                                let row = (i / cols) as f64;
-                                boards.push(photonic_core::Artboard::new(
-                                    format!("Artboard {}", i + 1),
-                                    col * (width + gap),
-                                    row * (height + gap),
-                                    width,
-                                    height,
-                                ));
-                            }
-                            new_doc.active_artboard = boards.first().map(|a| a.id);
-                            new_doc.artboards = boards;
-                        }
-                        *doc = new_doc;
-                        // Fresh document — drop any prior project's history so it
-                        // can't bleed into the new one.
-                        history.reset();
-                        // Fit all artboards to the viewport on the next frame
-                        // (once the real viewport rect is known).
-                        self.fit_pending = true;
-                        self.current_file = None;
-                        self.selected_id = None;
+                    WelcomeAction::CreateNew(spec) => {
+                        self.create_document_from_spec(doc, history, spec);
                         self.show_welcome = false;
                         doc_modified = true;
                     }
@@ -2242,8 +2328,37 @@ impl PhotonicApp {
             return doc_modified;
         }
 
+        // ── Multi-document tabs ──────────────────────────────────────────────
+        // Guarantee the active document has a tab slot (covers CLI-opened files
+        // and the first editor frame), then apply any switch/close requested by
+        // last frame's tab-bar UI before the canvas draws this frame.
+        self.ensure_initial_tab(doc, history);
+        if let Some(target) = self.pending_tab_switch.take() {
+            self.switch_tab(target, doc, history, view);
+        }
+        if let Some(idx) = self.pending_tab_close.take() {
+            // Dirty tabs route through the Save/Discard/Cancel modal; clean tabs
+            // close immediately.
+            if self.tabs.get(idx).is_some_and(|t| t.dirty) {
+                self.close_tab_prompt = Some(idx);
+            } else {
+                self.close_tab(idx, doc, history, view);
+            }
+        }
+
+        // ── New document modal (File ▸ New) ──────────────────────────────────
+        if self.draw_new_document_modal(ctx, doc, view, history) {
+            doc_modified = true;
+        }
+
+        // ── Unsaved-changes guards (tab close + program quit) ────────────────
+        doc_modified |= self.draw_unsaved_changes_modals(ctx, doc, view, history);
+
         // ── Export modal ─────────────────────────────────────────────────────
         self.draw_export_modal(ctx, doc);
+
+        // ── Radial-menu fill/stroke color picker ──────────────────────────────
+        doc_modified |= self.draw_color_popup(ctx, doc, history);
 
         // ── Simplify Path dialog ──────────────────────────────────────────────
         self.draw_simplify_dialog(ctx, doc, history);
@@ -2421,6 +2536,9 @@ impl PhotonicApp {
                 });
             });
 
+        // ── Document tab bar (sits just above the status bar) ─────────────────
+        self.draw_tab_bar(ctx);
+
         // ── Left drawer rail (Canva-style) ────────────────────────────────────
         // A thin vertical strip with one phosphor-icon button per DrawerGroup —
         // Tools now lives here too (the old standalone tools panel is gone).
@@ -2543,7 +2661,7 @@ impl PhotonicApp {
                     // `Color`), so route it through the shared sRGBA picker to
                     // match the renderer instead of egui's linear `Rgba` control
                     // (issue #185).
-                    let resp = crate::color_edit::srgb_f32_color_edit(ui, &mut self.fill_color)
+                    let resp = crate::color_popup::ColorPopup::swatch_f32(ui, &mut self.fill_color)
                         .on_hover_text("Active fill color — click to change");
                     if resp.changed() {
                         // Mirror in-memory every frame (cheap) so the active
@@ -2554,8 +2672,8 @@ impl PhotonicApp {
                     }
                     // Flush the single `prefs.save()` once the picker interaction
                     // settles (pointer released), matching the #171 recent-colors
-                    // commit-on-release idiom. `color_edit_button` drives an RGBA
-                    // slider popup whose `.changed()` fires on every drag frame;
+                    // commit-on-release idiom. `ColorPopup::swatch_f32` drives an
+                    // sRGBA picker popup whose `.changed()` fires on every drag frame;
                     // gating the write on pointer-release collapses dozens of
                     // synchronous serialize+fs::write cycles into one per edit.
                     if self.fill_swatch_dirty && ui.input(|i| i.pointer.any_released()) {
@@ -2779,19 +2897,16 @@ impl PhotonicApp {
                 ui.set_opacity(rt);
                 match right_render_group {
                     RightDrawerGroup::Layers => {
-                        egui::ScrollArea::vertical().id_salt("layers_scroll").show(
+                        // The panel owns its own layout (scrolling tree + pinned
+                        // footer), so it must not be wrapped in a ScrollArea.
+                        if let Some(action) = panels::draw_layers_panel(
                             ui,
-                            |ui| {
-                                if let Some(action) = panels::draw_layers_panel(
-                                    ui,
-                                    doc,
-                                    &mut self.selected_layer_ids,
-                                    self.selected_id,
-                                ) {
-                                    self.pending_panel_actions.push(action);
-                                }
-                            },
-                        );
+                            doc,
+                            &mut self.selected_layer_ids,
+                            self.selected_id,
+                        ) {
+                            self.pending_panel_actions.push(action);
+                        }
                     }
                     RightDrawerGroup::Chat => {
                         self.draw_claude_tab(ui);
@@ -5278,6 +5393,13 @@ impl PhotonicApp {
                     });
             }
         }
+
+        // ── Per-frame tab bookkeeping + autosave ─────────────────────────────
+        // Refresh the active tab's title/dirty from this frame's edits, then run
+        // the autosave timer (writes titled docs to disk + untitled docs to the
+        // recovery folder when the interval elapses).
+        self.sync_active_tab_meta(doc, doc_modified);
+        self.run_autosave(ctx, doc, history);
 
         doc_modified
     }

@@ -58,6 +58,14 @@ pub struct AppPreferences {
     /// Arrow-key nudge distance in document pixels (Shift multiplies by 10).
     #[serde(default = "default_nudge_distance")]
     pub nudge_distance: f64,
+    /// Periodically write open documents to disk on a timer. On for titled files
+    /// (recorded on an "Autosave" history branch) and untitled files (to a
+    /// recovery folder). See the autosave loop in `app::PhotonicApp::draw`.
+    #[serde(default = "default_true")]
+    pub autosave_enabled: bool,
+    /// Seconds between autosave passes. Default 5 minutes.
+    #[serde(default = "default_autosave_interval_secs")]
+    pub autosave_interval_secs: f64,
 
     // HISTORY — bound on the project undo/redo history persisted in the .photon
     // file. The user picks the unit: a step count, or a serialized-size budget
@@ -132,6 +140,10 @@ fn default_nudge_distance() -> f64 {
     1.0
 }
 
+fn default_autosave_interval_secs() -> f64 {
+    300.0
+}
+
 fn default_open_drawer() -> Option<DrawerGroup> {
     Some(DrawerGroup::Tools)
 }
@@ -204,6 +216,8 @@ impl Default for AppPreferences {
             default_stroke_width: 1.0,
             console_open_on_start: false,
             nudge_distance: 1.0,
+            autosave_enabled: true,
+            autosave_interval_secs: 300.0,
             history_limit_mode: HistoryLimitMode::Size,
             history_max_steps: 200,
             history_max_mb: 50.0,

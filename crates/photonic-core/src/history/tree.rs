@@ -23,6 +23,8 @@ pub struct HistoryGraphNode {
     pub children: Vec<u64>,
     /// The child redo prefers (used to drive the redo button / primary chain).
     pub primary_child: Option<u64>,
+    /// User-given name for this state, if any (a labeled commit == a named branch).
+    pub label: Option<String>,
     pub description: String,
     pub is_current: bool,
     pub is_root: bool,
@@ -42,6 +44,7 @@ impl CommandHistory {
                 command: None,
                 children: vec![],
                 primary_child: None,
+                label: None,
             },
         );
         self.root = 0;
@@ -66,6 +69,7 @@ impl CommandHistory {
                     command: Some(cmd),
                     children: vec![],
                     primary_child: None,
+                    label: None,
                 },
             );
             if let Some(p) = self.nodes.get_mut(&parent) {
@@ -88,6 +92,7 @@ impl CommandHistory {
                     command: Some(cmd),
                     children: vec![],
                     primary_child: None,
+                    label: None,
                 },
             );
             if let Some(p) = self.nodes.get_mut(&tip) {
@@ -269,6 +274,7 @@ impl CommandHistory {
                 parent: n.parent,
                 children: n.children.clone(),
                 primary_child: n.primary_child.or_else(|| n.children.last().copied()),
+                label: n.label.clone(),
                 description: n
                     .command
                     .as_ref()

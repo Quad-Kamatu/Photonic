@@ -289,23 +289,29 @@ pub struct RecentEntry {
     pub name: String,
 }
 
+/// The fully-resolved parameters chosen in the new-document flow, ready to be
+/// turned into a [`photonic_core::Document`]. Produced by [`NewDocumentForm`] and
+/// consumed identically by the welcome screen and the in-editor File ▸ New modal.
+#[derive(Debug, Clone)]
+pub struct NewDocumentSpec {
+    pub name: String,
+    /// Final canvas dimensions in pixels.
+    pub width: f64,
+    pub height: f64,
+    /// Print bleed in millimetres (0 = none).
+    pub bleed_mm: f64,
+    /// Print slug area in millimetres (0 = none).
+    pub slug_mm: f64,
+    /// Uniform safe-area margin inset on all four sides, in pixels (0 = none).
+    pub margin: f64,
+    /// Number of same-size artboards to create, laid out in a grid (>= 1).
+    pub artboards: usize,
+    /// Per-document edit-history size cap in MB (#195).
+    pub history_max_mb: f64,
+}
+
 pub enum WelcomeAction {
-    CreateNew {
-        name: String,
-        /// Final canvas dimensions in pixels.
-        width: f64,
-        height: f64,
-        /// Print bleed in millimetres (0 = none).
-        bleed_mm: f64,
-        /// Print slug area in millimetres (0 = none).
-        slug_mm: f64,
-        /// Uniform safe-area margin inset on all four sides, in pixels (0 = none).
-        margin: f64,
-        /// Number of same-size artboards to create, laid out in a grid (>= 1).
-        artboards: usize,
-        /// Per-document edit-history size cap in MB (#195).
-        history_max_mb: f64,
-    },
+    CreateNew(NewDocumentSpec),
     OpenFile(PathBuf),
     OpenBrowse,
     /// Prompt for a folder to add as a disk-search root.
@@ -353,19 +359,16 @@ enum WelcomeView {
     Open,
 }
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// ─── New-document form (shared component) ───────────────────────────────────────
 
-pub struct WelcomeState {
+/// The reusable new-document flow: a searchable size catalog, a custom-size box,
+/// print/output options, a name field, and a Create button. Rendered both by the
+/// welcome screen's New Canvas panel and by the in-editor File ▸ New modal, so the
+/// two stay identical by construction rather than by copy-paste.
+pub struct NewDocumentForm {
     pub doc_name: String,
     pub width: f64,
     pub height: f64,
-    pub recent: Vec<RecentEntry>,
-    view: WelcomeView,
-    /// Frame-clock time (`input.time`) at which the screen first drew — anchors
-    /// the one-shot entrance reveal.
-    appeared_at: Option<f64>,
-    thumbs: Thumbnailer,
-    // ── New Canvas advanced options ──
     unit: SizeUnit,
     dpi: f64,
     bleed_mm: f64,
@@ -375,25 +378,20 @@ pub struct WelcomeState {
     /// Per-document history size cap (MB) for the new file (#195).
     history_mb: f64,
     size_search: String,
-    // ── Open panel ──
-    open_tab: OpenTab,
-    disk_roots: Vec<PathBuf>,
-    disk_filter: String,
-    disk: crate::disk_search::DiskScanner,
-    /// Whether the disk tab has kicked off its first scan this session.
-    disk_scanned: bool,
 }
 
-impl WelcomeState {
+impl Default for NewDocumentForm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NewDocumentForm {
     pub fn new() -> Self {
         Self {
             doc_name: "Untitled".to_string(),
             width: 1123.0,
             height: 794.0,
-            recent: load_recent(),
-            view: WelcomeView::Hub,
-            appeared_at: None,
-            thumbs: Thumbnailer::new(),
             unit: SizeUnit::Px,
             dpi: 300.0,
             bleed_mm: 0.0,
@@ -402,229 +400,44 @@ impl WelcomeState {
             num_artboards: 1,
             history_mb: 50.0,
             size_search: String::new(),
-            open_tab: OpenTab::Recent,
-            disk_roots: load_disk_roots(),
-            disk_filter: String::new(),
-            disk: crate::disk_search::DiskScanner::new(),
-            disk_scanned: false,
         }
     }
 
-    /// Add a folder as a disk-search root (deduped), persist, and rescan.
-    pub fn add_disk_root(&mut self, path: PathBuf) {
-        if !self.disk_roots.contains(&path) {
-            self.disk_roots.push(path);
-            save_disk_roots(&self.disk_roots);
-            self.disk.rescan(self.disk_roots.clone(), false);
-            self.disk_scanned = true;
+    /// Assemble the current field values into a [`NewDocumentSpec`], normalising an
+    /// empty/whitespace name to "Untitled".
+    fn build_spec(&self) -> NewDocumentSpec {
+        let name = self.doc_name.trim();
+        let name = if name.is_empty() { "Untitled" } else { name };
+        NewDocumentSpec {
+            name: name.to_string(),
+            width: self.width,
+            height: self.height,
+            bleed_mm: self.bleed_mm,
+            slug_mm: self.slug_mm,
+            margin: self.margin,
+            artboards: self.num_artboards,
+            history_max_mb: self.history_mb,
         }
     }
 
-    /// Record a file in the recent list (modifies in-memory + saves to disk).
-    pub fn add_recent(&mut self, path: PathBuf, name: String) {
-        self.recent.retain(|e| e.path != path);
-        self.recent.insert(0, RecentEntry { path, name });
-        self.recent.truncate(MAX_RECENT);
-        save_recent(&self.recent);
-    }
-
-    /// Draw the welcome screen, returning an action if the user made a choice.
-    pub fn draw(&mut self, ctx: &egui::Context) -> Option<WelcomeAction> {
-        // The welcome screen is always dark, regardless of the app's light/dark
-        // preference — otherwise egui widgets (fields, buttons) would render light
-        // over the dark background.
-        ctx.set_visuals(crate::theme::build_dark_theme());
-        let t = ctx.input(|i| i.time);
-        let appeared = *self.appeared_at.get_or_insert(t);
-        let elapsed = (t - appeared) as f32;
-        // Repaint every frame so the animated Lightfall background advances.
-        ctx.request_repaint();
-        // Upload any thumbnails that finished rendering since last frame.
-        self.thumbs.pump(ctx);
-        // Drain any disk-search results found since last frame.
-        self.disk.pump();
-
-        let mut action: Option<WelcomeAction> = None;
-        let mut next_view: Option<WelcomeView> = None;
-
-        // ── Global keyboard shortcuts ────────────────────────────────────────
-        ctx.input(|i| {
-            use egui::Key;
-            match self.view {
-                WelcomeView::Hub => {
-                    if i.key_pressed(Key::N) {
-                        next_view = Some(WelcomeView::NewCanvas);
-                    }
-                    if i.key_pressed(Key::O) {
-                        next_view = Some(WelcomeView::Open);
-                    }
-                }
-                _ => {
-                    if i.key_pressed(Key::Escape) {
-                        next_view = Some(WelcomeView::Hub);
-                    }
-                }
-            }
-        });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG_BASE))
-            .show(ctx, |ui| {
-                let full = ui.max_rect();
-                // Animated Lightfall shader background (real fullscreen GPU pass
-                // behind the UI). Falls back to BG_BASE if not installed.
-                crate::lightfall::paint(ui, full, t as f32);
-                // Dark gradient over the whole background, plus an extra radial
-                // scrim in the centre so text + boxes read clearly.
-                paint_bg_gradient(ui.painter(), full);
-                paint_center_scrim(ui.painter(), full);
-
-                match self.view {
-                    WelcomeView::Hub => {
-                        self.draw_hub(ui, ctx, elapsed, &mut next_view);
-                    }
-                    WelcomeView::NewCanvas => {
-                        self.draw_new(ui, ctx, &mut action, &mut next_view);
-                    }
-                    WelcomeView::Open => {
-                        self.draw_open(ui, ctx, &mut action, &mut next_view);
-                    }
-                }
-            });
-
-        if let Some(v) = next_view {
-            self.view = v;
-            ctx.request_repaint();
-        }
-        action
-    }
-
-    // ── Hub: the landing fork ────────────────────────────────────────────────
-
-    fn draw_hub(
+    /// Draw the form body — name field, the two option containers, and the Create
+    /// button — inside the caller-provided width. `opacity` drives an optional
+    /// entrance fade (pass 1.0 for no fade). Returns a spec when the user commits
+    /// (Create clicked or Enter pressed).
+    pub fn draw(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
-        elapsed: f32,
-        next_view: &mut Option<WelcomeView>,
-    ) {
-        // Staggered reveal: each element fades + drifts up off one shared clock.
-        let r_word = reveal(elapsed, 0.00, 0.55);
-        let r_sub = reveal(elapsed, 0.10, 0.55);
-        let r_card1 = reveal(elapsed, 0.20, 0.55);
-        let r_card2 = reveal(elapsed, 0.28, 0.55);
-
-        let avail = ui.available_height();
-        ui.add_space(avail * 0.18);
-
-        // Wordmark + subtitle.
-        ui.vertical_centered(|ui| {
-            let p = ui.painter();
-            let cx = ui.max_rect().center().x;
-            let y = ui.cursor().top();
-            text_shadow(
-                p,
-                Pos2::new(cx, y + lift(r_word)),
-                Align2::CENTER_TOP,
-                "PHOTONIC",
-                FontId::proportional(40.0),
-                fade(ACCENT, r_word),
-            );
-        });
-        ui.add_space(46.0);
-        ui.vertical_centered(|ui| {
-            let p = ui.painter();
-            let cx = ui.max_rect().center().x;
-            let y = ui.cursor().top();
-            text_shadow(
-                p,
-                Pos2::new(cx, y + lift(r_sub)),
-                Align2::CENTER_TOP,
-                "a modern graphics studio",
-                FontId::proportional(13.5),
-                fade(TEXT_MUTED, r_sub),
-            );
-        });
-        ui.add_space(54.0);
-
-        // Two hero cards, centered.
-        let card_w = 218.0;
-        let card_h = 158.0;
-        let gap = 22.0;
-        let recent_hint = if self.recent.is_empty() {
-            "Pick up where you left off".to_string()
-        } else if self.recent.len() == 1 {
-            "1 recent document".to_string()
-        } else {
-            format!("{} recent documents", self.recent.len())
-        };
-
-        ui.vertical_centered(|ui| {
-            ui.set_max_width(card_w * 2.0 + gap);
-            ui.horizontal(|ui| {
-                if hero_card(
-                    ui,
-                    ctx,
-                    "hub_new",
-                    Vec2::new(card_w, card_h),
-                    ph::SPARKLE,
-                    "New Canvas",
-                    "Start something blank",
-                    r_card1,
-                ) {
-                    *next_view = Some(WelcomeView::NewCanvas);
-                }
-                ui.add_space(gap);
-                if hero_card(
-                    ui,
-                    ctx,
-                    "hub_open",
-                    Vec2::new(card_w, card_h),
-                    ph::CLOCK_COUNTER_CLOCKWISE,
-                    "Open",
-                    &recent_hint,
-                    r_card2,
-                ) {
-                    *next_view = Some(WelcomeView::Open);
-                }
-            });
-        });
-
-        // Quiet hint strip at the very bottom.
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height().max(20.0) - 38.0);
-            ui.scope(|ui| {
-                ui.set_opacity(r_card2 * 0.8);
-                ui.label(
-                    RichText::new("N  new canvas      O  open")
-                        .size(11.0)
-                        .color(TEXT_MUTED),
-                );
-            });
-        });
-    }
-
-    // ── New Canvas panel ─────────────────────────────────────────────────────
-
-    fn draw_new(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        action: &mut Option<WelcomeAction>,
-        next_view: &mut Option<WelcomeView>,
-    ) {
-        let anim = ctx.animate_bool_with_time(egui::Id::new("welcome_anim_new"), true, 0.18);
-        panel_chrome(ui, ctx, "New canvas", next_view);
-
-        // Fill most of the screen: a centered name on top, two large separate
-        // containers side by side, and a centered Create button below.
-        let panel_w = (ui.available_width() - 56.0).clamp(620.0, 1280.0);
+        panel_w: f32,
+        opacity: f32,
+    ) -> Option<NewDocumentSpec> {
+        let mut spec = None;
         ui.add_space(6.0);
         ui.vertical_centered(|ui| {
             ui.set_max_width(panel_w);
             ui.scope(|ui| {
-                ui.set_opacity(anim);
-                ui.add_space(lift(anim));
+                ui.set_opacity(opacity);
+                ui.add_space(lift(opacity));
 
                 // ── Name (centered, on top, in its own distinct container) ───
                 let name_w = (panel_w * 0.46).min(560.0);
@@ -724,21 +537,11 @@ impl WelcomeState {
                     },
                 );
                 if create || enter {
-                    let name = self.doc_name.trim();
-                    let name = if name.is_empty() { "Untitled" } else { name };
-                    *action = Some(WelcomeAction::CreateNew {
-                        name: name.to_string(),
-                        width: self.width,
-                        height: self.height,
-                        bleed_mm: self.bleed_mm,
-                        slug_mm: self.slug_mm,
-                        margin: self.margin,
-                        artboards: self.num_artboards,
-                        history_max_mb: self.history_mb,
-                    });
+                    spec = Some(self.build_spec());
                 }
             });
         });
+        spec
     }
 
     /// Left container: a searchable size catalog (scrolling) above a visually
@@ -998,6 +801,258 @@ impl WelcomeState {
                 }
             });
         });
+    }
+}
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+pub struct WelcomeState {
+    /// The shared new-document flow (size catalog, options, name) — identical to
+    /// the one used by the in-editor File ▸ New modal.
+    form: NewDocumentForm,
+    pub recent: Vec<RecentEntry>,
+    view: WelcomeView,
+    /// Frame-clock time (`input.time`) at which the screen first drew — anchors
+    /// the one-shot entrance reveal.
+    appeared_at: Option<f64>,
+    thumbs: Thumbnailer,
+    // ── Open panel ──
+    open_tab: OpenTab,
+    disk_roots: Vec<PathBuf>,
+    disk_filter: String,
+    disk: crate::disk_search::DiskScanner,
+    /// Whether the disk tab has kicked off its first scan this session.
+    disk_scanned: bool,
+}
+
+impl WelcomeState {
+    pub fn new() -> Self {
+        Self {
+            form: NewDocumentForm::new(),
+            recent: load_recent(),
+            view: WelcomeView::Hub,
+            appeared_at: None,
+            thumbs: Thumbnailer::new(),
+            open_tab: OpenTab::Recent,
+            disk_roots: load_disk_roots(),
+            disk_filter: String::new(),
+            disk: crate::disk_search::DiskScanner::new(),
+            disk_scanned: false,
+        }
+    }
+
+    /// Add a folder as a disk-search root (deduped), persist, and rescan.
+    pub fn add_disk_root(&mut self, path: PathBuf) {
+        if !self.disk_roots.contains(&path) {
+            self.disk_roots.push(path);
+            save_disk_roots(&self.disk_roots);
+            self.disk.rescan(self.disk_roots.clone(), false);
+            self.disk_scanned = true;
+        }
+    }
+
+    /// Record a file in the recent list (modifies in-memory + saves to disk).
+    pub fn add_recent(&mut self, path: PathBuf, name: String) {
+        self.recent.retain(|e| e.path != path);
+        self.recent.insert(0, RecentEntry { path, name });
+        self.recent.truncate(MAX_RECENT);
+        save_recent(&self.recent);
+    }
+
+    /// Draw the welcome screen, returning an action if the user made a choice.
+    pub fn draw(&mut self, ctx: &egui::Context) -> Option<WelcomeAction> {
+        // The welcome screen is always dark, regardless of the app's light/dark
+        // preference — otherwise egui widgets (fields, buttons) would render light
+        // over the dark background.
+        ctx.set_visuals(crate::theme::build_dark_theme());
+        let t = ctx.input(|i| i.time);
+        let appeared = *self.appeared_at.get_or_insert(t);
+        let elapsed = (t - appeared) as f32;
+        // Repaint every frame so the animated Lightfall background advances.
+        ctx.request_repaint();
+        // Upload any thumbnails that finished rendering since last frame.
+        self.thumbs.pump(ctx);
+        // Drain any disk-search results found since last frame.
+        self.disk.pump();
+
+        let mut action: Option<WelcomeAction> = None;
+        let mut next_view: Option<WelcomeView> = None;
+
+        // ── Global keyboard shortcuts ────────────────────────────────────────
+        ctx.input(|i| {
+            use egui::Key;
+            match self.view {
+                WelcomeView::Hub => {
+                    if i.key_pressed(Key::N) {
+                        next_view = Some(WelcomeView::NewCanvas);
+                    }
+                    if i.key_pressed(Key::O) {
+                        next_view = Some(WelcomeView::Open);
+                    }
+                }
+                _ => {
+                    if i.key_pressed(Key::Escape) {
+                        next_view = Some(WelcomeView::Hub);
+                    }
+                }
+            }
+        });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(BG_BASE))
+            .show(ctx, |ui| {
+                let full = ui.max_rect();
+                // Animated Lightfall shader background (real fullscreen GPU pass
+                // behind the UI). Falls back to BG_BASE if not installed.
+                crate::lightfall::paint(ui, full, t as f32);
+                // Dark gradient over the whole background, plus an extra radial
+                // scrim in the centre so text + boxes read clearly.
+                paint_bg_gradient(ui.painter(), full);
+                paint_center_scrim(ui.painter(), full);
+
+                match self.view {
+                    WelcomeView::Hub => {
+                        self.draw_hub(ui, ctx, elapsed, &mut next_view);
+                    }
+                    WelcomeView::NewCanvas => {
+                        self.draw_new(ui, ctx, &mut action, &mut next_view);
+                    }
+                    WelcomeView::Open => {
+                        self.draw_open(ui, ctx, &mut action, &mut next_view);
+                    }
+                }
+            });
+
+        if let Some(v) = next_view {
+            self.view = v;
+            ctx.request_repaint();
+        }
+        action
+    }
+
+    // ── Hub: the landing fork ────────────────────────────────────────────────
+
+    fn draw_hub(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        elapsed: f32,
+        next_view: &mut Option<WelcomeView>,
+    ) {
+        // Staggered reveal: each element fades + drifts up off one shared clock.
+        let r_word = reveal(elapsed, 0.00, 0.55);
+        let r_sub = reveal(elapsed, 0.10, 0.55);
+        let r_card1 = reveal(elapsed, 0.20, 0.55);
+        let r_card2 = reveal(elapsed, 0.28, 0.55);
+
+        let avail = ui.available_height();
+        ui.add_space(avail * 0.18);
+
+        // Wordmark + subtitle.
+        ui.vertical_centered(|ui| {
+            let p = ui.painter();
+            let cx = ui.max_rect().center().x;
+            let y = ui.cursor().top();
+            text_shadow(
+                p,
+                Pos2::new(cx, y + lift(r_word)),
+                Align2::CENTER_TOP,
+                "PHOTONIC",
+                FontId::proportional(40.0),
+                fade(ACCENT, r_word),
+            );
+        });
+        ui.add_space(46.0);
+        ui.vertical_centered(|ui| {
+            let p = ui.painter();
+            let cx = ui.max_rect().center().x;
+            let y = ui.cursor().top();
+            text_shadow(
+                p,
+                Pos2::new(cx, y + lift(r_sub)),
+                Align2::CENTER_TOP,
+                "a modern graphics studio",
+                FontId::proportional(13.5),
+                fade(TEXT_MUTED, r_sub),
+            );
+        });
+        ui.add_space(54.0);
+
+        // Two hero cards, centered.
+        let card_w = 218.0;
+        let card_h = 158.0;
+        let gap = 22.0;
+        let recent_hint = if self.recent.is_empty() {
+            "Pick up where you left off".to_string()
+        } else if self.recent.len() == 1 {
+            "1 recent document".to_string()
+        } else {
+            format!("{} recent documents", self.recent.len())
+        };
+
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(card_w * 2.0 + gap);
+            ui.horizontal(|ui| {
+                if hero_card(
+                    ui,
+                    ctx,
+                    "hub_new",
+                    Vec2::new(card_w, card_h),
+                    ph::SPARKLE,
+                    "New Canvas",
+                    "Start something blank",
+                    r_card1,
+                ) {
+                    *next_view = Some(WelcomeView::NewCanvas);
+                }
+                ui.add_space(gap);
+                if hero_card(
+                    ui,
+                    ctx,
+                    "hub_open",
+                    Vec2::new(card_w, card_h),
+                    ph::CLOCK_COUNTER_CLOCKWISE,
+                    "Open",
+                    &recent_hint,
+                    r_card2,
+                ) {
+                    *next_view = Some(WelcomeView::Open);
+                }
+            });
+        });
+
+        // Quiet hint strip at the very bottom.
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height().max(20.0) - 38.0);
+            ui.scope(|ui| {
+                ui.set_opacity(r_card2 * 0.8);
+                ui.label(
+                    RichText::new("N  new canvas      O  open")
+                        .size(11.0)
+                        .color(TEXT_MUTED),
+                );
+            });
+        });
+    }
+
+    // ── New Canvas panel ─────────────────────────────────────────────────────
+
+    fn draw_new(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        action: &mut Option<WelcomeAction>,
+        next_view: &mut Option<WelcomeView>,
+    ) {
+        let anim = ctx.animate_bool_with_time(egui::Id::new("welcome_anim_new"), true, 0.18);
+        panel_chrome(ui, ctx, "New canvas", next_view);
+
+        // The size catalog, options, and Create button are the shared new-document
+        // form -- identical to the File > New modal shown inside the editor.
+        let panel_w = (ui.available_width() - 56.0).clamp(620.0, 1280.0);
+        if let Some(spec) = self.form.draw(ui, ctx, panel_w, anim) {
+            *action = Some(WelcomeAction::CreateNew(spec));
+        }
     }
 
     // ── Open panel ───────────────────────────────────────────────────────────

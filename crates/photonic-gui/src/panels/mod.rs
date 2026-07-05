@@ -12,7 +12,7 @@ use photonic_core::{
 };
 use uuid::Uuid;
 
-use crate::color_edit::{srgb_color_edit, srgb_f32_color_edit};
+use crate::color_popup::ColorPopup;
 use crate::radial_wheel::WheelAction;
 use crate::tools::Tool;
 
@@ -318,6 +318,28 @@ pub enum PanelAction {
     },
     /// Rename a layer.
     RenameLayer { layer_id: LayerId, name: String },
+    /// Open a floating color picker for a path node's fill (`stroke = false`) or
+    /// stroke (`stroke = true`) solid color. Raised from the radial menu.
+    OpenColorPopup { node_id: NodeId, stroke: bool },
+    /// Delete a layer and all the nodes it contains (undoable). Refuses to
+    /// remove the last remaining layer.
+    DeleteLayer { layer_id: LayerId },
+    /// Show or hide an entire layer.
+    SetLayerVisible { layer_id: LayerId, visible: bool },
+    /// Lock or unlock an entire layer (prevents selecting its contents).
+    SetLayerLocked { layer_id: LayerId, locked: bool },
+    /// Create a new empty group ("sublayer") nesting container. When a group is
+    /// selected it is nested inside that group; otherwise it lands at the top of
+    /// the active layer.
+    AddSublayer,
+    /// Add a layer mask using the smartest interpretation for the current
+    /// selection: a raster alpha mask on a selected raster node, otherwise a
+    /// clipping mask built from the current multi-selection (top object clips).
+    AddLayerMaskSmart,
+    /// Create a non-destructive adjustment layer of the given kind (MCP
+    /// adjustment vocabulary, e.g. "brightness_contrast", "invert") at the top
+    /// of the active layer, with sensible default parameters.
+    AddAdjustmentLayer { kind: String },
     /// Align or distribute selected nodes.
     /// `operation`: left/center_horizontal/right/top/center_vertical/bottom/distribute_horizontal/distribute_vertical
     /// `key_object_id`: when set, align relative to this node's bounds (key object is not moved)
@@ -659,12 +681,15 @@ pub enum PanelAction {
     ApplySpotColor { node_id: NodeId, color_name: String },
     /// Delete a spot color.
     DeleteSpotColor { name: String },
-    /// Save the current document as a named branch.
+    /// Name the current history state (label the HEAD commit).
     BranchCreate { name: String },
-    /// Switch to a named branch (replace document).
+    /// Jump to a named state (non-destructive; navigates the edit tree).
     BranchSwitch { name: String },
-    /// Delete a named branch.
+    /// Remove a named state's name (deletes the label, keeps the commit).
     BranchDelete { name: String },
+    /// Set or clear a specific commit's name — `None` clears it. Drives the
+    /// commit-graph right-click "Name this state…" / "Remove name".
+    LabelHistoryNode { id: u64, name: Option<String> },
     /// Make a clipping mask from a group node (topmost child becomes clip path).
     MakeClippingMask { group_id: NodeId },
     /// Release the clipping mask from a group node.
@@ -880,6 +905,14 @@ impl PanelAction {
                 Self::ConvertToGrayscale { node_ids: vec![] }
             }
             WheelAction::UngroupNode(id) => Self::UngroupNode { node_id: id },
+            WheelAction::EditFillColor(id) => Self::OpenColorPopup {
+                node_id: id,
+                stroke: false,
+            },
+            WheelAction::EditStrokeColor(id) => Self::OpenColorPopup {
+                node_id: id,
+                stroke: true,
+            },
         }
     }
 }
@@ -970,7 +1003,6 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) rmbg_model_cached: bool,
     pub(crate) composition_findings: &'a [String],
     pub(crate) rhythm_findings: &'a [String],
-    pub(crate) branch_names: &'a [String],
     pub(crate) branch_name_input: &'a mut String,
     pub(crate) swatch_library_selected: &'a mut String,
     pub(crate) graphic_style_name_input: &'a mut String,
@@ -986,6 +1018,9 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) history_graph: &'a [photonic_core::history::HistoryGraphNode],
     /// The HEAD node id in the edit tree.
     pub(crate) history_current: u64,
+    /// The history node id matching the on-disk file, if saved — drives the
+    /// "Last Save" marker in the commit graph. `None` for never-saved documents.
+    pub(crate) history_last_saved: Option<u64>,
     /// Document-tab import/export settings (#176).
     pub(crate) doc_export: &'a mut crate::app::DocExportSettings,
     pub(crate) bleed_mm_input: &'a mut f64,
@@ -1153,10 +1188,17 @@ pub(crate) fn draw_drawer(
     // ── Search bar ────────────────────────────────────────────────
     // Filters the section headers within the *open* drawer (each section fn
     // honours `ctx.q` / `ctx.forced_open`).
+    // On the History drawer the query filters history entries + branches, not
+    // property sections — so label it accordingly.
+    let search_hint = if group == DrawerGroup::History {
+        "Search history…"
+    } else {
+        "Search properties…"
+    };
     ui.horizontal(|ui| {
         let response = ui.add(
             egui::TextEdit::singleline(&mut *ctx.prop_search)
-                .hint_text("Search properties…")
+                .hint_text(search_hint)
                 .desired_width(ui.available_width() - 24.0),
         );
         if !ctx.prop_search.is_empty()
@@ -1242,8 +1284,9 @@ pub(crate) fn draw_drawer(
             draw_workspaces(ui, ctx);
         }
         DrawerGroup::History => {
+            // Named branches are now labels on commits in the graph itself — the
+            // separate "Branches" accordion has been retired.
             draw_edit_history(ui, ctx);
-            draw_branches(ui, ctx);
         }
         // Tools is rendered by the app layer (it needs tool state, not the
         // property ctx), so it is never routed through draw_drawer.

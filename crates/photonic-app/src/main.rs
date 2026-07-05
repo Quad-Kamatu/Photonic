@@ -529,6 +529,15 @@ impl ApplicationHandler for PhotonicWinitApp {
 
         match event {
             WindowEvent::CloseRequested => {
+                // If the GUI holds unsaved work, defer the quit and let it show the
+                // Save all / Discard all / Cancel prompt. The GUI sets
+                // `close_confirmed` once the user resolves it, which we act on in
+                // the RedrawRequested arm below.
+                if state.gui.has_unsaved_changes() {
+                    state.gui.close_requested = true;
+                    state.window.request_redraw();
+                    return;
+                }
                 info!("Window closed");
                 self.window_state.update_normal_bounds(&state.window);
                 self.window_state.maximized = state.window.is_maximized();
@@ -548,6 +557,26 @@ impl ApplicationHandler for PhotonicWinitApp {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
+                // A deferred quit (unsaved-changes prompt) may have been confirmed
+                // by the GUI this frame — finalize window state + prefs and exit.
+                let exit_window = self.state.as_ref().and_then(|s| {
+                    if s.gui.close_confirmed {
+                        Some(s.window.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(win) = exit_window {
+                    info!("Quit confirmed after unsaved-changes prompt");
+                    if let Some(s) = &self.state {
+                        s.gui.prefs.save();
+                    }
+                    self.window_state.update_normal_bounds(&win);
+                    self.window_state.maximized = win.is_maximized();
+                    self.window_state.save();
+                    event_loop.exit();
+                    return;
+                }
                 if let Some(s) = &self.state {
                     s.window.request_redraw();
                 }

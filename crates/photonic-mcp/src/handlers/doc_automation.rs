@@ -368,44 +368,44 @@ pub async fn delete_action(state: &AppState, args: DeleteActionArgs) -> ToolResu
 /// Save current document state as a named branch.
 pub async fn branch_create(state: &AppState, args: BranchCreateArgs) -> ToolResult {
     tracing::debug!("tool: branch_create");
-    let doc = state.document.lock().await;
+    // A named branch is a label on the current history commit (non-destructive).
     let mut history = state.history.lock().await;
-    history.branch_create(args.name.clone(), &doc);
-    ToolResult::text(format!("Branch '{}' saved.", args.name))
+    history.branch_create(args.name.clone());
+    ToolResult::text(format!("Named the current state '{}'.", args.name))
         .with_data(json!({ "name": args.name }))
 }
 
-/// List all named branches.
+/// List all named states (labeled commits).
 pub async fn branch_list(state: &AppState) -> ToolResult {
     tracing::debug!("tool: branch_list");
     let history = state.history.lock().await;
     let names = history.branch_list();
-    ToolResult::text(format!("{} branch(es).", names.len())).with_data(json!({ "branches": names }))
+    ToolResult::text(format!("{} named state(s).", names.len()))
+        .with_data(json!({ "branches": names }))
 }
 
-/// Switch to a named branch — restores that document snapshot.
+/// Switch to a named state — a non-destructive jump to that commit (the whole
+/// edit tree is preserved and the jump is reversible).
 pub async fn branch_switch(state: &AppState, args: BranchSwitchArgs) -> ToolResult {
     tracing::debug!("tool: branch_switch");
     let mut history = state.history.lock().await;
-    match history.branch_switch(&args.name) {
-        Some(snapshot) => {
-            let mut doc = state.document.lock().await;
-            *doc = snapshot;
-            ToolResult::text(format!("Switched to branch '{}'.", args.name))
-                .with_data(json!({ "name": args.name }))
-        }
-        None => ToolResult::error(format!("No branch named '{}' found.", args.name)),
+    let mut doc = state.document.lock().await;
+    if history.branch_switch(&args.name, &mut doc) {
+        ToolResult::text(format!("Jumped to named state '{}'.", args.name))
+            .with_data(json!({ "name": args.name }))
+    } else {
+        ToolResult::error(format!("No state named '{}' found.", args.name))
     }
 }
 
-/// Delete a named branch.
+/// Delete a named state (removes the label; the commit itself stays in the tree).
 pub async fn branch_delete(state: &AppState, args: BranchDeleteArgs) -> ToolResult {
     tracing::debug!("tool: branch_delete");
     let mut history = state.history.lock().await;
     if history.branch_delete(&args.name) {
-        ToolResult::text(format!("Deleted branch '{}'.", args.name))
+        ToolResult::text(format!("Removed name '{}'.", args.name))
     } else {
-        ToolResult::error(format!("No branch named '{}' found.", args.name))
+        ToolResult::error(format!("No state named '{}' found.", args.name))
     }
 }
 

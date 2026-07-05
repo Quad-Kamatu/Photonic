@@ -2405,23 +2405,9 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                 .small()
                                 .strong(),
                         );
-                        let mut c32 = egui::Color32::from_rgb(
-                            (current[0] * 255.0).round() as u8,
-                            (current[1] * 255.0).round() as u8,
-                            (current[2] * 255.0).round() as u8,
-                        );
-                        if egui::color_picker::color_picker_color32(
-                            ui,
-                            &mut c32,
-                            egui::color_picker::Alpha::Opaque,
-                        ) {
-                            current = [
-                                c32.r() as f32 / 255.0,
-                                c32.g() as f32 / 255.0,
-                                c32.b() as f32 / 255.0,
-                                e.original[3],
-                            ];
-                        }
+                        // Shared picker body; alpha preserved (Opaque), rgb
+                        // edited in place.
+                        ColorPopup::picker_body_simple(ui, &mut current, false);
                         ui.horizontal(|ui| {
                             if ui.button("Apply").clicked() {
                                 apply = true;
@@ -2527,7 +2513,7 @@ pub(crate) fn draw_tool_shape_options(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                     // `fill_color` is gamma-sRGB `[f32; 4]` (maps 1:1 into
                     // `Color`), so route it through the shared sRGBA picker to
                     // avoid the linear-`Rgba` swatch shift (issue #185).
-                    srgb_f32_color_edit(ui, fill_color);
+                    ColorPopup::swatch_f32(ui, fill_color);
                     if eyedropper_btn(ui) {
                         action = Some(PanelAction::StartEyedropper(EyedropperTarget::NewShapeFill));
                     }

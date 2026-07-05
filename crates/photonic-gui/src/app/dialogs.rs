@@ -1,6 +1,120 @@
 use super::*;
+use crate::welcome::NewDocumentSpec;
 
 impl PhotonicApp {
+    /// Build a fresh [`Document`] from a [`NewDocumentSpec`] (pure — no install).
+    /// Shared by the welcome screen's New Canvas panel and the File ▸ New modal.
+    pub(crate) fn build_document_from_spec(spec: NewDocumentSpec) -> Document {
+        let NewDocumentSpec {
+            name,
+            width,
+            height,
+            bleed_mm,
+            slug_mm,
+            margin,
+            artboards,
+            history_max_mb,
+        } = spec;
+        let mut new_doc = photonic_core::Document::new(name, width, height);
+        new_doc.bleed_mm = bleed_mm;
+        new_doc.slug_mm = slug_mm;
+        new_doc.history_max_mb = Some(history_max_mb);
+        new_doc.margin_top = margin;
+        new_doc.margin_right = margin;
+        new_doc.margin_bottom = margin;
+        new_doc.margin_left = margin;
+        // Multiple artboards: lay out N same-size boards in a grid.
+        if artboards > 1 {
+            let gap = (width * 0.06).max(40.0);
+            let cols = (artboards as f64).sqrt().ceil().max(1.0) as usize;
+            let mut boards = Vec::with_capacity(artboards);
+            for i in 0..artboards {
+                let col = (i % cols) as f64;
+                let row = (i / cols) as f64;
+                boards.push(photonic_core::Artboard::new(
+                    format!("Artboard {}", i + 1),
+                    col * (width + gap),
+                    row * (height + gap),
+                    width,
+                    height,
+                ));
+            }
+            new_doc.active_artboard = boards.first().map(|a| a.id);
+            new_doc.artboards = boards;
+        }
+        new_doc
+    }
+
+    /// Build a document from a spec and install it into the live document in place
+    /// (replacing it), resetting history/selection and queuing a viewport fit. Used
+    /// for the FIRST document created from the welcome screen (before any tab
+    /// exists); the in-editor File ▸ New opens a new tab via `open_in_new_tab`.
+    pub(crate) fn create_document_from_spec(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        spec: NewDocumentSpec,
+    ) {
+        *doc = Self::build_document_from_spec(spec);
+        // Fresh document — drop any prior project's history so it can't bleed in.
+        history.reset();
+        // Fit all artboards to the viewport on the next frame (once the real
+        // viewport rect is known).
+        self.fit_pending = true;
+        self.current_file = None;
+        self.selected_id = None;
+    }
+
+    /// In-editor File ▸ New modal — draws the shared new-document form in a centered
+    /// window. On commit it opens the new document in a **new tab** (leaving other
+    /// open documents untouched), and closes on Escape, the window's ✕, or after
+    /// creating. Returns `true` when a new document was created.
+    pub(crate) fn draw_new_document_modal(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        view: &mut CanvasView,
+        history: &mut CommandHistory,
+    ) -> bool {
+        let Some(form) = &mut self.new_document_modal else {
+            return false;
+        };
+
+        let screen = ctx.screen_rect();
+        let panel_w = (screen.width() * 0.72).clamp(560.0, 1160.0);
+        let mut open = true;
+        let mut spec: Option<NewDocumentSpec> = None;
+
+        egui::Window::new(RichText::new(format!("{}  New document", ph::FILE_PLUS)).size(16.0))
+            .id(egui::Id::new("new_document_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(panel_w);
+                // No entrance fade inside the modal (opacity 1.0).
+                spec = form.draw(ui, ctx, panel_w, 1.0);
+            });
+
+        // Escape dismisses the modal, matching the welcome screen's back gesture.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+
+        if let Some(spec) = spec {
+            let new_doc = Self::build_document_from_spec(spec);
+            self.open_in_new_tab(doc, history, view, new_doc, CommandHistory::default(), None);
+            self.new_document_modal = None;
+            self.file_status = Some("New document".into());
+            return true;
+        }
+        if !open {
+            self.new_document_modal = None;
+        }
+        false
+    }
+
     pub(crate) fn draw_export_modal(&mut self, ctx: &egui::Context, doc: &Document) {
         let Some(dlg) = &mut self.export_dialog else {
             return;
@@ -148,6 +262,149 @@ impl PhotonicApp {
             }
             Action::None => {}
         }
+    }
+
+    /// Floating fill/stroke color picker raised from the radial menu (path
+    /// nodes only). Edits apply live through history. Returns whether the
+    /// document changed this frame.
+    pub(crate) fn draw_color_popup(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        use photonic_core::style::FillKind;
+        let Some(popup) = self.color_popup else {
+            return false;
+        };
+
+        // Snapshot the target path node; close the popup if it vanished or is
+        // no longer a path. Owned clone so `doc` is free for `history.execute`.
+        let node = match doc.nodes.get(&popup.node_id) {
+            Some(n) if matches!(n.kind, SceneNodeKind::Path(_)) => n.clone(),
+            _ => {
+                self.color_popup = None;
+                return false;
+            }
+        };
+
+        // Seed the picker from the node's current fill/stroke color.
+        let seed = match (&node.kind, popup.stroke) {
+            (SceneNodeKind::Path(pn), true) => pn.stroke.color,
+            (SceneNodeKind::Path(pn), false) => match &pn.fill.kind {
+                FillKind::Solid(c) => *c,
+                _ => photonic_core::Color::WHITE,
+            },
+            _ => photonic_core::Color::WHITE,
+        };
+        let mut rgba = [seed.r, seed.g, seed.b, seed.a];
+
+        let title = if popup.stroke {
+            "Stroke Color"
+        } else {
+            "Fill Color"
+        };
+
+        // Feed the picker Photonic's recent colors + document swatches.
+        let recents: Vec<[f32; 4]> = doc
+            .recent_colors
+            .iter()
+            .map(|c| [c.r, c.g, c.b, c.a])
+            .collect();
+        let swatches: Vec<[f32; 4]> = doc
+            .color_swatches
+            .iter()
+            .filter_map(|s| crate::color_convert::parse_hex(&s.color_hex))
+            .collect();
+        let cfg = crate::color_popup::PickerConfig {
+            alpha: true,
+            recents: &recents,
+            swatches: &swatches,
+            eyedropper: true,
+            allow_add_swatch: true,
+            contrast_ref: None,
+        };
+
+        let mut open = true;
+        // Fold the anchor into the id so re-opening at a new spot spawns a fresh
+        // window there (then it stays draggable).
+        let out = crate::color_popup::ColorPopup::window(
+            ctx,
+            ("radial_color_popup", popup.pos.x as i32, popup.pos.y as i32),
+            title,
+            popup.pos,
+            &mut rgba,
+            &mut open,
+            &cfg,
+        );
+
+        let mut doc_modified = false;
+        if out.changed {
+            let new_color = photonic_core::Color {
+                r: rgba[0],
+                g: rgba[1],
+                b: rgba[2],
+                a: rgba[3],
+            };
+            let mut new_node = node.clone();
+            if let SceneNodeKind::Path(pn) = &mut new_node.kind {
+                if popup.stroke {
+                    pn.stroke.color = new_color;
+                    pn.stroke.enabled = true;
+                } else {
+                    pn.fill.kind = FillKind::Solid(new_color);
+                    pn.fill.enabled = true;
+                }
+            }
+            history.execute(
+                Command::UpdateNode {
+                    old: node,
+                    new: new_node,
+                },
+                doc,
+            );
+            doc_modified = true;
+        }
+
+        // "Add to swatches": append a document color swatch for the current color.
+        if let Some(c) = out.add_swatch {
+            let hex = crate::color_convert::format_hex(c, false);
+            if !doc.color_swatches.iter().any(|s| s.color_hex.eq_ignore_ascii_case(&hex)) {
+                let mut n = doc.color_swatches.len() + 1;
+                let name = loop {
+                    let cand = format!("Swatch {n}");
+                    if !doc.color_swatches.iter().any(|s| s.name == cand) {
+                        break cand;
+                    }
+                    n += 1;
+                };
+                doc.color_swatches
+                    .push(photonic_core::document::ColorSwatch::new(name, hex));
+                doc_modified = true;
+            }
+        }
+
+        // Eyedropper: hand off to the canvas sampler for this node's slot and
+        // close the picker so canvas clicks reach the sampler.
+        if out.eyedropper_clicked {
+            let target = if popup.stroke {
+                EyedropperTarget::NodeStroke {
+                    node_id: popup.node_id,
+                }
+            } else {
+                EyedropperTarget::NodeFillSolid {
+                    node_id: popup.node_id,
+                }
+            };
+            self.pending_panel_actions
+                .push(PanelAction::StartEyedropper(target));
+            self.color_popup = None;
+        }
+
+        if !open {
+            self.color_popup = None;
+        }
+        doc_modified
     }
 
     pub(crate) fn draw_simplify_dialog(

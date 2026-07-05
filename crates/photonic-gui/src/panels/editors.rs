@@ -141,7 +141,7 @@ pub(crate) fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<Fi
             let mut new_col = *col;
             let mut changed = false;
             ui.horizontal(|ui| {
-                if srgb_color_edit(ui, &mut new_col).changed() {
+                if ColorPopup::swatch_color(ui, &mut new_col).changed() {
                     changed = true;
                 }
                 if eyedropper_btn(ui) {
@@ -250,7 +250,7 @@ pub(crate) fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<Fi
                 let can_remove = stop_count > 2;
                 ui.horizontal(|ui| {
                     // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
-                    if srgb_color_edit(ui, &mut new_g.stops[i].color).changed() {
+                    if ColorPopup::swatch_color(ui, &mut new_g.stops[i].color).changed() {
                         stop_changed = true;
                     }
                     if eyedropper_btn(ui) {
@@ -305,7 +305,7 @@ pub(crate) fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<Fi
                 let mut pt_changed = false;
                 ui.horizontal(|ui| {
                     // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
-                    if srgb_color_edit(ui, &mut new_fg.points[i].color).changed() {
+                    if ColorPopup::swatch_color(ui, &mut new_fg.points[i].color).changed() {
                         pt_changed = true;
                     }
                     if eyedropper_btn(ui) {
@@ -382,7 +382,7 @@ pub(crate) fn draw_fill_editor(ui: &mut Ui, fill: &Fill, dropper: &mut Option<Fi
                                 let idx = (row * new_mg.cols + col) as usize;
                                 if let Some(v) = new_mg.vertices.get_mut(idx) {
                                     // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
-                                    if srgb_color_edit(ui, &mut v.color)
+                                    if ColorPopup::swatch_color(ui, &mut v.color)
                                         .on_hover_text(format!("({},{})", row, col))
                                         .changed()
                                     {
@@ -586,7 +586,7 @@ pub(crate) fn draw_stroke_editor(ui: &mut Ui, stroke: &Stroke, dropper: &mut boo
     if new_stroke.enabled {
         // Color — gamma-sRGB `Color` → shared sRGBA picker (issue #185).
         ui.horizontal(|ui| {
-            if srgb_color_edit(ui, &mut new_stroke.color).changed() {
+            if ColorPopup::swatch_color(ui, &mut new_stroke.color).changed() {
                 changed = true;
             }
             if eyedropper_btn(ui) {
@@ -856,7 +856,7 @@ pub(crate) fn draw_glow_editor(ui: &mut Ui, glow: &GlowEffect, dropper: &mut boo
         ui.horizontal(|ui| {
             ui.label("Color");
             // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
-            if srgb_color_edit(ui, &mut new_glow.color).changed() {
+            if ColorPopup::swatch_color(ui, &mut new_glow.color).changed() {
                 changed = true;
             }
             if eyedropper_btn(ui) {
@@ -929,7 +929,7 @@ pub(crate) fn draw_gaussian_glow_editor(
         ui.horizontal(|ui| {
             ui.label("Color");
             // Gamma-sRGB `Color` → shared sRGBA picker (issue #185).
-            if srgb_color_edit(ui, &mut new_glow.color).changed() {
+            if ColorPopup::swatch_color(ui, &mut new_glow.color).changed() {
                 changed = true;
             }
             if eyedropper_btn(ui) {

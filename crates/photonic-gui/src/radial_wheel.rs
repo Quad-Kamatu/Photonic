@@ -86,6 +86,8 @@ pub enum WheelAction {
     ConvertToGrayscale(NodeId),   // single-node context
     ConvertToGrayscaleSelected,   // multi-node context
     UngroupNode(NodeId),          // group context only
+    EditFillColor(NodeId),        // path nodes only — open a fill-color picker
+    EditStrokeColor(NodeId),      // path nodes only — open a stroke-color picker
 }
 
 // ── Menu item / category ────────────────────────────────────────────────────────
@@ -197,16 +199,27 @@ pub fn build_wheel_categories(ctx: &WheelContext) -> Vec<WheelCategory> {
                 },
             ];
 
-            let color = vec![
-                RadialMenuItem {
-                    label: "Invert",
-                    action: WheelAction::InvertColors(id),
-                },
-                RadialMenuItem {
-                    label: "Grayscale",
-                    action: WheelAction::ConvertToGrayscale(id),
-                },
-            ];
+            let mut color = Vec::new();
+            // Direct fill/stroke color editing applies only to path nodes (the
+            // solid-color update path is path-only); text/group get the filters.
+            if matches!(node_kind, WheelNodeKind::Path) {
+                color.push(RadialMenuItem {
+                    label: "Fill Color",
+                    action: WheelAction::EditFillColor(id),
+                });
+                color.push(RadialMenuItem {
+                    label: "Stroke Color",
+                    action: WheelAction::EditStrokeColor(id),
+                });
+            }
+            color.push(RadialMenuItem {
+                label: "Invert",
+                action: WheelAction::InvertColors(id),
+            });
+            color.push(RadialMenuItem {
+                label: "Grayscale",
+                action: WheelAction::ConvertToGrayscale(id),
+            });
 
             let mut cats = vec![
                 WheelCategory {

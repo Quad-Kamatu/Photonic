@@ -44,11 +44,10 @@ impl PhotonicApp {
                                         ui.label(RichText::new("Document").strong());
                                         ui.add_space(4.0);
                                         if ui.button("  New  ").clicked() {
-                                            *doc = Document::default_artboard();
-                                            history.reset();
-                                            self.current_file = None;
-                                            self.selected_id = None;
-                                            self.file_status = Some("New document".into());
+                                            // Open the same new-document flow as the
+                                            // welcome screen, as a modal over the canvas.
+                                            self.new_document_modal =
+                                                Some(crate::welcome::NewDocumentForm::new());
                                             self.active_drawer = None;
                                             self.selected_drawer_option = None;
                                         }
@@ -77,13 +76,12 @@ impl PhotonicApp {
                                                 match load_document(&path) {
                                                     Ok((loaded, hist_snap)) => {
                                                         self.welcome.add_recent(path.clone(), loaded.name.clone());
-                                                        *doc = loaded;
-                                                        apply_opened_history(history, hist_snap);
-                                                        self.fit_pending = true;
-                                                        self.selected_id = None;
-                                                        doc_modified = true;
+                                                        // Open in a NEW tab, leaving other docs untouched.
+                                                        let mut new_history = CommandHistory::default();
+                                                        apply_opened_history(&mut new_history, hist_snap);
                                                         self.file_status = Some(format!("Opened {}", path.file_name().unwrap_or_default().to_string_lossy()));
-                                                        self.current_file = Some(path);
+                                                        self.open_in_new_tab(doc, history, view, loaded, new_history, Some(path));
+                                                        doc_modified = true;
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Open failed: {e}")),
                                                 }
@@ -120,6 +118,7 @@ impl PhotonicApp {
                                                 match write_photon_file(path, doc, history) {
                                                     Ok(_) => {
                                                         self.welcome.add_recent(path.clone(), doc.name.clone());
+                                                        self.mark_active_tab_saved(history);
                                                         self.file_status = Some(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Save failed: {e}")),
@@ -151,6 +150,7 @@ impl PhotonicApp {
                                                         self.welcome.add_recent(path.clone(), doc.name.clone());
                                                         self.file_status = Some(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
                                                         self.current_file = Some(path);
+                                                        self.mark_active_tab_saved(history);
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Save failed: {e}")),
                                                 }
@@ -233,7 +233,7 @@ impl PhotonicApp {
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Grid Color");
-                                                ui.color_edit_button_rgba_unmultiplied(&mut self.prefs.grid_color);
+                                                crate::color_popup::ColorPopup::swatch_f32(ui, &mut self.prefs.grid_color);
                                             });
                                             ui.checkbox(&mut self.prefs.snap_to_grid, "Snap to Grid");
                                             ui.checkbox(&mut self.prefs.snap_to_objects, "Snap to Objects")
@@ -305,7 +305,7 @@ impl PhotonicApp {
                                         ui.horizontal(|ui| {
                                             ui.label("Default Fill");
                                             // Gamma-sRGB store → shared sRGBA picker (issue #185).
-                                            if crate::color_edit::srgb_f32_color_edit(ui, &mut self.prefs.default_fill_color).changed() {
+                                            if crate::color_popup::ColorPopup::swatch_f32(ui, &mut self.prefs.default_fill_color).changed() {
                                                 self.fill_color = self.prefs.default_fill_color;
                                             }
                                         });
@@ -314,7 +314,7 @@ impl PhotonicApp {
                                             ui.horizontal(|ui| {
                                                 ui.label("Stroke Color");
                                                 // Gamma-sRGB store → shared sRGBA picker (issue #185).
-                                                crate::color_edit::srgb_f32_color_edit(ui, &mut self.prefs.default_stroke_color);
+                                                crate::color_popup::ColorPopup::swatch_f32(ui, &mut self.prefs.default_stroke_color);
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Stroke Width");
@@ -363,6 +363,38 @@ impl PhotonicApp {
                                                 .range(0.1..=100.0)
                                                 .fixed_decimals(1))
                                                 .on_hover_text("Distance moved per arrow key press (Shift×10)");
+                                        });
+
+                                        // ── Autosave ─────────────────────────────────
+                                        ui.add_space(10.0);
+                                        ui.separator();
+                                        ui.label(RichText::new("Autosave").strong());
+                                        ui.label(
+                                            RichText::new(
+                                                "Periodically writes open documents to disk. Saved files record an \
+                                                 \"Autosave\" branch in their history; unsaved files go to a recovery \
+                                                 folder that's offered back on the next launch.",
+                                            )
+                                            .weak()
+                                            .small(),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.checkbox(&mut self.prefs.autosave_enabled, "Enable autosave");
+                                        ui.add_space(4.0);
+                                        ui.add_enabled_ui(self.prefs.autosave_enabled, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Every (minutes):");
+                                                let mut minutes = self.prefs.autosave_interval_secs / 60.0;
+                                                if ui.add(egui::DragValue::new(&mut minutes)
+                                                    .speed(0.25)
+                                                    .range(0.25..=120.0)
+                                                    .fixed_decimals(2))
+                                                    .on_hover_text("How often to autosave. Default 5 minutes.")
+                                                    .changed()
+                                                {
+                                                    self.prefs.autosave_interval_secs = (minutes * 60.0).max(15.0);
+                                                }
+                                            });
                                         });
 
                                         // ── Project History ──────────────────────────

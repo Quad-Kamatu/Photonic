@@ -1909,6 +1909,119 @@ pub enum Command {
     },
 }
 
+/// Produce an informative label for an `UpdateNode` edit by diffing the node's
+/// before/after state, so the history graph reads "Move Rectangle", "Recolor
+/// Star", or "Edit text …" rather than a generic "Update X".
+fn describe_node_update(old: &SceneNode, new: &SceneNode) -> String {
+    use crate::node::SceneNodeKind as K;
+    let name = if new.name.trim().is_empty() {
+        "node"
+    } else {
+        new.name.trim()
+    };
+
+    // Rename is the clearest intent — report it first.
+    if old.name != new.name {
+        return format!("Rename \"{}\" → \"{}\"", old.name, new.name);
+    }
+
+    // Geometry (move / resize / rotate).
+    if old.transform != new.transform {
+        return format!("{} {name}", classify_transform(&old.transform, &new.transform));
+    }
+
+    // Kind-specific appearance / content changes.
+    match (&old.kind, &new.kind) {
+        (K::Path(o), K::Path(n)) => {
+            if o.fill != n.fill {
+                return format!("Recolor {name}");
+            }
+            if o.stroke != n.stroke {
+                return format!("Restyle stroke · {name}");
+            }
+        }
+        (K::Text(o), K::Text(n)) => {
+            if o.content != n.content {
+                return format!("Edit text · \"{}\"", snippet(&n.content));
+            }
+            if o.fill != n.fill {
+                return format!("Recolor {name}");
+            }
+            if o.font_family != n.font_family
+                || o.font_size != n.font_size
+                || o.font_weight != n.font_weight
+            {
+                return format!("Format text · {name}");
+            }
+        }
+        (K::Raster(_), K::Raster(_)) | (K::Group(_), K::Group(_)) => {}
+        // Different variant kinds entirely (rare) — the node's type changed.
+        _ => return format!("Change type · {name}"),
+    }
+
+    // Shared node properties.
+    if (old.opacity - new.opacity).abs() > f32::EPSILON {
+        return format!("Opacity {:.0}% · {name}", new.opacity * 100.0);
+    }
+    if old.visible != new.visible {
+        return format!("{} {name}", if new.visible { "Show" } else { "Hide" });
+    }
+    if old.locked != new.locked {
+        return format!("{} {name}", if new.locked { "Lock" } else { "Unlock" });
+    }
+    if old.blend_mode != new.blend_mode {
+        return format!("Blend: {:?} · {name}", new.blend_mode);
+    }
+    if old.outer_glow != new.outer_glow
+        || old.inner_glow != new.inner_glow
+        || old.drop_shadow != new.drop_shadow
+    {
+        return format!("Effects · {name}");
+    }
+
+    // A path whose nothing-above changed had its geometry edited (path_data has no
+    // cheap equality, so this is the residual case).
+    if matches!(new.kind, K::Path(_)) {
+        return format!("Reshape {name}");
+    }
+
+    format!("Update {name}")
+}
+
+/// Classify an affine transform delta as a plain verb for history labels.
+fn classify_transform(o: &crate::Transform, n: &crate::Transform) -> &'static str {
+    const E: f64 = 1e-6;
+    let (o, n) = (&o.matrix, &n.matrix);
+    let linear_same = (o[0] - n[0]).abs() < E
+        && (o[1] - n[1]).abs() < E
+        && (o[2] - n[2]).abs() < E
+        && (o[3] - n[3]).abs() < E;
+    let translated = (o[4] - n[4]).abs() > E || (o[5] - n[5]).abs() > E;
+    if linear_same {
+        return if translated { "Move" } else { "Transform" };
+    }
+    // Pure scale keeps the off-diagonal (shear) terms at zero.
+    if o[1].abs() < E && o[2].abs() < E && n[1].abs() < E && n[2].abs() < E {
+        return "Resize";
+    }
+    // Rotation: a == d and b == -c (a scaled rotation matrix).
+    if (n[0] - n[3]).abs() < E && (n[1] + n[2]).abs() < E {
+        return "Rotate";
+    }
+    "Transform"
+}
+
+/// First line of a string, truncated for a compact one-line label.
+fn snippet(s: &str) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 24 {
+        let head: String = line.chars().take(23).collect();
+        format!("{head}…")
+    } else {
+        line.to_string()
+    }
+}
+
 impl Command {
     /// Rough in-memory footprint of this command in bytes — dominated by any
     /// raster node buffers it clones (an UpdateNode on a raster edit holds two
@@ -1974,7 +2087,7 @@ impl Command {
         match self {
             Command::AddNode { node, .. } => format!("Add {}", node.name),
             Command::RemoveNode { .. } => "Remove node".to_string(),
-            Command::UpdateNode { new, .. } => format!("Update {}", new.name),
+            Command::UpdateNode { old, new } => describe_node_update(old, new),
             Command::UpdateRasterRegion { .. } => "Edit raster".to_string(),
             Command::AddLayer { layer } => format!("Add layer \"{}\"", layer.name),
             Command::RemoveLayer { .. } => "Remove layer".to_string(),
@@ -1997,8 +2110,9 @@ impl Command {
                 ..
             } => format!("Resize canvas to {new_width}×{new_height}"),
             Command::Batch(cmds) => {
-                // Use the name of the first AddNode result, falling back to
-                // the description of the first command in the batch.
+                // Prefer the name of the first AddNode result ("Create X"); else
+                // summarize as the leading command's description, noting how many
+                // more edits ride along so a batch reads distinctly from a single.
                 cmds.iter()
                     .find_map(|c| {
                         if let Command::AddNode { node, .. } = c {
@@ -2007,14 +2121,18 @@ impl Command {
                             None
                         }
                     })
-                    .unwrap_or_else(|| {
-                        cmds.first()
-                            .map(|c| c.description())
-                            .unwrap_or_else(|| "Batch".to_string())
+                    .unwrap_or_else(|| match cmds.split_first() {
+                        Some((first, rest)) if !rest.is_empty() => {
+                            format!("{} (+{} more)", first.description(), rest.len())
+                        }
+                        Some((first, _)) => first.description(),
+                        None => "Batch".to_string(),
                     })
             }
         }
     }
+
+    // (describe_node_update is a free fn below — see after this impl block.)
 
     /// Normalize deletion commands into their self-contained `*Full` forms
     /// **while the target entity still exists** in `doc`.
@@ -2652,6 +2770,10 @@ pub struct HistNode {
     /// Which child redo prefers (the most recently created or visited).
     #[serde(default)]
     pub primary_child: Option<u64>,
+    /// Optional user-given name for this state — a "named branch" is just a
+    /// labeled commit. Shown as a ref badge in the graph; navigable by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug)]

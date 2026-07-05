@@ -1,10 +1,12 @@
 pub mod app;
-pub mod color_edit;
+pub mod color_convert;
+pub mod color_popup;
 pub mod commands;
 pub mod disk_search;
 pub mod global_search;
 pub mod hotbar;
 pub mod lightfall;
+pub mod multi_button;
 pub mod panels;
 pub mod preferences;
 pub mod quit;
