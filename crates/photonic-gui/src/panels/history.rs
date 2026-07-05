@@ -280,13 +280,49 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         painter.galley(egui::pos2(text_left, cy - g.size().y * 0.5), g, tcol);
 
         let resp = resp.on_hover_text(if node.is_current {
-            "Current state".to_string()
+            "Current state — right-click for options".to_string()
         } else {
-            "Jump to this commit".to_string()
+            "Click to jump here · right-click for options".to_string()
         });
+        // Left-click: jump straight to this commit (reversible — it's a tree, so
+        // you can jump back). Doubles as click-to-preview per #174.
         if resp.clicked() {
             action = Some(PanelAction::JumpToHistoryNode { id: node.id });
         }
+        // Right-click: branch / navigation affordances (#174). Branching is
+        // implicit in the undo-tree — jumping to a commit and then editing forks
+        // a new branch — so "Branch from here" simply navigates HEAD to it.
+        resp.context_menu(|ui| {
+            ui.label(
+                RichText::new(node.description.clone())
+                    .small()
+                    .color(Color32::from_rgb(200, 204, 222)),
+            );
+            ui.separator();
+            if !node.is_current {
+                if ui
+                    .button("Jump to this state")
+                    .on_hover_text("Move the document to this commit (reversible)")
+                    .clicked()
+                {
+                    action = Some(PanelAction::JumpToHistoryNode { id: node.id });
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Branch from here")
+                    .on_hover_text("Jump here — your next edit starts a new branch off this commit")
+                    .clicked()
+                {
+                    action = Some(PanelAction::JumpToHistoryNode { id: node.id });
+                    ui.close_menu();
+                }
+            }
+            if !node.is_root && ui.button("Copy commit id").clicked() {
+                let id = short_hash(node.id as usize, &node.description);
+                ui.output_mut(|o| o.copied_text = id);
+                ui.close_menu();
+            }
+        });
     }
     ui.add_space(6.0);
 
