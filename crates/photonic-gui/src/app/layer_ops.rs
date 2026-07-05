@@ -41,6 +41,41 @@ impl PhotonicApp {
         }
     }
 
+    /// Add a new empty layer at the top of the stack and make it the active
+    /// layer so subsequently drawn objects land in it. One undoable step.
+    pub(crate) fn do_add_layer(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        // Pick a name that doesn't collide with an existing layer.
+        let mut n = doc.layers.len() + 1;
+        let name = loop {
+            let candidate = format!("Layer {n}");
+            if !doc.layers.values().any(|l| l.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+
+        let new_layer = Layer::new(name);
+        let new_layer_id = new_layer.id;
+        let old_active = doc.active_layer_id;
+
+        history.execute(
+            Command::Batch(vec![
+                Command::AddLayer { layer: new_layer },
+                Command::SetActiveLayer {
+                    old_id: old_active,
+                    new_id: Some(new_layer_id),
+                },
+            ]),
+            doc,
+        );
+        *doc_modified = true;
+    }
+
     pub(crate) fn do_collect_in_new_layer(
         &mut self,
         node_ids: Vec<NodeId>,

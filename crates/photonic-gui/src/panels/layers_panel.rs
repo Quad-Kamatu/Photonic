@@ -187,11 +187,27 @@ pub fn draw_layers_panel(
 ) -> Option<PanelAction> {
     let mut action: Option<PanelAction> = None;
 
-    ui.label(
-        RichText::new("LAYERS")
-            .small()
-            .color(Color32::from_rgb(80, 80, 110)),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("LAYERS")
+                .small()
+                .color(Color32::from_rgb(80, 80, 110)),
+        );
+        // Push the "add layer" button to the right edge of the header.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(ph::PLUS).small())
+                        .small()
+                        .frame(true),
+                )
+                .on_hover_text("Add a new empty layer")
+                .clicked()
+            {
+                action = Some(PanelAction::AddLayer);
+            }
+        });
+    });
     ui.add_space(2.0);
 
     // Prune any stale selected_layer_ids (layers that no longer exist).

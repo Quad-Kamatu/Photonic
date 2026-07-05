@@ -2435,6 +2435,10 @@ impl PhotonicApp {
                     self.eyedropper.skip_click = true;
                 }
 
+                PanelAction::AddLayer => {
+                    self.do_add_layer(doc, history, &mut doc_modified);
+                }
+
                 PanelAction::CollectInNewLayer { node_ids } => {
                     self.do_collect_in_new_layer(node_ids, doc, history, &mut doc_modified);
                 }

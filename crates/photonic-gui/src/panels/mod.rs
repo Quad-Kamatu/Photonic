@@ -267,6 +267,8 @@ pub enum PanelAction {
     /// Crop a raster layer's pixels (and mask) to the artboard bounds,
     /// discarding everything outside (undoable).
     CropRasterToArtboard { node_id: NodeId },
+    /// Add a new empty layer at the top of the stack and make it active.
+    AddLayer,
     /// Move the given nodes (or current selection if empty) into a new layer.
     CollectInNewLayer { node_ids: Vec<NodeId> },
     /// Blend fill colors linearly across 3+ selected path nodes.
