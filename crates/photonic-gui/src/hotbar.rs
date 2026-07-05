@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 /// never fully rearranges under the user.
 pub const PINNED_SLOTS: usize = 2;
 
+/// Point size for hotbar icons. Bumped above the default body text size (~14pt)
+/// so the icon row reads clearly at the top of the canvas.
+const HOTBAR_ICON_SIZE: f32 = 18.0;
+
 /// Whether the hotbar shows a fixed curated order or adapts to usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum HotbarMode {
@@ -351,7 +355,8 @@ pub fn render(ui: &mut egui::Ui, items: &[HotbarItem], active_tool: Tool) -> Opt
     let mut invoked: Option<HotbarItem> = None;
     ui.horizontal(|ui| {
         // Rough per-item width for the overflow split (icon button + spacing).
-        let per = 30.0_f32;
+        // Scales with the icon size so bigger icons still split correctly.
+        let per = HOTBAR_ICON_SIZE + 16.0;
         let avail = ui.available_width();
         let capacity = (avail / per).floor().max(1.0) as usize;
 
@@ -370,7 +375,7 @@ pub fn render(ui: &mut egui::Ui, items: &[HotbarItem], active_tool: Tool) -> Opt
         }
 
         if !tail.is_empty() {
-            ui.menu_button(ph::DOTS_THREE, |ui| {
+            ui.menu_button(egui::RichText::new(ph::DOTS_THREE).size(HOTBAR_ICON_SIZE), |ui| {
                 for item in tail {
                     if ui
                         .button(format!("{}  {}", item.icon, item.tooltip))
@@ -391,6 +396,6 @@ pub fn render(ui: &mut egui::Ui, items: &[HotbarItem], active_tool: Tool) -> Opt
 /// One hotbar button: icon-only, highlighted when it represents the active tool.
 fn hotbar_button(ui: &mut egui::Ui, item: &HotbarItem, active_tool: Tool) -> egui::Response {
     let is_active = matches!(item.effect, HotbarEffect::Tool(t) if t == active_tool);
-    ui.selectable_label(is_active, egui::RichText::new(item.icon))
+    ui.selectable_label(is_active, egui::RichText::new(item.icon).size(HOTBAR_ICON_SIZE))
         .on_hover_text(item.tooltip)
 }
