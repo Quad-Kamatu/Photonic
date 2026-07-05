@@ -2480,6 +2480,73 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::PlaceImageDialog => {
+                    // Import (#176): pick an image and embed it, same path as
+                    // File → Place Image….
+                    if let Some(path) = super::run_file_dialog(|| {
+                        rfd::FileDialog::new()
+                            .add_filter(
+                                "Images",
+                                &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"],
+                            )
+                            .pick_file()
+                    }) {
+                        self.place_image_file(doc, history, &path);
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::OpenExportDialog => {
+                    // Export (#176): open the export dialog seeded from the
+                    // Document-tab settings (format, scale, area).
+                    let s = self.doc_export;
+                    let mut dlg = super::ExportDialog::new(doc);
+                    dlg.format = s.format;
+                    let scale = s.scale.max(0.05);
+                    let (base_w, base_h) = match s.area {
+                        super::ExportArea::Document => (doc.width, doc.height),
+                        super::ExportArea::ContentBounds => {
+                            dlg.crop_to_content = true;
+                            (doc.width, doc.height)
+                        }
+                        super::ExportArea::Selection => {
+                            let ids: Vec<_> = doc.selection.node_ids.iter().copied().collect();
+                            let mut bbox: Option<(f64, f64, f64, f64)> = None;
+                            for id in &ids {
+                                if let Some(n) = doc.nodes.get(id) {
+                                    if let Some((x0, y0, x1, y1)) =
+                                        super::hit_test::node_world_aabb_opt(n)
+                                    {
+                                        bbox = Some(match bbox {
+                                            Some((a, b, c, d)) => {
+                                                (a.min(x0), b.min(y0), c.max(x1), d.max(y1))
+                                            }
+                                            None => (x0, y0, x1, y1),
+                                        });
+                                    }
+                                }
+                            }
+                            match bbox {
+                                Some((x0, y0, x1, y1)) => {
+                                    let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+                                    dlg.region_override = Some((x0, y0, w, h));
+                                    (w, h)
+                                }
+                                None => {
+                                    self.file_status = Some(
+                                        "No exportable selection bounds — exporting the whole document."
+                                            .into(),
+                                    );
+                                    (doc.width, doc.height)
+                                }
+                            }
+                        }
+                    };
+                    dlg.png_width = ((base_w as f32) * scale).round().max(1.0) as u32;
+                    dlg.png_height = ((base_h as f32) * scale).round().max(1.0) as u32;
+                    self.export_dialog = Some(dlg);
+                }
+
                 PanelAction::SetLayerColor { layer_id, color } => {
                     if let Some(layer) = doc.layers.get(&layer_id) {
                         let cmd = Command::UpdateLayer {

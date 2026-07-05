@@ -1,5 +1,119 @@
 use super::*;
 
+/// Human label for an export format.
+fn export_format_label(f: crate::app::ExportFormat) -> &'static str {
+    use crate::app::ExportFormat::*;
+    match f {
+        Png => "PNG",
+        Jpeg => "JPEG",
+        WebP => "WebP",
+        Gif => "GIF",
+        Tiff => "TIFF",
+        Ico => "ICO",
+        Svg => "SVG",
+    }
+}
+
+/// Document-tab Import & Export controls (#176): place an image (embed), and
+/// configure export format + scale + area, then open the export dialog seeded
+/// with those settings.
+pub(crate) fn draw_import_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    use crate::app::{ExportArea, ExportFormat};
+    if !ctx.matches("Import & Export") {
+        return;
+    }
+    let mut action: Option<PanelAction> = None;
+    egui::CollapsingHeader::new("Import & Export")
+        .default_open(false)
+        .show(ui, |ui| {
+            // ── Import ──────────────────────────────────────────────────────
+            ui.label(RichText::new("Import").strong().small());
+            ui.add_space(2.0);
+            if ui
+                .button(format!("{}  Place image…", ph::IMAGE))
+                .on_hover_text("Embed a PNG / JPEG / WebP / BMP / GIF / TIFF into the document")
+                .clicked()
+            {
+                action = Some(PanelAction::PlaceImageDialog);
+            }
+            ui.label(
+                RichText::new("Images are embedded in the .photon file.")
+                    .weak()
+                    .small(),
+            );
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Export ──────────────────────────────────────────────────────
+            ui.label(RichText::new("Export").strong().small());
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label("Format:");
+                egui::ComboBox::from_id_salt("doc_export_format")
+                    .selected_text(export_format_label(ctx.doc_export.format))
+                    .show_ui(ui, |ui| {
+                        for f in [
+                            ExportFormat::Png,
+                            ExportFormat::Jpeg,
+                            ExportFormat::WebP,
+                            ExportFormat::Gif,
+                            ExportFormat::Tiff,
+                            ExportFormat::Ico,
+                            ExportFormat::Svg,
+                        ] {
+                            ui.selectable_value(
+                                &mut ctx.doc_export.format,
+                                f,
+                                export_format_label(f),
+                            );
+                        }
+                    });
+            });
+            // Scale (raster only — SVG is resolution-independent).
+            let is_vector = ctx.doc_export.format == ExportFormat::Svg;
+            ui.horizontal(|ui| {
+                ui.label("Scale:");
+                ui.add_enabled(
+                    !is_vector,
+                    egui::DragValue::new(&mut ctx.doc_export.scale)
+                        .speed(0.05)
+                        .range(0.05..=8.0)
+                        .suffix("×")
+                        .fixed_decimals(2),
+                )
+                .on_hover_text("Output pixel-size multiplier (ignored for SVG)");
+            });
+            // Area.
+            ui.horizontal(|ui| {
+                ui.label("Area:");
+                ui.selectable_value(&mut ctx.doc_export.area, ExportArea::Document, "Document")
+                    .on_hover_text("Export the whole document canvas");
+                ui.selectable_value(
+                    &mut ctx.doc_export.area,
+                    ExportArea::ContentBounds,
+                    "Content",
+                )
+                .on_hover_text("Crop to the bounding box of all content");
+                ui.selectable_value(&mut ctx.doc_export.area, ExportArea::Selection, "Selection")
+                    .on_hover_text("Export just the current selection's bounds");
+            });
+            ui.add_space(6.0);
+            if ui
+                .button(format!("{}  Export…", ph::EXPORT))
+                .on_hover_text("Open the export dialog with these settings, then choose a file")
+                .clicked()
+            {
+                action = Some(PanelAction::OpenExportDialog);
+            }
+        });
+    ui.add_space(4.0);
+    if action.is_some() {
+        ctx.action = action;
+    }
+}
+
 pub(crate) fn draw_export_profiles(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let doc = ctx.doc;
     let matches = |label: &str| -> bool { ctx.matches(label) };

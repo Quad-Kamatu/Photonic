@@ -293,6 +293,10 @@ pub enum PanelAction {
     /// Reorder the layer stack to `new_order` (bottom→top), e.g. from a
     /// drag-to-reorder in the Layers panel (#169). Applied as one undoable step.
     ReorderLayers { new_order: Vec<LayerId> },
+    /// Open a file picker and place the chosen image into the document (#176).
+    PlaceImageDialog,
+    /// Open the Export dialog seeded from the Document-tab export settings (#176).
+    OpenExportDialog,
     /// Set the color tag of a layer (None = clear).
     SetLayerColor {
         layer_id: LayerId,
@@ -973,6 +977,8 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) history_graph: &'a [photonic_core::history::HistoryGraphNode],
     /// The HEAD node id in the edit tree.
     pub(crate) history_current: u64,
+    /// Document-tab import/export settings (#176).
+    pub(crate) doc_export: &'a mut crate::app::DocExportSettings,
     pub(crate) bleed_mm_input: &'a mut f64,
     pub(crate) slug_mm_input: &'a mut f64,
     pub(crate) construction_angle: &'a mut f64,
@@ -1215,6 +1221,7 @@ pub(crate) fn draw_drawer(
             draw_libraries_export(ui, ctx);
         }
         DrawerGroup::Document => {
+            draw_import_export(ui, ctx);
             draw_export_profiles(ui, ctx);
             draw_data_visualization(ui, ctx);
             draw_analysis(ui, ctx);

@@ -194,6 +194,37 @@ pub enum ExportFormat {
     Svg,
 }
 
+/// Which part of the document a Document-tab export covers (#176).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportArea {
+    /// The whole document canvas.
+    Document,
+    /// The tight bounding box of all content.
+    ContentBounds,
+    /// The bounding box of the current selection.
+    Selection,
+}
+
+/// Persistent Document-tab import/export settings (#176). Seeds the export
+/// dialog when the user clicks Export… from the Document drawer.
+#[derive(Debug, Clone, Copy)]
+pub struct DocExportSettings {
+    pub format: ExportFormat,
+    /// Output scale multiplier applied to the document/region pixel size.
+    pub scale: f32,
+    pub area: ExportArea,
+}
+
+impl Default for DocExportSettings {
+    fn default() -> Self {
+        Self {
+            format: ExportFormat::Png,
+            scale: 1.0,
+            area: ExportArea::Document,
+        }
+    }
+}
+
 pub struct ExportDialog {
     pub format: ExportFormat,
     pub background: ExportBackground,
@@ -208,6 +239,9 @@ pub struct ExportDialog {
     pub jpeg_quality: u8,
     /// Aspect ratio of the document at the time the dialog was opened.
     aspect: f64,
+    /// Explicit export region `(x, y, w, h)` — set when exporting a selection or
+    /// bounds from the Document tab (#176). Overrides `crop_to_content`.
+    pub region_override: Option<(f64, f64, f64, f64)>,
 }
 
 impl ExportDialog {
@@ -224,6 +258,7 @@ impl ExportDialog {
             ico_size_256: true,
             jpeg_quality: 90,
             aspect: doc.width / doc.height,
+            region_override: None,
         }
     }
 
@@ -239,10 +274,12 @@ impl ExportDialog {
         .collect();
         ExportOptions {
             background: self.background,
-            crop_to_content: self.crop_to_content,
+            // An explicit region (Document-tab selection/bounds export) wins over
+            // the generic crop-to-content toggle.
+            crop_to_content: self.crop_to_content && self.region_override.is_none(),
             ico_sizes,
             jpeg_quality: self.jpeg_quality,
-            region: None,
+            region: self.region_override,
             overprint_preview: false,
         }
     }
@@ -840,6 +877,8 @@ pub struct PhotonicApp {
     pub mcp_restart_requested: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Whether the MCP server status/restart modal is open (#170).
     pub show_mcp_modal: bool,
+    /// Document-tab import/export settings (#176).
+    pub doc_export: DocExportSettings,
     /// Bleed input (mm) for print settings panel.
     pub bleed_mm_input: f64,
     /// Slug input (mm) for print settings panel.
@@ -1122,6 +1161,7 @@ impl Default for PhotonicApp {
             history_current: 0,
             mcp_restart_requested: None,
             show_mcp_modal: false,
+            doc_export: DocExportSettings::default(),
             bleed_mm_input: 0.0,
             slug_mm_input: 0.0,
             construction_angle: 45.0,
@@ -1655,6 +1695,7 @@ impl PhotonicApp {
             action_names: &self.action_names,
             history_graph: &self.history_graph,
             history_current: self.history_current,
+            doc_export: &mut self.doc_export,
             bleed_mm_input: &mut self.bleed_mm_input,
             slug_mm_input: &mut self.slug_mm_input,
             construction_angle: &mut self.construction_angle,
