@@ -748,14 +748,22 @@ impl PhotonicApp {
                     if ui.input(|i| i.modifiers.alt) {
                         let src_ids: Vec<NodeId> = doc.selection.ids().copied().collect();
                         let mut new_ids: Vec<NodeId> = Vec::new();
+                        let mut cmds: Vec<Command> = Vec::new();
                         for id in &src_ids {
                             if let Some(mut n) = doc.nodes.get(id).cloned() {
                                 n.id = uuid::Uuid::new_v4();
                                 let layer = n.layer_id;
-                                let nid = n.id;
-                                doc.add_node(n, Some(layer));
-                                new_ids.push(nid);
+                                new_ids.push(n.id);
+                                // Route the duplicate through history so it is
+                                // undoable (was a direct doc.add_node bypass).
+                                cmds.push(Command::AddNode {
+                                    node: n,
+                                    layer_id: Some(layer),
+                                });
                             }
+                        }
+                        if !cmds.is_empty() {
+                            history.execute_discrete(Command::Batch(cmds), doc);
                         }
                         if !new_ids.is_empty() {
                             doc.selection = Selection::from_ids(new_ids.iter().copied());
@@ -1211,6 +1219,7 @@ impl PhotonicApp {
         response: &egui::Response,
         doc: &mut Document,
         view: &CanvasView,
+        history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
         // Escape cancels the in-progress path
@@ -1235,7 +1244,7 @@ impl PhotonicApp {
         // Double-click finalises the path, closing it (also fires clicked, so first)
         if response.double_clicked_by(egui::PointerButton::Primary) {
             if let Some(path) = self.build_pen_path(true) {
-                self.finalize_pen_node(path, doc, doc_modified);
+                self.finalize_pen_node(path, doc, history, doc_modified);
             }
             self.pen_points.clear();
             return;
@@ -1248,7 +1257,7 @@ impl PhotonicApp {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if self.pen_over_first_anchor(view, pos) {
                         if let Some(path) = self.build_pen_path(true) {
-                            self.finalize_pen_node(path, doc, doc_modified);
+                            self.finalize_pen_node(path, doc, history, doc_modified);
                         }
                         self.pen_points.clear();
                         return;
@@ -1341,7 +1350,13 @@ impl PhotonicApp {
 
     /// Commit a finalised pen `path` as a new document node (fill + optional
     /// default stroke). Shared by the double-click and click-to-close paths.
-    fn finalize_pen_node(&self, path: PathData, doc: &mut Document, doc_modified: &mut bool) {
+    fn finalize_pen_node(
+        &self,
+        path: PathData,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
         let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
             (
                 self.prefs.default_stroke_color,
@@ -1355,7 +1370,7 @@ impl PhotonicApp {
             "Pen",
             doc.node_count() + 1,
         );
-        doc.add_node(node, None);
+        history.execute(Command::AddNode { node, layer_id: None }, doc);
         *doc_modified = true;
     }
 

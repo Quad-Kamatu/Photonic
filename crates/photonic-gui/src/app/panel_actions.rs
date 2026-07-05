@@ -2340,7 +2340,7 @@ impl PhotonicApp {
                         );
                         node.transform =
                             photonic_core::transform::Transform::translate(canvas_x, canvas_y);
-                        doc.add_node(node, None);
+                        history.execute(Command::AddNode { node, layer_id: None }, doc);
                         doc_modified = true;
                     } else {
                         let tool = match shape {

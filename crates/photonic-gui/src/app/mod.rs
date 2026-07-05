@@ -4507,7 +4507,7 @@ impl PhotonicApp {
 
                 // ── Pen tool ─────────────────────────────────────────────────
                 if self.active_tool == Tool::Pen {
-                    self.handle_pen_tool(ui, &response, doc, view, &mut doc_modified);
+                    self.handle_pen_tool(ui, &response, doc, view, history, &mut doc_modified);
                     return;
                 }
 
@@ -4990,7 +4990,7 @@ impl PhotonicApp {
                             let mut node =
                                 SceneNode::new(format!("Text {}", num), Default::default(), kind);
                             node.transform = photonic_core::transform::Transform::translate(cx, cy);
-                            doc.add_node(node, None);
+                            history.execute(Command::AddNode { node, layer_id: None }, doc);
                             doc_modified = true;
                         }
                     }
@@ -5053,7 +5053,7 @@ impl PhotonicApp {
                                     self.active_tool.label(),
                                     doc.node_count() + 1,
                                 );
-                                doc.add_node(node, None);
+                                history.execute(Command::AddNode { node, layer_id: None }, doc);
                                 doc_modified = true;
                             }
                         }
@@ -5079,7 +5079,7 @@ impl PhotonicApp {
                                 self.active_tool.label(),
                                 doc.node_count() + 1,
                             );
-                            doc.add_node(node, None);
+                            history.execute(Command::AddNode { node, layer_id: None }, doc);
                             doc_modified = true;
                         }
                     }
