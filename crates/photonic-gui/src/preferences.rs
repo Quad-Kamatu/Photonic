@@ -24,6 +24,10 @@ pub struct AppPreferences {
     /// Also snap to the artboard/canvas edges, center, and margins (#211).
     #[serde(default = "default_true")]
     pub snap_to_artboard: bool,
+    /// Also snap to path anchor points (#211). Off by default — dense paths add
+    /// many candidates.
+    #[serde(default)]
+    pub snap_to_anchors: bool,
     /// Snap pull radius in screen pixels (converted to canvas units via zoom).
     #[serde(default = "default_snap_tolerance")]
     pub snap_tolerance_px: f32,
@@ -188,6 +192,7 @@ impl Default for AppPreferences {
             show_rulers: false,
             snap_to_objects: true,
             snap_to_artboard: true,
+            snap_to_anchors: false,
             snap_tolerance_px: 6.0,
             snap_show_guides: true,
             document_units: photonic_core::DocumentUnit::Px,

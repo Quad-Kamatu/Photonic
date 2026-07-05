@@ -240,7 +240,9 @@ impl PhotonicApp {
                                                 .on_hover_text("Align edges/centers to nearby objects (and equal-spacing) while dragging (#66).");
                                             ui.checkbox(&mut self.prefs.snap_to_artboard, "Snap to Artboard")
                                                 .on_hover_text("Align to the artboard/canvas edges, center, and margins while dragging (#211).");
-                                            ui.add_enabled_ui(self.prefs.snap_to_objects || self.prefs.snap_to_artboard, |ui| {
+                                            ui.checkbox(&mut self.prefs.snap_to_anchors, "Snap to Anchor Points")
+                                                .on_hover_text("Align to path vertices while dragging — off by default; dense paths add many targets (#211).");
+                                            ui.add_enabled_ui(self.prefs.snap_to_objects || self.prefs.snap_to_artboard || self.prefs.snap_to_anchors, |ui| {
                                                 ui.checkbox(&mut self.prefs.snap_show_guides, "Show Smart Guides");
                                                 ui.horizontal(|ui| {
                                                     ui.label("Snap Tolerance");

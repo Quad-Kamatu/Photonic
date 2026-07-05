@@ -11,8 +11,9 @@
 //! [`resolve_snap`], and multiplies guide distances by `view.zoom` when drawing
 //! the pixel-distance labels.
 
+use kurbo::PathEl;
 use photonic_core::document::Document;
-use photonic_core::node::{NodeId, SceneNode};
+use photonic_core::node::{NodeId, SceneNode, SceneNodeKind};
 
 /// Which kind of guide a candidate / active snap produces.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,6 +221,47 @@ pub fn collect_artboard_candidates(doc: &Document) -> Vec<SnapCandidate> {
                 value,
                 perp_min: x0,
                 perp_max: x1,
+            });
+        }
+    }
+    out
+}
+
+/// Snap candidates for path **anchor points** (#211): each on-curve vertex of a
+/// visible, non-locked, non-excluded path contributes a vertical (its x) and a
+/// horizontal (its y) alignment line, so a dragged object can align to a
+/// specific point. Point candidates have a zero-width perpendicular span.
+pub fn collect_anchor_candidates(doc: &Document, exclude: &[NodeId]) -> Vec<SnapCandidate> {
+    let mut out = Vec::new();
+    for node in doc.nodes_in_draw_order() {
+        if node.locked || exclude.contains(&node.id) {
+            continue;
+        }
+        let SceneNodeKind::Path(pn) = &node.kind else {
+            continue;
+        };
+        for el in pn.path_data.to_bez_path().elements() {
+            let p = match el {
+                PathEl::MoveTo(p)
+                | PathEl::LineTo(p)
+                | PathEl::QuadTo(_, p)
+                | PathEl::CurveTo(_, _, p) => *p,
+                PathEl::ClosePath => continue,
+            };
+            let (wx, wy) = node.transform.apply(p.x, p.y);
+            out.push(SnapCandidate {
+                source: Some(node.id),
+                axis: SnapAxis::Vertical,
+                value: wx,
+                perp_min: wy,
+                perp_max: wy,
+            });
+            out.push(SnapCandidate {
+                source: Some(node.id),
+                axis: SnapAxis::Horizontal,
+                value: wy,
+                perp_min: wx,
+                perp_max: wx,
             });
         }
     }
@@ -447,6 +489,34 @@ mod tests {
         // And a drag near the right edge snaps to it.
         let res = resolve_snap((196.0, 40.0, 216.0, 60.0), &cands, 6.0);
         assert!((res.corrected.0 - 4.0).abs() < 1e-9, "should snap right edge to x=200");
+    }
+
+    #[test]
+    fn anchor_candidates_expose_path_vertices() {
+        use photonic_core::node::{PathNode, SceneNode};
+        use photonic_core::path::PathData;
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let lid = doc.active_layer_id.unwrap();
+        let node = SceneNode::new(
+            "rect",
+            lid,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        doc.add_node(node, Some(lid));
+        let cands = collect_anchor_candidates(&doc, &[]);
+        assert!(cands.iter().all(|c| c.source.is_some()));
+        let has_x = |x: f64| {
+            cands
+                .iter()
+                .any(|c| c.axis == SnapAxis::Vertical && (c.value - x).abs() < 1e-9)
+        };
+        let has_y = |y: f64| {
+            cands
+                .iter()
+                .any(|c| c.axis == SnapAxis::Horizontal && (c.value - y).abs() < 1e-9)
+        };
+        assert!(has_x(0.0) && has_x(10.0), "corner x candidates missing");
+        assert!(has_y(0.0) && has_y(10.0), "corner y candidates missing");
     }
 
     #[test]

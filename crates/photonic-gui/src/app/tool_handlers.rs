@@ -812,7 +812,11 @@ impl PhotonicApp {
                     // nodes. Additive with grid snap; suppressed while Shift
                     // (axis-lock) is held. Tolerance is in screen px → canvas.
                     self.last_snap_result = None;
-                    if (self.prefs.snap_to_objects || self.prefs.snap_to_artboard) && !shift {
+                    if (self.prefs.snap_to_objects
+                        || self.prefs.snap_to_artboard
+                        || self.prefs.snap_to_anchors)
+                        && !shift
+                    {
                         if let Some((bx0, by0, bx1, by1)) = self.move_snap_bbox {
                             let moving: Vec<NodeId> = doc.selection.ids().copied().collect();
                             let mut candidates = if self.prefs.snap_to_objects {
@@ -823,6 +827,11 @@ impl PhotonicApp {
                             // Artboard/canvas edges + margins (#211).
                             if self.prefs.snap_to_artboard {
                                 candidates.extend(crate::snap::collect_artboard_candidates(doc));
+                            }
+                            // Path anchor points (#211).
+                            if self.prefs.snap_to_anchors {
+                                candidates
+                                    .extend(crate::snap::collect_anchor_candidates(doc, &moving));
                             }
                             let tol = (self.prefs.snap_tolerance_px as f64) / view.zoom.max(1e-6);
                             let tentative = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
