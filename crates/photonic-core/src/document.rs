@@ -18,6 +18,31 @@ pub enum NodeContainer {
     Group(NodeId),
 }
 
+/// A clash detected during [`Document::merge_3way`] that the auto-merge could
+/// not resolve; `ours` is kept and the node is reported for manual resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeConflict {
+    /// Both sides edited the same node differently.
+    BothEdited(NodeId),
+    /// One side edited the node while the other deleted it.
+    EditVsDelete(NodeId),
+}
+
+impl MergeConflict {
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            MergeConflict::BothEdited(id) | MergeConflict::EditVsDelete(id) => *id,
+        }
+    }
+}
+
+/// Result of [`Document::merge_3way`]: the merged document plus any conflicts.
+#[derive(Debug, Clone)]
+pub struct MergeOutcome {
+    pub merged: Document,
+    pub conflicts: Vec<MergeConflict>,
+}
+
 /// Whether a guide is horizontal (fixed Y) or vertical (fixed X).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1396,6 +1421,115 @@ impl Document {
         acc
     }
 
+    /// 3-way merge of node objects between two diverged document states sharing
+    /// the common ancestor `base` (e.g. the LCA of two edit-tree branch tips).
+    /// `self`/`ours` is the side we keep on conflict; `theirs` is merged in.
+    ///
+    /// Non-conflicting changes from both sides are combined: nodes added on
+    /// `theirs` are brought in (with their container membership), nodes deleted
+    /// on `theirs` (and untouched on `ours`) are removed, and one-sided edits are
+    /// taken. Where both sides changed the same node differently — or one edited
+    /// while the other deleted — `ours` is kept and the clash is reported in
+    /// [`MergeOutcome::conflicts`] for later resolution.
+    pub fn merge_3way(&self, base: &Document, theirs: &Document) -> MergeOutcome {
+        use crate::node::SceneNode;
+        use std::collections::BTreeSet;
+        let ours = self;
+        let node_eq = |a: &SceneNode, b: &SceneNode| {
+            serde_json::to_vec(a).ok() == serde_json::to_vec(b).ok()
+        };
+        let mut merged = ours.clone();
+        let mut conflicts = Vec::new();
+
+        let ids: BTreeSet<NodeId> = base
+            .nodes
+            .keys()
+            .chain(ours.nodes.keys())
+            .chain(theirs.nodes.keys())
+            .copied()
+            .collect();
+
+        // Membership edits are applied after the node-set pass so container lists
+        // are only touched once we know the final add/remove decisions.
+        let mut to_add: Vec<NodeId> = Vec::new();
+        let mut to_remove: Vec<NodeId> = Vec::new();
+
+        for id in ids {
+            match (base.nodes.get(&id), ours.nodes.get(&id), theirs.nodes.get(&id)) {
+                (Some(b), Some(o), Some(t)) => {
+                    let o_changed = !node_eq(b, o);
+                    let t_changed = !node_eq(b, t);
+                    if t_changed && !o_changed {
+                        merged.nodes.insert(id, t.clone());
+                    } else if o_changed && t_changed && !node_eq(o, t) {
+                        conflicts.push(MergeConflict::BothEdited(id));
+                    }
+                }
+                // Added on theirs only → bring it in.
+                (None, None, Some(t)) => {
+                    merged.nodes.insert(id, t.clone());
+                    to_add.push(id);
+                }
+                // Added on ours only → already present.
+                (None, Some(_), None) => {}
+                // Added on both with the same id (rare): conflict if they differ.
+                (None, Some(o), Some(t)) if !node_eq(o, t) => {
+                    conflicts.push(MergeConflict::BothEdited(id));
+                }
+                (None, Some(_), Some(_)) => {}
+                // Deleted on theirs.
+                (Some(b), Some(o), None) => {
+                    if node_eq(b, o) {
+                        merged.nodes.remove(&id);
+                        to_remove.push(id);
+                    } else {
+                        conflicts.push(MergeConflict::EditVsDelete(id));
+                    }
+                }
+                // Deleted on ours; theirs still has it.
+                (Some(b), None, Some(t)) => {
+                    if !node_eq(b, t) {
+                        conflicts.push(MergeConflict::EditVsDelete(id));
+                    }
+                }
+                // Deleted on both, or nonexistent.
+                (Some(_), None, None) | (None, None, None) => {}
+            }
+        }
+
+        // Bring theirs-added nodes into the same container they had on `theirs`
+        // (matched by id), falling back to the active layer if that container no
+        // longer exists on the merged side.
+        for id in to_add {
+            let placed = theirs
+                .node_container_and_index(&id)
+                .and_then(|(c, _)| merged.container_list_mut(c))
+                .map(|list| {
+                    if !list.contains(&id) {
+                        list.push(id);
+                    }
+                })
+                .is_some();
+            if !placed {
+                if let Some(lid) = merged.active_layer_id {
+                    if let Some(l) = merged.layers.get_mut(&lid) {
+                        l.node_ids.push(id);
+                    }
+                }
+            }
+        }
+        // Drop deleted nodes from their container on the merged side.
+        for id in to_remove {
+            if let Some((c, _)) = ours.node_container_and_index(&id) {
+                if let Some(list) = merged.container_list_mut(c) {
+                    list.retain(|&n| n != id);
+                }
+            }
+        }
+
+        MergeOutcome { merged, conflicts }
+    }
+
     /// Mutable access to a container's ordered child-id list.
     pub(crate) fn container_list_mut(&mut self, c: NodeContainer) -> Option<&mut Vec<NodeId>> {
         match c {
@@ -1584,6 +1718,83 @@ mod tests {
         style::Fill,
         Color,
     };
+
+    #[test]
+    fn merge_3way_combines_nonconflicts_and_flags_conflicts() {
+        use crate::style::Fill;
+        let mk = |hex: &str| {
+            PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))
+                .with_fill(Fill::solid(Color::from_hex(hex).unwrap()))
+        };
+        let set_fill = |doc: &mut Document, id: NodeId, hex: &str| {
+            if let SceneNodeKind::Path(p) = &mut doc.nodes.get_mut(&id).unwrap().kind {
+                p.fill = Fill::solid(Color::from_hex(hex).unwrap());
+            }
+        };
+        let json = |doc: &Document, id: &NodeId| serde_json::to_vec(&doc.nodes[id]).unwrap();
+
+        let mut base = Document::new("t", 100.0, 100.0);
+        let lid = base.layer_order[0];
+        let a = SceneNode::new("A", lid, SceneNodeKind::Path(mk("#ff0000")));
+        let aid = a.id;
+        base.add_node(a, Some(lid));
+
+        // 1. theirs adds a node; ours untouched → brought in + placed in the layer.
+        {
+            let ours = base.clone();
+            let mut theirs = base.clone();
+            let b = SceneNode::new("B", lid, SceneNodeKind::Path(mk("#00ff00")));
+            let bid = b.id;
+            theirs.add_node(b, Some(lid));
+            let out = ours.merge_3way(&base, &theirs);
+            assert!(out.conflicts.is_empty());
+            assert!(out.merged.nodes.contains_key(&bid));
+            assert!(out.merged.layers[&lid].node_ids.contains(&bid));
+        }
+
+        // 2. theirs edits A; ours untouched → take theirs.
+        {
+            let ours = base.clone();
+            let mut theirs = base.clone();
+            set_fill(&mut theirs, aid, "#0000ff");
+            let out = ours.merge_3way(&base, &theirs);
+            assert!(out.conflicts.is_empty());
+            assert_eq!(json(&out.merged, &aid), json(&theirs, &aid), "theirs edit taken");
+        }
+
+        // 3. both edit A differently → conflict, keep ours.
+        {
+            let mut ours = base.clone();
+            let mut theirs = base.clone();
+            set_fill(&mut ours, aid, "#00ff00");
+            set_fill(&mut theirs, aid, "#0000ff");
+            let out = ours.merge_3way(&base, &theirs);
+            assert_eq!(out.conflicts, vec![MergeConflict::BothEdited(aid)]);
+            assert_eq!(json(&out.merged, &aid), json(&ours, &aid), "ours kept on conflict");
+        }
+
+        // 4. theirs deletes A; ours untouched → removed.
+        {
+            let ours = base.clone();
+            let mut theirs = base.clone();
+            theirs.remove_node(&aid);
+            let out = ours.merge_3way(&base, &theirs);
+            assert!(out.conflicts.is_empty());
+            assert!(!out.merged.nodes.contains_key(&aid));
+            assert!(!out.merged.layers[&lid].node_ids.contains(&aid));
+        }
+
+        // 5. ours edits A, theirs deletes A → conflict, keep ours.
+        {
+            let mut ours = base.clone();
+            set_fill(&mut ours, aid, "#00ff00");
+            let mut theirs = base.clone();
+            theirs.remove_node(&aid);
+            let out = ours.merge_3way(&base, &theirs);
+            assert_eq!(out.conflicts, vec![MergeConflict::EditVsDelete(aid)]);
+            assert!(out.merged.nodes.contains_key(&aid));
+        }
+    }
 
     #[test]
     fn live_boolean_group_resolves_union_intersection_and_round_trips() {
