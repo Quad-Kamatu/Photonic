@@ -109,6 +109,18 @@ impl FillKind {
         }
     }
 
+    /// Whether the fill varies **non-linearly** across the object, so a
+    /// vertex-color (Gouraud) renderer must finely tessellate the fill to look
+    /// right. Linear gradients and solids interpolate exactly, so they return
+    /// false; radial/fluid/mesh gradients and patterns return true.
+    pub fn is_nonlinear(&self) -> bool {
+        match self {
+            FillKind::Gradient(g) => g.kind == GradientKind::Radial,
+            FillKind::FluidGradient(_) | FillKind::MeshGradient(_) | FillKind::Pattern(_) => true,
+            _ => false,
+        }
+    }
+
     /// Whether this fill is a gradient that rotates/shears with the object
     /// (resolved in the object's local space rather than the world AABB).
     pub fn gradient_follows_rotation(&self) -> bool {
@@ -1079,6 +1091,24 @@ mod gradient_interp_tests {
         let json = r#"{"kind":"linear","stops":[],"coords":[0.0,0.0,1.0,0.0]}"#;
         let g: Gradient = serde_json::from_str(json).unwrap();
         assert_eq!(g.units, GradientUnits::UserSpaceOnUse);
+    }
+
+    #[test]
+    fn default_object_box_radial_renders_a_gradient() {
+        // Exactly what the picker builds for a new radial fill.
+        let g = Gradient::radial(0.5, 0.5, 0.5, stops())
+            .with_units(GradientUnits::ObjectBoundingBox);
+        // Object bbox at (100,200) size 60×40.
+        let r = g.resolved_for_bbox(100.0, 200.0, 60.0, 40.0);
+        assert_eq!(r.units, GradientUnits::UserSpaceOnUse);
+        // center at bbox center, r = 0.5*max(60,40)=30.
+        assert_eq!(r.coords[0], 130.0);
+        assert_eq!(r.coords[1], 220.0);
+        assert_eq!(r.coords[4], 30.0);
+        let center = r.sample_at(130.0, 220.0); // dist 0 → first stop (red)
+        let edge = r.sample_at(160.0, 220.0); // dist 30 == r → last stop (blue)
+        assert!((center[0] - 1.0).abs() < 1e-3 && center[2] < 1e-3, "center {center:?}");
+        assert!(edge[2] > 0.99 && edge[0] < 1e-3, "edge {edge:?}");
     }
 }
 

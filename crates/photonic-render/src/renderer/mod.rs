@@ -782,6 +782,15 @@ impl PhotonicRenderer {
             if mesh.is_empty() {
                 return;
             }
+            // Non-linear fills (radial/fluid/mesh/pattern) sample per vertex, so
+            // refine the coarse fill triangulation for a smooth result.
+            let mesh = if node.fill_kind.is_nonlinear() {
+                let (lx, ly, lxx, lyy) = local_bounds(&mesh.vertices);
+                let maxdim = ((lxx - lx).max(lyy - ly)) as f32;
+                crate::tessellator::refine_mesh(&mesh, (maxdim / 48.0).max(1.0))
+            } else {
+                mesh
+            };
             // Object-space gradients resolve against the fill's bbox so they
             // track the object. Rotation-following gradients resolve in the
             // object's local space (so they rotate/shear with it); others use

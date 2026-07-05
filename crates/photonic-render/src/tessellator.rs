@@ -292,6 +292,63 @@ impl Mesh {
     }
 }
 
+/// Subdivide a triangle mesh (1→4 by edge midpoints) until no triangle edge
+/// exceeds `max_edge`, up to a triangle budget. Vertex-color renderers use this
+/// to make **non-linear** fills (radial/fluid/mesh gradients, patterns) smooth —
+/// lyon triangulates convex fills with no interior vertices, so those fills
+/// would otherwise be a flat blend of the boundary colors. Shared-edge midpoints
+/// are recomputed identically per triangle, so duplicated vertices are safe (no
+/// visible seams — same position samples the same color).
+pub fn refine_mesh(mesh: &Mesh, max_edge: f32) -> Mesh {
+    let max_edge2 = {
+        let e = max_edge.max(0.5);
+        e * e
+    };
+    const BUDGET: usize = 24_000;
+    let v = &mesh.vertices;
+
+    let mut work: Vec<[[f32; 2]; 3]> = mesh
+        .indices
+        .chunks_exact(3)
+        .filter_map(|t| {
+            let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+            (a < v.len() && b < v.len() && c < v.len()).then(|| [v[a], v[b], v[c]])
+        })
+        .collect();
+
+    let mut out: Vec<[[f32; 2]; 3]> = Vec::new();
+    let e2 = |a: [f32; 2], b: [f32; 2]| {
+        let dx = a[0] - b[0];
+        let dy = a[1] - b[1];
+        dx * dx + dy * dy
+    };
+    let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+
+    while let Some(tri) = work.pop() {
+        let longest = e2(tri[0], tri[1]).max(e2(tri[1], tri[2])).max(e2(tri[2], tri[0]));
+        if longest <= max_edge2 || out.len() + work.len() >= BUDGET {
+            out.push(tri);
+        } else {
+            let m01 = mid(tri[0], tri[1]);
+            let m12 = mid(tri[1], tri[2]);
+            let m20 = mid(tri[2], tri[0]);
+            work.push([tri[0], m01, m20]);
+            work.push([m01, tri[1], m12]);
+            work.push([m20, m12, tri[2]]);
+            work.push([m01, m12, m20]);
+        }
+    }
+
+    let mut vertices = Vec::with_capacity(out.len() * 3);
+    let mut indices = Vec::with_capacity(out.len() * 3);
+    for tri in out {
+        let base = vertices.len() as u32;
+        vertices.extend_from_slice(&tri);
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    Mesh { vertices, indices }
+}
+
 /// Tessellate a filled `PathData` into a `Mesh` using lyon.
 /// Vertices are returned in path-local coordinates (transforms applied by the renderer).
 /// When `even_odd` is true, uses the even-odd fill rule (for compound paths with holes).
@@ -635,6 +692,39 @@ fn bezpath_to_lyon(bez: &kurbo::BezPath) -> lyon::path::Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refine_mesh_densifies_large_triangles() {
+        // One big 100-unit triangle refined to <=10-unit edges.
+        let mesh = Mesh {
+            vertices: vec![[0.0, 0.0], [100.0, 0.0], [0.0, 100.0]],
+            indices: vec![0, 1, 2],
+        };
+        let refined = refine_mesh(&mesh, 10.0);
+        assert!(refined.indices.len() > mesh.indices.len() * 20);
+        // Every resulting edge is within the target.
+        for t in refined.indices.chunks_exact(3) {
+            let p = [
+                refined.vertices[t[0] as usize],
+                refined.vertices[t[1] as usize],
+                refined.vertices[t[2] as usize],
+            ];
+            for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                let dx = p[a][0] - p[b][0];
+                let dy = p[a][1] - p[b][1];
+                assert!((dx * dx + dy * dy).sqrt() <= 10.5, "edge too long");
+            }
+        }
+    }
+
+    #[test]
+    fn refine_mesh_noop_when_already_fine() {
+        let mesh = Mesh {
+            vertices: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2],
+        };
+        assert_eq!(refine_mesh(&mesh, 10.0).indices.len(), 3);
+    }
 
     #[test]
     fn sample_width_profile_interpolates_linearly() {

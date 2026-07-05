@@ -4390,6 +4390,8 @@ impl PhotonicApp {
 
                 // ── Canvas pan: middle mouse drag ────────────────────────────
                 if response.dragged_by(egui::PointerButton::Middle) {
+                    // Closed-hand cursor signals the workspace is being grabbed/moved.
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                     let delta = response.drag_delta();
                     view.pan_x += delta.x as f64;
                     view.pan_y += delta.y as f64;

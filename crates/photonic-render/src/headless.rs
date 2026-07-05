@@ -1113,6 +1113,21 @@ fn build_geometry(
             let opacity = path_node.fill.opacity * node.opacity * gop;
             let mesh = tessellate_fill(&path_node.path_data, false);
             if !mesh.is_empty() {
+                // Non-linear fills sample per vertex → refine the triangulation.
+                let mesh = if path_node.fill.kind.is_nonlinear() {
+                    let (mut lx, mut ly, mut lxx, mut lyy) =
+                        (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                    for p in &mesh.vertices {
+                        lx = lx.min(p[0] as f64);
+                        ly = ly.min(p[1] as f64);
+                        lxx = lxx.max(p[0] as f64);
+                        lyy = lyy.max(p[1] as f64);
+                    }
+                    let maxdim = ((lxx - lx).max(lyy - ly)) as f32;
+                    crate::tessellator::refine_mesh(&mesh, (maxdim / 48.0).max(1.0))
+                } else {
+                    mesh
+                };
                 // Object-space gradients resolve against the fill's bbox; the
                 // rotation-following variant resolves in local space.
                 let rotated = path_node.fill.kind.gradient_follows_rotation();
