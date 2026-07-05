@@ -11,6 +11,8 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-05
+
 ### Added
 
 - **Branching edit history (undo-tree).** Editing after an undo no longer throws
