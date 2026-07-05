@@ -1643,12 +1643,16 @@ mod tests {
             },
             &mut doc,
         );
-        // Ten raster edits, each an UpdateNode holding two ~40 KB bitmaps.
-        for _ in 0..10 {
+        // Ten whole-image raster edits. Each rewrites every pixel, so even the
+        // #196 region delta spans the full bitmap (~80 KB of before/after) —
+        // exactly the case the memory cap must bound.
+        for k in 0..10u8 {
             let old = doc.nodes.get(&rid).unwrap().clone();
             let mut new = old.clone();
             if let SceneNodeKind::Raster(r) = &mut new.kind {
-                r.image.pixels[0] = r.image.pixels[0].wrapping_add(1);
+                for px in r.image.pixels.chunks_exact_mut(4) {
+                    px.copy_from_slice(&[k, k, k, 255]);
+                }
             }
             h.execute(Command::UpdateNode { old, new }, &mut doc);
         }
@@ -1667,6 +1671,74 @@ mod tests {
         );
         assert!(h.undo_depth() < before_depth, "nothing was trimmed");
     }
+
+    #[test]
+    fn raster_edit_stored_as_compact_region_delta_round_trips() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+        let mut doc = make_doc();
+        let lid = doc.active_layer_id.unwrap();
+        let node = SceneNode::new(
+            "ras",
+            lid,
+            SceneNodeKind::Raster(RasterNode {
+                image: RasterImage::new(100, 100),
+                mask: None,
+                source_uri: None,
+                adjustment: None,
+            }),
+        );
+        let rid = node.id;
+        let mut h = CommandHistory::new(1000);
+        h.execute(
+            Command::AddNode {
+                node,
+                layer_id: Some(lid),
+            },
+            &mut doc,
+        );
+
+        // Paint a 10×10 red square at (20, 30).
+        let old = doc.nodes.get(&rid).unwrap().clone();
+        let mut new = old.clone();
+        if let SceneNodeKind::Raster(r) = &mut new.kind {
+            for y in 30..40u32 {
+                for x in 20..30u32 {
+                    let i = ((y * 100 + x) * 4) as usize;
+                    r.image.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+                }
+            }
+        }
+        h.execute(Command::UpdateNode { old, new }, &mut doc);
+
+        // It was stored as a tight region delta, not two full bitmap clones.
+        match h.current_command() {
+            Some(Command::UpdateRasterRegion { x, y, w, h: rh, old, new, .. }) => {
+                assert_eq!((*x, *y, *w, *rh), (20, 30, 10, 10));
+                assert_eq!(old.len(), 10 * 10 * 4);
+                assert_eq!(new.len(), 10 * 10 * 4);
+            }
+            other => panic!("expected a region delta, got {other:?}"),
+        }
+        // The delta command is ~1 KB, not the ~80 KB of two 100×100 bitmaps.
+        assert!(
+            h.current_command().unwrap().mem_estimate() < 2_000,
+            "region delta should be compact"
+        );
+
+        // Undo/redo patch exactly the touched pixel back and forth.
+        let sample = |d: &Document| -> u8 {
+            match &d.nodes.get(&rid).unwrap().kind {
+                SceneNodeKind::Raster(r) => r.image.pixels[((35 * 100 + 25) * 4) as usize],
+                _ => 0,
+            }
+        };
+        assert_eq!(sample(&doc), 255, "edit applied");
+        h.undo(&mut doc);
+        assert_eq!(sample(&doc), 0, "undo restores transparent");
+        h.redo(&mut doc);
+        assert_eq!(sample(&doc), 255, "redo re-applies red");
+    }
 }
 
 /// A reversible command that can be applied to a Document.
@@ -1682,6 +1754,21 @@ pub enum Command {
     RemoveNode { node_id: NodeId },
     /// Replace a node (used for any property update — stores old node for undo).
     UpdateNode { old: SceneNode, new: SceneNode },
+
+    /// Delta form of an `UpdateNode` whose ONLY change is raster pixels within a
+    /// rectangular region (#196) — a brush stroke touches a small area, so this
+    /// stores just that region's before/after pixels instead of two full bitmap
+    /// clones. Produced transparently in `execute` (see `into_raster_delta`).
+    UpdateRasterRegion {
+        node_id: NodeId,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        /// RGBA pixels of the region before / after, each `w*h*4` bytes.
+        old: Vec<u8>,
+        new: Vec<u8>,
+    },
     /// Add a layer.
     AddLayer { layer: Layer },
     /// Remove a layer.
@@ -1832,8 +1919,52 @@ impl Command {
             Command::AddNode { node, .. } => BASE + node.mem_estimate(),
             Command::RemoveNodeFull { node } => BASE + node.mem_estimate(),
             Command::UpdateNode { old, new } => BASE + old.mem_estimate() + new.mem_estimate(),
+            Command::UpdateRasterRegion { old, new, .. } => {
+                BASE + old.len() as u64 + new.len() as u64
+            }
             Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
             _ => BASE,
+        }
+    }
+
+    /// If this is an `UpdateNode` whose only change is raster pixels (same node,
+    /// same dimensions, no mask, all other fields equal), rewrite it as a compact
+    /// [`Command::UpdateRasterRegion`] over just the changed rectangle (#196).
+    /// Otherwise returns `self` unchanged. Called once per `execute`.
+    pub fn into_raster_delta(self) -> Command {
+        use crate::node::SceneNodeKind;
+        let Command::UpdateNode { old, new } = &self else {
+            return self;
+        };
+        if old.id != new.id {
+            return self;
+        }
+        let (SceneNodeKind::Raster(ro), SceneNodeKind::Raster(rn)) = (&old.kind, &new.kind) else {
+            return self;
+        };
+        let (oi, ni) = (&ro.image, &rn.image);
+        // Region deltas only make sense for a pure same-size pixel edit with no
+        // mask involved and no other node field changed.
+        if oi.width != ni.width
+            || oi.height != ni.height
+            || ro.mask.is_some()
+            || rn.mask.is_some()
+            || !node_meta_equal_ignoring_raster_pixels(old, new)
+        {
+            return self;
+        }
+        match diff_raster_region(oi, ni) {
+            Some((x, y, w, h, old_px, new_px)) => Command::UpdateRasterRegion {
+                node_id: new.id,
+                x,
+                y,
+                w,
+                h,
+                old: old_px,
+                new: new_px,
+            },
+            // No pixels actually differ → keep the (harmless) UpdateNode.
+            None => self,
         }
     }
 
@@ -1843,6 +1974,7 @@ impl Command {
             Command::AddNode { node, .. } => format!("Add {}", node.name),
             Command::RemoveNode { .. } => "Remove node".to_string(),
             Command::UpdateNode { new, .. } => format!("Update {}", new.name),
+            Command::UpdateRasterRegion { .. } => "Edit raster".to_string(),
             Command::AddLayer { layer } => format!("Add layer \"{}\"", layer.name),
             Command::RemoveLayer { .. } => "Remove layer".to_string(),
             Command::ReorderLayers { .. } => "Reorder layers".to_string(),
@@ -1932,6 +2064,21 @@ impl Command {
             Command::UpdateNode { new, .. } => {
                 if let Some(n) = doc.nodes.get_mut(&new.id) {
                     *n = new.clone();
+                }
+            }
+            Command::UpdateRasterRegion {
+                node_id,
+                x,
+                y,
+                w,
+                h,
+                new,
+                ..
+            } => {
+                if let Some(node) = doc.nodes.get_mut(node_id) {
+                    if let crate::node::SceneNodeKind::Raster(r) = &mut node.kind {
+                        paste_raster_region(&mut r.image, *x, *y, *w, *h, new);
+                    }
                 }
             }
             Command::AddLayer { layer } => {
@@ -2201,6 +2348,23 @@ impl Command {
                 })
             }
             Command::UpdateNode { old, new } => Some(Command::UpdateNode {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            Command::UpdateRasterRegion {
+                node_id,
+                x,
+                y,
+                w,
+                h,
+                old,
+                new,
+            } => Some(Command::UpdateRasterRegion {
+                node_id: *node_id,
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
                 old: new.clone(),
                 new: old.clone(),
             }),
@@ -2555,6 +2719,97 @@ impl Default for CommandHistory {
 
 /// Recursively collect the `old` side of any `UpdateNode` command in `cmd`
 /// that touches `node_id`, appending to `out`.
+/// True when two nodes are identical except (possibly) for raster pixel data —
+/// used to decide whether an `UpdateNode` can be reduced to a pixel-region delta
+/// (#196). Compares a pixel-stripped serialization so no field is missed.
+fn node_meta_equal_ignoring_raster_pixels(a: &SceneNode, b: &SceneNode) -> bool {
+    use crate::node::SceneNodeKind;
+    use crate::raster::image::RasterImage;
+    let strip = |n: &SceneNode| -> SceneNode {
+        let mut c = n.clone();
+        if let SceneNodeKind::Raster(r) = &mut c.kind {
+            // Replace the heavy pixel buffer with a 1×1 placeholder so the
+            // comparison is cheap and ignores pixels (dimensions are checked
+            // separately by the caller).
+            r.image = RasterImage::new(1, 1);
+        }
+        c
+    };
+    serde_json::to_vec(&strip(a)).ok() == serde_json::to_vec(&strip(b)).ok()
+}
+
+/// Find the bounding box of pixels that differ between two same-size RGBA
+/// images and return `(x, y, w, h, old_region, new_region)`, or `None` when
+/// nothing changed. Both regions are `w*h*4` bytes (#196).
+fn diff_raster_region(
+    old: &crate::raster::image::RasterImage,
+    new: &crate::raster::image::RasterImage,
+) -> Option<(u32, u32, u32, u32, Vec<u8>, Vec<u8>)> {
+    let (w, h) = (old.width, old.height);
+    if new.width != w || new.height != h {
+        return None;
+    }
+    let (op, np) = (&old.pixels, &new.pixels);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+    let mut any = false;
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            if op[i..i + 4] != np[i..i + 4] {
+                any = true;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    let (rw, rh) = (max_x - min_x + 1, max_y - min_y + 1);
+    let mut old_r = Vec::with_capacity((rw * rh * 4) as usize);
+    let mut new_r = Vec::with_capacity((rw * rh * 4) as usize);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let i = ((y * w + x) * 4) as usize;
+            old_r.extend_from_slice(&op[i..i + 4]);
+            new_r.extend_from_slice(&np[i..i + 4]);
+        }
+    }
+    Some((min_x, min_y, rw, rh, old_r, new_r))
+}
+
+/// Paste a `w*h` RGBA region into `img` at `(x, y)`, clipping at the edges.
+fn paste_raster_region(
+    img: &mut crate::raster::image::RasterImage,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    px: &[u8],
+) {
+    let iw = img.width;
+    let ih = img.height;
+    for row in 0..h {
+        let iy = y + row;
+        if iy >= ih {
+            break;
+        }
+        for col in 0..w {
+            let ix = x + col;
+            if ix >= iw {
+                continue;
+            }
+            let di = ((iy * iw + ix) * 4) as usize;
+            let si = ((row * w + col) * 4) as usize;
+            if di + 4 <= img.pixels.len() && si + 4 <= px.len() {
+                img.pixels[di..di + 4].copy_from_slice(&px[si..si + 4]);
+            }
+        }
+    }
+}
+
 fn collect_node_olds(cmd: &Command, node_id: NodeId, out: &mut Vec<SceneNode>) {
     match cmd {
         Command::UpdateNode { old, new } if new.id == node_id => {

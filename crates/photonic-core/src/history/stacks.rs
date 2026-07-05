@@ -230,7 +230,7 @@ impl CommandHistory {
         // while the target entity still exists, so the pushed undo entry (and
         // the persisted `.photon` history) is always invertible. See
         // [`Command::hydrate`].
-        let cmd = cmd.hydrate(doc);
+        let cmd = cmd.hydrate(doc).into_raster_delta();
         let desc = cmd.description();
 
         // Gesture coalescing (#182): during an open pointer gesture, fold a
