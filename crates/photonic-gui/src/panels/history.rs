@@ -234,7 +234,6 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         }
         lanes[c] = node.parent; // reserve this column for the parent (None frees it)
     }
-    let max_lane = col.values().copied().max().unwrap_or(0);
 
     // Ancestors of HEAD (the trunk) render bright; branch nodes render dim.
     let mut onpath: HashSet<u64> = HashSet::new();
@@ -278,7 +277,24 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let top = block.top();
     let x_of = |c: usize| left + gutter + c as f32 * lane_w;
     let y_of = |i: usize| top + i as f32 * row_h + row_h * 0.5;
-    let text_left = x_of(max_lane) + node_r + 10.0;
+
+    // Per-row rightmost occupied lane — each node's own column plus any edge that
+    // runs vertically through that row. Labels anchor just past this, so each title
+    // sits directly beside its own node instead of aligning to the single furthest
+    // lane, while still clearing pass-through branch lines.
+    let mut row_max_lane: Vec<usize> =
+        graph.iter().map(|node| *col.get(&node.id).unwrap_or(&0)).collect();
+    for node in graph.iter() {
+        let (Some(&i), Some(&c)) = (index.get(&node.id), col.get(&node.id)) else {
+            continue;
+        };
+        let Some(p) = node.parent else { continue };
+        let Some(&j) = index.get(&p) else { continue };
+        let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+        for slot in row_max_lane[lo..=hi].iter_mut() {
+            *slot = (*slot).max(c);
+        }
+    }
 
     // Edges first (drawn under the nodes).
     for node in graph.iter() {
@@ -390,6 +406,8 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             text_dim
         };
         // A small floppy glyph precedes the message on the last-saved node.
+        // Anchor the label just past this row's own graph column(s).
+        let text_left = x_of(row_max_lane[i]) + node_r + 10.0;
         let mut msg_left = text_left;
         if saved_here {
             let fg = ui.painter().layout_no_wrap(

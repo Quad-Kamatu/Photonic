@@ -188,27 +188,51 @@ impl PhotonicApp {
             _ => {}
         }
 
+        // Generous grab radius; find the closest handle to a screen point.
+        const HIT: f32 = 16.0;
+        let closest = |pt: egui::Pos2| -> Option<GradHandle> {
+            handles
+                .iter()
+                .map(|(h, dx, dy, _)| (*h, pt.distance(to_screen((*dx, *dy)))))
+                .filter(|(_, d)| *d <= HIT)
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(h, _)| h)
+        };
+
+        // The handle to emphasise: the one being dragged, else the hovered one.
+        let emphasised = self
+            .gradient_drag
+            .or_else(|| response.hover_pos().and_then(closest));
+
         // ── Handle dots ──
         for (h, dx, dy, col) in &handles {
             let p = to_screen((*dx, *dy));
-            let selected = self.gradient_drag == Some(*h);
-            let r = if selected { 6.0 } else { 5.0 };
-            painter.circle_filled(p, r + 1.5, Color32::from_black_alpha(120));
+            let active = emphasised == Some(*h);
+            let r = if active { 7.5 } else { 5.5 };
+            painter.circle_filled(p, r + 2.0, Color32::from_black_alpha(130));
             painter.circle_filled(p, r, col.unwrap_or(Color32::WHITE));
             painter.circle_stroke(
                 p,
                 r,
-                egui::Stroke::new(1.5, if selected { accent } else { Color32::WHITE }),
+                egui::Stroke::new(2.0, if active { accent } else { Color32::WHITE }),
             );
         }
 
+        // Cursor feedback so handles read as grabbable.
+        if self.gradient_drag.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if emphasised.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+
         // ── Interaction ──
+        // Grab from the exact press origin, not the delayed `drag_started`
+        // position (egui only reports a drag after the pointer has drifted past
+        // its drag threshold — that drift used to miss the small handle and let
+        // the Select tool move the object instead).
         if response.drag_started() {
-            if let Some(pp) = response.interact_pointer_pos() {
-                self.gradient_drag = handles
-                    .iter()
-                    .find(|(_, dx, dy, _)| pp.distance(to_screen((*dx, *dy))) <= 9.0)
-                    .map(|(h, _, _, _)| *h);
+            if let Some(press) = ui.input(|i| i.pointer.press_origin()) {
+                self.gradient_drag = closest(press);
             }
         }
         let dragging = self.gradient_drag.is_some();
