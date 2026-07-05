@@ -21,6 +21,9 @@ pub struct AppPreferences {
     /// nodes during a move drag (#66). Additive with `snap_to_grid`.
     #[serde(default = "default_true")]
     pub snap_to_objects: bool,
+    /// Also snap to the artboard/canvas edges, center, and margins (#211).
+    #[serde(default = "default_true")]
+    pub snap_to_artboard: bool,
     /// Snap pull radius in screen pixels (converted to canvas units via zoom).
     #[serde(default = "default_snap_tolerance")]
     pub snap_tolerance_px: f32,
@@ -184,6 +187,7 @@ impl Default for AppPreferences {
             grid_color: [0.31, 0.31, 0.47, 0.24], // muted violet, semi-transparent
             show_rulers: false,
             snap_to_objects: true,
+            snap_to_artboard: true,
             snap_tolerance_px: 6.0,
             snap_show_guides: true,
             document_units: photonic_core::DocumentUnit::Px,

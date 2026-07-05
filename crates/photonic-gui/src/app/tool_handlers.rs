@@ -812,18 +812,30 @@ impl PhotonicApp {
                     // nodes. Additive with grid snap; suppressed while Shift
                     // (axis-lock) is held. Tolerance is in screen px → canvas.
                     self.last_snap_result = None;
-                    if self.prefs.snap_to_objects && !shift {
+                    if (self.prefs.snap_to_objects || self.prefs.snap_to_artboard) && !shift {
                         if let Some((bx0, by0, bx1, by1)) = self.move_snap_bbox {
                             let moving: Vec<NodeId> = doc.selection.ids().copied().collect();
-                            let candidates = crate::snap::collect_snap_candidates(doc, &moving);
+                            let mut candidates = if self.prefs.snap_to_objects {
+                                crate::snap::collect_snap_candidates(doc, &moving)
+                            } else {
+                                Vec::new()
+                            };
+                            // Artboard/canvas edges + margins (#211).
+                            if self.prefs.snap_to_artboard {
+                                candidates.extend(crate::snap::collect_artboard_candidates(doc));
+                            }
                             let tol = (self.prefs.snap_tolerance_px as f64) / view.zoom.max(1e-6);
                             let tentative = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
                             let mut snap = crate::snap::resolve_snap(tentative, &candidates, tol);
                             dx += snap.corrected.0;
                             dy += snap.corrected.1;
-                            // Equal-spacing distribution hints (#66) — only on an
-                            // axis that edge/center snapping didn't already claim.
-                            let others = crate::snap::collect_node_aabbs(doc, &moving);
+                            // Equal-spacing distribution hints (#66) — only between
+                            // objects, and only on an axis edge snapping didn't claim.
+                            let others = if self.prefs.snap_to_objects {
+                                crate::snap::collect_node_aabbs(doc, &moving)
+                            } else {
+                                Vec::new()
+                            };
                             let post = (bx0 + dx, by0 + dy, bx1 + dx, by1 + dy);
                             let sp = crate::snap::resolve_equal_spacing(post, &others, tol);
                             if snap.corrected.0 == 0.0 {

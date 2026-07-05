@@ -28,8 +28,9 @@ pub enum SnapAxis {
 /// A single alignment target contributed by one node.
 #[derive(Clone, Copy, Debug)]
 pub struct SnapCandidate {
-    /// The node that owns this alignment line.
-    pub node_id: NodeId,
+    /// The node that owns this alignment line, or `None` for a document-level
+    /// line (artboard/canvas edge, center, or margin) — see #211.
+    pub source: Option<NodeId>,
     /// Whether `value` is an `x` (vertical guide) or `y` (horizontal guide).
     pub axis: SnapAxis,
     /// The canvas-space coordinate of the alignment line (e.g. left-edge x).
@@ -49,8 +50,8 @@ pub struct ActiveGuide {
     pub axis: SnapAxis,
     /// Canvas-space coordinate the line is drawn at (matches the target edge).
     pub coord: f64,
-    /// The node we snapped to (for debugging / future labels).
-    pub target_node: NodeId,
+    /// The node we snapped to, or `None` for a document-level line (artboard).
+    pub target_node: Option<NodeId>,
     /// Gap between the dragged object and the target object along the
     /// perpendicular axis, in **canvas units** (0 when they overlap). The
     /// caller multiplies by `view.zoom` to render a pixel-distance label.
@@ -151,7 +152,7 @@ pub fn collect_snap_candidates(doc: &Document, exclude: &[NodeId]) -> Vec<SnapCa
         // Vertical guides snap an x coordinate; their perpendicular span is y.
         for value in [x0, cx, x1] {
             out.push(SnapCandidate {
-                node_id: node.id,
+                source: Some(node.id),
                 axis: SnapAxis::Vertical,
                 value,
                 perp_min: y0,
@@ -161,7 +162,60 @@ pub fn collect_snap_candidates(doc: &Document, exclude: &[NodeId]) -> Vec<SnapCa
         // Horizontal guides snap a y coordinate; their perpendicular span is x.
         for value in [y0, cy, y1] {
             out.push(SnapCandidate {
-                node_id: node.id,
+                source: Some(node.id),
+                axis: SnapAxis::Horizontal,
+                value,
+                perp_min: x0,
+                perp_max: x1,
+            });
+        }
+    }
+    out
+}
+
+/// Snap candidates for the document's artboard(s) (#211): each board's edges +
+/// center, plus its margin insets. Falls back to the whole canvas when no
+/// explicit artboards exist. These lines have no owning node (`source: None`).
+pub fn collect_artboard_candidates(doc: &Document) -> Vec<SnapCandidate> {
+    let mut out = Vec::new();
+    let boards: Vec<(f64, f64, f64, f64)> = if doc.artboards.is_empty() {
+        vec![(0.0, 0.0, doc.width, doc.height)]
+    } else {
+        doc.artboards
+            .iter()
+            .map(|a| (a.x, a.y, a.width, a.height))
+            .collect()
+    };
+    for (x, y, w, h) in boards {
+        let (x0, y0, x1, y1) = (x, y, x + w, y + h);
+        let cx = (x0 + x1) / 2.0;
+        let cy = (y0 + y1) / 2.0;
+        let mut xs = vec![x0, cx, x1];
+        let mut ys = vec![y0, cy, y1];
+        if doc.margin_left > 0.0 {
+            xs.push(x0 + doc.margin_left);
+        }
+        if doc.margin_right > 0.0 {
+            xs.push(x1 - doc.margin_right);
+        }
+        if doc.margin_top > 0.0 {
+            ys.push(y0 + doc.margin_top);
+        }
+        if doc.margin_bottom > 0.0 {
+            ys.push(y1 - doc.margin_bottom);
+        }
+        for value in xs {
+            out.push(SnapCandidate {
+                source: None,
+                axis: SnapAxis::Vertical,
+                value,
+                perp_min: y0,
+                perp_max: y1,
+            });
+        }
+        for value in ys {
+            out.push(SnapCandidate {
+                source: None,
                 axis: SnapAxis::Horizontal,
                 value,
                 perp_min: x0,
@@ -241,7 +295,7 @@ pub fn resolve_snap(
         result.active.push(ActiveGuide {
             axis: SnapAxis::Vertical,
             coord: cand.value,
-            target_node: cand.node_id,
+            target_node: cand.source,
             distance: interval_gap(sy0, sy1, cand.perp_min, cand.perp_max),
         });
     }
@@ -249,7 +303,7 @@ pub fn resolve_snap(
         result.active.push(ActiveGuide {
             axis: SnapAxis::Horizontal,
             coord: cand.value,
-            target_node: cand.node_id,
+            target_node: cand.source,
             distance: interval_gap(sx0, sx1, cand.perp_min, cand.perp_max),
         });
     }
@@ -363,12 +417,36 @@ mod tests {
 
     fn cand(axis: SnapAxis, value: f64) -> SnapCandidate {
         SnapCandidate {
-            node_id: Uuid::nil(),
+            source: Some(Uuid::nil()),
             axis,
             value,
             perp_min: 0.0,
             perp_max: 10.0,
         }
+    }
+
+    #[test]
+    fn artboard_candidates_cover_canvas_edges_center_and_margins() {
+        let mut doc = Document::new("t", 200.0, 100.0);
+        doc.margin_left = 10.0;
+        let cands = collect_artboard_candidates(&doc);
+        // All artboard lines have no owning node.
+        assert!(cands.iter().all(|c| c.source.is_none()));
+        // Canvas x edges/center + the left-margin inset are present.
+        let xs: Vec<f64> = cands
+            .iter()
+            .filter(|c| c.axis == SnapAxis::Vertical)
+            .map(|c| c.value)
+            .collect();
+        for expected in [0.0, 100.0, 200.0, 10.0] {
+            assert!(
+                xs.iter().any(|&v| (v - expected).abs() < 1e-9),
+                "missing vertical candidate at {expected}"
+            );
+        }
+        // And a drag near the right edge snaps to it.
+        let res = resolve_snap((196.0, 40.0, 216.0, 60.0), &cands, 6.0);
+        assert!((res.corrected.0 - 4.0).abs() < 1e-9, "should snap right edge to x=200");
     }
 
     #[test]

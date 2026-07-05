@@ -237,8 +237,10 @@ impl PhotonicApp {
                                             });
                                             ui.checkbox(&mut self.prefs.snap_to_grid, "Snap to Grid");
                                             ui.checkbox(&mut self.prefs.snap_to_objects, "Snap to Objects")
-                                                .on_hover_text("Align edges/centers to nearby objects while dragging (#66).");
-                                            ui.add_enabled_ui(self.prefs.snap_to_objects, |ui| {
+                                                .on_hover_text("Align edges/centers to nearby objects (and equal-spacing) while dragging (#66).");
+                                            ui.checkbox(&mut self.prefs.snap_to_artboard, "Snap to Artboard")
+                                                .on_hover_text("Align to the artboard/canvas edges, center, and margins while dragging (#211).");
+                                            ui.add_enabled_ui(self.prefs.snap_to_objects || self.prefs.snap_to_artboard, |ui| {
                                                 ui.checkbox(&mut self.prefs.snap_show_guides, "Show Smart Guides");
                                                 ui.horizontal(|ui| {
                                                     ui.label("Snap Tolerance");
