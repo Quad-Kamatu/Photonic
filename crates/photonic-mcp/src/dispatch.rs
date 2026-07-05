@@ -1093,6 +1093,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::make_compound_path(state, a).await,
             ))
         }
+        "make_live_boolean" => {
+            let a: MakeLiveBooleanArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::mutating(
+                handlers::nodes::make_live_boolean(state, a).await,
+            ))
+        }
         "release_compound_path" => {
             let a: ReleaseCompoundPathArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::mutating(

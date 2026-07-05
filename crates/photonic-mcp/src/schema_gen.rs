@@ -2919,6 +2919,28 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "make_live_boolean",
+            "description": "Group two or more path nodes into a NON-DESTRUCTIVE live boolean. Unlike boolean_operation / make_compound_path, the operands stay individually editable: the group renders and exports as the single resolved path (styled by the bottom child), and editing any operand re-computes the boolean live. Operators: union, intersect, subtract, exclude, divide. Single undoable step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 2,
+                        "description": "IDs of the path nodes to combine (at least 2 top-level path nodes)."
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["union", "intersect", "subtract", "exclude", "divide"],
+                        "description": "The boolean operator to apply across the operands."
+                    },
+                    "name": { "type": "string", "description": "Optional name for the live-boolean group." }
+                },
+                "required": ["node_ids", "operation"]
+            }
+        },
+        {
             "name": "release_compound_path",
             "description": "Release a compound path back into its individual subpaths (Illustrator's Object > Compound Path > Release). Each subpath becomes a separate path node sharing the compound path's fill and stroke. Single undoable step.",
             "inputSchema": {

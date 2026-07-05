@@ -202,6 +202,72 @@ pub async fn group_nodes(state: &AppState, args: GroupNodesArgs) -> ToolResult {
     ))
     .with_data(serde_json::json!({ "group_id": group_id }))
 }
+pub async fn make_live_boolean(
+    state: &AppState,
+    args: crate::protocol::args::MakeLiveBooleanArgs,
+) -> ToolResult {
+    use photonic_core::ops::boolean::BooleanOp;
+    if args.node_ids.len() < 2 {
+        return ToolResult::error("make_live_boolean requires at least 2 node_ids");
+    }
+    let op = match args.operation.trim().to_lowercase().as_str() {
+        "union" | "add" => BooleanOp::Union,
+        "intersect" | "intersection" => BooleanOp::Intersect,
+        "subtract" | "minus" | "minus_front" => BooleanOp::Subtract,
+        "exclude" | "xor" => BooleanOp::Exclude,
+        "divide" => BooleanOp::Divide,
+        other => {
+            return ToolResult::error(format!(
+                "Unknown operation '{other}' (union|intersect|subtract|exclude|divide)"
+            ))
+        }
+    };
+
+    let mut doc = state.document.lock().await;
+    // Every operand must be a path node for the boolean to be meaningful.
+    for &id in &args.node_ids {
+        match doc.nodes.get(&id) {
+            Some(n) if matches!(n.kind, SceneNodeKind::Path(_)) => {}
+            Some(_) => return ToolResult::error(format!("Node {id} is not a path node")),
+            None => return ToolResult::error(format!("Node {id} not found")),
+        }
+    }
+
+    let (layer_id, mut indexed) = match doc.nodes_layer_and_indices(&args.node_ids) {
+        Some(v) => v,
+        None => return ToolResult::error("All nodes must exist and belong to the same layer"),
+    };
+    indexed.sort_by_key(|(_, idx)| *idx);
+    let children: Vec<NodeId> = indexed.iter().map(|(id, _)| *id).collect();
+    let insert_index = indexed[0].1;
+
+    let group_name = args.name.unwrap_or_else(|| "Live Boolean".to_string());
+    let group_kind = SceneNodeKind::Group(GroupNode {
+        children: children.clone(),
+        clip_children: false,
+        clip_node_id: None,
+        blend_spine_id: None,
+        live_boolean: Some(op),
+    });
+    let group = SceneNode::new(&group_name, layer_id, group_kind);
+    let group_id = group.id;
+
+    let cmd = Command::GroupNodes {
+        group,
+        layer_id,
+        insert_index,
+        children,
+    };
+    let mut history = state.history.lock().await;
+    history.execute_discrete(cmd, &mut doc);
+
+    ToolResult::text(format!(
+        "Made live {op:?} boolean '{group_name}' (id: {group_id}) from {} paths",
+        args.node_ids.len()
+    ))
+    .with_data(serde_json::json!({ "group_id": group_id }))
+}
+
 pub async fn ungroup_nodes(state: &AppState, args: UngroupNodesArgs) -> ToolResult {
     let mut doc = state.document.lock().await;
 

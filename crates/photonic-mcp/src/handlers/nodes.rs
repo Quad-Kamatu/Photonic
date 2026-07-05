@@ -56,7 +56,8 @@ pub use crate::handlers::styling::{
 pub use crate::handlers::utility::{
     auto_name_nodes, check_style_continuity, clean_up, delete_nodes, enter_isolation_mode,
     exit_isolation_mode, export_tagged_assets, flatten_transparency, get_css_preview, get_node,
-    get_node_prompts, group_nodes, inspect_node, measure_distance, measure_nodes, move_to_layer,
+    get_node_prompts, group_nodes, inspect_node, make_live_boolean, measure_distance,
+    measure_nodes, move_to_layer,
     set_locked, set_node_prompt, set_node_size, set_visibility, tag_node_for_export, tag_nodes,
     undo_node, ungroup_nodes, update_node,
 };

@@ -830,6 +830,20 @@ pub struct MakeCompoundPathArgs {
     pub name: Option<String>,
 }
 
+/// Arguments for `make_live_boolean`.
+#[derive(Debug, Deserialize, Default)]
+pub struct MakeLiveBooleanArgs {
+    /// IDs of the path nodes to combine. Must contain at least 2 path nodes.
+    /// They are grouped into a non-destructive live-boolean group; the operands
+    /// stay individually editable and the boolean recomputes on every edit.
+    pub node_ids: Vec<Uuid>,
+    /// Boolean operator: `union`, `intersect`, `subtract`, `exclude`, or `divide`.
+    pub operation: String,
+    /// Optional name for the resulting live-boolean group.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// Arguments for `release_compound_path`.
 #[derive(Debug, Deserialize, Default)]
 pub struct ReleaseCompoundPathArgs {
