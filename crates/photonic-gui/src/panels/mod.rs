@@ -9,7 +9,7 @@ use photonic_core::{
 };
 use uuid::Uuid;
 
-use crate::color_popup::{ColorPopup, FillPickerConfig, PickerConfig};
+use crate::color_popup::ColorPopup;
 use crate::radial_wheel::WheelAction;
 use crate::tools::Tool;
 

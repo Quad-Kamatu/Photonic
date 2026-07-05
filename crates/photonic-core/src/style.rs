@@ -81,6 +81,45 @@ pub enum FillKind {
 }
 
 impl FillKind {
+    /// Resolve an object-bounding-box gradient against the filled object's
+    /// document-space bbox so it can be sampled at document coordinates. Returns
+    /// `self` borrowed for every other fill (no allocation).
+    pub fn for_bbox(
+        &self,
+        min_x: f64,
+        min_y: f64,
+        w: f64,
+        h: f64,
+    ) -> std::borrow::Cow<'_, FillKind> {
+        match self {
+            FillKind::Gradient(g) if g.units.is_object_box() => {
+                std::borrow::Cow::Owned(FillKind::Gradient(g.resolved_for_bbox(min_x, min_y, w, h)))
+            }
+            FillKind::FluidGradient(fg) if fg.units.is_object_box() => {
+                std::borrow::Cow::Owned(FillKind::FluidGradient(
+                    fg.resolved_for_bbox(min_x, min_y, w, h),
+                ))
+            }
+            FillKind::MeshGradient(mg) if mg.units.is_object_box() => {
+                std::borrow::Cow::Owned(FillKind::MeshGradient(
+                    mg.resolved_for_bbox(min_x, min_y, w, h),
+                ))
+            }
+            _ => std::borrow::Cow::Borrowed(self),
+        }
+    }
+
+    /// Whether this fill is a gradient that rotates/shears with the object
+    /// (resolved in the object's local space rather than the world AABB).
+    pub fn gradient_follows_rotation(&self) -> bool {
+        match self {
+            FillKind::Gradient(g) => g.units.follows_rotation(),
+            FillKind::FluidGradient(fg) => fg.units.follows_rotation(),
+            FillKind::MeshGradient(mg) => mg.units.follows_rotation(),
+            _ => false,
+        }
+    }
+
     /// Sample the fill color at document-space coordinates `(x, y)`.
     /// `opacity` is the combined fill opacity × node opacity.
     pub fn sample_at(&self, x: f64, y: f64, opacity: f32) -> [f32; 4] {
@@ -390,17 +429,48 @@ pub enum LineJoin {
 
 // ─── Linear / Radial gradient ────────────────────────────────────────────────
 
+/// How a gradient's `coords` are interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientUnits {
+    /// Coordinates are absolute document/world units. (Back-compat default.)
+    #[default]
+    UserSpaceOnUse,
+    /// Coordinates are `0..1` fractions of the object's axis-aligned bounding
+    /// box — the gradient scales & moves with the object but stays axis-aligned.
+    ObjectBoundingBox,
+    /// Like [`ObjectBoundingBox`](Self::ObjectBoundingBox) but resolved in the
+    /// object's *local* space, so the gradient also **rotates/shears** with the
+    /// object (true SVG `objectBoundingBox`).
+    ObjectBoundingBoxRotated,
+}
+
+impl GradientUnits {
+    /// Whether coords are `0..1` fractions of the object's bbox (either mode).
+    pub fn is_object_box(self) -> bool {
+        matches!(self, Self::ObjectBoundingBox | Self::ObjectBoundingBoxRotated)
+    }
+    /// Whether the gradient rotates/shears with the object (local-space).
+    pub fn follows_rotation(self) -> bool {
+        matches!(self, Self::ObjectBoundingBoxRotated)
+    }
+}
+
 /// A linear or radial gradient.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Gradient {
     pub kind: GradientKind,
     pub stops: Vec<GradientStop>,
-    /// For linear: [x0, y0, x1, y1] in document/world space
+    /// For linear: [x0, y0, x1, y1]
     /// For radial: [cx, cy, fx, fy, r] (center, focal point, radius)
+    /// Interpreted per [`Gradient::units`].
     pub coords: Vec<f64>,
     /// Color space used to blend between stops.
     #[serde(default)]
     pub interpolation: GradientInterpolation,
+    /// Coordinate space of `coords`.
+    #[serde(default)]
+    pub units: GradientUnits,
 }
 
 impl Gradient {
@@ -410,6 +480,7 @@ impl Gradient {
             stops,
             coords: vec![x0, y0, x1, y1],
             interpolation: GradientInterpolation::default(),
+            units: GradientUnits::default(),
         }
     }
 
@@ -419,7 +490,52 @@ impl Gradient {
             stops,
             coords: vec![cx, cy, cx, cy, r],
             interpolation: GradientInterpolation::default(),
+            units: GradientUnits::default(),
         }
+    }
+
+    /// Builder: set the coordinate space.
+    pub fn with_units(mut self, units: GradientUnits) -> Self {
+        self.units = units;
+        self
+    }
+
+    /// If this gradient is in [`GradientUnits::ObjectBoundingBox`] space, return
+    /// an equivalent [`GradientUnits::UserSpaceOnUse`] gradient with `coords`
+    /// mapped into the given document-space bbox (so it can be sampled directly
+    /// at document coordinates). Returns `self` clone for user-space gradients.
+    pub fn resolved_for_bbox(&self, min_x: f64, min_y: f64, w: f64, h: f64) -> Gradient {
+        if !self.units.is_object_box() {
+            return self.clone();
+        }
+        let w = if w.abs() < 1e-9 { 1.0 } else { w };
+        let h = if h.abs() < 1e-9 { 1.0 } else { h };
+        let mut g = self.clone();
+        g.units = GradientUnits::UserSpaceOnUse;
+        match self.kind {
+            GradientKind::Linear if self.coords.len() >= 4 => {
+                g.coords = vec![
+                    min_x + self.coords[0] * w,
+                    min_y + self.coords[1] * h,
+                    min_x + self.coords[2] * w,
+                    min_y + self.coords[3] * h,
+                ];
+            }
+            GradientKind::Radial if self.coords.len() >= 5 => {
+                // Isotropic radius scaled by the larger bbox dimension so the
+                // default r=0.5 reaches the object edge.
+                let rs = w.abs().max(h.abs());
+                g.coords = vec![
+                    min_x + self.coords[0] * w,
+                    min_y + self.coords[1] * h,
+                    min_x + self.coords[2] * w,
+                    min_y + self.coords[3] * h,
+                    self.coords[4] * rs,
+                ];
+            }
+            _ => {}
+        }
+        g
     }
 
     /// Sample the gradient color at document-space coordinates `(x, y)`.
@@ -535,11 +651,40 @@ pub struct FluidGradient {
     pub points: Vec<FluidGradientPoint>,
     /// IDW power parameter (default 2.0 = Shepard's method).
     pub power: f32,
+    /// Coordinate space of the point positions.
+    #[serde(default)]
+    pub units: GradientUnits,
 }
 
 impl FluidGradient {
     pub fn new(points: Vec<FluidGradientPoint>) -> Self {
-        Self { points, power: 2.0 }
+        Self {
+            points,
+            power: 2.0,
+            units: GradientUnits::default(),
+        }
+    }
+
+    /// Builder: set the coordinate space.
+    pub fn with_units(mut self, units: GradientUnits) -> Self {
+        self.units = units;
+        self
+    }
+
+    /// Resolve object-bounding-box point coords into the given document bbox.
+    pub fn resolved_for_bbox(&self, min_x: f64, min_y: f64, w: f64, h: f64) -> FluidGradient {
+        if !self.units.is_object_box() {
+            return self.clone();
+        }
+        let w = if w.abs() < 1e-9 { 1.0 } else { w };
+        let h = if h.abs() < 1e-9 { 1.0 } else { h };
+        let mut g = self.clone();
+        g.units = GradientUnits::UserSpaceOnUse;
+        for p in &mut g.points {
+            p.x = min_x + p.x * w;
+            p.y = min_y + p.y * h;
+        }
+        g
     }
 
     /// Sample the gradient color at document-space coordinates `(x, y)`.
@@ -615,6 +760,9 @@ pub struct MeshGradient {
     pub cols: u32,
     /// `rows * cols` entries in row-major order.
     pub vertices: Vec<MeshGradientVertex>,
+    /// Coordinate space of the vertex positions.
+    #[serde(default)]
+    pub units: GradientUnits,
 }
 
 impl MeshGradient {
@@ -623,7 +771,30 @@ impl MeshGradient {
             rows,
             cols,
             vertices,
+            units: GradientUnits::default(),
         }
+    }
+
+    /// Builder: set the coordinate space.
+    pub fn with_units(mut self, units: GradientUnits) -> Self {
+        self.units = units;
+        self
+    }
+
+    /// Resolve object-bounding-box vertex coords into the given document bbox.
+    pub fn resolved_for_bbox(&self, min_x: f64, min_y: f64, w: f64, h: f64) -> MeshGradient {
+        if !self.units.is_object_box() {
+            return self.clone();
+        }
+        let w = if w.abs() < 1e-9 { 1.0 } else { w };
+        let h = if h.abs() < 1e-9 { 1.0 } else { h };
+        let mut g = self.clone();
+        g.units = GradientUnits::UserSpaceOnUse;
+        for v in &mut g.vertices {
+            v.x = min_x + v.x * w;
+            v.y = min_y + v.y * h;
+        }
+        g
     }
 
     fn vertex_at(&self, row: u32, col: u32) -> Option<&MeshGradientVertex> {
@@ -880,6 +1051,34 @@ mod gradient_interp_tests {
         let json = r#"{"offset":0.3,"color":{"r":1.0,"g":0.0,"b":0.0,"a":1.0}}"#;
         let s: GradientStop = serde_json::from_str(json).unwrap();
         assert_eq!(s.midpoint, 0.5);
+    }
+
+    #[test]
+    fn object_bbox_gradient_resolves_into_bbox() {
+        // A 0..1 linear gradient resolved into a bbox at (100,200) size 50×80.
+        let g = Gradient::linear(0.0, 0.0, 1.0, 0.0, stops())
+            .with_units(GradientUnits::ObjectBoundingBox);
+        let r = g.resolved_for_bbox(100.0, 200.0, 50.0, 80.0);
+        assert_eq!(r.units, GradientUnits::UserSpaceOnUse);
+        assert_eq!(r.coords, vec![100.0, 200.0, 150.0, 200.0]);
+        // Sampling the resolved gradient in document space hits the endpoints.
+        let a = r.sample_at(100.0, 200.0);
+        let b = r.sample_at(150.0, 200.0);
+        assert!((a[0] - 1.0).abs() < 1e-3 && a[2] < 1e-3); // red
+        assert!(b[2] > 0.99 && b[0] < 1e-3); // blue
+    }
+
+    #[test]
+    fn user_space_gradient_unchanged_by_resolve() {
+        let g = Gradient::linear(10.0, 0.0, 90.0, 0.0, stops());
+        assert_eq!(g.resolved_for_bbox(0.0, 0.0, 5.0, 5.0).coords, g.coords);
+    }
+
+    #[test]
+    fn legacy_gradient_defaults_to_user_space() {
+        let json = r#"{"kind":"linear","stops":[],"coords":[0.0,0.0,1.0,0.0]}"#;
+        let g: Gradient = serde_json::from_str(json).unwrap();
+        assert_eq!(g.units, GradientUnits::UserSpaceOnUse);
     }
 }
 

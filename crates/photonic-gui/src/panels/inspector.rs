@@ -233,72 +233,29 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                 .small(),
                             );
                         }
-                        // Consolidated fill editor: a fill swatch that opens the
-                        // color picker with the slide-out gradient drawer.
-                        let mut fill = pn.fill.clone();
-                        let recents: Vec<[f32; 4]> = doc
-                            .recent_colors
-                            .iter()
-                            .map(|c| [c.r, c.g, c.b, c.a])
-                            .collect();
-                        let cswatches: Vec<[f32; 4]> = doc
-                            .color_swatches
-                            .iter()
-                            .filter_map(|s| crate::color_convert::parse_hex(&s.color_hex))
-                            .collect();
-                        let gswatches: Vec<(String, Fill)> = doc
-                            .gradient_swatches
-                            .iter()
-                            .filter_map(|gs| {
-                                serde_json::from_str::<Fill>(&gs.fill_json)
-                                    .ok()
-                                    .map(|f| (gs.name.clone(), f))
-                            })
-                            .collect();
-                        let fcfg = FillPickerConfig {
-                            color: PickerConfig {
-                                alpha: true,
-                                recents: &recents,
-                                swatches: &cswatches,
-                                eyedropper: true,
-                                allow_add_swatch: false,
-                                contrast_ref: None,
-                            },
-                            gradient_swatches: &gswatches,
-                            allow_save_gradient: false,
-                        };
-                        let fout = ColorPopup::fill_swatch_popup(ui, &mut fill, &fcfg);
-                        if fout.changed {
-                            action = Some(if multi {
-                                PanelAction::UpdateNodesFill {
-                                    node_ids: selected_ids.to_vec(),
-                                    fill,
+                        // Clicking the fill preview opens the movable fill color
+                        // popup (full picker + slide-out gradient drawer).
+                        ui.horizontal(|ui| {
+                            if ColorPopup::fill_preview(ui, &pn.fill, egui::vec2(56.0, 22.0))
+                                .on_hover_text("Edit fill — opens the color popup")
+                                .clicked()
+                            {
+                                action =
+                                    Some(PanelAction::OpenColorPopup { node_id: nid, stroke: false });
+                            }
+                            let label = {
+                                use photonic_core::style::FillKind as FK;
+                                match &pn.fill.kind {
+                                    FK::None => "None",
+                                    FK::Solid(_) => "Solid",
+                                    FK::Gradient(_) => "Gradient",
+                                    FK::FluidGradient(_) => "Fluid",
+                                    FK::MeshGradient(_) => "Mesh",
+                                    FK::Pattern(_) => "Pattern",
                                 }
-                            } else {
-                                PanelAction::UpdateNodeFill { node_id: nid, fill }
-                            });
-                        }
-                        if let Some(slot) = fout.eyedropper {
-                            action = Some(PanelAction::StartEyedropper(match slot {
-                                FillColorSlot::Solid if multi => {
-                                    EyedropperTarget::NodesFillSolid {
-                                        node_ids: selected_ids.to_vec(),
-                                    }
-                                }
-                                FillColorSlot::Solid => {
-                                    EyedropperTarget::NodeFillSolid { node_id: nid }
-                                }
-                                FillColorSlot::GradientStop(i) => {
-                                    EyedropperTarget::NodeFillGradStop { node_id: nid, idx: i }
-                                }
-                                FillColorSlot::FluidPoint(i) => {
-                                    EyedropperTarget::NodeFillFluid { node_id: nid, idx: i }
-                                }
-                                FillColorSlot::MeshVertex(i) => {
-                                    EyedropperTarget::NodeFillMesh { node_id: nid, idx: i }
-                                }
-                            }));
-                        }
+                            };
+                            ui.label(RichText::new(label).weak().small());
+                        });
                         // ── Recent colors swatches ──────────────────────────
                         if !doc.recent_colors.is_empty() {
                             ui.add_space(4.0);

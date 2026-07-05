@@ -157,9 +157,40 @@ fn render_path_node(
         if opacity > 0.0 {
             let mesh = tessellate_fill(&pn.path_data, false);
             if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
-                let kind = &pn.fill.kind;
+                // Object-space gradients resolve against the fill's bbox; the
+                // rotation-following variant resolves + samples in local space
+                // (each pixel is inverse-transformed into the object's frame).
+                let m = &transform.matrix;
+                let rotated = pn.fill.kind.gradient_follows_rotation();
+                let (mut minx, mut miny, mut maxx, mut maxy) =
+                    (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for p in &mesh.vertices {
+                    let (x, y) = if rotated {
+                        (p[0] as f64, p[1] as f64)
+                    } else {
+                        (
+                            m[0] * p[0] as f64 + m[2] * p[1] as f64 + m[4],
+                            m[1] * p[0] as f64 + m[3] * p[1] as f64 + m[5],
+                        )
+                    };
+                    minx = minx.min(x);
+                    miny = miny.min(y);
+                    maxx = maxx.max(x);
+                    maxy = maxy.max(y);
+                }
+                let kind = pn.fill.kind.for_bbox(minx, miny, maxx - minx, maxy - miny);
+                // Inverse of the object transform for local-space sampling.
+                let det = m[0] * m[3] - m[1] * m[2];
+                let inv_ok = det.abs() > 1e-12;
                 composite_coverage(base, w, view, cov, bbox, blend_mode, |cx, cy| {
-                    let c = kind.sample_at(cx, cy, opacity);
+                    let (sx, sy) = if rotated && inv_ok {
+                        let dx = cx - m[4];
+                        let dy = cy - m[5];
+                        ((m[3] * dx - m[2] * dy) / det, (-m[1] * dx + m[0] * dy) / det)
+                    } else {
+                        (cx, cy)
+                    };
+                    let c = kind.sample_at(sx, sy, opacity);
                     ([c[0], c[1], c[2]], c[3])
                 });
             }

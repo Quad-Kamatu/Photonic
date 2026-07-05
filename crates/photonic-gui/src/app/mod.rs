@@ -12,6 +12,7 @@ use hit_test::*;
 mod command_center;
 mod direct_select;
 mod erase_tools;
+pub(crate) mod gradient_handles;
 pub(crate) mod layer_ops;
 mod rulers;
 mod tool_handlers;
@@ -797,6 +798,9 @@ pub struct PhotonicApp {
     /// Floating fill/stroke color picker raised from the radial menu, or None.
     color_popup: Option<ColorPopupState>,
 
+    /// The gradient control handle currently being dragged on the canvas.
+    gradient_drag: Option<gradient_handles::GradHandle>,
+
     // ── Audit panel ───────────────────────────────────────────────────────────
     pub audit: AuditPanelState,
 
@@ -1227,6 +1231,7 @@ impl Default for PhotonicApp {
 
             radial_wheel: None,
             color_popup: None,
+            gradient_drag: None,
 
             audit: AuditPanelState::default(),
 
@@ -4591,6 +4596,21 @@ impl PhotonicApp {
                             egui::Stroke::new(2.0, red_stroke),
                         );
                     }
+                }
+
+                // ── On-canvas gradient handles ───────────────────────────────
+                // Active whenever the movable fill popup is open (any tool). If
+                // a handle is grabbed, it consumes the drag so the underlying
+                // tool doesn't also act on it.
+                if self.handle_gradient_on_canvas(
+                    ui,
+                    &response,
+                    doc,
+                    view,
+                    &mut doc_modified,
+                    history,
+                ) {
+                    return;
                 }
 
                 // ── Select tool ──────────────────────────────────────────────

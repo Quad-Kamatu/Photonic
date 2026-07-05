@@ -1113,11 +1113,34 @@ fn build_geometry(
             let opacity = path_node.fill.opacity * node.opacity * gop;
             let mesh = tessellate_fill(&path_node.path_data, false);
             if !mesh.is_empty() {
+                // Object-space gradients resolve against the fill's bbox; the
+                // rotation-following variant resolves in local space.
+                let rotated = path_node.fill.kind.gradient_follows_rotation();
+                let (mut minx, mut miny, mut maxx, mut maxy) =
+                    (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for p in &mesh.vertices {
+                    let (x, y) = if rotated {
+                        (p[0] as f64, p[1] as f64)
+                    } else {
+                        (a * p[0] as f64 + c * p[1] as f64 + e, b * p[0] as f64 + d * p[1] as f64 + f)
+                    };
+                    minx = minx.min(x);
+                    miny = miny.min(y);
+                    maxx = maxx.max(x);
+                    maxy = maxy.max(y);
+                }
+                let fill_kind =
+                    path_node.fill.kind.for_bbox(minx, miny, maxx - minx, maxy - miny);
                 let base = verts.len() as u32;
                 for pos in &mesh.vertices {
                     let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
                     let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
-                    let color = path_node.fill.kind.sample_at(x, y, opacity);
+                    let (sx, sy) = if rotated {
+                        (pos[0] as f64, pos[1] as f64)
+                    } else {
+                        (x, y)
+                    };
+                    let color = fill_kind.sample_at(sx, sy, opacity);
                     verts.push(Vertex {
                         position: [x as f32, y as f32],
                         color,

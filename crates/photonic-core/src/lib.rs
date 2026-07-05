@@ -43,8 +43,8 @@ pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
     interpolate_stops, interpolate_stops_with, ArrowheadStyle, Fill, FillKind, FluidGradient,
-    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop, MeshGradient,
-    MeshGradientVertex, Stroke,
+    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop,
+    GradientUnits, MeshGradient, MeshGradientVertex, Stroke,
 };
 pub use transform::Transform;
 pub use units::{from_px, to_px, DocumentUnit};

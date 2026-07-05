@@ -722,6 +722,49 @@ impl PhotonicRenderer {
             idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
 
+        // Document-space bounds of a local mesh under an affine transform.
+        fn world_bounds(
+            verts: &[[f32; 2]],
+            a: f64,
+            b: f64,
+            c: f64,
+            d: f64,
+            e: f64,
+            f: f64,
+        ) -> (f64, f64, f64, f64) {
+            let (mut minx, mut miny, mut maxx, mut maxy) =
+                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for p in verts {
+                let x = a * p[0] as f64 + c * p[1] as f64 + e;
+                let y = b * p[0] as f64 + d * p[1] as f64 + f;
+                minx = minx.min(x);
+                miny = miny.min(y);
+                maxx = maxx.max(x);
+                maxy = maxy.max(y);
+            }
+            if verts.is_empty() {
+                (0.0, 0.0, 1.0, 1.0)
+            } else {
+                (minx, miny, maxx, maxy)
+            }
+        }
+        // Local (pre-transform) bounds of a mesh.
+        fn local_bounds(verts: &[[f32; 2]]) -> (f64, f64, f64, f64) {
+            let (mut minx, mut miny, mut maxx, mut maxy) =
+                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for p in verts {
+                minx = minx.min(p[0] as f64);
+                miny = miny.min(p[1] as f64);
+                maxx = maxx.max(p[0] as f64);
+                maxy = maxy.max(p[1] as f64);
+            }
+            if verts.is_empty() {
+                (0.0, 0.0, 1.0, 1.0)
+            } else {
+                (minx, miny, maxx, maxy)
+            }
+        }
+
         // Helpers for appending tessellated meshes to the vertex/index buffers.
         // Defined as closures to keep the loop body readable.
         let append_fill = |node: &NodeSnapshot, verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>| {
@@ -739,11 +782,29 @@ impl PhotonicRenderer {
             if mesh.is_empty() {
                 return;
             }
+            // Object-space gradients resolve against the fill's bbox so they
+            // track the object. Rotation-following gradients resolve in the
+            // object's local space (so they rotate/shear with it); others use
+            // the document-space AABB.
+            let rotated = node.fill_kind.gradient_follows_rotation();
+            let (bx, by, bw, bh) = if rotated {
+                let (lx, ly, lxx, lyy) = local_bounds(&mesh.vertices);
+                (lx, ly, lxx - lx, lyy - ly)
+            } else {
+                let (minx, miny, maxx, maxy) = world_bounds(&mesh.vertices, a, b, c, d, e, f);
+                (minx, miny, maxx - minx, maxy - miny)
+            };
+            let fill_kind = node.fill_kind.for_bbox(bx, by, bw, bh);
             let base = verts.len() as u32;
             for pos in &mesh.vertices {
                 let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
                 let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
-                let color = node.fill_kind.sample_at(x, y, opacity);
+                let (sx, sy) = if rotated {
+                    (pos[0] as f64, pos[1] as f64)
+                } else {
+                    (x, y)
+                };
+                let color = fill_kind.sample_at(sx, sy, opacity);
                 verts.push(Vertex {
                     position: [x as f32, y as f32],
                     color,

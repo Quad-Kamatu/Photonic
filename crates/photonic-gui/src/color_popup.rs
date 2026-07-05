@@ -18,7 +18,8 @@ use egui::{
 };
 use photonic_core::style::{
     interpolate_stops_with, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
-    GradientInterpolation, GradientKind, GradientStop, MeshGradient, MeshGradientVertex,
+    GradientInterpolation, GradientKind, GradientStop, GradientUnits, MeshGradient,
+    MeshGradientVertex,
 };
 use photonic_core::Color;
 
@@ -1075,34 +1076,48 @@ fn build_default_fill(t: FillType, old: &Fill) -> Fill {
     let mut f = match t {
         FillType::None => Fill::solid(base),
         FillType::Solid => Fill::solid(base),
-        FillType::Linear => Fill::gradient(Gradient::linear(
-            0.0,
-            0.0,
-            200.0,
-            0.0,
-            vec![GradientStop::new(0.0, base), GradientStop::new(1.0, white)],
-        )),
-        FillType::Radial => Fill::gradient(Gradient::radial(
-            100.0,
-            100.0,
-            100.0,
-            vec![GradientStop::new(0.0, base), GradientStop::new(1.0, white)],
-        )),
-        FillType::Fluid => Fill::fluid_gradient(FluidGradient::new(vec![
-            FluidGradientPoint::new(50.0, 50.0, base),
-            FluidGradientPoint::new(150.0, 50.0, white),
-            FluidGradientPoint::new(100.0, 150.0, Color::new(1.0, 0.5, 0.0, 1.0)),
-        ])),
-        FillType::Mesh => Fill::mesh_gradient(MeshGradient::new(
-            2,
-            2,
-            vec![
-                MeshGradientVertex::new(0.0, 0.0, base),
-                MeshGradientVertex::new(200.0, 0.0, Color::new(1.0, 0.2, 0.2, 1.0)),
-                MeshGradientVertex::new(0.0, 200.0, Color::new(0.2, 1.0, 0.2, 1.0)),
-                MeshGradientVertex::new(200.0, 200.0, Color::new(0.2, 0.2, 1.0, 1.0)),
-            ],
-        )),
+        // New gradients use object-bounding-box units (0..1) so they fit the
+        // filled object rather than the artboard.
+        FillType::Linear => Fill::gradient(
+            Gradient::linear(
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                vec![GradientStop::new(0.0, base), GradientStop::new(1.0, white)],
+            )
+            .with_units(GradientUnits::ObjectBoundingBox),
+        ),
+        FillType::Radial => Fill::gradient(
+            Gradient::radial(
+                0.5,
+                0.5,
+                0.5,
+                vec![GradientStop::new(0.0, base), GradientStop::new(1.0, white)],
+            )
+            .with_units(GradientUnits::ObjectBoundingBox),
+        ),
+        FillType::Fluid => Fill::fluid_gradient(
+            FluidGradient::new(vec![
+                FluidGradientPoint::new(0.25, 0.3, base),
+                FluidGradientPoint::new(0.75, 0.3, white),
+                FluidGradientPoint::new(0.5, 0.8, Color::new(1.0, 0.5, 0.0, 1.0)),
+            ])
+            .with_units(GradientUnits::ObjectBoundingBox),
+        ),
+        FillType::Mesh => Fill::mesh_gradient(
+            MeshGradient::new(
+                2,
+                2,
+                vec![
+                    MeshGradientVertex::new(0.0, 0.0, base),
+                    MeshGradientVertex::new(1.0, 0.0, Color::new(1.0, 0.2, 0.2, 1.0)),
+                    MeshGradientVertex::new(0.0, 1.0, Color::new(0.2, 1.0, 0.2, 1.0)),
+                    MeshGradientVertex::new(1.0, 1.0, Color::new(0.2, 0.2, 1.0, 1.0)),
+                ],
+            )
+            .with_units(GradientUnits::ObjectBoundingBox),
+        ),
         FillType::Pattern => {
             Fill::pattern(photonic_core::style::PatternFill::new(crate::panels::default_checker_tile()))
         }
@@ -1270,6 +1285,28 @@ fn gradient_drawer(
 }
 
 /// Linear/Radial drawer: interpolation toggle, stop bar, stop actions, geometry.
+/// A "rotate with object" checkbox for object-bounding-box gradients: toggles
+/// between axis-aligned and rotation-following units. Returns true on change.
+fn rotate_toggle(ui: &mut Ui, units: &mut GradientUnits) -> bool {
+    if !units.is_object_box() {
+        return false;
+    }
+    let mut rot = units.follows_rotation();
+    if ui
+        .checkbox(&mut rot, "Rotate with object")
+        .on_hover_text("Gradient rotates & shears with the object (local space)")
+        .changed()
+    {
+        *units = if rot {
+            GradientUnits::ObjectBoundingBoxRotated
+        } else {
+            GradientUnits::ObjectBoundingBox
+        };
+        return true;
+    }
+    false
+}
+
 fn gradient_stop_drawer(ui: &mut Ui, g: &mut Gradient, id: egui::Id, out: &mut FillOutcome) {
     let mut changed = false;
 
@@ -1288,6 +1325,7 @@ fn gradient_stop_drawer(ui: &mut Ui, g: &mut Gradient, id: egui::Id, out: &mut F
             changed = true;
         }
     });
+    changed |= rotate_toggle(ui, &mut g.units);
 
     // Stop bar.
     let mut active = active_index(ui, id, g.stops.len());
@@ -1471,40 +1509,47 @@ fn linear_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
     if g.coords.len() < 4 {
         return false;
     }
+    // Object-bounding-box coords are 0..1 fractions; user-space are pixels.
+    let obb = g.units.is_object_box();
+    let (len_speed, len_max, min_len) = if obb {
+        (0.005, 4.0, 0.01)
+    } else {
+        (1.0, 100000.0, 1.0)
+    };
     let (x0, y0, x1, y1) = (g.coords[0], g.coords[1], g.coords[2], g.coords[3]);
     let dx = x1 - x0;
     let dy = y1 - y0;
     let mut angle = dy.atan2(dx).to_degrees();
-    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let len = (dx * dx + dy * dy).sqrt().max(min_len);
     let mut changed = false;
+    let apply = |g: &mut Gradient, angle: f64, l: f64| {
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let r = angle.to_radians();
+        g.coords[0] = cx - r.cos() * l * 0.5;
+        g.coords[1] = cy - r.sin() * l * 0.5;
+        g.coords[2] = cx + r.cos() * l * 0.5;
+        g.coords[3] = cy + r.sin() * l * 0.5;
+    };
     ui.horizontal(|ui| {
         if ui
             .add(egui::DragValue::new(&mut angle).speed(1.0).suffix("°").prefix("angle "))
             .changed()
         {
-            let cx = (x0 + x1) * 0.5;
-            let cy = (y0 + y1) * 0.5;
-            let r = angle.to_radians();
-            let hx = r.cos() * len * 0.5;
-            let hy = r.sin() * len * 0.5;
-            g.coords[0] = cx - hx;
-            g.coords[1] = cy - hy;
-            g.coords[2] = cx + hx;
-            g.coords[3] = cy + hy;
+            apply(g, angle, len);
             changed = true;
         }
         let mut l = len;
         if ui
-            .add(egui::DragValue::new(&mut l).speed(1.0).range(1.0..=100000.0).prefix("len "))
+            .add(
+                egui::DragValue::new(&mut l)
+                    .speed(len_speed)
+                    .range(min_len..=len_max)
+                    .prefix("len "),
+            )
             .changed()
         {
-            let cx = (x0 + x1) * 0.5;
-            let cy = (y0 + y1) * 0.5;
-            let r = angle.to_radians();
-            g.coords[0] = cx - r.cos() * l * 0.5;
-            g.coords[1] = cy - r.sin() * l * 0.5;
-            g.coords[2] = cx + r.cos() * l * 0.5;
-            g.coords[3] = cy + r.sin() * l * 0.5;
+            apply(g, angle, l);
             changed = true;
         }
     });
@@ -1515,23 +1560,29 @@ fn radial_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
     if g.coords.len() < 5 {
         return false;
     }
+    let obb = g.units.is_object_box();
+    let (speed, rmin, rmax) = if obb {
+        (0.005, 0.01, 4.0)
+    } else {
+        (1.0, 1.0, 100000.0)
+    };
     let mut changed = false;
     ui.horizontal(|ui| {
         let mut cx = g.coords[0];
         let mut cy = g.coords[1];
-        if ui.add(egui::DragValue::new(&mut cx).speed(1.0).prefix("cx ")).changed() {
+        if ui.add(egui::DragValue::new(&mut cx).speed(speed).prefix("cx ")).changed() {
             g.coords[0] = cx;
             g.coords[2] = cx;
             changed = true;
         }
-        if ui.add(egui::DragValue::new(&mut cy).speed(1.0).prefix("cy ")).changed() {
+        if ui.add(egui::DragValue::new(&mut cy).speed(speed).prefix("cy ")).changed() {
             g.coords[1] = cy;
             g.coords[3] = cy;
             changed = true;
         }
         let mut r = g.coords[4];
         if ui
-            .add(egui::DragValue::new(&mut r).speed(1.0).range(1.0..=100000.0).prefix("r "))
+            .add(egui::DragValue::new(&mut r).speed(speed).range(rmin..=rmax).prefix("r "))
             .changed()
         {
             g.coords[4] = r;
@@ -1543,6 +1594,10 @@ fn radial_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
 
 fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
     let mut changed = false;
+    changed |= rotate_toggle(ui, &mut fg.units);
+    let obb = fg.units.is_object_box();
+    let xy_speed = if obb { 0.005 } else { 1.0 };
+    let add_pos = if obb { 0.5 } else { 100.0 };
     let mut active = active_index(ui, id, fg.points.len());
     let mut remove = None;
     ui.label(egui::RichText::new("Points").small().weak());
@@ -1558,11 +1613,11 @@ fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
                 }
                 let mut x = fg.points[i].x as f32;
                 let mut y = fg.points[i].y as f32;
-                if ui.add(egui::DragValue::new(&mut x).speed(1.0).prefix("x")).changed() {
+                if ui.add(egui::DragValue::new(&mut x).speed(xy_speed).prefix("x")).changed() {
                     fg.points[i].x = x as f64;
                     changed = true;
                 }
-                if ui.add(egui::DragValue::new(&mut y).speed(1.0).prefix("y")).changed() {
+                if ui.add(egui::DragValue::new(&mut y).speed(xy_speed).prefix("y")).changed() {
                     fg.points[i].y = y as f64;
                     changed = true;
                 }
@@ -1578,7 +1633,7 @@ fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
     }
     ui.horizontal(|ui| {
         if ui.small_button("+ Point").clicked() {
-            fg.points.push(FluidGradientPoint::new(100.0, 100.0, Color::WHITE));
+            fg.points.push(FluidGradientPoint::new(add_pos, add_pos, Color::WHITE));
             active = fg.points.len() - 1;
             changed = true;
         }
@@ -1594,6 +1649,8 @@ fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
 
 fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
     let mut changed = false;
+    changed |= rotate_toggle(ui, &mut mg.units);
+    let step = if mg.units.is_object_box() { 0.5 } else { 50.0 };
     let mut active = active_index(ui, id, mg.vertices.len());
     ui.label(egui::RichText::new(format!("Grid {}×{}", mg.rows, mg.cols)).small().weak());
     egui::ScrollArea::vertical().max_height(150.0).id_salt("mesh_grid").show(ui, |ui| {
@@ -1621,7 +1678,7 @@ fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
             let last_row_y = mg.vertices.get(((mg.rows - 1) * cols) as usize).map(|v| v.y).unwrap_or(0.0);
             for c in 0..cols {
                 let x = mg.vertices.get(((mg.rows - 1) * cols + c) as usize).map(|v| v.x).unwrap_or(0.0);
-                mg.vertices.push(MeshGradientVertex::new(x, last_row_y + 50.0, Color::WHITE));
+                mg.vertices.push(MeshGradientVertex::new(x, last_row_y + step, Color::WHITE));
             }
             mg.rows += 1;
             changed = true;
@@ -1635,7 +1692,7 @@ fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
                     nv.push(mg.vertices[(r * old_cols + c) as usize].clone());
                 }
                 let last = &mg.vertices[((r + 1) * old_cols - 1) as usize];
-                nv.push(MeshGradientVertex::new(last.x + 50.0, last.y, Color::WHITE));
+                nv.push(MeshGradientVertex::new(last.x + step, last.y, Color::WHITE));
             }
             mg.vertices = nv;
             changed = true;
@@ -1731,12 +1788,14 @@ impl ColorPopup {
         cfg: &FillPickerConfig,
     ) -> FillOutcome {
         let mut out = FillOutcome::default();
+        let frame = egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::same(12.0));
         egui::Window::new(title)
             .id(egui::Id::new(id_salt))
             .collapsible(false)
             .resizable(false)
             .default_pos(pos)
             .constrain(true)
+            .frame(frame)
             .open(open)
             .show(ctx, |ui| {
                 out = Self::fill_picker(ui, fill, cfg);
@@ -1772,6 +1831,21 @@ impl ColorPopup {
             },
         );
         out
+    }
+}
+
+impl ColorPopup {
+    /// A fill-preview **swatch button** (no popup). The caller opens its own
+    /// editor (e.g. the movable fill window) on click.
+    pub fn fill_preview(ui: &mut Ui, fill: &Fill, size: Vec2) -> Response {
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        paint_fill_preview(ui.painter(), rect, fill);
+        ui.painter().rect_stroke(
+            rect,
+            egui::Rounding::same(3.0),
+            Stroke::new(1.0, Color32::from_gray(90)),
+        );
+        resp
     }
 }
 
