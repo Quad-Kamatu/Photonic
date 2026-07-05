@@ -2480,6 +2480,34 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::ReparentNode {
+                    node_id,
+                    new,
+                    new_index,
+                } => {
+                    use photonic_core::document::NodeContainer;
+                    // Guard: never drop a node into itself or one of its own
+                    // descendants (would create a cycle).
+                    let cycle = matches!(new, NodeContainer::Group(gid) if doc.is_ancestor_or_self(node_id, gid));
+                    if !cycle {
+                        if let Some((old, old_index)) = doc.node_container_and_index(&node_id) {
+                            if !(old == new && old_index == new_index) {
+                                history.execute(
+                                    Command::ReparentNode {
+                                        node_id,
+                                        old,
+                                        old_index,
+                                        new,
+                                        new_index,
+                                    },
+                                    doc,
+                                );
+                                doc_modified = true;
+                            }
+                        }
+                    }
+                }
+
                 PanelAction::PlaceImageDialog => {
                     // Import (#176): pick an image and embed it, same path as
                     // File → Place Image….

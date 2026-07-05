@@ -1,5 +1,5 @@
 use crate::{
-    document::{Document, Guide, WidthProfile},
+    document::{Document, Guide, NodeContainer, WidthProfile},
     layer::{Layer, LayerId},
     node::{NodeId, SceneNode},
 };
@@ -1567,6 +1567,56 @@ mod tests {
         // The whole tree (both branches) survives, not just the linear path.
         assert_eq!(fresh.history_graph().len(), 4, "branch lost across save/load");
     }
+
+    #[test]
+    fn reparent_node_into_group_and_back() {
+        use crate::document::NodeContainer;
+        use crate::node::GroupNode;
+        let mut doc = make_doc();
+        let layer_id = doc.active_layer_id.unwrap();
+        // A group + a path, both top-level in the layer.
+        let group = SceneNode::new(
+            "grp",
+            layer_id,
+            SceneNodeKind::Group(GroupNode {
+                children: vec![],
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+            }),
+        );
+        let gid = doc.add_node(group, Some(layer_id));
+        let b = make_node(&doc);
+        let bid = doc.add_node(b, Some(layer_id));
+
+        let (old, old_index) = doc.node_container_and_index(&bid).unwrap();
+        assert_eq!(old, NodeContainer::Layer(layer_id));
+
+        let mut h = CommandHistory::new(200);
+        h.execute(
+            Command::ReparentNode {
+                node_id: bid,
+                old,
+                old_index,
+                new: NodeContainer::Group(gid),
+                new_index: 0,
+            },
+            &mut doc,
+        );
+
+        // B now lives inside the group, not directly in the layer.
+        let in_group = matches!(&doc.nodes.get(&gid).unwrap().kind,
+            SceneNodeKind::Group(g) if g.children.contains(&bid));
+        assert!(in_group, "B should be a child of the group");
+        assert!(!doc.layers.get(&layer_id).unwrap().node_ids.contains(&bid));
+
+        // Undo restores B to the layer.
+        assert!(h.undo(&mut doc));
+        assert!(doc.layers.get(&layer_id).unwrap().node_ids.contains(&bid));
+        let back_out = matches!(&doc.nodes.get(&gid).unwrap().kind,
+            SceneNodeKind::Group(g) if !g.children.contains(&bid));
+        assert!(back_out, "undo should pull B out of the group");
+    }
 }
 
 /// A reversible command that can be applied to a Document.
@@ -1684,6 +1734,16 @@ pub enum Command {
         new_index: usize,
     },
 
+    /// Reparent a node between containers (layer ↔ group, or reorder within one)
+    /// for Layers-panel drag-and-drop (#210). Stores both endpoints for undo.
+    ReparentNode {
+        node_id: NodeId,
+        old: NodeContainer,
+        old_index: usize,
+        new: NodeContainer,
+        new_index: usize,
+    },
+
     /// Replace the entire guide list. Stores old and new for self-contained undo.
     SetGuides { old: Vec<Guide>, new: Vec<Guide> },
 
@@ -1729,6 +1789,7 @@ impl Command {
             Command::RemoveNodeFull { node } => format!("Remove {}", node.name),
             Command::UpdateLayer { new_name, .. } => format!("Update layer \"{}\"", new_name),
             Command::MoveNodeToLayer { .. } => "Move node to layer".to_string(),
+            Command::ReparentNode { .. } => "Reparent node".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
             Command::SetArtboards { .. } => "Update artboards".to_string(),
             Command::SetWidthProfiles { .. } => "Edit width profile".to_string(),
@@ -1914,6 +1975,52 @@ impl Command {
                 if let Some(layer) = doc.layers.get_mut(new_layer_id) {
                     let clamped = (*new_index).min(layer.node_ids.len());
                     layer.node_ids.insert(clamped, *node_id);
+                }
+            }
+
+            Command::ReparentNode {
+                node_id,
+                old,
+                old_index,
+                new,
+                new_index,
+            } => {
+                let same = old == new;
+                // Remove from the old container (by id).
+                if let Some(list) = doc.container_list_mut(*old) {
+                    list.retain(|id| id != node_id);
+                }
+                // Drop dangling clip/blend references if the moved node was the
+                // old group's special child.
+                if let NodeContainer::Group(gid) = *old {
+                    if let Some(crate::node::SceneNodeKind::Group(g)) =
+                        doc.nodes.get_mut(&gid).map(|n| &mut n.kind)
+                    {
+                        if g.clip_node_id == Some(*node_id) {
+                            g.clip_node_id = None;
+                        }
+                        if g.blend_spine_id == Some(*node_id) {
+                            g.blend_spine_id = None;
+                        }
+                    }
+                }
+                // Insert into the new container, adjusting for the removal when it
+                // is a reorder within the same list.
+                let mut idx = *new_index;
+                if same && *old_index < *new_index {
+                    idx = idx.saturating_sub(1);
+                }
+                if let Some(list) = doc.container_list_mut(*new) {
+                    let idx = idx.min(list.len());
+                    list.insert(idx, *node_id);
+                }
+                // Keep `layer_id` consistent with the new top-level layer.
+                let new_layer = match *new {
+                    NodeContainer::Layer(lid) => Some(lid),
+                    NodeContainer::Group(gid) => doc.nodes.get(&gid).map(|n| n.layer_id),
+                };
+                if let (Some(lid), Some(node)) = (new_layer, doc.nodes.get_mut(node_id)) {
+                    node.layer_id = lid;
                 }
             }
 
@@ -2142,6 +2249,20 @@ impl Command {
                 old_layer_id: *new_layer_id,
                 new_layer_id: *old_layer_id,
                 old_index: *new_index,
+                new_index: *old_index,
+            }),
+
+            Command::ReparentNode {
+                node_id,
+                old,
+                old_index,
+                new,
+                new_index,
+            } => Some(Command::ReparentNode {
+                node_id: *node_id,
+                old: *new,
+                old_index: *new_index,
+                new: *old,
                 new_index: *old_index,
             }),
 

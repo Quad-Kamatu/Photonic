@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Where a node lives in the scene hierarchy: directly in a layer, or nested
+/// inside a group. Used by reparenting (drag-and-drop in the Layers panel, #210).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeContainer {
+    Layer(LayerId),
+    Group(NodeId),
+}
+
 /// Whether a guide is horizontal (fixed Y) or vertical (fixed X).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1282,6 +1290,55 @@ impl Document {
             }
         }
         None
+    }
+
+    /// Find the container (a layer, or a group) and index that directly holds
+    /// `node_id`. Searches top-level layers first, then every group's children.
+    pub fn node_container_and_index(&self, node_id: &NodeId) -> Option<(NodeContainer, usize)> {
+        for lid in &self.layer_order {
+            if let Some(layer) = self.layers.get(lid) {
+                if let Some(pos) = layer.node_ids.iter().position(|id| id == node_id) {
+                    return Some((NodeContainer::Layer(*lid), pos));
+                }
+            }
+        }
+        for (&gid, node) in &self.nodes {
+            if let crate::node::SceneNodeKind::Group(g) = &node.kind {
+                if let Some(pos) = g.children.iter().position(|id| id == node_id) {
+                    return Some((NodeContainer::Group(gid), pos));
+                }
+            }
+        }
+        None
+    }
+
+    /// True if `node` is `ancestor` itself or lives anywhere in its subtree —
+    /// the cycle guard for reparenting (you can't move a group into itself/a
+    /// descendant).
+    pub fn is_ancestor_or_self(&self, ancestor: NodeId, node: NodeId) -> bool {
+        if ancestor == node {
+            return true;
+        }
+        if let Some(crate::node::SceneNodeKind::Group(g)) =
+            self.nodes.get(&ancestor).map(|n| &n.kind)
+        {
+            g.children
+                .iter()
+                .any(|&c| self.is_ancestor_or_self(c, node))
+        } else {
+            false
+        }
+    }
+
+    /// Mutable access to a container's ordered child-id list.
+    pub(crate) fn container_list_mut(&mut self, c: NodeContainer) -> Option<&mut Vec<NodeId>> {
+        match c {
+            NodeContainer::Layer(lid) => self.layers.get_mut(&lid).map(|l| &mut l.node_ids),
+            NodeContainer::Group(gid) => match self.nodes.get_mut(&gid).map(|n| &mut n.kind) {
+                Some(crate::node::SceneNodeKind::Group(g)) => Some(&mut g.children),
+                _ => None,
+            },
+        }
     }
 
     /// Find the shared layer and indices for a set of nodes.

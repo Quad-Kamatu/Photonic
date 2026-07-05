@@ -8,45 +8,133 @@ fn draw_layer_node_row(
     ui: &mut Ui,
     doc: &Document,
     node_id: NodeId,
+    parent: photonic_core::document::NodeContainer,
+    index_in_parent: usize,
     selected_id: Option<NodeId>,
     action: &mut Option<PanelAction>,
 ) {
+    use photonic_core::document::NodeContainer;
+    use photonic_core::node::SceneNodeKind as K;
     let Some(node) = doc.nodes.get(&node_id) else {
         return;
     };
     let is_selected = selected_id == Some(node_id);
+    let grip = |ui: &mut Ui, id: NodeId| {
+        ui.dnd_drag_source(egui::Id::new(("node_drag", id)), id, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(ph::DOTS_SIX_VERTICAL).weak()).selectable(false),
+            )
+            .on_hover_text("Drag to reparent");
+        })
+        .response
+    };
 
     let response = match &node.kind {
         SceneNodeKind::Group(g) => {
-            let label = RichText::new(node.name.clone()).color(if is_selected {
-                Color32::from_rgb(184, 164, 255)
-            } else {
-                Color32::from_rgb(144, 119, 224)
+            // Manual disclosure (persisted open flag) so we control the header
+            // row layout — a grip + folder label — and still get an indented body.
+            let open_id = egui::Id::new(("layer_group_open", node_id));
+            let mut open = ui.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(true));
+            let clip = g.clip_node_id.is_some();
+            let row = ui.horizontal(|ui| {
+                grip(ui, node_id);
+                let tri = if open { "▾" } else { "▸" };
+                if ui
+                    .add(egui::Label::new(RichText::new(tri).weak()).sense(egui::Sense::click()))
+                    .clicked()
+                {
+                    open = !open;
+                }
+                let name = if clip {
+                    format!("{} {} {}", ph::FOLDER_SIMPLE, node.name, ph::SCISSORS)
+                } else {
+                    format!("{} {}", ph::FOLDER_SIMPLE, node.name)
+                };
+                let label = RichText::new(name).color(if is_selected {
+                    Color32::from_rgb(184, 164, 255)
+                } else {
+                    Color32::from_rgb(144, 119, 224)
+                });
+                if ui.selectable_label(is_selected, label).clicked() {
+                    *action = Some(PanelAction::SelectNode { node_id });
+                }
             });
-            let header = egui::CollapsingHeader::new(label)
-                .id_salt(node_id)
-                .default_open(true)
-                .show(ui, |ui| {
-                    let children: Vec<NodeId> = g.children.iter().rev().copied().collect();
-                    if children.is_empty() {
+            ui.data_mut(|d| d.insert_temp(open_id, open));
+            let row_resp = row.response;
+            // Drop a node ONTO this group → reparent into it (at the top of the
+            // folder). Highlight while hovering with a payload.
+            if row_resp.dnd_hover_payload::<NodeId>().is_some() {
+                ui.painter().rect_stroke(
+                    row_resp.rect,
+                    egui::Rounding::same(3.0),
+                    egui::Stroke::new(1.5, Color32::from_rgb(110, 86, 207)),
+                );
+            }
+            if let Some(p) = row_resp.dnd_release_payload::<NodeId>() {
+                if *p != node_id {
+                    *action = Some(PanelAction::ReparentNode {
+                        node_id: *p,
+                        new: NodeContainer::Group(node_id),
+                        new_index: g.children.len(),
+                    });
+                }
+            }
+            // Indented children.
+            if open {
+                ui.indent(egui::Id::new(("layer_group_body", node_id)), |ui| {
+                    if g.children.is_empty() {
                         ui.label(RichText::new("(empty group)").weak());
                     }
-                    for child_id in children {
-                        draw_layer_node_row(ui, doc, child_id, selected_id, action);
+                    let n = g.children.len();
+                    for (ui_i, child_id) in g.children.iter().rev().copied().enumerate() {
+                        let cidx = n - 1 - ui_i;
+                        draw_layer_node_row(
+                            ui,
+                            doc,
+                            child_id,
+                            NodeContainer::Group(node_id),
+                            cidx,
+                            selected_id,
+                            action,
+                        );
                     }
                 });
-            let hr = header.header_response;
-            if hr.clicked() {
-                *action = Some(PanelAction::SelectNode { node_id });
             }
-            hr
+            row_resp
         }
         _ => {
-            let resp = ui.selectable_label(is_selected, format!("• {}", node.name));
-            if resp.clicked() {
+            let compound = matches!(&node.kind, K::Path(p) if p.is_compound);
+            let src = ui.dnd_drag_source(egui::Id::new(("node_drag", node_id)), node_id, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(ph::DOTS_SIX_VERTICAL).weak())
+                            .selectable(false),
+                    );
+                    let name = if compound {
+                        format!("• {} {}", node.name, ph::INTERSECT)
+                    } else {
+                        format!("• {}", node.name)
+                    };
+                    ui.selectable_label(is_selected, name)
+                })
+                .inner
+            });
+            if src.inner.clicked() {
                 *action = Some(PanelAction::SelectNode { node_id });
             }
-            resp
+            let row_resp = src.response;
+            // Drop onto a leaf → reparent to this leaf's container at its slot
+            // (basic between-rows placement).
+            if let Some(p) = row_resp.dnd_release_payload::<NodeId>() {
+                if *p != node_id {
+                    *action = Some(PanelAction::ReparentNode {
+                        node_id: *p,
+                        new: parent,
+                        new_index: index_in_parent,
+                    });
+                }
+            }
+            row_resp
         }
     };
 
@@ -213,12 +301,22 @@ pub fn draw_layers_panel(
                 .id_salt(lid)
                 .default_open(true)
                 .show(ui, |ui| {
-                    let node_ids: Vec<NodeId> = layer.node_ids.iter().rev().copied().collect();
-                    if node_ids.is_empty() {
+                    use photonic_core::document::NodeContainer;
+                    if layer.node_ids.is_empty() {
                         ui.label(RichText::new("  (empty)").weak());
                     }
-                    for node_id in node_ids {
-                        draw_layer_node_row(ui, doc, node_id, selected_id, &mut action);
+                    let n = layer.node_ids.len();
+                    for (ui_i, node_id) in layer.node_ids.iter().rev().copied().enumerate() {
+                        let idx = n - 1 - ui_i;
+                        draw_layer_node_row(
+                            ui,
+                            doc,
+                            node_id,
+                            NodeContainer::Layer(lid),
+                            idx,
+                            selected_id,
+                            &mut action,
+                        );
                     }
                 });
         });
@@ -254,6 +352,15 @@ pub fn draw_layers_panel(
                     action = Some(PanelAction::ReorderLayers { new_order });
                 }
             }
+        }
+        // Drop a NODE onto this layer row → reparent it to this layer's top (#210),
+        // i.e. pull it out of a group / move it between layers.
+        if let Some(payload) = row.response.dnd_release_payload::<NodeId>() {
+            action = Some(PanelAction::ReparentNode {
+                node_id: *payload,
+                new: photonic_core::document::NodeContainer::Layer(lid),
+                new_index: doc.layers.get(&lid).map_or(0, |l| l.node_ids.len()),
+            });
         }
     }
 

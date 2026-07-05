@@ -293,6 +293,13 @@ pub enum PanelAction {
     /// Reorder the layer stack to `new_order` (bottom→top), e.g. from a
     /// drag-to-reorder in the Layers panel (#169). Applied as one undoable step.
     ReorderLayers { new_order: Vec<LayerId> },
+    /// Reparent a node into a container (a group, or a layer) at an index —
+    /// Layers-panel drag-and-drop (#210). The handler resolves the old container.
+    ReparentNode {
+        node_id: NodeId,
+        new: photonic_core::document::NodeContainer,
+        new_index: usize,
+    },
     /// Open a file picker and place the chosen image into the document (#176).
     PlaceImageDialog,
     /// Open the Export dialog seeded from the Document-tab export settings (#176).
