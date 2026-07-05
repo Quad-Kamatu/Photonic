@@ -304,7 +304,7 @@ pub fn refine_mesh(mesh: &Mesh, max_edge: f32) -> Mesh {
         let e = max_edge.max(0.5);
         e * e
     };
-    const BUDGET: usize = 24_000;
+    const BUDGET: usize = 60_000;
     let v = &mesh.vertices;
 
     let mut work: Vec<[[f32; 2]; 3]> = mesh
@@ -324,18 +324,33 @@ pub fn refine_mesh(mesh: &Mesh, max_edge: f32) -> Mesh {
     };
     let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
 
+    // Longest-edge bisection: split a triangle across the midpoint of its
+    // longest edge into two. This converges on lyon's long fan slivers far more
+    // efficiently than 1→4 midpoint subdivision (~edge/target triangles per
+    // sliver vs (edge/target)²), and keeps triangles well-shaped. Independent
+    // (non-conforming) bisection is fine here — a shared edge's midpoint is the
+    // same position on both sides and samples the same color, so no seams.
     while let Some(tri) = work.pop() {
-        let longest = e2(tri[0], tri[1]).max(e2(tri[1], tri[2])).max(e2(tri[2], tri[0]));
+        let d01 = e2(tri[0], tri[1]);
+        let d12 = e2(tri[1], tri[2]);
+        let d20 = e2(tri[2], tri[0]);
+        let longest = d01.max(d12).max(d20);
         if longest <= max_edge2 || out.len() + work.len() >= BUDGET {
             out.push(tri);
+            continue;
+        }
+        if d01 >= d12 && d01 >= d20 {
+            let m = mid(tri[0], tri[1]);
+            work.push([tri[0], m, tri[2]]);
+            work.push([m, tri[1], tri[2]]);
+        } else if d12 >= d20 {
+            let m = mid(tri[1], tri[2]);
+            work.push([tri[1], m, tri[0]]);
+            work.push([m, tri[2], tri[0]]);
         } else {
-            let m01 = mid(tri[0], tri[1]);
-            let m12 = mid(tri[1], tri[2]);
-            let m20 = mid(tri[2], tri[0]);
-            work.push([tri[0], m01, m20]);
-            work.push([m01, tri[1], m12]);
-            work.push([m20, m12, tri[2]]);
-            work.push([m01, m12, m20]);
+            let m = mid(tri[2], tri[0]);
+            work.push([tri[2], m, tri[1]]);
+            work.push([m, tri[0], tri[1]]);
         }
     }
 
@@ -863,5 +878,36 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod refine_diag {
+    use super::*;
+    use photonic_core::PathData;
+    #[test]
+    fn refine_circle_reaches_target_within_budget() {
+        // A 400px circle (lyon fan, edges up to 400px) must refine so every
+        // edge meets the target — no huge leftover triangles (the wedge bug).
+        let p = PathData::ellipse(200.0, 200.0, 200.0, 200.0);
+        let mesh = tessellate_fill(&p, false);
+        let target = 400.0 / 48.0; // ~8.3px
+        let refined = refine_mesh(&mesh, target);
+        let tris = refined.indices.len() / 3;
+        let mut maxe = 0f32;
+        for t in refined.indices.chunks_exact(3) {
+            let q = [
+                refined.vertices[t[0] as usize],
+                refined.vertices[t[1] as usize],
+                refined.vertices[t[2] as usize],
+            ];
+            for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                let dx = q[a][0] - q[b][0];
+                let dy = q[a][1] - q[b][1];
+                maxe = maxe.max((dx * dx + dy * dy).sqrt());
+            }
+        }
+        assert!(maxe <= target * 1.05, "max edge {maxe} exceeds target {target}");
+        assert!(tris < 60_000, "triangle count {tris} hit the budget");
     }
 }
