@@ -24,7 +24,7 @@ use crate::{
     tessellator::{tessellate_fill, tessellate_stroke, Mesh},
 };
 use photonic_core::{
-    node::{NodeId, SceneNodeKind},
+    node::{NodeId, SceneNode, SceneNodeKind},
     raster::blend::blend_rgb,
     style::FillKind,
     transform::Transform,
@@ -58,40 +58,115 @@ pub fn composite_document(base: &mut [u8], w: u32, h: u32, doc: &Document, view:
     // Reusable per-node coverage accumulator (cleared as it is consumed).
     let mut cov = vec![0.0f32; (w as usize) * (h as usize)];
 
-    for node in doc.nodes_in_draw_order() {
-        let nid = node.id;
-        // Resolve symbol instances to the live master (+ overrides), exactly as
-        // the headless path does, so output matches the GPU renderer.
-        let resolved = doc.resolve_render_node(node);
-        let node = resolved.as_ref();
-
-        let gop = eff.get(&nid).copied().unwrap_or(1.0);
-        if gop <= 0.0 {
+    // Composite one layer at a time so a layer's opacity + blend mode apply to
+    // the layer as a whole (P0). A layer that is fully opaque and Normal takes
+    // the fast path — its nodes composite straight onto `base`, byte-identical
+    // to the pre-P0 flat pass — so existing documents (where layer opacity/blend
+    // were unused) are unchanged. Only a layer the user has given `opacity < 1`
+    // or a non-Normal blend mode is rendered to an isolated buffer and blended
+    // back as a unit. (Isolating a layer means an adjustment node inside it would
+    // sample only that layer, not the full canvas beneath; the fast path avoids
+    // that for the common case, which is why adjustment layers stay at
+    // opacity 1 / Normal.)
+    for layer_id in &doc.layer_order {
+        let Some(layer) = doc.layers.get(layer_id) else {
+            continue;
+        };
+        if !layer.visible {
             continue;
         }
-
-        match &node.kind {
-            SceneNodeKind::Path(pn) => {
-                render_path_node(
-                    base,
-                    w,
-                    h,
-                    view,
-                    &mut cov,
-                    &node.transform,
-                    node.opacity,
-                    gop,
-                    node.blend_mode,
-                    pn,
-                );
-            }
-            SceneNodeKind::Raster(_) => {
-                render_raster_node(base, w, h, doc, view, node, gop);
-            }
-            // Groups are flattened away by `nodes_in_draw_order`; text is not
-            // rendered by the headless path either, so it is skipped here too.
-            SceneNodeKind::Group(_) | SceneNodeKind::Text(_) => {}
+        let nodes = doc.draw_nodes_in_layer(layer_id);
+        if nodes.is_empty() {
+            continue;
         }
+        let isolate = layer.opacity < 1.0 || layer.blend_mode != BlendMode::Normal;
+        if !isolate {
+            for node in nodes {
+                composite_node(base, w, h, doc, view, &mut cov, &eff, node);
+            }
+        } else {
+            let mut layer_buf = vec![0u8; base.len()];
+            for node in nodes {
+                composite_node(&mut layer_buf, w, h, doc, view, &mut cov, &eff, node);
+            }
+            blend_layer_onto(
+                base,
+                &layer_buf,
+                layer.opacity.clamp(0.0, 1.0),
+                layer.blend_mode,
+            );
+        }
+    }
+}
+
+/// Composite a single resolved scene node onto `target`, honouring its ancestor
+/// group opacity (`eff`) and its own opacity/blend mode. Extracted so both the
+/// fast path (straight onto `base`) and the isolated-layer path (into a temp
+/// buffer) share one node-rendering routine.
+#[allow(clippy::too_many_arguments)]
+fn composite_node(
+    target: &mut [u8],
+    w: u32,
+    h: u32,
+    doc: &Document,
+    view: &CanvasView,
+    cov: &mut [f32],
+    eff: &std::collections::HashMap<NodeId, f32>,
+    node: &SceneNode,
+) {
+    let nid = node.id;
+    // Resolve symbol instances to the live master (+ overrides), exactly as the
+    // headless path does, so output matches the GPU renderer.
+    let resolved = doc.resolve_render_node(node);
+    let node = resolved.as_ref();
+
+    let gop = eff.get(&nid).copied().unwrap_or(1.0);
+    if gop <= 0.0 {
+        return;
+    }
+
+    match &node.kind {
+        SceneNodeKind::Path(pn) => {
+            render_path_node(
+                target,
+                w,
+                h,
+                view,
+                cov,
+                &node.transform,
+                node.opacity,
+                gop,
+                node.blend_mode,
+                pn,
+            );
+        }
+        SceneNodeKind::Raster(_) => {
+            render_raster_node(target, w, h, doc, view, node, gop);
+        }
+        // Groups are flattened away by `draw_nodes_in_layer`; text is not
+        // rendered by the headless path either, so it is skipped here too.
+        SceneNodeKind::Group(_) | SceneNodeKind::Text(_) => {}
+    }
+}
+
+/// Blend an isolated layer buffer (straight-alpha RGBA8) onto `base` as a single
+/// unit, scaling the layer's alpha by `opacity` and compositing each pixel with
+/// the layer's `mode` — the per-layer analogue of [`composite_pixel`], which it
+/// reuses so layer and per-node blending stay identical.
+fn blend_layer_onto(base: &mut [u8], layer_buf: &[u8], opacity: f32, mode: BlendMode) {
+    let pixels = (base.len().min(layer_buf.len())) / 4;
+    for i in 0..pixels {
+        let idx = i * 4;
+        let sa = (layer_buf[idx + 3] as f32 / 255.0) * opacity;
+        if sa <= 0.0 {
+            continue;
+        }
+        let rgb = [
+            layer_buf[idx] as f32 / 255.0,
+            layer_buf[idx + 1] as f32 / 255.0,
+            layer_buf[idx + 2] as f32 / 255.0,
+        ];
+        composite_pixel(base, idx, rgb, sa, mode);
     }
 }
 
@@ -742,5 +817,83 @@ mod tests {
         composite_document(&mut [], 0, 0, &doc, &view);
         let mut tooshort = vec![0u8; 3];
         composite_document(&mut tooshort, 2, 2, &doc, &view);
+    }
+
+    /// Build a doc: bottom (default) layer = full-canvas RED; a second layer =
+    /// full-canvas BLUE, whose opacity/blend the test sets. Returns (doc, top id).
+    fn two_layer_red_blue(w: f64, h: f64) -> (Document, photonic_core::layer::LayerId) {
+        let mut doc = Document::new("t", w, h);
+        let mut red = PathNode::new(PathData::rect(0.0, 0.0, w, h));
+        red.fill = Fill::solid(Color::RED);
+        doc.add_node(
+            SceneNode::new("red", Default::default(), SceneNodeKind::Path(red)),
+            None,
+        );
+        let top_id = doc.add_layer(photonic_core::layer::Layer::new("top"));
+        let mut blue = PathNode::new(PathData::rect(0.0, 0.0, w, h));
+        blue.fill = Fill::solid(Color::BLUE);
+        doc.add_node(
+            SceneNode::new("blue", Default::default(), SceneNodeKind::Path(blue)),
+            Some(top_id),
+        );
+        (doc, top_id)
+    }
+
+    fn composite_center(doc: &Document, w: u32, h: u32) -> [u8; 4] {
+        let mut view = CanvasView::new(w, h);
+        view.fit_to_rect(0.0, 0.0, doc.width, doc.height);
+        let mut base = vec![0u8; (w * h * 4) as usize];
+        for px in base.chunks_exact_mut(4) {
+            px.copy_from_slice(&[40, 40, 40, 255]);
+        }
+        composite_document(&mut base, w, h, doc, &view);
+        let (cx, cy) = view.canvas_to_screen(doc.width / 2.0, doc.height / 2.0);
+        let px = (cx.round() as i64).clamp(0, w as i64 - 1) as u32;
+        let py = (cy.round() as i64).clamp(0, h as i64 - 1) as u32;
+        let i = ((py * w + px) * 4) as usize;
+        [base[i], base[i + 1], base[i + 2], base[i + 3]]
+    }
+
+    /// P0: a half-opacity Normal top layer blends 50/50 over the layer beneath —
+    /// the layer's `opacity` is honoured (it was a dead field before P0).
+    #[test]
+    fn layer_opacity_blends_over_layer_beneath() {
+        let (mut doc, top) = two_layer_red_blue(8.0, 8.0);
+        doc.layers.get_mut(&top).unwrap().opacity = 0.5;
+        let c = composite_center(&doc, 8, 8);
+        // ~50% blue over opaque red → roughly (128, 0, 128).
+        assert!(
+            (c[0] as i32 - 128).abs() < 24
+                && c[1] < 24
+                && (c[2] as i32 - 128).abs() < 24,
+            "half-opacity blue over red should be ~purple, got {c:?}"
+        );
+    }
+
+    /// P0: a Multiply top layer multiplies against the layer beneath — the
+    /// layer's `blend_mode` is honoured as a whole-layer operation.
+    #[test]
+    fn layer_blend_mode_multiply() {
+        let (mut doc, top) = two_layer_red_blue(8.0, 8.0);
+        doc.layers.get_mut(&top).unwrap().blend_mode = BlendMode::Multiply;
+        let c = composite_center(&doc, 8, 8);
+        // RED (1,0,0) × BLUE (0,0,1) = black.
+        assert!(
+            c[0] < 24 && c[1] < 24 && c[2] < 24,
+            "red × blue via Multiply layer should be ~black, got {c:?}"
+        );
+    }
+
+    /// Zero-regression guard: a fully-opaque Normal top layer (the state of every
+    /// pre-P0 document) composites identically to drawing its node straight —
+    /// i.e. the fast path is taken and the centre is plain blue.
+    #[test]
+    fn opaque_normal_layer_is_fast_path_identical() {
+        let (doc, _top) = two_layer_red_blue(8.0, 8.0);
+        let c = composite_center(&doc, 8, 8);
+        assert!(
+            c[2] > 200 && c[0] < 40 && c[1] < 40,
+            "opaque Normal top layer should show plain blue, got {c:?}"
+        );
     }
 }

@@ -1167,6 +1167,25 @@ impl Document {
         result
     }
 
+    /// Nodes of a single layer in draw order (bottom node first), with groups
+    /// expanded recursively — the per-layer analogue of [`nodes_in_draw_order`].
+    /// Returns empty if the layer is hidden or unknown. Used by renderers that
+    /// composite each layer as an isolated unit (layer opacity / blend / mask).
+    ///
+    /// [`nodes_in_draw_order`]: Document::nodes_in_draw_order
+    pub fn draw_nodes_in_layer(&self, layer_id: &LayerId) -> Vec<&SceneNode> {
+        let mut result = vec![];
+        if let Some(layer) = self.layers.get(layer_id) {
+            if !layer.visible {
+                return result;
+            }
+            for node_id in &layer.node_ids {
+                self.collect_draw_nodes(node_id, &mut result);
+            }
+        }
+        result
+    }
+
     fn collect_draw_nodes<'a>(&'a self, node_id: &NodeId, out: &mut Vec<&'a SceneNode>) {
         if let Some(node) = self.nodes.get(node_id) {
             if !node.visible {
