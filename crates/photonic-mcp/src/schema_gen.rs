@@ -1683,7 +1683,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "update_layer",
-            "description": "Update mutable metadata on a layer: rename it, change visibility, lock/unlock, set a color tag, or mark as a template layer. Only the fields you supply are changed; omitted fields keep their current values. Template layers are locked reference layers used for tracing over (dimmed in the GUI). Single undoable step.",
+            "description": "Update mutable metadata on a layer: rename it, change visibility, lock/unlock, set a color tag, mark as a template layer, or set the layer's opacity and blend mode. Only the fields you supply are changed; omitted fields keep their current values. Layer opacity and blend mode composite the whole layer as a unit against the layers beneath (like Photoshop/Illustrator). Template layers are locked reference layers used for tracing over (dimmed in the GUI). Single undoable step.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1692,6 +1692,8 @@ pub fn tool_list() -> Value {
                     "visible": { "type": "boolean", "description": "Show or hide the layer." },
                     "locked": { "type": "boolean", "description": "Lock or unlock the layer." },
                     "is_template": { "type": "boolean", "description": "Mark as a template layer (locked, dimmed reference for tracing over artwork). Setting true also locks the layer." },
+                    "opacity": { "type": "number", "description": "Layer opacity 0.0–1.0; the layer composites as a unit at this opacity." },
+                    "blend_mode": { "type": "string", "description": "Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity.", "enum": ["normal","multiply","screen","overlay","darken","lighten","color_dodge","color_burn","hard_light","soft_light","difference","exclusion","hue","saturation","color","luminosity"] },
                     "color": {
                         "description": "Color tag as [r,g,b,a] floats 0.0–1.0. Pass null to clear.",
                         "oneOf": [

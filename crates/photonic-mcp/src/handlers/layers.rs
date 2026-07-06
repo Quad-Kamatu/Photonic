@@ -399,6 +399,17 @@ pub async fn update_layer(state: &AppState, args: UpdateLayerArgs) -> ToolResult
         Some(c) => c, // explicit — use as provided (Some([..]) sets color, None clears it)
         None => layer.color, // omitted — keep existing
     };
+    let new_opacity = args
+        .opacity
+        .map(|o| o.clamp(0.0, 1.0))
+        .unwrap_or(layer.opacity);
+    let new_blend_mode = match &args.blend_mode {
+        Some(s) => match photonic_core::layer::BlendMode::from_css(&s.replace('_', "-")) {
+            Some(m) => m,
+            None => return ToolResult::error(format!("Unknown blend_mode '{s}'")),
+        },
+        None => layer.blend_mode,
+    };
 
     let cmd = photonic_core::history::Command::UpdateLayer {
         layer_id: args.layer_id,
@@ -412,6 +423,10 @@ pub async fn update_layer(state: &AppState, args: UpdateLayerArgs) -> ToolResult
         new_color,
         old_is_template: layer.is_template,
         new_is_template,
+        old_opacity: layer.opacity,
+        new_opacity,
+        old_blend_mode: layer.blend_mode,
+        new_blend_mode,
     };
 
     let mut history = state.history.lock().await;
@@ -429,5 +444,7 @@ pub async fn update_layer(state: &AppState, args: UpdateLayerArgs) -> ToolResult
         "locked": new_locked,
         "color": new_color,
         "is_template": new_is_template,
+        "opacity": new_opacity,
+        "blend_mode": new_blend_mode.to_css(),
     }))
 }

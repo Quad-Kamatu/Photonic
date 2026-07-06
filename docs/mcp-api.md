@@ -3285,15 +3285,17 @@ Rename or change the color of an existing swatch. Optionally propagates the colo
 
 ## `update_layer`
 
-Update mutable metadata on a layer: rename it, change visibility, lock/unlock, set a color tag, or mark as a template layer. Only the fields you supply are changed; omitted fields keep their current values. Template layers are locked reference layers used for tracing over (dimmed in the GUI). Single undoable step.
+Update mutable metadata on a layer: rename it, change visibility, lock/unlock, set a color tag, mark as a template layer, or set the layer's opacity and blend mode. Only the fields you supply are changed; omitted fields keep their current values. Layer opacity and blend mode composite the whole layer as a unit against the layers beneath (like Photoshop/Illustrator). Template layers are locked reference layers used for tracing over (dimmed in the GUI). Single undoable step.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `layer_id` | string | yes | UUID of the layer to update. |
+| `blend_mode` | enum (`normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`, `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`, `saturation`, `color`, `luminosity`) | no | Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity. |
 | `color` | any | no | Color tag as [r,g,b,a] floats 0.0–1.0. Pass null to clear. |
 | `is_template` | boolean | no | Mark as a template layer (locked, dimmed reference for tracing over artwork). Setting true also locks the layer. |
 | `locked` | boolean | no | Lock or unlock the layer. |
 | `name` | string | no | New name for the layer. |
+| `opacity` | number | no | Layer opacity 0.0–1.0; the layer composites as a unit at this opacity. |
 | `visible` | boolean | no | Show or hide the layer. |
 
 ## `update_node`

@@ -966,6 +966,50 @@ mod tests {
         assert_eq!(doc.nodes[&node_id].name, "frame-20");
     }
 
+    /// P0: a layer's opacity and blend mode are part of `UpdateLayer` and survive
+    /// undo/redo (they compose the layer as a unit; see the compositor).
+    #[test]
+    fn update_layer_opacity_and_blend_round_trip() {
+        use crate::layer::BlendMode;
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let lid = doc.layer_order[0];
+        assert_eq!(doc.layers[&lid].opacity, 1.0);
+        assert_eq!(doc.layers[&lid].blend_mode, BlendMode::Normal);
+
+        let l = doc.layers[&lid].clone();
+        history.execute(
+            Command::UpdateLayer {
+                layer_id: lid,
+                old_name: l.name.clone(),
+                new_name: l.name.clone(),
+                old_visible: l.visible,
+                new_visible: l.visible,
+                old_locked: l.locked,
+                new_locked: l.locked,
+                old_color: l.color,
+                new_color: l.color,
+                old_is_template: l.is_template,
+                new_is_template: l.is_template,
+                old_opacity: l.opacity,
+                new_opacity: 0.5,
+                old_blend_mode: l.blend_mode,
+                new_blend_mode: BlendMode::Multiply,
+            },
+            &mut doc,
+        );
+        assert_eq!(doc.layers[&lid].opacity, 0.5);
+        assert_eq!(doc.layers[&lid].blend_mode, BlendMode::Multiply);
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.layers[&lid].opacity, 1.0);
+        assert_eq!(doc.layers[&lid].blend_mode, BlendMode::Normal);
+
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.layers[&lid].opacity, 0.5);
+        assert_eq!(doc.layers[&lid].blend_mode, BlendMode::Multiply);
+    }
+
     /// #182 fix round 1: an external (MCP/REPL/script) edit routed through
     /// `execute_discrete` must land as its OWN undo step even while a GUI pointer
     /// gesture is open on the shared history, and must not be folded into — nor
@@ -1858,6 +1902,10 @@ pub enum Command {
         new_color: Option<[f32; 4]>,
         old_is_template: bool,
         new_is_template: bool,
+        old_opacity: f32,
+        new_opacity: f32,
+        old_blend_mode: crate::layer::BlendMode,
+        new_blend_mode: crate::layer::BlendMode,
     },
 
     /// Move a top-level node from one layer to another.
@@ -2279,6 +2327,8 @@ impl Command {
                 new_locked,
                 new_color,
                 new_is_template,
+                new_opacity,
+                new_blend_mode,
                 ..
             } => {
                 if let Some(layer) = doc.layers.get_mut(layer_id) {
@@ -2287,6 +2337,8 @@ impl Command {
                     layer.locked = *new_locked;
                     layer.color = *new_color;
                     layer.is_template = *new_is_template;
+                    layer.opacity = *new_opacity;
+                    layer.blend_mode = *new_blend_mode;
                 }
             }
 
@@ -2572,6 +2624,10 @@ impl Command {
                 new_color,
                 old_is_template,
                 new_is_template,
+                old_opacity,
+                new_opacity,
+                old_blend_mode,
+                new_blend_mode,
             } => Some(Command::UpdateLayer {
                 layer_id: *layer_id,
                 old_name: new_name.clone(),
@@ -2584,6 +2640,10 @@ impl Command {
                 new_color: *old_color,
                 old_is_template: *new_is_template,
                 new_is_template: *old_is_template,
+                old_opacity: *new_opacity,
+                new_opacity: *old_opacity,
+                old_blend_mode: *new_blend_mode,
+                new_blend_mode: *old_blend_mode,
             }),
 
             Command::MoveNodeToLayer {

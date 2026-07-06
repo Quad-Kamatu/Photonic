@@ -468,6 +468,15 @@ pub struct UpdateLayerArgs {
     /// Omit to keep existing value.
     #[serde(default)]
     pub is_template: Option<bool>,
+    /// Layer opacity, 0.0–1.0. The layer composites as a unit at this opacity.
+    /// Omit to keep existing value.
+    #[serde(default)]
+    pub opacity: Option<f32>,
+    /// Layer blend mode (e.g. "normal", "multiply", "screen", "overlay",
+    /// "color_dodge", "hue", "luminosity"). The layer composites as a unit with
+    /// this mode against the layers beneath. Omit to keep existing value.
+    #[serde(default)]
+    pub blend_mode: Option<String>,
 }
 
 /// Arguments for `flatten_artwork`.
