@@ -231,6 +231,14 @@ pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
         if (layer.opacity - 1.0).abs() > 0.001 {
             attrs.push_str(&format!(" opacity=\"{:.4}\"", layer.opacity));
         }
+        // Layer blend mode → CSS `mix-blend-mode` (the SVG keywords are 1:1 with
+        // our BlendMode, so every mode round-trips). Normal is the default, omit.
+        if layer.blend_mode != crate::layer::BlendMode::Normal {
+            attrs.push_str(&format!(
+                " style=\"mix-blend-mode:{}\"",
+                layer.blend_mode.to_css()
+            ));
+        }
         body.push_str(&format!("  <g{}>\n", attrs));
 
         for node_id in &layer.node_ids {
@@ -1270,6 +1278,37 @@ mod tests {
         assert!(
             modes.contains(&BlendMode::Multiply),
             "blend mode lost on re-import; modes = {modes:?}"
+        );
+    }
+
+    /// P0: a layer's opacity and blend mode are emitted on its wrapper `<g>`
+    /// (opacity attribute + `mix-blend-mode` style), so exported SVG composites
+    /// the layer as a unit — matching the renderer's per-layer compositing.
+    #[test]
+    fn layer_opacity_and_blend_emit_on_group() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.add_node(
+            SceneNode::new(
+                "r",
+                doc.active_layer_id.unwrap(),
+                SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+            ),
+            None,
+        );
+        let lid = doc.active_layer_id.unwrap();
+        {
+            let layer = doc.layers.get_mut(&lid).unwrap();
+            layer.opacity = 0.5;
+            layer.blend_mode = BlendMode::Screen;
+        }
+        let svg = export_svg(&doc, &SvgExportOptions::default());
+        assert!(svg.contains("opacity=\"0.5"), "layer opacity on <g>:\n{svg}");
+        assert!(
+            svg.contains("mix-blend-mode:screen"),
+            "layer blend mode on <g>:\n{svg}"
         );
     }
 
