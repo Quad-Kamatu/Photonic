@@ -9,6 +9,9 @@ pub enum Tool {
     #[default]
     Select,
     DirectSelect,
+    /// Direct Select sub-variant: dragging an anchor pulls neighbours within a
+    /// falloff radius (Blender-style proportional editing).
+    ProportionalMove,
     Pan,
     Rectangle,
     RoundedRect,
@@ -45,6 +48,7 @@ impl Tool {
         match self {
             Tool::Select => "Select",
             Tool::DirectSelect => "Direct Select",
+            Tool::ProportionalMove => "Proportional Move",
             Tool::Pan => "Pan",
             Tool::Rectangle => "Rect",
             Tool::RoundedRect => "Rounded Rect",
@@ -76,6 +80,7 @@ impl Tool {
         match self {
             Tool::Select => ph::CURSOR,
             Tool::DirectSelect => ph::VECTOR_TWO,
+            Tool::ProportionalMove => ph::MAGNET,
             Tool::Pan => ph::HAND,
             Tool::Rectangle => ph::RECTANGLE,
             Tool::RoundedRect => ph::RECTANGLE,
@@ -107,6 +112,9 @@ impl Tool {
         match self {
             Tool::Select => "Select and move objects",
             Tool::DirectSelect => "Edit individual anchor points",
+            Tool::ProportionalMove => {
+                "Drag an anchor to pull neighbours along a falloff radius (scroll: spread, Shift+scroll: curve)"
+            }
             Tool::Pan => "Pan the canvas view",
             Tool::Rectangle => "Draw rectangles and squares",
             Tool::RoundedRect => "Draw rectangles with rounded corners",
@@ -151,6 +159,7 @@ impl Tool {
             self,
             Tool::Select
                 | Tool::DirectSelect
+                | Tool::ProportionalMove
                 | Tool::Pan
                 | Tool::Pen
                 | Tool::ShapeBuilder

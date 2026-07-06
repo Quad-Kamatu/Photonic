@@ -237,6 +237,47 @@ impl PhotonicApp {
         const CORNER_INSET_PX: f64 = 22.0;
         let accent = Color32::from_rgb(110, 86, 207);
 
+        // Proportional Move is the Direct Select sub-variant: the anchor drag pulls
+        // neighbours within a falloff radius, scroll adjusts spread/curve, and an
+        // extra overlay shows the radius. Everything else (selection, handles,
+        // corners, marquee) is identical, so we branch only where it differs.
+        let proportional = self.active_tool == Tool::ProportionalMove;
+
+        // ── Scroll while holding a node: spread (plain) / curve (Shift) ───────
+        // Multiplicative (exponential) nudges so a tick feels uniform across the
+        // whole range. The global zoom handler suppresses itself for this gesture.
+        if proportional
+            && response.dragged_by(egui::PointerButton::Primary)
+            && matches!(self.point_drag_mode, Some(DirectDrag::Anchors))
+        {
+            let (raw, shift_held) =
+                ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift));
+            // Holding Shift remaps the vertical wheel onto the horizontal axis
+            // (egui/OS behaviour), so the delta arrives in `.x` — pick whichever
+            // axis actually moved rather than assuming `.y`.
+            let scroll = if raw.y.abs() >= raw.x.abs() {
+                raw.y
+            } else {
+                raw.x
+            };
+            if scroll != 0.0 {
+                if shift_held {
+                    let factor = (scroll as f64 * 0.004).exp();
+                    self.prop_falloff_k = (self.prop_falloff_k * factor).clamp(
+                        proportional_move::MIN_CURVE,
+                        proportional_move::MAX_CURVE,
+                    );
+                } else {
+                    let factor = (scroll as f64 * 0.0015).exp();
+                    self.prop_spread = (self.prop_spread * factor).clamp(
+                        proportional_move::MIN_SPREAD,
+                        proportional_move::MAX_SPREAD,
+                    );
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+
         // Escape: exit point-edit mode
         if viewport_kb(ui.ctx()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.point_edit_node = None;
@@ -551,6 +592,52 @@ impl PhotonicApp {
             let nid = self.point_edit_node;
             // Borrow the mode (don't clone — Corner carries a whole BezPath).
             match &self.point_drag_mode {
+                Some(DirectDrag::Anchors) if proportional => {
+                    // Proportional move: re-derive the whole path each frame from the
+                    // drag-start snapshot using the *cumulative* press→cursor delta,
+                    // because scroll can change the falloff weights mid-drag — an
+                    // incremental per-frame delta would bake in stale weights.
+                    let press = ui.input(|i| i.pointer.press_origin());
+                    let cursor = response.interact_pointer_pos();
+                    if let (Some(nid), Some(press), Some(cursor), Some(origin)) =
+                        (nid, press, cursor, self.point_drag_origin.clone())
+                    {
+                        if !self.point_selected.is_empty() {
+                            if let (Some(node), SceneNodeKind::Path(opn)) =
+                                (doc.nodes.get_mut(&nid), &origin.kind)
+                            {
+                                let (pcx, pcy) =
+                                    view.screen_to_canvas(press.x as f64, press.y as f64);
+                                let (ccx, ccy) =
+                                    view.screen_to_canvas(cursor.x as f64, cursor.y as f64);
+                                let (dcx, dcy) = (ccx - pcx, ccy - pcy);
+                                // Invert the linear transform → local-space delta.
+                                let [a, b, c, d, _, _] = node.transform.matrix;
+                                let det = a * d - b * c;
+                                let (dlx, dly) = if det.abs() > 1e-10 {
+                                    ((d * dcx - c * dcy) / det, (-b * dcx + a * dcy) / det)
+                                } else {
+                                    (dcx, dcy)
+                                };
+                                let obez = opn.path_data.to_bez_path();
+                                let weights = proportional_move::compute_weights(
+                                    &obez,
+                                    &self.point_selected,
+                                    self.prop_spread,
+                                    self.prop_falloff_k,
+                                    proportional_move::DistanceMetric::Euclidean,
+                                );
+                                let new_bez = proportional_move::bez_move_anchors_weighted(
+                                    &obez, &weights, dlx, dly,
+                                );
+                                if let SceneNodeKind::Path(pn) = &mut node.kind {
+                                    pn.path_data = PathData::from_bez_path(&new_bez);
+                                    *doc_modified = true;
+                                }
+                            }
+                        }
+                    }
+                }
                 Some(DirectDrag::Anchors) => {
                     if let Some(nid) = nid {
                         if !self.point_selected.is_empty() {
@@ -847,6 +934,100 @@ impl PhotonicApp {
                     // Bezier control handles for selected curved anchors (seam-aware).
                     // Drawn before the anchor squares so anchors sit on top.
                     let anchors = path_anchor_points(&bez);
+
+                    // ── Proportional Move falloff overlay ─────────────────────
+                    // Drawn beneath handles/anchors: the influence disc + radius
+                    // boundary, a half-weight ring, and a mini graph of the current
+                    // falloff curve with live spread/curve readouts. Centred on the
+                    // dragged selection (following the move) or the hovered anchor.
+                    if proportional {
+                        let dragging_anchors = response
+                            .dragged_by(egui::PointerButton::Primary)
+                            && matches!(self.point_drag_mode, Some(DirectDrag::Anchors));
+                        let center_local = if dragging_anchors && !self.point_selected.is_empty() {
+                            let sel: Vec<Point> = anchors
+                                .iter()
+                                .filter(|(i, _)| self.point_selected.contains(i))
+                                .map(|(_, p)| *p)
+                                .collect();
+                            (!sel.is_empty()).then(|| {
+                                let n = sel.len() as f64;
+                                Point::new(
+                                    sel.iter().map(|p| p.x).sum::<f64>() / n,
+                                    sel.iter().map(|p| p.y).sum::<f64>() / n,
+                                )
+                            })
+                        } else {
+                            hover_canvas
+                                .and_then(|(hx, hy)| {
+                                    nearest_anchor_screen(
+                                        &bez,
+                                        &node.transform,
+                                        view,
+                                        hx,
+                                        hy,
+                                        ANCHOR_RADIUS_PX,
+                                    )
+                                })
+                                .and_then(|idx| {
+                                    anchors.iter().find(|(i, _)| *i == idx).map(|(_, p)| *p)
+                                })
+                        };
+                        if let Some(cl) = center_local {
+                            let k = self.prop_falloff_k;
+                            // Local→screen scale of the node's linear transform, so the
+                            // local-space radius draws at the right on-screen size
+                            // (approximates non-uniform scale as a circle — good enough).
+                            let [a, b, c, d, _, _] = node.transform.matrix;
+                            let s = (a * d - b * c).abs().sqrt();
+                            let r_screen = (self.prop_spread * s * view.zoom) as f32;
+                            let (csx, csy) = local_to_screen(&node.transform, view, cl);
+                            let center = egui::pos2(csx as f32, csy as f32);
+                            painter.circle_filled(
+                                center,
+                                r_screen,
+                                Color32::from_rgba_unmultiplied(110, 86, 207, 18),
+                            );
+                            painter.circle_stroke(center, r_screen, egui::Stroke::new(1.5, accent));
+                            // Half-weight ring: falloff(t,k)=0.5 → t = 1 − 0.5^(1/k).
+                            let t_half = (1.0 - 0.5_f64.powf(1.0 / k.max(1e-3))) as f32;
+                            painter.circle_stroke(
+                                center,
+                                r_screen * t_half,
+                                egui::Stroke::new(
+                                    1.0,
+                                    Color32::from_rgba_unmultiplied(110, 86, 207, 120),
+                                ),
+                            );
+                            // Mini falloff-curve graph above the circle + readouts.
+                            let (bw, bh) = (72.0f32, 46.0f32);
+                            let bl = center.x - bw / 2.0;
+                            let bt = center.y - r_screen - bh - 12.0;
+                            let inset =
+                                egui::Rect::from_min_size(egui::pos2(bl, bt), egui::vec2(bw, bh));
+                            painter.rect_filled(
+                                inset,
+                                3.0,
+                                Color32::from_rgba_unmultiplied(20, 20, 28, 190),
+                            );
+                            let curve_pts: Vec<egui::Pos2> = (0..=24)
+                                .map(|i| {
+                                    let t = i as f64 / 24.0;
+                                    let w = proportional_move::falloff(t, k) as f32;
+                                    egui::pos2(bl + t as f32 * bw, bt + bh - 3.0 - w * (bh - 16.0))
+                                })
+                                .collect();
+                            painter.add(egui::Shape::line(curve_pts, egui::Stroke::new(1.5, accent)));
+                            painter.text(
+                                egui::pos2(bl + 4.0, bt + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("R {:.0}  k {:.2}", self.prop_spread, k),
+                                egui::FontId::monospace(9.0),
+                                Color32::from_gray(215),
+                            );
+                        }
+                    }
+
                     for &i in &self.point_selected {
                         let Some(ap) = anchors.iter().find(|(idx, _)| *idx == i).map(|(_, p)| *p)
                         else {

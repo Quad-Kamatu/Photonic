@@ -24,13 +24,17 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
 
     // ── Select & navigate ─────────────────────────────────────────────────
     section_header(ui, "SELECT");
-    for tool in [
-        Tool::Select,
-        Tool::DirectSelect,
-        Tool::Pan,
-        Tool::MagicWand,
-        Tool::Lasso,
-    ] {
+    tool_row(ui, active, Tool::Select, &mut chosen);
+    // Direct Select family: the anchor editor and its Proportional Move variant.
+    tool_group(
+        ui,
+        active,
+        "direct_select_popover",
+        "Direct Select",
+        &[Tool::DirectSelect, Tool::ProportionalMove],
+        &mut chosen,
+    );
+    for tool in [Tool::Pan, Tool::MagicWand, Tool::Lasso] {
         tool_row(ui, active, tool, &mut chosen);
     }
 

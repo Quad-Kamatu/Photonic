@@ -11,6 +11,7 @@ mod hit_test;
 use hit_test::*;
 mod command_center;
 mod direct_select;
+mod proportional_move;
 mod erase_tools;
 pub(crate) mod gradient_handles;
 pub(crate) mod layer_ops;
@@ -678,6 +679,14 @@ pub struct PhotonicApp {
     /// anchor selection, not geometry (no undo). #181.
     point_marquee_start: Option<egui::Pos2>,
 
+    // ── Proportional Move (Direct Select sub-variant) state ──────────────────
+    /// Falloff radius in local path units — the "spread" scale. Persisted default,
+    /// adjusted live by scroll while dragging an anchor.
+    pub prop_spread: f64,
+    /// Falloff curve exponent — the "curve" scale (1 = linear, higher = sharper).
+    /// Adjusted live by Shift+scroll while dragging an anchor.
+    pub prop_falloff_k: f64,
+
     // ── Shape Builder tool state ──────────────────────────────────────────────
     /// Node under cursor in Shape Builder mode (for highlight preview).
     shape_builder_hovered: Option<NodeId>,
@@ -1181,6 +1190,8 @@ impl Default for PhotonicApp {
             point_drag_origin: None,
             point_drag_mode: None,
             point_marquee_start: None,
+            prop_spread: proportional_move::DEFAULT_SPREAD,
+            prop_falloff_k: proportional_move::DEFAULT_CURVE,
             shape_builder_hovered: None,
             shape_builder_drag_ids: Vec::new(),
             shape_builder_subtract_mode: false,
@@ -1774,6 +1785,8 @@ impl PhotonicApp {
             magic_wand_attribute: &mut self.magic_wand_attribute,
             magic_wand_tolerance: &mut self.magic_wand_tolerance,
             eraser_radius: &mut self.eraser_radius,
+            prop_spread: &mut self.prop_spread,
+            prop_falloff_k: &mut self.prop_falloff_k,
             raster_mask_tolerance: &mut self.raster_mask_tolerance,
             raster_mask_contiguous: &mut self.raster_mask_contiguous,
             raster_color_range_target,
@@ -1903,8 +1916,14 @@ impl PhotonicApp {
         // every anchor of that path shows up filled ("whole object selected")
         // without requiring an extra click. Edge-triggered (not every frame) so a
         // deliberate click-to-deselect isn't immediately undone.
+        // Direct Select and its Proportional Move sub-variant share point-edit
+        // state. Re-seed whenever the active tool changes into either one (a switch
+        // between the two sub-variants re-seeds to the whole path; narrowing to a
+        // single anchor is then done by clicking within the active sub-variant).
+        let is_point_edit_tool =
+            |t: Tool| matches!(t, Tool::DirectSelect | Tool::ProportionalMove);
         let entered_direct_select =
-            self.active_tool == Tool::DirectSelect && self.last_tool != Tool::DirectSelect;
+            is_point_edit_tool(self.active_tool) && self.last_tool != self.active_tool;
         // Central tool-lifecycle seam (#190): on a tool switch, fire the previous
         // tool's `on_deactivate` then the new tool's `on_activate`, so cross-tool
         // switch behaviour lives in one place (the DirectSelect seed below is a
@@ -2772,7 +2791,10 @@ impl PhotonicApp {
                             self.isolated_group = None;
                             self.clear_point_edit();
                             self.active_tool = tool;
-                            if tool != Tool::Select && tool != Tool::DirectSelect {
+                            if tool != Tool::Select
+                                && tool != Tool::DirectSelect
+                                && tool != Tool::ProportionalMove
+                            {
                                 self.selected_id = None;
                                 doc.selection.clear();
                             }
@@ -4278,8 +4300,10 @@ impl PhotonicApp {
                         // hit-test the tool uses) and fall through to the tool handler.
                         // Right-clicking empty canvas in Direct Select still opens the
                         // wheel, matching every other tool.
-                        let ds_anchor_menu = self.active_tool == Tool::DirectSelect
-                            && self.ds_anchor_at(cx, cy, doc, view).is_some();
+                        let ds_anchor_menu = matches!(
+                            self.active_tool,
+                            Tool::DirectSelect | Tool::ProportionalMove
+                        ) && self.ds_anchor_at(cx, cy, doc, view).is_some();
                         if !ds_anchor_menu {
                             let hit = hit_test(doc, cx, cy, renderer);
                             let wheel_ctx = match hit {
@@ -4491,8 +4515,12 @@ impl PhotonicApp {
                 }
 
                 // ── Zoom: scroll accumulates into log-space target ────────────
+                // Proportional Move claims the wheel while dragging an anchor
+                // (spread / Shift+curve), so suppress zoom for that gesture.
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll != 0.0 && response.hovered() {
+                let prop_move_scroll = self.active_tool == Tool::ProportionalMove
+                    && response.dragged_by(egui::PointerButton::Primary);
+                if scroll != 0.0 && response.hovered() && !prop_move_scroll {
                     let pivot = ui
                         .input(|i| i.pointer.hover_pos())
                         .unwrap_or(response.rect.center());
@@ -4633,7 +4661,12 @@ impl PhotonicApp {
                 }
 
                 // ── Direct Selection (point edit) tool ────────────────────────
-                if self.active_tool == Tool::DirectSelect {
+                // Proportional Move is a sub-variant sharing the same handler; it
+                // branches internally on `self.active_tool` for the anchor drag,
+                // the falloff overlay, and scroll-wheel spread/curve control.
+                if self.active_tool == Tool::DirectSelect
+                    || self.active_tool == Tool::ProportionalMove
+                {
                     self.handle_direct_select_tool(
                         ui,
                         &response,

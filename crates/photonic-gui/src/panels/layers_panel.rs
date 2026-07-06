@@ -20,17 +20,10 @@ fn draw_layer_node_row(
         return;
     };
     let is_selected = selected_id == Some(node_id);
-    let grip = |ui: &mut Ui, id: NodeId| {
-        ui.dnd_drag_source(egui::Id::new(("node_drag", id)), id, |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(ph::DOTS_SIX_VERTICAL).weak()).selectable(false),
-            )
-            .on_hover_text("Drag to reparent");
-        })
-        .response
-    };
 
-    let response = match &node.kind {
+    // Reserve a paint slot for the hover highlight (filled behind the row).
+    let hover_bg = ui.painter().add(egui::Shape::Noop);
+    let (response, name_resp) = match &node.kind {
         SceneNodeKind::Group(g) => {
             // Manual disclosure (persisted open flag) so we control the header
             // row layout — a grip + folder label — and still get an indented body.
@@ -38,7 +31,8 @@ fn draw_layer_node_row(
             let mut open = ui.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(true));
             let clip = g.clip_node_id.is_some();
             let row = ui.horizontal(|ui| {
-                grip(ui, node_id);
+                // Caret — OUTSIDE the drag hitbox so clicking it toggles the
+                // folder open/closed instead of starting a drag.
                 let tri = if open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
                 if ui
                     .add(egui::Label::new(RichText::new(tri).weak()).sense(egui::Sense::click()))
@@ -46,30 +40,44 @@ fn draw_layer_node_row(
                 {
                     open = !open;
                 }
-                let name = if clip {
-                    format!("{} {} {}", ph::FOLDER_SIMPLE, node.name, ph::SCISSORS)
-                } else {
-                    format!("{} {}", ph::FOLDER_SIMPLE, node.name)
-                };
-                let label = RichText::new(name).color(if is_selected {
-                    Color32::from_rgb(184, 164, 255)
-                } else {
-                    Color32::from_rgb(144, 119, 224)
-                });
-                if ui.selectable_label(is_selected, label).clicked() {
-                    *action = Some(PanelAction::SelectNode { node_id });
-                }
+                // The folder name is the drag handle (grab to reparent).
+                let name_resp = ui
+                    .dnd_drag_source(egui::Id::new(("node_drag", node_id)), node_id, |ui| {
+                        let name = if clip {
+                            format!("{} {} {}", ph::FOLDER_SIMPLE, node.name, ph::SCISSORS)
+                        } else {
+                            format!("{} {}", ph::FOLDER_SIMPLE, node.name)
+                        };
+                        let label = RichText::new(name).color(if is_selected {
+                            Color32::from_rgb(184, 164, 255)
+                        } else {
+                            Color32::from_rgb(144, 119, 224)
+                        });
+                        let r = ui.selectable_label(is_selected, label);
+                        if r.clicked() {
+                            *action = Some(PanelAction::SelectNode { node_id });
+                        }
+                        r
+                    })
+                    .inner;
+                // Right-aligned, frameless ⋯ object options.
+                node_options_button(ui, node_id, action);
+                name_resp
             });
             ui.data_mut(|d| d.insert_temp(open_id, open));
+            let name_resp = row.inner;
             let row_resp = row.response;
             // Drop a node ONTO this group → reparent into it (at the top of the
-            // folder). Highlight while hovering with a payload.
-            if row_resp.dnd_hover_payload::<NodeId>().is_some() {
-                ui.painter().rect_stroke(
-                    row_resp.rect,
-                    egui::Rounding::same(3.0),
-                    egui::Stroke::new(1.5, Color32::from_rgb(110, 86, 207)),
-                );
+            // folder). Outline the whole row while hovering so it reads as "drop
+            // inside this folder" (distinct from the between-rows insertion line).
+            if let Some(p) = row_resp.dnd_hover_payload::<NodeId>() {
+                if *p != node_id {
+                    ui.painter().rect_stroke(
+                        row_resp.rect,
+                        egui::Rounding::same(3.0),
+                        egui::Stroke::new(2.0, Color32::from_rgb(140, 110, 245)),
+                    );
+                }
             }
             if let Some(p) = row_resp.dnd_release_payload::<NodeId>() {
                 if *p != node_id {
@@ -101,80 +109,183 @@ fn draw_layer_node_row(
                     }
                 });
             }
-            row_resp
+            (row_resp, Some(name_resp))
         }
         _ => {
             let compound = matches!(&node.kind, K::Path(p) if p.is_compound);
-            let src = ui.dnd_drag_source(egui::Id::new(("node_drag", node_id)), node_id, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(ph::DOTS_SIX_VERTICAL).weak())
-                            .selectable(false),
-                    );
-                    let name = if compound {
-                        format!("• {} {}", node.name, ph::INTERSECT)
-                    } else {
-                        format!("• {}", node.name)
-                    };
-                    ui.selectable_label(is_selected, name)
-                })
-                .inner
+            let row = ui.horizontal(|ui| {
+                // The name is the drag handle (grab to reparent).
+                let src =
+                    ui.dnd_drag_source(egui::Id::new(("node_drag", node_id)), node_id, |ui| {
+                        let name = if compound {
+                            format!("• {} {}", node.name, ph::INTERSECT)
+                        } else {
+                            format!("• {}", node.name)
+                        };
+                        ui.selectable_label(is_selected, name)
+                    });
+                if src.inner.clicked() {
+                    *action = Some(PanelAction::SelectNode { node_id });
+                }
+                // Right-aligned, frameless ⋯ object options.
+                node_options_button(ui, node_id, action);
+                src.inner
             });
-            if src.inner.clicked() {
-                *action = Some(PanelAction::SelectNode { node_id });
+            let name_resp = row.inner;
+            let row_resp = row.response;
+            // Preview: while another object is dragged over this row, show an
+            // insertion line above/below depending on the pointer half, so it is
+            // clear where the object will land.
+            if let Some(p) = row_resp.dnd_hover_payload::<NodeId>() {
+                if *p != node_id {
+                    let above = pointer_above_center(ui, row_resp.rect);
+                    draw_drop_indicator(ui, row_resp.rect, above);
+                }
             }
-            let row_resp = src.response;
-            // Drop onto a leaf → reparent to this leaf's container at its slot
-            // (basic between-rows placement).
+            // Drop onto a leaf → reparent into this leaf's container, landing on
+            // the side of the row the pointer is nearest (above = higher slot).
             if let Some(p) = row_resp.dnd_release_payload::<NodeId>() {
                 if *p != node_id {
+                    let above = pointer_above_center(ui, row_resp.rect);
+                    let new_index = if above {
+                        index_in_parent + 1
+                    } else {
+                        index_in_parent
+                    };
                     *action = Some(PanelAction::ReparentNode {
                         node_id: *p,
                         new: parent,
-                        new_index: index_in_parent,
+                        new_index,
                     });
                 }
             }
-            row_resp
+            (row_resp, Some(name_resp))
         }
     };
 
-    response.context_menu(|ui| {
-        if ui.button("Bring to Front").clicked() {
-            *action = Some(PanelAction::ReorderNode {
-                node_id,
-                op: ZOrderOp::BringToFront,
-            });
-            ui.close_menu();
+    // Subtle animated hover highlight for the row.
+    paint_row_hover(
+        ui,
+        hover_bg,
+        response.rect,
+        egui::Id::new(("node_hover", node_id)),
+        response.contains_pointer(),
+    );
+
+    // Right-click anywhere on the row → the same options menu as the ⋯ button.
+    if let Some(nr) = &name_resp {
+        nr.context_menu(|ui| node_menu_items(ui, node_id, action));
+    }
+    response
+        .interact(egui::Sense::click())
+        .context_menu(|ui| node_menu_items(ui, node_id, action));
+}
+
+/// True when the pointer is in the upper half of `rect` (or off-screen). Used to
+/// decide whether a drop lands above or below a row — the same test drives the
+/// insertion-line preview and the actual landing index so they always agree.
+fn pointer_above_center(ui: &Ui, rect: egui::Rect) -> bool {
+    ui.input(|i| i.pointer.hover_pos())
+        .is_none_or(|p| p.y < rect.center().y)
+}
+
+/// Paint a subtle, animated hover highlight behind a row. `bg` is a paint slot
+/// reserved with `painter().add(Shape::Noop)` *before* the row was laid out, so
+/// filling it now lands the tint behind the row's content rather than over it.
+fn paint_row_hover(
+    ui: &Ui,
+    bg: egui::layers::ShapeIdx,
+    rect: egui::Rect,
+    anim_id: egui::Id,
+    hovered: bool,
+) {
+    let t = ui.ctx().animate_bool_with_time(anim_id, hovered, 0.12);
+    if t > 0.001 {
+        let a = (26.0 * t).round() as u8;
+        ui.painter().set(
+            bg,
+            egui::Shape::rect_filled(
+                rect,
+                egui::Rounding::same(4.0),
+                Color32::from_rgba_unmultiplied(120, 96, 220, a),
+            ),
+        );
+    }
+}
+
+/// Paint a prominent insertion indicator — a bar with round end caps — at the
+/// top (`above`) or bottom edge of `rect`, marking where a dragged row lands.
+fn draw_drop_indicator(ui: &Ui, rect: egui::Rect, above: bool) {
+    let y = if above { rect.top() } else { rect.bottom() };
+    let color = Color32::from_rgb(150, 120, 255);
+    let painter = ui.painter();
+    painter.hline(rect.x_range(), y, egui::Stroke::new(2.5, color));
+    painter.circle_filled(egui::pos2(rect.left() + 1.0, y), 3.0, color);
+    painter.circle_filled(egui::pos2(rect.right() - 1.0, y), 3.0, color);
+}
+
+/// The shared body of the object/node options menu: z-order ops and "Collect in
+/// New Layer". Used by both the row's right-click menu and its ⋯ options button.
+fn node_menu_items(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction>) {
+    if ui.button("Bring to Front").clicked() {
+        *action = Some(PanelAction::ReorderNode {
+            node_id,
+            op: ZOrderOp::BringToFront,
+        });
+        ui.close_menu();
+    }
+    if ui.button("Bring Forward").clicked() {
+        *action = Some(PanelAction::ReorderNode {
+            node_id,
+            op: ZOrderOp::BringForward,
+        });
+        ui.close_menu();
+    }
+    if ui.button("Send Backward").clicked() {
+        *action = Some(PanelAction::ReorderNode {
+            node_id,
+            op: ZOrderOp::SendBackward,
+        });
+        ui.close_menu();
+    }
+    if ui.button("Send to Back").clicked() {
+        *action = Some(PanelAction::ReorderNode {
+            node_id,
+            op: ZOrderOp::SendToBack,
+        });
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Collect in New Layer").clicked() {
+        *action = Some(PanelAction::CollectInNewLayer {
+            node_ids: vec![node_id],
+        });
+        ui.close_menu();
+    }
+}
+
+/// The right-aligned, frameless "⋯" options button for an object/node row. Opens
+/// a popup of [`node_menu_items`], with outer right padding so it never clips.
+fn node_options_button(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction>) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(4.0);
+        let resp = ui
+            .add(egui::Button::new(RichText::new(ph::DOTS_THREE_VERTICAL).weak()).frame(false))
+            .on_hover_text("Object options");
+        let popup_id = resp.id.with("node_opts_popup");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
         }
-        if ui.button("Bring Forward").clicked() {
-            *action = Some(PanelAction::ReorderNode {
-                node_id,
-                op: ZOrderOp::BringForward,
-            });
-            ui.close_menu();
-        }
-        if ui.button("Send Backward").clicked() {
-            *action = Some(PanelAction::ReorderNode {
-                node_id,
-                op: ZOrderOp::SendBackward,
-            });
-            ui.close_menu();
-        }
-        if ui.button("Send to Back").clicked() {
-            *action = Some(PanelAction::ReorderNode {
-                node_id,
-                op: ZOrderOp::SendToBack,
-            });
-            ui.close_menu();
-        }
-        ui.separator();
-        if ui.button("Collect in New Layer").clicked() {
-            *action = Some(PanelAction::CollectInNewLayer {
-                node_ids: vec![node_id],
-            });
-            ui.close_menu();
-        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &resp,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(160.0);
+                node_menu_items(ui, node_id, action);
+            },
+        );
     });
 }
 
@@ -208,8 +319,13 @@ pub fn draw_layers_panel(
         });
 
     // ── Scrolling layer tree fills the remaining space above the footer ──────
+    // A little left inset so the color-tag swatch isn't clipped by the panel
+    // edge when it enlarges on hover.
     egui::CentralPanel::default()
-        .frame(egui::Frame::none())
+        .frame(egui::Frame::none().inner_margin(egui::Margin {
+            left: 4.0,
+            ..egui::Margin::ZERO
+        }))
         .show_inside(ui, |ui| {
             ui.label(
                 RichText::new("LAYERS")
@@ -247,28 +363,20 @@ fn draw_layers_tree(
         };
         let lid = *layer_id;
 
-        let row = ui.horizontal(|ui| {
-            // Drag handle — grab to reorder the layer stack (#169).
-            ui.dnd_drag_source(egui::Id::new(("layer_grip", lid)), lid, |ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(ph::DOTS_SIX_VERTICAL).weak())
-                        .selectable(false),
-                )
-                .on_hover_text("Drag to reorder layer");
-            });
-            // Checkbox for multi-layer selection (used by Merge Layers).
-            let mut checked = selected_layer_ids.contains(&lid);
-            if ui.checkbox(&mut checked, "").changed() {
-                if checked {
-                    if !selected_layer_ids.contains(&lid) {
-                        selected_layer_ids.push(lid);
-                    }
-                } else {
-                    selected_layer_ids.retain(|id| id != &lid);
-                }
-            }
+        let is_layer_selected = selected_layer_ids.contains(&lid);
+        // Persisted disclosure state for this layer's object list.
+        let open_id = egui::Id::new(("layer_open", lid));
+        let mut open = ui.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(true));
 
-            // Color swatch — shows layer color tag; click cycles through preset colors.
+        // ── Header row: [swatch] [caret] [name] … [options ⋯] ────────────────
+        // The name/row body is itself the drag handle — grab it to reorder the
+        // stack (#169), no separate grip. Shift-click the name toggles a layer
+        // into the multi-selection; a plain click selects just that layer.
+        // Reserve a paint slot for the hover highlight (filled behind the row).
+        let hover_bg = ui.painter().add(egui::Shape::Noop);
+        let row = ui.horizontal(|ui| {
+            // Color swatch — kept OUTSIDE the drag hitbox so a click cycles the
+            // color tag instead of starting a layer drag.
             let swatch_color = match layer.color {
                 Some([r, g, b, a]) => Color32::from_rgba_unmultiplied(
                     (r * 255.0) as u8,
@@ -296,7 +404,6 @@ fn draw_layers_tree(
                 .on_hover_text("Click to cycle layer color tag")
                 .clicked()
             {
-                // Find the current color in the preset list and advance to next.
                 let cur_idx = LAYER_COLORS
                     .iter()
                     .position(|c| *c == layer.color)
@@ -308,115 +415,140 @@ fn draw_layers_tree(
                 });
             }
 
-            // Template toggle — "T" button; dimmed when not a template layer.
-            let t_btn = egui::Button::new(RichText::new("T").small().color(if layer.is_template {
-                Color32::from_rgb(255, 180, 60)
-            } else {
-                Color32::from_gray(90)
-            }))
-            .min_size(egui::vec2(14.0, 14.0));
+            // Disclosure caret — also OUTSIDE the drag hitbox so clicking it
+            // expands/collapses the layer's contents instead of dragging.
+            let tri = if open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
             if ui
-                .add(t_btn)
-                .on_hover_text(if layer.is_template {
-                    "Template layer (locked, dimmed) — click to disable"
-                } else {
-                    "Click to make this a template layer (locked, dimmed reference)"
-                })
+                .add(egui::Label::new(RichText::new(tri).weak()).sense(egui::Sense::click()))
                 .clicked()
             {
-                *action = Some(PanelAction::SetLayerTemplate {
-                    layer_id: lid,
-                    is_template: !layer.is_template,
-                });
+                open = !open;
             }
 
-            // Inline rename takes over the name slot while this layer is the
-            // rename target; otherwise a disclosure header + right-click menu.
-            if rename_target == Some(lid) {
-                let mut buf: String = ui.data(|d| d.get_temp(rename_buf_id()).unwrap_or_default());
-                let edit_id = egui::Id::new(("layer_rename_edit", lid));
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut buf)
-                        .id(edit_id)
-                        .desired_width(140.0),
-                );
-                if resp.lost_focus() {
-                    // Commit on Enter (and on click-away); Escape cancels.
-                    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                    let trimmed = buf.trim();
-                    if !escaped && !trimmed.is_empty() && trimmed != layer.name {
-                        *action = Some(PanelAction::RenameLayer {
-                            layer_id: lid,
-                            name: trimmed.to_string(),
-                        });
+            // Name slot — this is the drag handle: grab it to reorder the stack.
+            // Inline rename takes it over while renaming; otherwise it is a
+            // selectable label whose click drives selection (shift = toggle).
+            let name_resp = ui
+                .dnd_drag_source(egui::Id::new(("layer_grip", lid)), lid, |ui| {
+                    if rename_target == Some(lid) {
+                        let mut buf: String =
+                            ui.data(|d| d.get_temp(rename_buf_id()).unwrap_or_default());
+                        let edit_id = egui::Id::new(("layer_rename_edit", lid));
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut buf)
+                                .id(edit_id)
+                                .desired_width(140.0),
+                        );
+                        if resp.lost_focus() {
+                            // Commit on Enter (and on click-away); Escape cancels.
+                            let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            let trimmed = buf.trim();
+                            if !escaped && !trimmed.is_empty() && trimmed != layer.name {
+                                *action = Some(PanelAction::RenameLayer {
+                                    layer_id: lid,
+                                    name: trimmed.to_string(),
+                                });
+                            }
+                            ui.data_mut(|d| {
+                                d.remove::<LayerId>(rename_target_id());
+                                d.remove::<String>(rename_buf_id());
+                            });
+                        } else {
+                            ui.data_mut(|d| d.insert_temp(rename_buf_id(), buf));
+                        }
+                        None
+                    } else {
+                        let layer_label = if layer.is_template {
+                            RichText::new(format!("{} [T]", layer.name)).italics().weak()
+                        } else if layer.visible {
+                            RichText::new(layer.name.to_string())
+                        } else {
+                            RichText::new(format!("{} (hidden)", layer.name)).weak()
+                        };
+                        let r = ui.selectable_label(is_layer_selected, layer_label);
+                        if r.clicked() {
+                            if ui.input(|i| i.modifiers.shift) {
+                                // Shift-click: toggle this layer in the selection.
+                                if let Some(pos) =
+                                    selected_layer_ids.iter().position(|x| x == &lid)
+                                {
+                                    selected_layer_ids.remove(pos);
+                                } else {
+                                    selected_layer_ids.push(lid);
+                                }
+                            } else {
+                                // Plain click: select just this layer.
+                                selected_layer_ids.clear();
+                                selected_layer_ids.push(lid);
+                            }
+                        }
+                        Some(r)
                     }
-                    ui.data_mut(|d| {
-                        d.remove::<LayerId>(rename_target_id());
-                        d.remove::<String>(rename_buf_id());
-                    });
-                } else {
-                    ui.data_mut(|d| d.insert_temp(rename_buf_id(), buf));
-                }
-            } else {
-                let layer_label = if layer.is_template {
-                    RichText::new(format!("{} [T]", layer.name))
-                        .italics()
-                        .weak()
-                } else if layer.visible {
-                    RichText::new(layer.name.to_string())
-                } else {
-                    RichText::new(format!("{} (hidden)", layer.name)).weak()
-                };
+                })
+                .inner;
 
-                let ch = egui::CollapsingHeader::new(layer_label)
-                    .id_salt(lid)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        use photonic_core::document::NodeContainer;
-                        if layer.node_ids.is_empty() {
-                            ui.label(RichText::new("  (empty)").weak());
-                        }
-                        let n = layer.node_ids.len();
-                        for (ui_i, node_id) in layer.node_ids.iter().rev().copied().enumerate() {
-                            let idx = n - 1 - ui_i;
-                            draw_layer_node_row(
-                                ui,
-                                doc,
-                                node_id,
-                                NodeContainer::Layer(lid),
-                                idx,
-                                selected_id,
-                                action,
-                            );
-                        }
-                    });
-
-                // Right-click the layer name for layer-level actions.
-                draw_layer_context_menu(&ch.header_response, doc, lid, layer, action);
-            }
+            // Right-aligned per-layer options button (frameless ⋯) — its popup
+            // carries the template toggle and the same actions as right-click.
+            layer_options_button(ui, doc, lid, layer, action);
+            name_resp
         });
+        ui.data_mut(|d| d.insert_temp(open_id, open));
+
+        // Subtle animated hover highlight for the row.
+        paint_row_hover(
+            ui,
+            hover_bg,
+            row.response.rect,
+            egui::Id::new(("layer_hover", lid)),
+            row.response.contains_pointer(),
+        );
+
+        // Right-click anywhere on the row → the same options menu as the ⋯ button.
+        // Attach to the name (covers the label) and to a click-sensing pass over
+        // the whole row rect (covers the gaps the interactive children don't).
+        if let Some(nr) = &row.inner {
+            nr.context_menu(|ui| layer_menu_items(ui, doc, lid, layer, action));
+        }
+        row.response
+            .interact(egui::Sense::click())
+            .context_menu(|ui| layer_menu_items(ui, doc, lid, layer, action));
+
+        // Indented object list for this layer.
+        if open {
+            ui.indent(egui::Id::new(("layer_body", lid)), |ui| {
+                use photonic_core::document::NodeContainer;
+                if layer.node_ids.is_empty() {
+                    ui.label(RichText::new("  (empty)").weak());
+                }
+                let n = layer.node_ids.len();
+                for (ui_i, node_id) in layer.node_ids.iter().rev().copied().enumerate() {
+                    let idx = n - 1 - ui_i;
+                    draw_layer_node_row(
+                        ui,
+                        doc,
+                        node_id,
+                        NodeContainer::Layer(lid),
+                        idx,
+                        selected_id,
+                        action,
+                    );
+                }
+            });
+        }
 
         // ── Drag-to-reorder drop handling (#169) ─────────────────────────────
         // Show an insertion line while a layer is dragged over this row, and on
         // release rebuild the stack order and emit a single undoable reorder.
-        if row.response.dnd_hover_payload::<LayerId>().is_some() {
-            let rect = row.response.rect;
-            let top = ui
-                .input(|i| i.pointer.hover_pos())
-                .is_none_or(|p| p.y < rect.center().y);
-            let y = if top { rect.top() } else { rect.bottom() };
-            ui.painter().hline(
-                rect.x_range(),
-                y,
-                egui::Stroke::new(2.0, Color32::from_rgb(110, 86, 207)),
-            );
+        if let Some(p) = row.response.dnd_hover_payload::<LayerId>() {
+            if *p != lid {
+                let above = pointer_above_center(ui, row.response.rect);
+                draw_drop_indicator(ui, row.response.rect, above);
+            }
         }
         if let Some(payload) = row.response.dnd_release_payload::<LayerId>() {
             let dragged = *payload;
             if dragged != lid {
-                let before = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .is_none_or(|p| p.y < row.response.rect.center().y);
+                let before = pointer_above_center(ui, row.response.rect);
                 // Work in UI order (top→bottom = layer_order reversed).
                 let mut ui_order: Vec<LayerId> = doc.layer_order.iter().rev().copied().collect();
                 ui_order.retain(|&x| x != dragged);
@@ -427,6 +559,15 @@ fn draw_layers_tree(
                     *action = Some(PanelAction::ReorderLayers { new_order });
                 }
             }
+        }
+        // Preview: dragging an object onto a layer header lands it at the top of
+        // that layer — outline the header so that destination reads clearly.
+        if row.response.dnd_hover_payload::<NodeId>().is_some() {
+            ui.painter().rect_stroke(
+                row.response.rect,
+                egui::Rounding::same(3.0),
+                egui::Stroke::new(2.0, Color32::from_rgb(140, 110, 245)),
+            );
         }
         // Drop a NODE onto this layer row → reparent it to this layer's top (#210),
         // i.e. pull it out of a group / move it between layers.
@@ -488,16 +629,71 @@ fn adjust_tray_open_id() -> egui::Id {
     egui::Id::new("layers_adjust_tray_open")
 }
 
-/// Right-click menu for a layer row: rename, add sublayer, show/hide, lock,
-/// and delete. Emits the matching [`PanelAction`].
-fn draw_layer_context_menu(
-    header: &egui::Response,
+/// The right-aligned, frameless "⋯" options button for a layer row. Opens a
+/// popup of the layer actions ([`layer_menu_items`]). A little outer right
+/// padding keeps the icon from clipping the panel edge.
+fn layer_options_button(
+    ui: &mut Ui,
     doc: &Document,
     lid: LayerId,
     layer: &photonic_core::layer::Layer,
     action: &mut Option<PanelAction>,
 ) {
-    header.context_menu(|ui| {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(4.0);
+        let resp = ui
+            .add(egui::Button::new(RichText::new(ph::DOTS_THREE_VERTICAL).weak()).frame(false))
+            .on_hover_text("Layer options");
+        let popup_id = resp.id.with("layer_opts_popup");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &resp,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(160.0);
+                layer_menu_items(ui, doc, lid, layer, action);
+            },
+        );
+    });
+}
+
+/// The shared body of the layer options menu: template toggle, rename, add
+/// sublayer, show/hide, lock, and delete. Emits the matching [`PanelAction`].
+fn layer_menu_items(
+    ui: &mut Ui,
+    doc: &Document,
+    lid: LayerId,
+    layer: &photonic_core::layer::Layer,
+    action: &mut Option<PanelAction>,
+) {
+    {
+        // Template toggle — relocated here from the old inline "T" button. A
+        // template layer is locked and dimmed as a tracing reference.
+        let t_label = if layer.is_template {
+            format!("{} Template Layer", ph::CHECK)
+        } else {
+            "     Make Template".to_string()
+        };
+        if ui
+            .button(t_label)
+            .on_hover_text(if layer.is_template {
+                "Template layer (locked, dimmed) — click to disable"
+            } else {
+                "Make this a template layer (locked, dimmed reference)"
+            })
+            .clicked()
+        {
+            *action = Some(PanelAction::SetLayerTemplate {
+                layer_id: lid,
+                is_template: !layer.is_template,
+            });
+            ui.close_menu();
+        }
+        ui.separator();
         if ui.button(format!("{} Rename", ph::PENCIL_SIMPLE)).clicked() {
             // Arm inline rename and focus the edit box on the next frame.
             ui.data_mut(|d| {
@@ -553,7 +749,7 @@ fn draw_layer_context_menu(
             *action = Some(PanelAction::DeleteLayer { layer_id: lid });
             ui.close_menu();
         }
-    });
+    }
 }
 
 /// The pinned footer: the adjustment slide-up tray, the four layer-action

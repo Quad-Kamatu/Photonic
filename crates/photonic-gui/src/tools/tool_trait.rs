@@ -72,6 +72,7 @@ macro_rules! tool_registry {
 tool_registry! {
     Select => SelectTool,
     DirectSelect => DirectSelectTool,
+    ProportionalMove => ProportionalMoveTool,
     Pan => PanTool,
     Rectangle => RectangleTool,
     RoundedRect => RoundedRectTool,

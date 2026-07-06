@@ -989,6 +989,10 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) magic_wand_attribute: &'a mut SelectSameAttr,
     pub(crate) magic_wand_tolerance: &'a mut f64,
     pub(crate) eraser_radius: &'a mut f64,
+    /// Proportional Move (Direct Select sub-variant): falloff radius ("spread")
+    /// and curve exponent, editable in Tool Options and adjusted live by scroll.
+    pub(crate) prop_spread: &'a mut f64,
+    pub(crate) prop_falloff_k: &'a mut f64,
     /// Raster color-range mask-out: fuzziness (0..1) and contiguous (wand) flag.
     pub(crate) raster_mask_tolerance: &'a mut f32,
     pub(crate) raster_mask_contiguous: &'a mut bool,

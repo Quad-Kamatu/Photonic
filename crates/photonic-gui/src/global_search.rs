@@ -39,6 +39,7 @@ pub struct SearchItem {
 const TOOLS: &[Tool] = &[
     Tool::Select,
     Tool::DirectSelect,
+    Tool::ProportionalMove,
     Tool::Pan,
     Tool::Rectangle,
     Tool::RoundedRect,
@@ -68,6 +69,14 @@ fn tool_keywords(t: Tool) -> &'static [&'static str] {
     match t {
         Tool::Select => &["move", "arrow", "pointer"],
         Tool::DirectSelect => &["node", "anchor", "point", "edit"],
+        Tool::ProportionalMove => &[
+            "proportional",
+            "falloff",
+            "soft",
+            "magnet",
+            "spread",
+            "blender",
+        ],
         Tool::Pan => &["hand", "scroll", "navigate"],
         Tool::Rectangle => &["square", "box", "rect"],
         Tool::RoundedRect => &["rounded", "corner", "square"],

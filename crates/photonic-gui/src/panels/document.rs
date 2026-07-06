@@ -184,6 +184,8 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let magic_wand_attribute = &mut *ctx.magic_wand_attribute;
     let magic_wand_tolerance = &mut *ctx.magic_wand_tolerance;
     let eraser_radius = &mut *ctx.eraser_radius;
+    let prop_spread = &mut *ctx.prop_spread;
+    let prop_falloff_k = &mut *ctx.prop_falloff_k;
     let q = ctx.q.as_str();
     let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
     let forced_open = ctx.forced_open;
@@ -282,6 +284,7 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         Tool::Select => "Select Shortcuts",
         Tool::ShapeBuilder => "Shape Builder",
         Tool::DirectSelect => "Direct Select",
+        Tool::ProportionalMove => "Proportional Move Options",
         Tool::MagicWand => "Magic Wand Options",
         Tool::Eraser => "Eraser Options",
         Tool::Knife => "Knife Options",
@@ -300,6 +303,7 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         | Tool::Select
         | Tool::ShapeBuilder
         | Tool::DirectSelect
+        | Tool::ProportionalMove
         | Tool::MagicWand
         | Tool::Eraser
         | Tool::Knife => {
@@ -428,6 +432,20 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             Tool::Knife => {
                                 ui.label(RichText::new("Drag a line across filled paths → slice into faces").weak().small());
                                 ui.label(RichText::new("Each cut face becomes its own editable path").weak().small());
+                            }
+                            Tool::ProportionalMove => {
+                                ui.label("Spread (falloff radius)");
+                                let mut r = *prop_spread as f32;
+                                if ui.add(egui::Slider::new(&mut r, 1.0..=2000.0).suffix("px").logarithmic(true)).changed() {
+                                    *prop_spread = r as f64;
+                                }
+                                ui.label("Falloff curve");
+                                let mut k = *prop_falloff_k as f32;
+                                if ui.add(egui::Slider::new(&mut k, 0.1..=8.0).text("k")).changed() {
+                                    *prop_falloff_k = k as f64;
+                                }
+                                ui.label(RichText::new("Drag an anchor → neighbours follow along the falloff").weak().small());
+                                ui.label(RichText::new("While dragging: scroll = spread, Shift+scroll = curve").weak().small());
                             }
                             _ => {}
                         }
