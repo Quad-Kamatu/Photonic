@@ -325,6 +325,13 @@ pub enum PanelAction {
     SetLayerVisible { layer_id: LayerId, visible: bool },
     /// Lock or unlock an entire layer (prevents selecting its contents).
     SetLayerLocked { layer_id: LayerId, locked: bool },
+    /// Set a layer's opacity (0.0–1.0); the layer composites as a unit.
+    SetLayerOpacity { layer_id: LayerId, opacity: f32 },
+    /// Set a layer's blend mode; the layer composites as a unit against those beneath.
+    SetLayerBlendMode {
+        layer_id: LayerId,
+        blend_mode: photonic_core::layer::BlendMode,
+    },
     /// Create a new empty group ("sublayer") nesting container. When a group is
     /// selected it is nested inside that group; otherwise it lands at the top of
     /// the active layer.

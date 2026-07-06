@@ -737,6 +737,59 @@ fn layer_menu_items(
             ui.close_menu();
         }
         ui.separator();
+        // ── Layer compositing: opacity + blend mode (composited as a unit) ────
+        ui.horizontal(|ui| {
+            ui.label("Opacity");
+            let mut op = layer.opacity;
+            if ui
+                .add(egui::Slider::new(&mut op, 0.0..=1.0))
+                .on_hover_text("Layer opacity — composites the whole layer as a unit")
+                .changed()
+            {
+                *action = Some(PanelAction::SetLayerOpacity {
+                    layer_id: lid,
+                    opacity: op,
+                });
+            }
+        });
+        {
+            use photonic_core::layer::BlendMode as Bm;
+            const MODES: [(Bm, &str); 16] = [
+                (Bm::Normal, "Normal"),
+                (Bm::Multiply, "Multiply"),
+                (Bm::Screen, "Screen"),
+                (Bm::Overlay, "Overlay"),
+                (Bm::Darken, "Darken"),
+                (Bm::Lighten, "Lighten"),
+                (Bm::ColorDodge, "Color Dodge"),
+                (Bm::ColorBurn, "Color Burn"),
+                (Bm::HardLight, "Hard Light"),
+                (Bm::SoftLight, "Soft Light"),
+                (Bm::Difference, "Difference"),
+                (Bm::Exclusion, "Exclusion"),
+                (Bm::Hue, "Hue"),
+                (Bm::Saturation, "Saturation"),
+                (Bm::Color, "Color"),
+                (Bm::Luminosity, "Luminosity"),
+            ];
+            let cur = MODES
+                .iter()
+                .find(|(m, _)| *m == layer.blend_mode)
+                .map(|(_, n)| *n)
+                .unwrap_or("Normal");
+            ui.menu_button(format!("Blend: {cur}"), |ui| {
+                for (m, name) in MODES {
+                    if ui.selectable_label(m == layer.blend_mode, name).clicked() {
+                        *action = Some(PanelAction::SetLayerBlendMode {
+                            layer_id: lid,
+                            blend_mode: m,
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        ui.separator();
         // Delete — refuse when this is the only remaining layer.
         let can_delete = doc.layer_order.len() > 1;
         if ui

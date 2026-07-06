@@ -2585,6 +2585,10 @@ impl PhotonicApp {
                             new_color: color,
                             old_is_template: layer.is_template,
                             new_is_template: layer.is_template,
+                            old_opacity: layer.opacity,
+                            new_opacity: layer.opacity,
+                            old_blend_mode: layer.blend_mode,
+                            new_blend_mode: layer.blend_mode,
                         };
                         history.execute(cmd, doc);
                         doc_modified = true;
@@ -2609,6 +2613,10 @@ impl PhotonicApp {
                             new_color: layer.color,
                             old_is_template: layer.is_template,
                             new_is_template: is_template,
+                            old_opacity: layer.opacity,
+                            new_opacity: layer.opacity,
+                            old_blend_mode: layer.blend_mode,
+                            new_blend_mode: layer.blend_mode,
                         };
                         history.execute(cmd, doc);
                         doc_modified = true;
@@ -2629,6 +2637,10 @@ impl PhotonicApp {
                             new_color: layer.color,
                             old_is_template: layer.is_template,
                             new_is_template: layer.is_template,
+                            old_opacity: layer.opacity,
+                            new_opacity: layer.opacity,
+                            old_blend_mode: layer.blend_mode,
+                            new_blend_mode: layer.blend_mode,
                         };
                         history.execute(cmd, doc);
                         doc_modified = true;
@@ -2640,11 +2652,19 @@ impl PhotonicApp {
                 }
 
                 PanelAction::SetLayerVisible { layer_id, visible } => {
-                    self.do_set_layer_flag(layer_id, Some(visible), None, doc, history, &mut doc_modified);
+                    self.do_set_layer_flag(layer_id, Some(visible), None, None, None, doc, history, &mut doc_modified);
                 }
 
                 PanelAction::SetLayerLocked { layer_id, locked } => {
-                    self.do_set_layer_flag(layer_id, None, Some(locked), doc, history, &mut doc_modified);
+                    self.do_set_layer_flag(layer_id, None, Some(locked), None, None, doc, history, &mut doc_modified);
+                }
+
+                PanelAction::SetLayerOpacity { layer_id, opacity } => {
+                    self.do_set_layer_flag(layer_id, None, None, Some(opacity), None, doc, history, &mut doc_modified);
+                }
+
+                PanelAction::SetLayerBlendMode { layer_id, blend_mode } => {
+                    self.do_set_layer_flag(layer_id, None, None, None, Some(blend_mode), doc, history, &mut doc_modified);
                 }
 
                 PanelAction::AddSublayer => {

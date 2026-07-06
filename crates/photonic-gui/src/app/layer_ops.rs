@@ -289,6 +289,8 @@ impl PhotonicApp {
         layer_id: LayerId,
         visible: Option<bool>,
         locked: Option<bool>,
+        opacity: Option<f32>,
+        blend_mode: Option<photonic_core::layer::BlendMode>,
         doc: &mut Document,
         history: &mut CommandHistory,
         doc_modified: &mut bool,
@@ -298,7 +300,13 @@ impl PhotonicApp {
         };
         let new_visible = visible.unwrap_or(layer.visible);
         let new_locked = locked.unwrap_or(layer.locked);
-        if new_visible == layer.visible && new_locked == layer.locked {
+        let new_opacity = opacity.map(|o| o.clamp(0.0, 1.0)).unwrap_or(layer.opacity);
+        let new_blend_mode = blend_mode.unwrap_or(layer.blend_mode);
+        if new_visible == layer.visible
+            && new_locked == layer.locked
+            && new_opacity == layer.opacity
+            && new_blend_mode == layer.blend_mode
+        {
             return;
         }
         history.execute(
@@ -314,6 +322,10 @@ impl PhotonicApp {
                 new_color: layer.color,
                 old_is_template: layer.is_template,
                 new_is_template: layer.is_template,
+                old_opacity: layer.opacity,
+                new_opacity,
+                old_blend_mode: layer.blend_mode,
+                new_blend_mode,
             },
             doc,
         );
