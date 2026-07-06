@@ -1146,23 +1146,81 @@ fn build_geometry(
                 }
                 let fill_kind =
                     path_node.fill.kind.for_bbox(minx, miny, maxx - minx, maxy - miny);
-                let base = verts.len() as u32;
-                for pos in &mesh.vertices {
-                    let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
-                    let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
-                    let (sx, sy) = if rotated {
-                        (pos[0] as f64, pos[1] as f64)
-                    } else {
-                        (x, y)
+
+                // Mesh fills: cut along grid lines for clean cell boundaries.
+                if let FillKind::MeshGradient(mg) = &*fill_kind {
+                    let interior = |lines: &[f64]| -> Vec<f64> {
+                        if lines.len() > 2 {
+                            lines[1..lines.len() - 1].to_vec()
+                        } else {
+                            Vec::new()
+                        }
                     };
-                    let color = fill_kind.sample_at(sx, sy, opacity);
-                    verts.push(Vertex {
-                        position: [x as f32, y as f32],
-                        color,
-                    });
-                }
-                for &i in &mesh.indices {
-                    idxs.push(base + i);
+                    let xs = interior(&mg.x_lines);
+                    let ys = interior(&mg.y_lines);
+                    let sc = |p: &[f32; 2]| -> [f64; 2] {
+                        if rotated {
+                            [p[0] as f64, p[1] as f64]
+                        } else {
+                            [
+                                a * p[0] as f64 + c * p[1] as f64 + e,
+                                b * p[0] as f64 + d * p[1] as f64 + f,
+                            ]
+                        }
+                    };
+                    let mut tris: Vec<[[f64; 2]; 3]> = mesh
+                        .indices
+                        .chunks_exact(3)
+                        .map(|t| {
+                            [
+                                sc(&mesh.vertices[t[0] as usize]),
+                                sc(&mesh.vertices[t[1] as usize]),
+                                sc(&mesh.vertices[t[2] as usize]),
+                            ]
+                        })
+                        .collect();
+                    crate::tessellator::cut_triangles(&mut tris, &xs, &ys);
+                    for tri in &tris {
+                        let cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0;
+                        let cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0;
+                        let base = verts.len() as u32;
+                        for p in tri {
+                            let color = fill_kind.sample_at(
+                                p[0] + (cx - p[0]) * 0.02,
+                                p[1] + (cy - p[1]) * 0.02,
+                                opacity,
+                            );
+                            let (wx, wy) = if rotated {
+                                (a * p[0] + c * p[1] + e, b * p[0] + d * p[1] + f)
+                            } else {
+                                (p[0], p[1])
+                            };
+                            verts.push(Vertex {
+                                position: [wx as f32, wy as f32],
+                                color,
+                            });
+                        }
+                        idxs.extend_from_slice(&[base, base + 1, base + 2]);
+                    }
+                } else {
+                    let base = verts.len() as u32;
+                    for pos in &mesh.vertices {
+                        let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
+                        let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                        let (sx, sy) = if rotated {
+                            (pos[0] as f64, pos[1] as f64)
+                        } else {
+                            (x, y)
+                        };
+                        let color = fill_kind.sample_at(sx, sy, opacity);
+                        verts.push(Vertex {
+                            position: [x as f32, y as f32],
+                            color,
+                        });
+                    }
+                    for &i in &mesh.indices {
+                        idxs.push(base + i);
+                    }
                 }
             }
         }

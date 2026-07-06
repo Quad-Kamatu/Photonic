@@ -881,6 +881,91 @@ mod tests {
     }
 }
 
+/// Split triangles wherever they cross the given axis-aligned lines, so every
+/// resulting triangle lies entirely within one grid cell. Used to give mesh
+/// (spreadsheet-grid) fills clean, straight cell boundaries on the vertex-color
+/// renderers — otherwise the hard color edge zig-zags along the triangulation.
+/// `xs`/`ys` are line positions in the same space as the triangle coordinates.
+pub fn cut_triangles(tris: &mut Vec<[[f64; 2]; 3]>, xs: &[f64], ys: &[f64]) {
+    const CAP: usize = 200_000;
+    for &c in xs {
+        if tris.len() >= CAP {
+            break;
+        }
+        let mut next = Vec::with_capacity(tris.len() + 8);
+        for t in tris.iter() {
+            split_axis(*t, c, 0, &mut next);
+        }
+        *tris = next;
+    }
+    for &c in ys {
+        if tris.len() >= CAP {
+            break;
+        }
+        let mut next = Vec::with_capacity(tris.len() + 8);
+        for t in tris.iter() {
+            split_axis(*t, c, 1, &mut next);
+        }
+        *tris = next;
+    }
+}
+
+/// Split one triangle by the line `axis == c` (`axis` 0 = vertical x=c, 1 =
+/// horizontal y=c), appending the 1–3 resulting triangles.
+fn split_axis(tri: [[f64; 2]; 3], c: f64, axis: usize, out: &mut Vec<[[f64; 2]; 3]>) {
+    let below = [tri[0][axis] < c, tri[1][axis] < c, tri[2][axis] < c];
+    let n_below = below.iter().filter(|&&b| b).count();
+    if n_below == 0 || n_below == 3 {
+        out.push(tri);
+        return;
+    }
+    // The lone vertex sits alone on its side of the line.
+    let lone = if n_below == 1 {
+        below.iter().position(|&b| b).unwrap()
+    } else {
+        below.iter().position(|&b| !b).unwrap()
+    };
+    let a = tri[lone];
+    let b = tri[(lone + 1) % 3];
+    let d = tri[(lone + 2) % 3];
+    let cross = |p: [f64; 2], q: [f64; 2]| -> [f64; 2] {
+        let denom = q[axis] - p[axis];
+        let t = if denom.abs() < 1e-12 {
+            0.5
+        } else {
+            (c - p[axis]) / denom
+        };
+        [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]
+    };
+    let mab = cross(a, b);
+    let mad = cross(a, d);
+    out.push([a, mab, mad]);
+    out.push([mab, b, d]);
+    out.push([mab, d, mad]);
+}
+
+#[cfg(test)]
+mod cut_tests {
+    use super::*;
+    #[test]
+    fn cut_triangles_no_straddle() {
+        let mut tris = vec![[[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]]];
+        cut_triangles(&mut tris, &[3.0, 7.0], &[4.0]);
+        assert!(tris.len() > 1);
+        let straddles = |t: &[[f64; 2]; 3], c: f64, ax: usize| {
+            let lo = t.iter().filter(|p| p[ax] < c - 1e-6).count();
+            let hi = t.iter().filter(|p| p[ax] > c + 1e-6).count();
+            lo > 0 && hi > 0
+        };
+        for t in &tris {
+            for &c in &[3.0_f64, 7.0] {
+                assert!(!straddles(t, c, 0), "straddles x={c}");
+            }
+            assert!(!straddles(t, 4.0, 1), "straddles y=4");
+        }
+    }
+}
+
 #[cfg(test)]
 mod refine_diag {
     use super::*;

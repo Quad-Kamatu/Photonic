@@ -804,6 +804,66 @@ impl PhotonicRenderer {
                 (minx, miny, maxx - minx, maxy - miny)
             };
             let fill_kind = node.fill_kind.for_bbox(bx, by, bw, bh);
+
+            // Mesh (spreadsheet-grid) fills: cut the triangles along the grid
+            // lines so cell boundaries are clean straight edges, and sample each
+            // triangle from just inside its own cell.
+            if let FillKind::MeshGradient(mg) = &*fill_kind {
+                let interior = |lines: &[f64]| -> Vec<f64> {
+                    if lines.len() > 2 {
+                        lines[1..lines.len() - 1].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let xs = interior(&mg.x_lines);
+                let ys = interior(&mg.y_lines);
+                let sample_coord = |p: &[f32; 2]| -> [f64; 2] {
+                    if rotated {
+                        [p[0] as f64, p[1] as f64]
+                    } else {
+                        [
+                            a * p[0] as f64 + c * p[1] as f64 + e,
+                            b * p[0] as f64 + d * p[1] as f64 + f,
+                        ]
+                    }
+                };
+                let mut tris: Vec<[[f64; 2]; 3]> = mesh
+                    .indices
+                    .chunks_exact(3)
+                    .map(|t| {
+                        [
+                            sample_coord(&mesh.vertices[t[0] as usize]),
+                            sample_coord(&mesh.vertices[t[1] as usize]),
+                            sample_coord(&mesh.vertices[t[2] as usize]),
+                        ]
+                    })
+                    .collect();
+                crate::tessellator::cut_triangles(&mut tris, &xs, &ys);
+                for tri in &tris {
+                    let cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0;
+                    let cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0;
+                    let base = verts.len() as u32;
+                    for p in tri {
+                        // Nudge toward the centroid so boundary vertices sample
+                        // inside their own cell (crisp edges at blend 0).
+                        let color =
+                            fill_kind.sample_at(p[0] + (cx - p[0]) * 0.02, p[1] + (cy - p[1]) * 0.02, opacity);
+                        let (wx, wy) = if rotated {
+                            (a * p[0] + c * p[1] + e, b * p[0] + d * p[1] + f)
+                        } else {
+                            (p[0], p[1])
+                        };
+                        verts.push(Vertex {
+                            position: [wx as f32, wy as f32],
+                            color,
+                        });
+                    }
+                    idxs.extend_from_slice(&[base, base + 1, base + 2]);
+                }
+                return;
+            }
+
             let base = verts.len() as u32;
             for pos in &mesh.vertices {
                 let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
