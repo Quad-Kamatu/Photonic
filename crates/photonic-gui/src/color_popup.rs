@@ -19,7 +19,6 @@ use egui::{
 use photonic_core::style::{
     interpolate_stops_with, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
     GradientInterpolation, GradientKind, GradientStop, GradientUnits, MeshGradient,
-    MeshGradientVertex,
 };
 use photonic_core::Color;
 
@@ -1069,7 +1068,7 @@ fn build_default_fill(t: FillType, old: &Fill) -> Fill {
         FillKind::Solid(c) => *c,
         FillKind::Gradient(g) => g.stops.first().map(|s| s.color).unwrap_or(Color::BLACK),
         FillKind::FluidGradient(fg) => fg.points.first().map(|p| p.color).unwrap_or(Color::BLACK),
-        FillKind::MeshGradient(mg) => mg.vertices.first().map(|v| v.color).unwrap_or(Color::BLACK),
+        FillKind::MeshGradient(mg) => mg.cell_colors.first().copied().unwrap_or(Color::BLACK),
         _ => Color::BLACK,
     };
     let white = Color::WHITE;
@@ -1106,14 +1105,14 @@ fn build_default_fill(t: FillType, old: &Fill) -> Fill {
             .with_units(GradientUnits::ObjectBoundingBox),
         ),
         FillType::Mesh => Fill::mesh_gradient(
-            MeshGradient::new(
+            MeshGradient::grid(
                 2,
                 2,
                 vec![
-                    MeshGradientVertex::new(0.0, 0.0, base),
-                    MeshGradientVertex::new(1.0, 0.0, Color::new(1.0, 0.2, 0.2, 1.0)),
-                    MeshGradientVertex::new(0.0, 1.0, Color::new(0.2, 1.0, 0.2, 1.0)),
-                    MeshGradientVertex::new(1.0, 1.0, Color::new(0.2, 0.2, 1.0, 1.0)),
+                    base,
+                    Color::new(1.0, 0.2, 0.2, 1.0),
+                    Color::new(0.2, 1.0, 0.2, 1.0),
+                    Color::new(0.2, 0.2, 1.0, 1.0),
                 ],
             )
             .with_units(GradientUnits::ObjectBoundingBox),
@@ -1164,9 +1163,9 @@ fn fill_active_color(
             )
         }
         FillKind::MeshGradient(mg) => {
-            let ai = active_index(ui, id, mg.vertices.len());
+            let ai = active_index(ui, id, mg.cell_colors.len());
             (
-                mg.vertices.get(ai).map(|v| col_to_arr(v.color)),
+                mg.cell_colors.get(ai).map(|c| col_to_arr(*c)),
                 FillColorSlot::MeshVertex(ai),
             )
         }
@@ -1197,8 +1196,8 @@ fn fill_active_color(
                         }
                     }
                     (FillKind::MeshGradient(mg), FillColorSlot::MeshVertex(i)) => {
-                        if let Some(v) = mg.vertices.get_mut(*i) {
-                            v.color = c;
+                        if let Some(cell) = mg.cell_colors.get_mut(*i) {
+                            *cell = c;
                         }
                     }
                     _ => {}
@@ -1650,22 +1649,44 @@ fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
 fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
     let mut changed = false;
     changed |= rotate_toggle(ui, &mut mg.units);
-    let step = if mg.units.is_object_box() { 0.5 } else { 50.0 };
-    let mut active = active_index(ui, id, mg.vertices.len());
-    ui.label(egui::RichText::new(format!("Grid {}×{}", mg.rows, mg.cols)).small().weak());
+
+    // Blend: hard cells (0) → smooth (1).
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Blend").small().weak());
+        let mut b = mg.blend;
+        if ui
+            .add(egui::Slider::new(&mut b, 0.0..=1.0).show_value(false))
+            .on_hover_text("Cell transition: hard edges (0) → smooth blend (1)")
+            .changed()
+        {
+            mg.blend = b;
+            changed = true;
+        }
+    });
+
+    let mut active = active_index(ui, id, mg.cell_colors.len());
+    ui.label(
+        egui::RichText::new(format!("{}×{} cells — click to recolor", mg.rows, mg.cols))
+            .small()
+            .weak(),
+    );
     egui::ScrollArea::vertical().max_height(150.0).id_salt("mesh_grid").show(ui, |ui| {
         for row in 0..mg.rows {
             ui.horizontal(|ui| {
                 for col in 0..mg.cols {
                     let idx = (row * mg.cols + col) as usize;
-                    if let Some(v) = mg.vertices.get(idx) {
+                    if let Some(c) = mg.cell_colors.get(idx) {
                         let sel = idx == active;
-                        let r = mini_swatch(ui, [v.color.r, v.color.g, v.color.b], v.color.a, false);
+                        let r = mini_swatch(ui, [c.r, c.g, c.b], c.a, false);
                         if r.clicked() {
                             active = idx;
                         }
                         if sel {
-                            ui.painter().rect_stroke(r.rect.expand(1.0), egui::Rounding::same(3.0), Stroke::new(2.0, ACCENT));
+                            ui.painter().rect_stroke(
+                                r.rect.expand(1.5),
+                                egui::Rounding::same(3.0),
+                                Stroke::new(2.0, ACCENT),
+                            );
                         }
                     }
                 }
@@ -1674,32 +1695,52 @@ fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
     });
     ui.horizontal(|ui| {
         if mg.rows < 8 && ui.small_button("+ Row").clicked() {
-            let cols = mg.cols;
-            let last_row_y = mg.vertices.get(((mg.rows - 1) * cols) as usize).map(|v| v.y).unwrap_or(0.0);
-            for c in 0..cols {
-                let x = mg.vertices.get(((mg.rows - 1) * cols + c) as usize).map(|v| v.x).unwrap_or(0.0);
-                mg.vertices.push(MeshGradientVertex::new(x, last_row_y + step, Color::WHITE));
-            }
-            mg.rows += 1;
+            mesh_resize(mg, mg.rows + 1, mg.cols);
+            changed = true;
+        }
+        if mg.rows > 1 && ui.small_button("− Row").clicked() {
+            mesh_resize(mg, mg.rows - 1, mg.cols);
             changed = true;
         }
         if mg.cols < 8 && ui.small_button("+ Col").clicked() {
-            let old_cols = mg.cols;
-            mg.cols += 1;
-            let mut nv = Vec::new();
-            for r in 0..mg.rows {
-                for c in 0..old_cols {
-                    nv.push(mg.vertices[(r * old_cols + c) as usize].clone());
-                }
-                let last = &mg.vertices[((r + 1) * old_cols - 1) as usize];
-                nv.push(MeshGradientVertex::new(last.x + step, last.y, Color::WHITE));
-            }
-            mg.vertices = nv;
+            mesh_resize(mg, mg.rows, mg.cols + 1);
+            changed = true;
+        }
+        if mg.cols > 1 && ui.small_button("− Col").clicked() {
+            mesh_resize(mg, mg.rows, mg.cols - 1);
             changed = true;
         }
     });
     set_active_index(ui, id, active);
     changed
+}
+
+/// Resize the cell grid, preserving overlapping cell colors and re-spacing the
+/// lines of the changed axis evenly (the unchanged axis keeps its positions).
+fn mesh_resize(mg: &mut MeshGradient, new_rows: u32, new_cols: u32) {
+    let new_rows = new_rows.clamp(1, 8);
+    let new_cols = new_cols.clamp(1, 8);
+    let (or, oc) = (mg.rows, mg.cols);
+    let old = std::mem::take(&mut mg.cell_colors);
+    let mut colors = Vec::with_capacity((new_rows * new_cols) as usize);
+    for r in 0..new_rows {
+        for c in 0..new_cols {
+            colors.push(if r < or && c < oc {
+                old.get((r * oc + c) as usize).copied().unwrap_or(Color::WHITE)
+            } else {
+                Color::WHITE
+            });
+        }
+    }
+    mg.cell_colors = colors;
+    if new_cols != oc {
+        mg.x_lines = (0..=new_cols).map(|i| i as f64 / new_cols as f64).collect();
+    }
+    if new_rows != or {
+        mg.y_lines = (0..=new_rows).map(|i| i as f64 / new_rows as f64).collect();
+    }
+    mg.rows = new_rows;
+    mg.cols = new_cols;
 }
 
 /// A small gradient preview swatch button.
@@ -1881,7 +1922,7 @@ fn paint_fill_preview(painter: &egui::Painter, rect: Rect, fill: &Fill) {
             painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_rgb(b[0], b[1], b[2]));
         }
         FillKind::MeshGradient(mg) => {
-            let c = mg.vertices.first().map(|v| col_to_arr(v.color)).unwrap_or([0.5; 4]);
+            let c = mg.cell_colors.first().map(|c| col_to_arr(*c)).unwrap_or([0.5; 4]);
             let b = cc::rgba_to_bytes(c);
             painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_rgb(b[0], b[1], b[2]));
         }

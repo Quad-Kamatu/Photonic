@@ -259,8 +259,8 @@ impl PhotonicApp {
                     let mut updated = node.clone();
                     if let SceneNodeKind::Path(pn) = &mut updated.kind {
                         if let FillKind::MeshGradient(ref mut mg) = pn.fill.kind {
-                            if let Some(v) = mg.vertices.get_mut(idx) {
-                                v.color = picked;
+                            if let Some(c) = mg.cell_colors.get_mut(idx) {
+                                *c = picked;
                             }
                         }
                     }

@@ -317,18 +317,17 @@ pub async fn find_replace_style(state: &AppState, args: FindReplaceStyleArgs) ->
                             }
                         }
                         FillKind::MeshGradient(mg) => {
-                            for v in &mut mg.vertices {
-                                if color_near(v.color, target) {
+                            for (i, c) in mg.cell_colors.iter_mut().enumerate() {
+                                if color_near(*c, target) {
                                     fill_matched = true;
                                     if let Some(nc) = new_fill {
                                         changes.push(format!(
-                                            "mesh vertex ({:.0},{:.0}): {} → {}",
-                                            v.x,
-                                            v.y,
-                                            v.color.to_hex(),
+                                            "mesh cell {}: {} → {}",
+                                            i,
+                                            c.to_hex(),
                                             nc.to_hex()
                                         ));
-                                        v.color = nc;
+                                        *c = nc;
                                     }
                                 }
                             }

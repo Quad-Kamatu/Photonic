@@ -21,7 +21,10 @@ pub(crate) enum GradHandle {
     RadCenter,
     RadRadius,
     Fluid(usize),
-    Mesh(usize),
+    /// Interior vertical grid line `i` (drag horizontally).
+    MeshXLine(usize),
+    /// Interior horizontal grid line `j` (drag vertically).
+    MeshYLine(usize),
 }
 
 /// Coordinate mapper between gradient-coordinate space and document space for a
@@ -185,6 +188,22 @@ impl PhotonicApp {
                     egui::Stroke::new(1.0, Color32::from_black_alpha(120)),
                 );
             }
+            FillKind::MeshGradient(mg) if mg.x_lines.len() >= 2 && mg.y_lines.len() >= 2 => {
+                let x0 = mg.x_lines[0];
+                let x1 = *mg.x_lines.last().unwrap();
+                let y0 = mg.y_lines[0];
+                let y1 = *mg.y_lines.last().unwrap();
+                let line = |a, b, painter: &egui::Painter| {
+                    painter.line_segment([a, b], egui::Stroke::new(3.0, Color32::from_black_alpha(110)));
+                    painter.line_segment([a, b], egui::Stroke::new(1.25, Color32::WHITE));
+                };
+                for &x in &mg.x_lines {
+                    line(to_screen(frame.c2d(x, y0)), to_screen(frame.c2d(x, y1)), painter);
+                }
+                for &y in &mg.y_lines {
+                    line(to_screen(frame.c2d(x0, y)), to_screen(frame.c2d(x1, y)), painter);
+                }
+            }
             _ => {}
         }
 
@@ -326,10 +345,17 @@ fn collect_handles(kind: &FillKind, f: &Frame) -> Vec<(GradHandle, f64, f64, Opt
                 out.push((GradHandle::Fluid(i), x, y, Some(color32(p.color))));
             }
         }
-        FillKind::MeshGradient(mg) => {
-            for (i, v) in mg.vertices.iter().enumerate() {
-                let (x, y) = f.c2d(v.x, v.y);
-                out.push((GradHandle::Mesh(i), x, y, Some(color32(v.color))));
+        FillKind::MeshGradient(mg) if mg.x_lines.len() >= 2 && mg.y_lines.len() >= 2 => {
+            // A grab handle on each interior grid line, at the line's midpoint.
+            let midy = (mg.y_lines[0] + mg.y_lines.last().unwrap()) * 0.5;
+            let midx = (mg.x_lines[0] + mg.x_lines.last().unwrap()) * 0.5;
+            for i in 1..mg.x_lines.len() - 1 {
+                let (x, y) = f.c2d(mg.x_lines[i], midy);
+                out.push((GradHandle::MeshXLine(i), x, y, None));
+            }
+            for j in 1..mg.y_lines.len() - 1 {
+                let (x, y) = f.c2d(midx, mg.y_lines[j]);
+                out.push((GradHandle::MeshYLine(j), x, y, None));
             }
         }
         _ => {}
@@ -381,12 +407,20 @@ fn apply_handle_drag(kind: &mut FillKind, handle: GradHandle, x: f64, y: f64, f:
             }
         }
         FillKind::MeshGradient(mg) => {
-            if let GradHandle::Mesh(i) = handle {
-                if let Some(vtx) = mg.vertices.get_mut(i) {
-                    let (u, v) = f.d2c(x, y);
-                    vtx.x = u;
-                    vtx.y = v;
+            let (u, v) = f.d2c(x, y);
+            match handle {
+                // Keep an interior line strictly between its neighbours.
+                GradHandle::MeshXLine(i) if i >= 1 && i + 1 < mg.x_lines.len() => {
+                    let lo = mg.x_lines[i - 1] + 1e-3;
+                    let hi = mg.x_lines[i + 1] - 1e-3;
+                    mg.x_lines[i] = u.clamp(lo, hi);
                 }
+                GradHandle::MeshYLine(j) if j >= 1 && j + 1 < mg.y_lines.len() => {
+                    let lo = mg.y_lines[j - 1] + 1e-3;
+                    let hi = mg.y_lines[j + 1] - 1e-3;
+                    mg.y_lines[j] = v.clamp(lo, hi);
+                }
+                _ => {}
             }
         }
         _ => {}

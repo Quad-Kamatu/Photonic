@@ -777,26 +777,27 @@ fn fill_attrs(fill: &Fill, ctx: &mut SvgCtx) -> String {
             paint_url_attr("fill", &id, fill.opacity)
         }
         FillKind::MeshGradient(mg) => {
-            // Export as a linear gradient approximation between first and last vertex colours.
-            if mg.vertices.is_empty() {
+            // Export as a linear-gradient approximation from the first to the
+            // last cell colour along the grid diagonal (SVG has no mesh fill).
+            if mg.cell_colors.is_empty() {
                 return " fill=\"none\"".to_string();
             }
-            if mg.vertices.len() == 1 {
-                return solid_fill_attr(&mg.vertices[0].color, fill.opacity);
+            if mg.cell_colors.len() == 1 {
+                return solid_fill_attr(&mg.cell_colors[0], fill.opacity);
             }
-            let first = &mg.vertices[0];
-            let last = &mg.vertices[mg.vertices.len() - 1];
+            let first = mg.cell_colors[0];
+            let last = *mg.cell_colors.last().unwrap();
             let (x1, y1, x2, y2) = (
-                fmt(first.x, p),
-                fmt(first.y, p),
-                fmt(last.x, p),
-                fmt(last.y, p),
+                fmt(*mg.x_lines.first().unwrap_or(&0.0), p),
+                fmt(*mg.y_lines.first().unwrap_or(&0.0), p),
+                fmt(*mg.x_lines.last().unwrap_or(&1.0), p),
+                fmt(*mg.y_lines.last().unwrap_or(&1.0), p),
             );
             let stops = format!(
                 "      <stop offset=\"0\" stop-color=\"{}\"/>\n\
                  \x20     <stop offset=\"1\" stop-color=\"{}\"/>\n",
-                first.color.to_hex(),
-                last.color.to_hex()
+                first.to_hex(),
+                last.to_hex()
             );
             let sig = format!("lin|{x1}|{y1}|{x2}|{y2}|{stops}");
             let id = ctx.intern("grad", sig, |id| {
@@ -1143,7 +1144,7 @@ fn fill_rgb(fill: &Fill) -> Option<[f32; 3]> {
         FillKind::Solid(c) => *c,
         FillKind::Gradient(g) => g.stops.first().map(|s| s.color)?,
         FillKind::FluidGradient(g) => g.points.first().map(|p| p.color)?,
-        FillKind::MeshGradient(g) => g.vertices.first().map(|v| v.color)?,
+        FillKind::MeshGradient(g) => g.cell_colors.first().copied()?,
         // Pattern fills can't tile in this representative-RGB path; approximate by
         // the tile's own centre pixel — always inside the tile (never the
         // inter-tile gutter, unlike sampling at the document origin) — composited

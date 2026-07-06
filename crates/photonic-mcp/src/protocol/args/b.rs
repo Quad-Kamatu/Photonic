@@ -1031,7 +1031,6 @@ impl FillArg {
     pub fn to_fill(&self) -> Result<photonic_core::style::Fill, String> {
         use photonic_core::style::{
             Fill, FluidGradient, FluidGradientPoint, Gradient, GradientStop, MeshGradient,
-            MeshGradientVertex,
         };
         match self {
             FillArg::None => Ok(Fill::none()),
@@ -1105,15 +1104,16 @@ impl FillArg {
                 cols,
                 vertices,
             } => {
-                let verts: Result<Vec<MeshGradientVertex>, String> = vertices
+                // The mesh is now a grid of colored cells; use the provided
+                // colors (in order) as the `rows`×`cols` cell colors.
+                let colors: Result<Vec<Color>, String> = vertices
                     .iter()
                     .map(|v| {
-                        let color = Color::from_hex(&v.color)
-                            .ok_or_else(|| format!("Invalid color: {}", v.color))?;
-                        Ok(MeshGradientVertex::new(v.x, v.y, color))
+                        Color::from_hex(&v.color)
+                            .ok_or_else(|| format!("Invalid color: {}", v.color))
                     })
                     .collect();
-                Ok(Fill::mesh_gradient(MeshGradient::new(*rows, *cols, verts?)))
+                Ok(Fill::mesh_gradient(MeshGradient::grid(*rows, *cols, colors?)))
             }
             FillArg::Pattern {
                 tile_base64,

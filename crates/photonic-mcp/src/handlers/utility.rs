@@ -988,15 +988,14 @@ pub async fn get_css_preview(state: &AppState, args: GetCssPreviewArgs) -> ToolR
                 }
             }
             FillKind::MeshGradient(mg) => {
-                if let Some(first) = mg.vertices.first() {
-                    let c = &first.color;
+                if let Some(c) = mg.cell_colors.first() {
                     let a = c.a * opacity;
                     lines.push(format!(
                         "background-color: {}; /* approximated from mesh gradient */",
                         color_css(c.r, c.g, c.b, a)
                     ));
                     notes.push(
-                        "Mesh gradient has no direct CSS equivalent — shown as approximated solid from the first vertex."
+                        "Mesh gradient has no direct CSS equivalent — shown as approximated solid from the first cell."
                             .to_string(),
                     );
                 }

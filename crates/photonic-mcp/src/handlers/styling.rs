@@ -1364,8 +1364,8 @@ pub async fn invert_colors(state: &AppState, args: InvertColorsArgs) -> ToolResu
                         }
                     }
                     FillKind::MeshGradient(mg) => {
-                        for v in &mut mg.vertices {
-                            v.color = v.color.invert();
+                        for c in &mut mg.cell_colors {
+                            *c = c.invert();
                         }
                     }
                     FillKind::Pattern(p) => {
@@ -1464,8 +1464,8 @@ pub async fn adjust_colors(state: &AppState, args: AdjustColorsArgs) -> ToolResu
                     }
                 }
                 FillKind::MeshGradient(mg) => {
-                    for v in &mut mg.vertices {
-                        v.color = shift_color(v.color);
+                    for c in &mut mg.cell_colors {
+                        *c = shift_color(*c);
                     }
                 }
                 FillKind::Pattern(p) => {
@@ -1560,8 +1560,8 @@ pub async fn convert_to_grayscale(state: &AppState, args: ConvertToGrayscaleArgs
                         }
                     }
                     FillKind::MeshGradient(mg) => {
-                        for v in &mut mg.vertices {
-                            v.color = v.color.to_grayscale();
+                        for c in &mut mg.cell_colors {
+                            *c = c.to_grayscale();
                         }
                     }
                     FillKind::Pattern(p) => {

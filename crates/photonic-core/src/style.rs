@@ -747,53 +747,71 @@ impl FluidGradient {
     }
 }
 
-// ─── Mesh (vertex-grid) gradient ─────────────────────────────────────────────
+// ─── Mesh (spreadsheet-grid) gradient ─────────────────────────────────────────
 
-/// A single vertex in a mesh gradient grid.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MeshGradientVertex {
-    /// Position in document/world space.
-    pub x: f64,
-    pub y: f64,
-    pub color: Color,
+fn default_mesh_blend() -> f32 {
+    1.0
 }
 
-impl MeshGradientVertex {
-    pub fn new(x: f64, y: f64, color: Color) -> Self {
-        Self { x, y, color }
-    }
-}
-
-/// Vertex-based mesh gradient: a rows×cols grid of colored control points,
-/// with bilinear interpolation within each cell.
+/// A spreadsheet-style grid gradient: `rows`×`cols` colored cells whose interior
+/// grid lines can be moved to size the cells. `blend` drives how the cells
+/// transition — `0.0` = hard, sharp cell edges at the lines; `1.0` = fully
+/// smooth blending between neighbouring cells.
+///
+/// `x_lines` holds `cols + 1` vertical boundary x-positions (left→right) and
+/// `y_lines` holds `rows + 1` horizontal boundary y-positions (top→bottom), in
+/// the gradient's coordinate space (`0..1` for object-bounding-box units).
+/// `cell_colors` holds `rows * cols` colors, row-major.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeshGradient {
     pub rows: u32,
     pub cols: u32,
-    /// `rows * cols` entries in row-major order.
-    pub vertices: Vec<MeshGradientVertex>,
-    /// Coordinate space of the vertex positions.
+    #[serde(default)]
+    pub x_lines: Vec<f64>,
+    #[serde(default)]
+    pub y_lines: Vec<f64>,
+    #[serde(default)]
+    pub cell_colors: Vec<Color>,
+    /// Cell-transition softness, `0.0` (hard) .. `1.0` (smooth).
+    #[serde(default = "default_mesh_blend")]
+    pub blend: f32,
+    /// Coordinate space of the line positions.
     #[serde(default)]
     pub units: GradientUnits,
 }
 
 impl MeshGradient {
-    pub fn new(rows: u32, cols: u32, vertices: Vec<MeshGradientVertex>) -> Self {
+    /// A `rows`×`cols` grid over `[0,1]²` with evenly-spaced lines. `colors`
+    /// (row-major) fills the cells; missing entries default to white.
+    pub fn grid(rows: u32, cols: u32, colors: Vec<Color>) -> Self {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let x_lines = (0..=cols).map(|i| i as f64 / cols as f64).collect();
+        let y_lines = (0..=rows).map(|i| i as f64 / rows as f64).collect();
+        let mut cell_colors = colors;
+        cell_colors.resize((rows * cols) as usize, Color::WHITE);
         Self {
             rows,
             cols,
-            vertices,
+            x_lines,
+            y_lines,
+            cell_colors,
+            blend: 1.0,
             units: GradientUnits::default(),
         }
     }
 
-    /// Builder: set the coordinate space.
     pub fn with_units(mut self, units: GradientUnits) -> Self {
         self.units = units;
         self
     }
 
-    /// Resolve object-bounding-box vertex coords into the given document bbox.
+    pub fn with_blend(mut self, blend: f32) -> Self {
+        self.blend = blend.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Resolve object-bounding-box line positions into the given document bbox.
     pub fn resolved_for_bbox(&self, min_x: f64, min_y: f64, w: f64, h: f64) -> MeshGradient {
         if !self.units.is_object_box() {
             return self.clone();
@@ -802,86 +820,81 @@ impl MeshGradient {
         let h = if h.abs() < 1e-9 { 1.0 } else { h };
         let mut g = self.clone();
         g.units = GradientUnits::UserSpaceOnUse;
-        for v in &mut g.vertices {
-            v.x = min_x + v.x * w;
-            v.y = min_y + v.y * h;
+        for x in &mut g.x_lines {
+            *x = min_x + *x * w;
+        }
+        for y in &mut g.y_lines {
+            *y = min_y + *y * h;
         }
         g
     }
 
-    fn vertex_at(&self, row: u32, col: u32) -> Option<&MeshGradientVertex> {
-        if row >= self.rows || col >= self.cols {
-            return None;
+    pub fn cell_color(&self, row: u32, col: u32) -> Color {
+        let row = row.min(self.rows.saturating_sub(1));
+        let col = col.min(self.cols.saturating_sub(1));
+        self.cell_colors
+            .get((row * self.cols + col) as usize)
+            .copied()
+            .unwrap_or(Color::WHITE)
+    }
+
+    /// Locate a point on one axis: returns the two cell indices to blend and the
+    /// weight between them. Hard-bounded by the lines; a transition zone of half
+    /// `blend` on each side of a boundary blends toward the neighbouring cell.
+    fn axis(lines: &[f64], p: f64, blend: f32) -> (u32, u32, f32) {
+        let ncells = lines.len().saturating_sub(1);
+        if ncells == 0 {
+            return (0, 0, 0.0);
         }
-        self.vertices.get((row * self.cols + col) as usize)
+        let last = ncells - 1;
+        let p = p.clamp(lines[0], lines[ncells]);
+        let mut c = last;
+        for i in 0..ncells {
+            if p <= lines[i + 1] {
+                c = i;
+                break;
+            }
+        }
+        let cw = (lines[c + 1] - lines[c]).max(1e-9);
+        let lp = ((p - lines[c]) / cw) as f32; // 0..1 within the cell
+        let half = (blend * 0.5).clamp(0.0, 0.5);
+        if half <= 1e-6 {
+            return (c as u32, c as u32, 0.0);
+        }
+        if lp < half && c > 0 {
+            // Blend with the left neighbour: 50/50 at the boundary → full cell.
+            return ((c - 1) as u32, c as u32, 0.5 + 0.5 * (lp / half));
+        }
+        if lp > 1.0 - half && c < last {
+            // Blend with the right neighbour.
+            return (c as u32, (c + 1) as u32, 0.5 * ((lp - (1.0 - half)) / half));
+        }
+        (c as u32, c as u32, 0.0)
     }
 
     /// Sample the gradient color at document-space coordinates `(x, y)`.
     pub fn sample_at(&self, x: f64, y: f64) -> [f32; 4] {
-        if self.vertices.is_empty() {
+        if self.rows == 0 || self.cols == 0 || self.cell_colors.is_empty() {
             return [0.5, 0.5, 0.5, 1.0];
         }
-        if self.rows < 2 || self.cols < 2 {
-            let v = &self.vertices[0];
-            return [v.color.r, v.color.g, v.color.b, v.color.a];
-        }
-
-        // Compute bounding box of all vertices to map (x,y) → normalised [0,1]²
-        let min_x = self
-            .vertices
-            .iter()
-            .fold(f64::INFINITY, |acc, v| acc.min(v.x));
-        let max_x = self
-            .vertices
-            .iter()
-            .fold(f64::NEG_INFINITY, |acc, v| acc.max(v.x));
-        let min_y = self
-            .vertices
-            .iter()
-            .fold(f64::INFINITY, |acc, v| acc.min(v.y));
-        let max_y = self
-            .vertices
-            .iter()
-            .fold(f64::NEG_INFINITY, |acc, v| acc.max(v.y));
-
-        let w = (max_x - min_x).max(1e-10);
-        let h = (max_y - min_y).max(1e-10);
-
-        let u = ((x - min_x) / w).clamp(0.0, 1.0) as f32;
-        let v_coord = ((y - min_y) / h).clamp(0.0, 1.0) as f32;
-
-        // Grid cell indices
-        let ci = ((u * (self.cols - 1) as f32).floor() as u32).min(self.cols - 2);
-        let ri = ((v_coord * (self.rows - 1) as f32).floor() as u32).min(self.rows - 2);
-
-        // Local UV within cell
-        let cell_u = u * (self.cols - 1) as f32 - ci as f32;
-        let cell_v = v_coord * (self.rows - 1) as f32 - ri as f32;
-
-        // Bilinear interpolation over 4 corners
-        let v00 = self.vertex_at(ri, ci).unwrap();
-        let v10 = self.vertex_at(ri, ci + 1).unwrap();
-        let v01 = self.vertex_at(ri + 1, ci).unwrap();
-        let v11 = self.vertex_at(ri + 1, ci + 1).unwrap();
-
+        let (c0, c1, tx) = Self::axis(&self.x_lines, x, self.blend);
+        let (r0, r1, ty) = Self::axis(&self.y_lines, y, self.blend);
         let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-        let lerp_col = |c0: &Color, c1: &Color, t: f32| -> [f32; 4] {
+        let lc = |a: Color, b: Color, t: f32| {
             [
-                lerp(c0.r, c1.r, t),
-                lerp(c0.g, c1.g, t),
-                lerp(c0.b, c1.b, t),
-                lerp(c0.a, c1.a, t),
+                lerp(a.r, b.r, t),
+                lerp(a.g, b.g, t),
+                lerp(a.b, b.b, t),
+                lerp(a.a, b.a, t),
             ]
         };
-
-        let top = lerp_col(&v00.color, &v10.color, cell_u);
-        let bot = lerp_col(&v01.color, &v11.color, cell_u);
-
+        let top = lc(self.cell_color(r0, c0), self.cell_color(r0, c1), tx);
+        let bot = lc(self.cell_color(r1, c0), self.cell_color(r1, c1), tx);
         [
-            lerp(top[0], bot[0], cell_v),
-            lerp(top[1], bot[1], cell_v),
-            lerp(top[2], bot[2], cell_v),
-            lerp(top[3], bot[3], cell_v),
+            lerp(top[0], bot[0], ty),
+            lerp(top[1], bot[1], ty),
+            lerp(top[2], bot[2], ty),
+            lerp(top[3], bot[3], ty),
         ]
     }
 }
@@ -1084,6 +1097,34 @@ mod gradient_interp_tests {
     fn user_space_gradient_unchanged_by_resolve() {
         let g = Gradient::linear(10.0, 0.0, 90.0, 0.0, stops());
         assert_eq!(g.resolved_for_bbox(0.0, 0.0, 5.0, 5.0).coords, g.coords);
+    }
+
+    #[test]
+    fn mesh_grid_hard_and_smooth_blend() {
+        // 2×1 grid: left cell red, right cell blue, boundary at x=0.5.
+        let mut m = MeshGradient::grid(1, 2, vec![
+            Color::new(1.0, 0.0, 0.0, 1.0),
+            Color::new(0.0, 0.0, 1.0, 1.0),
+        ]);
+        // Hard: sharp switch at the line — just left is pure red, just right pure blue.
+        m.blend = 0.0;
+        let l = m.sample_at(0.4, 0.5);
+        let r = m.sample_at(0.6, 0.5);
+        assert!((l[0] - 1.0).abs() < 1e-3 && l[2] < 1e-3, "hard left {l:?}");
+        assert!(r[2] > 0.99 && r[0] < 1e-3, "hard right {r:?}");
+        // Smooth: at the boundary it's the 50/50 mix.
+        m.blend = 1.0;
+        let mid = m.sample_at(0.5, 0.5);
+        assert!((mid[0] - 0.5).abs() < 0.05 && (mid[2] - 0.5).abs() < 0.05, "smooth mid {mid:?}");
+    }
+
+    #[test]
+    fn mesh_resolves_lines_into_bbox() {
+        let m = MeshGradient::grid(1, 2, vec![Color::BLACK, Color::WHITE])
+            .with_units(GradientUnits::ObjectBoundingBox);
+        let r = m.resolved_for_bbox(100.0, 50.0, 40.0, 20.0);
+        assert_eq!(r.x_lines, vec![100.0, 120.0, 140.0]);
+        assert_eq!(r.y_lines, vec![50.0, 70.0]);
     }
 
     #[test]

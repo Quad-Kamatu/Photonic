@@ -1974,8 +1974,8 @@ impl PhotonicApp {
                                             }
                                         }
                                         FillKind::MeshGradient(mg) => {
-                                            for v in &mut mg.vertices {
-                                                v.color = v.color.invert();
+                                            for c in &mut mg.cell_colors {
+                                                *c = c.invert();
                                             }
                                         }
                                         FillKind::Pattern(p) => {
@@ -2026,8 +2026,8 @@ impl PhotonicApp {
                                             }
                                         }
                                         FillKind::MeshGradient(mg) => {
-                                            for v in &mut mg.vertices {
-                                                v.color = v.color.to_grayscale();
+                                            for c in &mut mg.cell_colors {
+                                                *c = c.to_grayscale();
                                             }
                                         }
                                         FillKind::Pattern(p) => {
@@ -2095,8 +2095,8 @@ impl PhotonicApp {
                                             }
                                         }
                                         FillKind::MeshGradient(mg) => {
-                                            for v in &mut mg.vertices {
-                                                v.color = shift(v.color);
+                                            for c in &mut mg.cell_colors {
+                                                *c = shift(*c);
                                             }
                                         }
                                         FillKind::Pattern(p) => {
