@@ -3958,6 +3958,7 @@ dependencies = [
  "image",
  "kurbo",
  "lyon",
+ "naga",
  "photonic-core",
  "pollster 0.3.0",
  "serde",
