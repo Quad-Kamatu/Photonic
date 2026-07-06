@@ -972,11 +972,12 @@ pub struct PdfExportOptions {
 /// Export `doc` as a single-page vector PDF (1 document unit = 1 PDF point).
 ///
 /// MVP scope: filled/stroked vector paths with solid colours, node/group affine
-/// transforms, and group nesting. Gradient fills are approximated by their first
-/// stop colour; text, clipping, per-node opacity, blend modes and multi-page
-/// artboards are documented follow-ups.
+/// transforms, group nesting, and per-layer opacity + blend mode (via ExtGState).
+/// Gradient fills are approximated by their first stop colour; text, clipping,
+/// per-node opacity, and multi-page artboards are documented follow-ups. Like
+/// SVG, PDF layer groups are non-isolated, so blend reads the page backdrop.
 pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
-    use pdf_writer::{Content, Finish, Pdf, Rect, Ref};
+    use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
 
     let w = doc.width as f32;
     let h = doc.height as f32;
@@ -1002,21 +1003,41 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
         content.fill_nonzero();
     }
 
+    // Layers that need a graphics state (opacity < 1 or non-Normal blend) wrap
+    // their nodes in a `/gsN` ExtGState so the layer composites as a unit. The
+    // states are collected here and written as PDF objects + page resources below.
+    let mut gstates: Vec<(f32, pdf_writer::types::BlendMode)> = Vec::new();
     for layer_id in &doc.layer_order {
         let layer = match doc.layers.get(layer_id) {
             Some(l) if l.visible => l,
             _ => continue,
         };
+        let needs_gs =
+            layer.opacity < 1.0 || layer.blend_mode != crate::layer::BlendMode::Normal;
+        if needs_gs {
+            let name = format!("gs{}", gstates.len());
+            gstates.push((layer.opacity.clamp(0.0, 1.0), pdf_blend_mode(layer.blend_mode)));
+            content.save_state();
+            content.set_parameters(Name(name.as_bytes()));
+        }
         for node_id in &layer.node_ids {
             if let Some(node) = doc.nodes.get(node_id) {
                 emit_node_pdf(node, doc, &mut content);
             }
+        }
+        if needs_gs {
+            content.restore_state();
         }
     }
 
     let stream = content.finish();
 
     // ── Document structure ──────────────────────────────────────────────────────
+    // ExtGState objects get Refs after the fixed 1–4 (catalog/pages/page/content).
+    let gs_refs: Vec<Ref> = (0..gstates.len())
+        .map(|i| Ref::new(5 + i as i32))
+        .collect();
+
     let mut pdf = Pdf::new();
     pdf.catalog(catalog_id).pages(page_tree_id);
     pdf.pages(page_tree_id).kids([page_id]).count(1);
@@ -1025,11 +1046,54 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
         page.parent(page_tree_id)
             .media_box(Rect::new(0.0, 0.0, w, h))
             .contents(content_id);
-        page.resources().finish();
+        {
+            let mut res = page.resources();
+            if !gs_refs.is_empty() {
+                let mut egs = res.ext_g_states();
+                for (i, r) in gs_refs.iter().enumerate() {
+                    egs.pair(Name(format!("gs{i}").as_bytes()), *r);
+                }
+                egs.finish();
+            }
+            res.finish();
+        }
         page.finish();
     }
     pdf.stream(content_id, &stream);
+    // Write the ExtGState objects: layer alpha (fill + stroke) and blend mode.
+    for ((opacity, blend), r) in gstates.iter().zip(gs_refs.iter()) {
+        pdf.ext_graphics(*r)
+            .non_stroking_alpha(*opacity)
+            .stroking_alpha(*opacity)
+            .blend_mode(*blend)
+            .finish();
+    }
     pdf.finish()
+}
+
+/// Map a Photonic blend mode to the `pdf-writer` blend mode (the 16 PDF standard
+/// separable + non-separable modes are 1:1 with ours).
+fn pdf_blend_mode(m: crate::layer::BlendMode) -> pdf_writer::types::BlendMode {
+    use crate::layer::BlendMode as B;
+    use pdf_writer::types::BlendMode as P;
+    match m {
+        B::Normal => P::Normal,
+        B::Multiply => P::Multiply,
+        B::Screen => P::Screen,
+        B::Overlay => P::Overlay,
+        B::Darken => P::Darken,
+        B::Lighten => P::Lighten,
+        B::ColorDodge => P::ColorDodge,
+        B::ColorBurn => P::ColorBurn,
+        B::HardLight => P::HardLight,
+        B::SoftLight => P::SoftLight,
+        B::Difference => P::Difference,
+        B::Exclusion => P::Exclusion,
+        B::Hue => P::Hue,
+        B::Saturation => P::Saturation,
+        B::Color => P::Color,
+        B::Luminosity => P::Luminosity,
+    }
 }
 
 /// Recursively emit a node's geometry into the PDF content stream, applying its
@@ -1342,6 +1406,38 @@ mod tests {
         assert!(
             text.contains(" m\n") || text.contains(" m "),
             "missing path move op"
+        );
+    }
+
+    /// P0: a layer with a blend mode + opacity emits a `/gs0` ExtGState carrying
+    /// the PDF blend mode and alpha, and the layer's content is wrapped with it.
+    #[test]
+    fn pdf_export_layer_blend_and_opacity_emit_extgstate() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut rect = PathNode::new(PathData::rect(0.0, 0.0, 50.0, 50.0));
+        rect.fill = Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0));
+        doc.add_node(
+            SceneNode::new("r", doc.active_layer_id.unwrap(), SceneNodeKind::Path(rect)),
+            None,
+        );
+        let lid = doc.active_layer_id.unwrap();
+        {
+            let l = doc.layers.get_mut(&lid).unwrap();
+            l.opacity = 0.5;
+            l.blend_mode = crate::layer::BlendMode::Multiply;
+        }
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(bytes.starts_with(b"%PDF-1"), "missing PDF header");
+        assert!(text.contains("/BM /Multiply"), "missing blend mode:\n{text}");
+        assert!(text.contains("/gs0 gs"), "content not wrapped with the ExtGState");
+        assert!(
+            text.contains("/ExtGState") && text.contains("/ca 0.5"),
+            "missing ExtGState alpha:\n{text}"
         );
     }
 
