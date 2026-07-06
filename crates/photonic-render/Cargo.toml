@@ -24,3 +24,8 @@ ico = "0.3"
 # Glyph outline extraction for text-on-path. Pinned to 0.21 so it unifies with
 # the ttf-parser that cosmic-text/rustybuzz (via glyphon) already resolve.
 ttf-parser = "0.21"
+
+[dev-dependencies]
+# wgpu's own shader compiler — lets tests parse + validate the inline WGSL
+# without a GPU device. Version tracks wgpu 22's naga (22.x) so it unifies.
+naga = { version = "22", features = ["wgsl-in"] }

@@ -518,6 +518,253 @@ pub fn create_blur_pipeline_with_blend(
     })
 }
 
+// ─── Layer composite (offscreen isolation, all blend modes) ─────────────────────
+
+/// Stable numeric id for a blend mode, passed to the composite shader. Matches
+/// the `BlendMode` declaration order; indices `>= 12` are the non-separable HSL
+/// modes. Explicit (not `as u32`) so the mapping can't drift if the enum is
+/// reordered.
+// Wired into the per-layer composite passes in the next increment.
+#[allow(dead_code)]
+pub(crate) fn blend_mode_index(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::HardLight => 8,
+        BlendMode::SoftLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+        BlendMode::Hue => 12,
+        BlendMode::Saturation => 13,
+        BlendMode::Color => 14,
+        BlendMode::Luminosity => 15,
+    }
+}
+
+/// Uniform for the composite pass: which blend mode, and the layer's opacity.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CompositeParams {
+    pub mode: u32,
+    pub opacity: f32,
+    pub _pad: [f32; 2],
+}
+
+/// Full-screen composite of an isolated **source** layer texture over a
+/// **backdrop** texture, honouring every blend mode with a backdrop read — the
+/// GPU port of the CPU `blend_rgb` + `composite_pixel` straight-alpha math. Both
+/// inputs are sRGB textures, so sampling decodes to linear and the target
+/// re-encodes: blending runs in linear space, matching fixed-function GPU blends
+/// (#145). The shader writes the finished pixel, so its pipeline uses no
+/// fixed-function blend (Replace).
+pub const COMPOSITE_SHADER: &str = r#"
+@group(0) @binding(0) var t_backdrop: texture_2d<f32>;
+@group(0) @binding(1) var t_src:      texture_2d<f32>;
+@group(0) @binding(2) var samp:       sampler;
+struct Params { mode: u32, opacity: f32, _pad: vec2<f32> }
+@group(0) @binding(3) var<uniform> params: Params;
+
+struct VOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0)       uv:       vec2<f32>,
+}
+
+@vertex
+fn vs_quad(@builtin(vertex_index) vi: u32) -> VOut {
+    var pos = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0,  1.0), vec2<f32>(-1.0, 1.0)
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 0.0)
+    );
+    var out: VOut;
+    out.clip_pos = vec4<f32>(pos[vi], 0.0, 1.0);
+    out.uv       = uvs[vi];
+    return out;
+}
+
+fn screen1(cb: f32, cs: f32) -> f32 { return cb + cs - cb * cs; }
+fn hard_light1(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return cb * (2.0 * cs); }
+    return screen1(cb, 2.0 * cs - 1.0);
+}
+fn soft_light1(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb); }
+    var d: f32;
+    if (cb <= 0.25) { d = ((16.0 * cb - 12.0) * cb + 4.0) * cb; } else { d = sqrt(cb); }
+    return cb + (2.0 * cs - 1.0) * (d - cb);
+}
+fn blend_channel(mode: u32, cb: f32, cs: f32) -> f32 {
+    switch (mode) {
+        case 1u:  { return cb * cs; }
+        case 2u:  { return screen1(cb, cs); }
+        case 3u:  { return hard_light1(cs, cb); }
+        case 4u:  { return min(cb, cs); }
+        case 5u:  { return max(cb, cs); }
+        case 6u:  {
+            if (cb == 0.0) { return 0.0; }
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb / (1.0 - cs), 1.0);
+        }
+        case 7u:  {
+            if (cb >= 1.0) { return 1.0; }
+            if (cs <= 0.0) { return 0.0; }
+            return 1.0 - min((1.0 - cb) / cs, 1.0);
+        }
+        case 8u:  { return hard_light1(cb, cs); }
+        case 9u:  { return soft_light1(cb, cs); }
+        case 10u: { return abs(cb - cs); }
+        case 11u: { return cb + cs - 2.0 * cb * cs; }
+        default:  { return cs; }
+    }
+}
+fn lum(c: vec3<f32>) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+fn clip_color(c: vec3<f32>) -> vec3<f32> {
+    let l = lum(c);
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    var o = c;
+    if (n < 0.0) { o = vec3<f32>(l) + (o - vec3<f32>(l)) * (l / max(l - n, 1e-6)); }
+    if (x > 1.0) { o = vec3<f32>(l) + (o - vec3<f32>(l)) * ((1.0 - l) / max(x - l, 1e-6)); }
+    return o;
+}
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    let d = l - lum(c);
+    return clip_color(c + vec3<f32>(d));
+}
+fn sat(c: vec3<f32>) -> f32 { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let cmin = min(min(c.r, c.g), c.b);
+    let cmax = max(max(c.r, c.g), c.b);
+    let rng = cmax - cmin;
+    if (rng <= 0.0) { return vec3<f32>(0.0); }
+    // (c - min) * s / range maps min->0, max->s, mid->proportional.
+    return (c - vec3<f32>(cmin)) * (s / rng);
+}
+
+@fragment
+fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
+    let bd  = textureSample(t_backdrop, samp, in.uv);
+    let src = textureSample(t_src, samp, in.uv);
+    let cb  = bd.rgb;
+    let cs  = src.rgb;
+    let ba  = bd.a;
+    let sa  = src.a * params.opacity;
+    let mode = params.mode;
+
+    var blended: vec3<f32>;
+    if (mode >= 12u) {
+        if (mode == 12u)      { blended = set_lum(set_sat(cs, sat(cb)), lum(cb)); } // Hue
+        else if (mode == 13u) { blended = set_lum(set_sat(cb, sat(cs)), lum(cb)); } // Saturation
+        else if (mode == 14u) { blended = set_lum(cs, lum(cb)); }                   // Color
+        else                  { blended = set_lum(cb, lum(cs)); }                   // Luminosity
+    } else {
+        blended = vec3<f32>(
+            blend_channel(mode, cb.r, cs.r),
+            blend_channel(mode, cb.g, cs.g),
+            blend_channel(mode, cb.b, cs.b),
+        );
+    }
+
+    // Cs' = (1 - ab)·Cs + ab·B(Cb,Cs), then straight-alpha source-over.
+    let mixed = (1.0 - ba) * cs + ba * blended;
+    let oa = sa + ba * (1.0 - sa);
+    var orgb = vec3<f32>(0.0);
+    if (oa > 0.0) { orgb = (mixed * sa + cb * ba * (1.0 - sa)) / oa; }
+    return vec4<f32>(orgb, oa);
+}
+"#;
+
+/// Bind group layout for the composite pass: backdrop texture, source texture,
+/// sampler, and the [`CompositeParams`] uniform.
+pub fn create_composite_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let tex = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("composite_bgl"),
+        entries: &[
+            tex(0),
+            tex(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// The composite pipeline. Output is [`SCENE_FORMAT`]; the shader emits the
+/// finished pixel so fixed-function blending is disabled (Replace), and the pass
+/// is single-sampled (the isolated layer texture is already resolved).
+pub fn create_composite_pipeline(
+    device: &wgpu::Device,
+    output_format: wgpu::TextureFormat,
+    composite_bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("composite_shader"),
+        source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("composite_layout"),
+        bind_group_layouts: &[composite_bgl],
+        push_constant_ranges: &[],
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("composite_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_quad",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_composite",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: output_format,
+                blend: None, // shader composites against the sampled backdrop
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +859,49 @@ mod tests {
             let bs = separable_blend_state(mode).unwrap();
             assert_eq!(bs.alpha.src_factor, BlendFactor::Zero, "{mode:?}");
             assert_eq!(bs.alpha.dst_factor, BlendFactor::One, "{mode:?}");
+        }
+    }
+
+    /// The composite shader's blend-mode ids are unique, dense 0..=15, and the
+    /// non-separable HSL modes are exactly the ids `>= 12` the shader branches on.
+    #[test]
+    fn blend_mode_index_is_dense_and_hsl_is_high() {
+        use photonic_core::layer::BlendMode::*;
+        let all = [
+            Normal, Multiply, Screen, Overlay, Darken, Lighten, ColorDodge, ColorBurn, HardLight,
+            SoftLight, Difference, Exclusion, Hue, Saturation, Color, Luminosity,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for m in all {
+            assert!(seen.insert(blend_mode_index(m)), "duplicate index for {m:?}");
+        }
+        assert_eq!(seen, (0u32..=15).collect());
+        for m in [Hue, Saturation, Color, Luminosity] {
+            assert!(blend_mode_index(m) >= 12, "{m:?} must be a high (HSL) id");
+        }
+        for m in [Normal, Overlay, SoftLight, ColorDodge, Exclusion] {
+            assert!(blend_mode_index(m) < 12, "{m:?} must be a separable id");
+        }
+    }
+
+    /// Validate every inline WGSL shader parses AND type-checks via naga — a full
+    /// compile of the composite/blend math with no GPU device required.
+    #[test]
+    fn wgsl_shaders_parse_and_validate() {
+        for (name, src) in [
+            ("fill", FILL_SHADER),
+            ("blur", BLUR_SHADER),
+            ("composite", COMPOSITE_SHADER),
+        ] {
+            let module = naga::front::wgsl::parse_str(src)
+                .unwrap_or_else(|e| panic!("{name} shader failed to parse: {e:?}"));
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            );
+            validator
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name} shader failed to validate: {e:?}"));
         }
     }
 }
