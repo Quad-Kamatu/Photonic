@@ -270,7 +270,18 @@ impl HeadlessRenderer {
                     if matches!(pn.fill.kind, photonic_core::style::FillKind::Pattern(_))
             )
         });
-        if has_raster || has_pattern {
+        // A layer with opacity < 1 or a non-Normal blend mode must composite as an
+        // isolated unit (P0). The CPU compositor already does that per layer, so
+        // route such documents through it — correct and exact, matching on-canvas.
+        // The GPU fast path below only handles the common all-opaque/Normal case.
+        let has_isolated_layer = document.layer_order.iter().any(|lid| {
+            document.layers.get(lid).is_some_and(|l| {
+                l.visible
+                    && !l.node_ids.is_empty()
+                    && (l.opacity < 1.0 || l.blend_mode != BlendMode::Normal)
+            })
+        });
+        if has_raster || has_pattern || has_isolated_layer {
             let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
             let bg = match opts.background {
                 ExportBackground::Artboard => [
@@ -1568,6 +1579,74 @@ mod blend_tests {
                 SOURCE[i],
             );
         }
+    }
+
+    /// Two-layer doc: full-canvas RED on the base layer, full-canvas BLUE on a
+    /// second layer whose opacity/blend the caller sets. Returns the centre pixel.
+    fn layer_blend_center(r: &HeadlessRenderer, opacity: f32, mode: BlendMode) -> [u8; 4] {
+        let mut doc = Document::new("lb", 20.0, 20.0);
+        doc.add_node(
+            SceneNode::new(
+                "red",
+                doc.active_layer_id.unwrap(),
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                        .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+                ),
+            ),
+            None,
+        );
+        let top = doc.add_layer(photonic_core::layer::Layer::new("top"));
+        {
+            let l = doc.layers.get_mut(&top).unwrap();
+            l.opacity = opacity;
+            l.blend_mode = mode;
+        }
+        doc.add_node(
+            SceneNode::new(
+                "blue",
+                Default::default(),
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                        .with_fill(Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0))),
+                ),
+            ),
+            Some(top),
+        );
+        let png = r.render_png_at_size(&doc, 20, 20);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        img.get_pixel(10, 10).0
+    }
+
+    /// P0 (headless): a Multiply blend set on a whole LAYER composites the layer
+    /// as a unit against the layer beneath. Pure primaries → space-independent
+    /// (sRGB == linear), so RED × BLUE = black regardless of blend space.
+    #[test]
+    fn layer_multiply_composites_as_a_unit() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping layer-multiply test");
+            return;
+        };
+        let p = layer_blend_center(&r, 1.0, BlendMode::Multiply);
+        assert!(
+            p[0] < 24 && p[1] < 24 && p[2] < 24,
+            "RED × BLUE via a Multiply layer should be ~black, got {p:?}"
+        );
+    }
+
+    /// P0 (headless): a half-opacity Normal layer blends 50/50 over the layer
+    /// beneath → ~purple (the previously-dead Layer.opacity now takes effect).
+    #[test]
+    fn layer_half_opacity_via_headless() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping layer-opacity test");
+            return;
+        };
+        let p = layer_blend_center(&r, 0.5, BlendMode::Normal);
+        assert!(
+            (p[0] as i32 - 127).abs() < 32 && p[1] < 32 && (p[2] as i32 - 127).abs() < 32,
+            "half-opacity blue over red should be ~purple, got {p:?}"
+        );
     }
 
     fn luma(px: [u8; 4]) -> f32 {
