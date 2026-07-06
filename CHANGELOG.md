@@ -11,6 +11,15 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+### Added
+
+- **Proportional editing over MCP.** A new `proportional_move_anchor` tool lets
+  AI and scripted callers do the same Blender-style proportional edit as the
+  interactive Proportional Move tool: name a path, the anchor index(es) to move,
+  a displacement, and a `spread` radius + falloff `curve`, and neighbouring
+  anchors follow along the falloff — committed as one undoable step. It shares the
+  exact falloff math with the GUI tool, so both stay in lockstep.
+
 ## [0.2.2] - 2026-07-05
 
 ### Added

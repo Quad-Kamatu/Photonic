@@ -1083,6 +1083,27 @@ pub struct TwirlPathArgs {
     pub center_y: Option<f64>,
 }
 
+/// Arguments for `proportional_move_anchor` tool
+#[derive(Debug, Deserialize)]
+pub struct ProportionalMoveAnchorArgs {
+    /// Path node ID (UUID or name) to edit.
+    pub node_id: String,
+    /// Element indices of the anchor point(s) to move directly (the "primary"
+    /// anchors, weight 1.0). Positional indices into the path's element list, as
+    /// reported by `inspect_node` / `get_node`.
+    pub anchor_indices: Vec<usize>,
+    /// Displacement of the primary anchors in the path's local X (path units).
+    pub dx: f64,
+    /// Displacement of the primary anchors in the path's local Y (path units).
+    pub dy: f64,
+    /// Falloff radius ("spread") in path units — neighbours within this distance
+    /// of a primary anchor follow proportionally. Default: 120.
+    pub spread: Option<f64>,
+    /// Falloff curve exponent: 1 = linear, >1 = sharp (influence concentrated
+    /// near the primary), <1 = soft/broad plateau. Default: 2.
+    pub curve: Option<f64>,
+}
+
 /// Arguments for `roughen_path` tool
 #[derive(Debug, Deserialize)]
 pub struct RoughenPathArgs {

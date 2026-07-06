@@ -8,7 +8,7 @@ pub use crate::handlers::typography::{
     link_text_frames, unlink_text_frames,
 };
 pub use crate::handlers::shapes::{
-    create_shape, create_path, create_curvature_path, create_flare, create_spiral, create_grid, create_polar_grid, create_heart, create_gear, create_wave_pattern, create_freehand_path, build_shape_from_points, create_speech_bubble, create_cross, create_arrow_shape, create_donut, create_sunburst, create_parametric_shape, create_truchet_tiling, add_anchor_points, delete_anchor_point, average_anchor_points, convert_anchor_points, zig_zag_path, pucker_bloat, roughen_path, twirl_path, round_corners, scallop_path, crystallize_path, simplify_path, smooth_path, reverse_path_direction, offset_path, join_paths, scissors_cut, outline_stroke, point_on_path, measure_path, noise_deform, warp_envelope,
+    create_shape, create_path, create_curvature_path, create_flare, create_spiral, create_grid, create_polar_grid, create_heart, create_gear, create_wave_pattern, create_freehand_path, build_shape_from_points, create_speech_bubble, create_cross, create_arrow_shape, create_donut, create_sunburst, create_parametric_shape, create_truchet_tiling, add_anchor_points, delete_anchor_point, average_anchor_points, convert_anchor_points, zig_zag_path, pucker_bloat, roughen_path, twirl_path, proportional_move_anchor, round_corners, scallop_path, crystallize_path, simplify_path, smooth_path, reverse_path_direction, offset_path, join_paths, scissors_cut, outline_stroke, point_on_path, measure_path, noise_deform, warp_envelope,
 };
 pub use crate::handlers::selection::{
     deselect_all, find_nodes, find_replace_style, find_replace_text, get_selection, lasso_select,

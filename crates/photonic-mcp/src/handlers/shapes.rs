@@ -997,6 +997,105 @@ pub async fn twirl_path(state: &AppState, args: TwirlPathArgs) -> ToolResult {
     ))
     .with_data(serde_json::json!({ "modified": modified, "skipped": skipped }))
 }
+
+pub async fn proportional_move_anchor(
+    state: &AppState,
+    args: ProportionalMoveAnchorArgs,
+) -> ToolResult {
+    tracing::debug!("tool: proportional_move_anchor");
+    use photonic_core::ops::proportional;
+
+    if args.anchor_indices.is_empty() {
+        return ToolResult::error("anchor_indices must not be empty");
+    }
+    let spread = args.spread.unwrap_or(proportional::DEFAULT_SPREAD);
+    let curve = args.curve.unwrap_or(proportional::DEFAULT_CURVE);
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+
+    // Resolve the node id (UUID or name).
+    let nid = match uuid::Uuid::parse_str(&args.node_id) {
+        Ok(id) => id,
+        Err(_) => match doc.find_node_by_name(&args.node_id) {
+            Some(n) => n.id,
+            None => return ToolResult::error(format!("Node not found: {}", args.node_id)),
+        },
+    };
+    let node = match doc.nodes.get(&nid) {
+        Some(n) => n.clone(),
+        None => return ToolResult::error(format!("Node not found: {}", args.node_id)),
+    };
+    let pn = match &node.kind {
+        SceneNodeKind::Path(pn) => pn,
+        _ => return ToolResult::error("Node is not a path"),
+    };
+
+    // Validate the primary indices against the path's actual anchor indices.
+    let bez = pn.path_data.to_bez_path();
+    let valid: Vec<usize> = proportional::anchor_points(&bez)
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect();
+    let invalid: Vec<usize> = args
+        .anchor_indices
+        .iter()
+        .copied()
+        .filter(|i| !valid.contains(i))
+        .collect();
+    if !invalid.is_empty() {
+        return ToolResult::error(format!(
+            "Invalid anchor_indices {invalid:?}; this path's anchor element indices are {valid:?}"
+        ));
+    }
+
+    // How many anchors will actually move (weight > 0), for the report.
+    let affected = proportional::compute_weights(
+        &bez,
+        &args.anchor_indices,
+        spread,
+        curve,
+        proportional::DistanceMetric::Euclidean,
+    )
+    .len();
+
+    let new_path = proportional::proportional_move(
+        &pn.path_data,
+        &args.anchor_indices,
+        args.dx,
+        args.dy,
+        spread,
+        curve,
+        proportional::DistanceMetric::Euclidean,
+    );
+
+    let mut new_node = node.clone();
+    if let SceneNodeKind::Path(ref mut new_pn) = new_node.kind {
+        new_pn.path_data = new_path;
+    }
+    history.execute_discrete(
+        Command::UpdateNode {
+            old: node,
+            new: new_node,
+        },
+        &mut doc,
+    );
+
+    ToolResult::text(format!(
+        "Proportionally moved {} primary anchor(s) by ({}, {}); {affected} anchor(s) affected within spread {spread} (curve {curve})",
+        args.anchor_indices.len(),
+        args.dx,
+        args.dy,
+    ))
+    .with_data(serde_json::json!({
+        "node_id": nid.to_string(),
+        "primary": args.anchor_indices,
+        "affected": affected,
+        "spread": spread,
+        "curve": curve,
+    }))
+}
+
 pub async fn create_parametric_shape(
     state: &AppState,
     args: CreateParametricShapeArgs,

@@ -404,6 +404,13 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::twirl_path(state, a).await,
             ))
         }
+        "proportional_move_anchor" => {
+            let a: ProportionalMoveAnchorArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::nodes::proportional_move_anchor(state, a).await,
+            ))
+        }
         "blend_objects" => {
             let a: BlendObjectsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(

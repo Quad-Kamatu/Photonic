@@ -1348,6 +1348,22 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "proportional_move_anchor",
+            "description": "Move a path's anchor point(s) and pull nearby anchors along a falloff — Blender-style proportional editing on real vector anchors (topology is preserved; only positions change). The primary anchors move by the full (dx, dy); every other anchor within `spread` follows by a weighted fraction shaped by the falloff `curve`. Coordinates and `spread` are in the path's local space, matching the anchor positions from inspect_node. Destructive to geometry; single undoable step.\n\nUse anchor element indices from inspect_node / get_node. Great for organically reshaping, tapering, or bulging a run of points without dragging each one by hand.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string", "description": "Path node ID (UUID or name) to edit" },
+                    "anchor_indices": { "type": "array", "items": { "type": "integer" }, "description": "Element indices of the primary anchor(s) to move directly (weight 1.0), from inspect_node/get_node" },
+                    "dx": { "type": "number", "description": "Primary displacement in the path's local X (path units)" },
+                    "dy": { "type": "number", "description": "Primary displacement in the path's local Y (path units)" },
+                    "spread": { "type": "number", "description": "Falloff radius in path units — neighbours within this distance follow proportionally. Default: 120" },
+                    "curve": { "type": "number", "description": "Falloff curve exponent: 1 = linear, >1 = sharp, <1 = soft/broad. Default: 2" }
+                },
+                "required": ["node_id", "anchor_indices", "dx", "dy"]
+            }
+        },
+        {
             "name": "roughen_path",
             "description": "Displace path anchor and control points by random amounts to create a hand-drawn, organic, or grunge effect. Configurable maximum displacement (size), optional subdivision for extra detail, and deterministic seed for reproducible results.\n\nUse detail > 0 to add intermediate points before roughening — this creates finer texture on long straight segments. Destructive — modifies path data. Single undoable step.",
             "inputSchema": {
