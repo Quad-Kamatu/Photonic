@@ -11,6 +11,70 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-05
+
+### Added
+
+- **Proportional Move tool** — a new Direct Select sub-variant that brings
+  Blender-style proportional editing to vector art (something Illustrator and
+  Affinity don't have). Drag an anchor and its neighbours follow along a falloff:
+  the whole region flexes instead of one point moving rigidly. While you hold the
+  node, **scroll** grows or shrinks the falloff *spread* (radius) and
+  **Shift+scroll** bends the falloff *curve* from soft to sharp; an on-canvas
+  overlay shows the radius, a half-weight ring, and a live graph of the curve.
+  Pick it from the Direct Select fly-out in the toolbar, and set the defaults in
+  Tool Options.
+- **Multi-document tabs.** Open several documents at once and switch between them
+  from a tab bar along the bottom of the canvas — no more closing one file to work
+  on another. Each tab keeps its own view, selection, and edit history.
+- **Autosave and crash recovery.** Your work is saved in the background as you go,
+  and if the app or your machine goes down, Photonic offers to restore the
+  unsaved document when you reopen it. Closing a document with unsaved changes now
+  warns you first, and the title shows how long ago the last save was.
+- **All-new colour picker.** Every colour control now opens one industry-grade
+  picker: a saturation/value square with hue and alpha bars, hex entry, and
+  RGB / HSB / HSL / OKLCH numeric models — plus a perceptual tint ramp, harmony
+  suggestions, recent and document swatches, an inline eyedropper, WCAG contrast
+  badges, and a colour-blindness preview. Right-click a path → **Fill/Stroke
+  Color** opens it directly.
+- **Fill-aware fills with a slide-out gradient drawer.** The picker now edits
+  solid, gradient, and pattern fills from one place. The gradient drawer has a
+  live preview bar with draggable stops, per-stop **midpoint** control
+  (Illustrator-style), add / duplicate / delete / reverse / distribute, and an
+  **sRGB ↔ OKLab** toggle for perceptual blending with no muddy grey band. Save
+  and re-apply gradient swatches.
+- **Gradients now track the object.** Linear, radial, fluid, and mesh gradients
+  can be scoped to an object's bounding box, so they move and scale with the
+  shape instead of being pinned to the artboard, with a **"Rotate with object"**
+  toggle so they rotate and shear along with it. **On-canvas gradient handles**
+  let you drag endpoints, centre, radius, and gradient points right on the
+  artwork while the fill popup is open.
+- **Redesigned mesh gradient.** The mesh gradient is now a spreadsheet-style grid
+  of coloured cells: click a cell to recolour it, drag the interior grid lines to
+  resize cells, add or remove rows and columns, and use a **Blend** slider that
+  runs from hard cell edges to a fully smooth blend.
+- **Layers panel refresh.** Rows are decluttered — the name itself is the drag
+  handle, and Shift-clicking a name multi-selects. Each row (or a right-click)
+  opens a compact three-dot menu (rename, add sublayer, show/hide, lock, delete,
+  layer-template toggle). Reordering now previews the drop with an insertion bar
+  between rows and a drop-inside outline over groups and layer headers, with a
+  subtle animated hover highlight. A pinned footer adds New Layer / Sublayer /
+  Mask / Adjustment buttons and a live object count.
+
+### Fixed
+
+- **Radial, fluid, and mesh gradients render correctly on the GPU and headless
+  renderers.** They previously collapsed to a flat blend of their edge colours
+  (only linear gradients looked right); the fill is now subdivided so the true
+  gradient shows through on every render path.
+- **Radial gradient facet/wedge artifacts are gone.** Large radial fills no longer
+  show sharp wedges or creases.
+- **Mesh-gradient cell edges are clean.** Hard cell boundaries no longer zig-zag
+  into a "static" look on the GPU/headless renderers.
+- **Gradient on-canvas handles are easy to grab.** Hit-testing now starts from the
+  exact press point with a larger grab radius and hover feedback, so grabbing a
+  handle no longer misses and moves the whole object instead.
+
 ## [0.2.1] - 2026-07-05
 
 ### Added
