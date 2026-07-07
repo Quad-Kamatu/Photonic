@@ -7,9 +7,31 @@ description = "Video engine for Photonic: frame-graph IR, decode, playback, audi
 
 [dependencies]
 photonic-core = { path = "../photonic-core" }
+# Decode delivers YUV planes to the render crate's consumer type
+# (photonic_render::video::YuvPlanes) — allowed dep direction per 00 §3.
+photonic-render = { path = "../photonic-render" }
 uuid = { workspace = true }
 glam = { workspace = true }
 wgpu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Content-hash (relink identity, 01 §3). xxh3 is the spec's first choice:
+# 64-bit output (far lower collision probability than the crc32fast already in
+# the tree) and deterministic across platforms/toolchain versions — unlike
+# std's DefaultHasher (SipHash), whose output Rust explicitly does not
+# guarantee stable, which a persisted relink hash requires. Single MIT crate,
+# zero transitive deps → cargo-deny clean.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Audio device I/O (09 §3's stack decision: cpal over rodio — raw callback
+# access the mixer worker's real-time drain needs). Apache-2.0.
+cpal = "0.18"
+# Lock-free SPSC ring buffer for the mixer-worker -> cpal-callback handoff
+# (09 §5). Purpose-built for exactly this real-time-audio producer/consumer
+# shape (chunked, wait-free read/write, no allocation on the hot path) rather
+# than hand-rolling atomics. Dual MIT/Apache-2.0.
+rtrb = "0.3"
 
 [dev-dependencies]
 pollster = { workspace = true }
