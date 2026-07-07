@@ -1,0 +1,207 @@
+//! Minimal seek + sequential-fill driver for one decode source (02 §3).
+//!
+//! This is the P3 floor: [`DecodeSource::seek`] picks the keyframe at or before
+//! the target, (re)starts the sidecar there, decode-forwards discarding until
+//! `pts >= target`, and fills the ring; [`DecodeSource::pump`] keeps the ring
+//! filled for sequential playback. Cut-ahead / cross-clip prefetch is a later
+//! story (playback controller) — the seams (`SharedRing`, restart budget, the
+//! reused sidecar) are left in place for it.
+//!
+//! Failure containment (02 §3): a sidecar crash / mid-frame EOF surfaces as
+//! [`DecodeError`]; `seek` restarts the process up to [`MAX_RESTARTS`] with
+//! backoff before giving up, and a wedged pipe can never block the caller
+//! because every read has already happened on this (worker) thread with the
+//! process killed-on-drop.
+
+use std::path::PathBuf;
+use std::process::ChildStdout;
+use std::sync::Arc;
+use std::time::Duration;
+
+use photonic_core::timeline::{FrameRate, Tick};
+
+use super::reader::{FrameReader, PtsModel};
+use super::ring::SharedRing;
+use super::sidecar::{Sidecar, SidecarConfig};
+use super::{DecodeError, DecodedFrame, PixFmt};
+use crate::media::ffmpeg_locate::FfmpegTools;
+use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
+
+/// Max process restarts per seek before giving up (02 §3 "max 3").
+pub const MAX_RESTARTS: u32 = 3;
+
+/// How a source's presentation ticks are derived (chosen at import from the
+/// probe's VFR flag — 02 §4).
+#[derive(Clone)]
+pub enum PtsKind {
+    /// Constant-frame-rate: arithmetic derivation, no extra probe.
+    Cfr(FrameRate),
+    /// Variable-frame-rate: ground-truth table (pts-true path).
+    Vfr(Arc<PtsIndex>),
+}
+
+/// Everything needed to open a decode source.
+#[derive(Clone)]
+pub struct SourceParams {
+    pub input: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub pix_fmt: PixFmt,
+    pub pts_kind: PtsKind,
+    pub keyframes: KeyframeIndex,
+}
+
+/// A single active decode source: keyframe-seek + sequential fill into a ring.
+pub struct DecodeSource {
+    tools: FfmpegTools,
+    params: SourceParams,
+    ring: SharedRing,
+    // The live process + its parsed pipe. Both `None` until the first seek; a
+    // restart drops (kills) and re-creates them together.
+    sidecar: Option<Sidecar>,
+    reader: Option<FrameReader<ChildStdout>>,
+}
+
+impl DecodeSource {
+    pub fn new(tools: FfmpegTools, params: SourceParams, ring: SharedRing) -> Self {
+        DecodeSource {
+            tools,
+            params,
+            ring,
+            sidecar: None,
+            reader: None,
+        }
+    }
+
+    /// The ring this source fills (shared with the consumer).
+    pub fn ring(&self) -> &SharedRing {
+        &self.ring
+    }
+
+    /// Source frame ordinal of the keyframe at `kf_tick`, for the pts model.
+    fn start_frame(&self, kf_tick: Tick) -> i64 {
+        match &self.params.pts_kind {
+            PtsKind::Cfr(rate) => rate.frame_at(kf_tick),
+            PtsKind::Vfr(table) => table.ordinal_before(kf_tick),
+        }
+    }
+
+    fn pts_model(&self, start_frame: i64) -> PtsModel {
+        match &self.params.pts_kind {
+            PtsKind::Cfr(rate) => PtsModel::Cfr {
+                rate: *rate,
+                start_frame,
+            },
+            PtsKind::Vfr(table) => PtsModel::Table {
+                start_frame,
+                table: Arc::clone(table),
+            },
+        }
+    }
+
+    /// Start (or restart) the ffmpeg process seeked to `kf_tick` and rebuild the
+    /// reader with a pts model whose origin is that keyframe.
+    fn start_process(&mut self, kf_tick: Tick) -> Result<(), DecodeError> {
+        // Drop the old process/reader first (kill-on-drop) before respawning.
+        self.reader = None;
+        self.sidecar = None;
+
+        let cfg = SidecarConfig {
+            input: self.params.input.clone(),
+            seek: kf_tick,
+            pix_fmt: self.params.pix_fmt,
+        };
+        let (sidecar, stdout) = Sidecar::spawn(&self.tools, &cfg)?;
+        let model = self.pts_model(self.start_frame(kf_tick));
+        let reader = FrameReader::new(
+            stdout,
+            self.params.width,
+            self.params.height,
+            self.params.pix_fmt,
+            model,
+        );
+        self.sidecar = Some(sidecar);
+        self.reader = Some(reader);
+        Ok(())
+    }
+
+    /// Seek so the frame at or after `target` is decoded and ringed.
+    ///
+    /// Picks `keyframe_before(target)`, (re)starts the process there, discards
+    /// frames with `pts < target`, then rings the first frame with
+    /// `pts >= target` (and returns it). On a sidecar crash mid-seek, restarts
+    /// up to [`MAX_RESTARTS`] with backoff.
+    pub fn seek(&mut self, target: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
+        let kf = self.params.keyframes.keyframe_before(target);
+        self.ring.clear();
+
+        let mut last_err: Option<DecodeError> = None;
+        for attempt in 0..=MAX_RESTARTS {
+            if attempt > 0 {
+                // Exponential-ish backoff: 20ms, 40ms, 80ms.
+                std::thread::sleep(Duration::from_millis(20u64 << (attempt - 1)));
+            }
+            match self.seek_attempt(kf, target) {
+                Ok(frame) => {
+                    self.ring.set_playhead(frame.pts);
+                    return Ok(frame);
+                }
+                Err(DecodeError::EmptyDecode) => return Err(DecodeError::EmptyDecode),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(DecodeError::RestartsExhausted {
+            max: MAX_RESTARTS,
+            last: last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    /// One seek attempt: spawn at `kf`, decode-forward discarding `pts < target`,
+    /// ring the first `pts >= target` frame and return it.
+    fn seek_attempt(&mut self, kf: Tick, target: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
+        self.start_process(kf)?;
+        let reader = self.reader.as_mut().expect("reader set by start_process");
+
+        loop {
+            match reader.next_frame()? {
+                // First frame at/after the target: ring it and return it.
+                Some(frame) if frame.pts >= target => {
+                    let pts = frame.pts;
+                    self.ring.push(frame);
+                    return self.ring.get(pts).ok_or(DecodeError::EmptyDecode);
+                }
+                // Still before the target within this GOP: discard.
+                Some(_) => continue,
+                // EOF before reaching target ⇒ nothing at/after target.
+                None => return Err(DecodeError::EmptyDecode),
+            }
+        }
+    }
+
+    /// Decode up to `n` more frames from the current process into the ring
+    /// (sequential playback fill). Returns how many were decoded; fewer than
+    /// `n` (possibly 0) at end-of-stream or with no active process.
+    pub fn pump(&mut self, n: usize) -> Result<usize, DecodeError> {
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        for _ in 0..n {
+            match reader.next_frame()? {
+                Some(frame) => {
+                    self.ring.push(frame);
+                    count += 1;
+                }
+                None => break, // clean EOF
+            }
+        }
+        Ok(count)
+    }
+
+    /// Whether a decode process is currently live.
+    pub fn is_active(&self) -> bool {
+        self.sidecar.is_some()
+    }
+}
