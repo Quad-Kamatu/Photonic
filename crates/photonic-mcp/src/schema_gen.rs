@@ -4925,6 +4925,464 @@ pub fn tool_list() -> Value {
                 },
                 "required": ["group_id"]
             }
+        },
+
+        // ── Video domain (10-mcp-tools.md, P2: timeline-EDIT tools) ─────────────
+        // Sequence (10 §3.2)
+        {
+            "name": "create_sequence",
+            "description": "Create a new timeline sequence (creates the timeline project itself, undoably, if this is the first video-mode action). Requires at least one SequenceFormat (aspect-ratio variant, CAP-012). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "frame_rate": { "type": "object", "description": "{\"num\": 30, \"den\": 1} — a rational frame rate, e.g. 30000/1001 for 29.97 fps." },
+                    "formats": {
+                        "type": "array",
+                        "description": "At least one SequenceFormat (aspect-ratio variant).",
+                        "items": { "type": "object", "properties": { "name": {"type":"string"}, "width": {"type":"integer"}, "height": {"type":"integer"} }, "required": ["name","width","height"] }
+                    }
+                },
+                "required": ["name","frame_rate","formats"]
+            }
+        },
+        {
+            "name": "delete_sequence",
+            "description": "Delete a sequence. Fails if referenced by a NestedSequence clip elsewhere (cycle/dangling-ref guard). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence_id": { "type": "string" } },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "list_sequences",
+            "description": "List all sequences in the timeline project.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "set_active_sequence",
+            "description": "Set (or clear, if omitted/null) the project's active sequence. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence_id": { "type": ["string","null"] } }
+            }
+        },
+        {
+            "name": "set_sequence_format",
+            "description": "Add, update, or remove a SequenceFormat (aspect-ratio variant) on a sequence. op=add requires `format`; op=update requires `format_index` and `format`; op=remove requires `format_index` (refused if it's the sequence's last format). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "op": { "type": "string", "enum": ["add","update","remove"] },
+                    "format": { "type": "object", "description": "{\"name\":str,\"width\":int,\"height\":int} — required for add/update.", "properties": { "name": {"type":"string"}, "width": {"type":"integer"}, "height": {"type":"integer"} } },
+                    "format_index": { "type": "integer", "description": "Required for update/remove." }
+                },
+                "required": ["sequence_id","op"]
+            }
+        },
+        {
+            "name": "set_active_format",
+            "description": "Switch a sequence's active aspect-ratio variant by index. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence_id": { "type": "string" }, "format_index": { "type": "integer" } },
+                "required": ["sequence_id","format_index"]
+            }
+        },
+
+        // Track (10 §3.3)
+        {
+            "name": "add_track",
+            "description": "Append (or insert at `index`) a video or audio track on a sequence. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["video","audio"] },
+                    "name": { "type": "string" },
+                    "index": { "type": "integer", "description": "Insertion index within the track's lane; defaults to the end." }
+                },
+                "required": ["sequence_id","kind"]
+            }
+        },
+        {
+            "name": "remove_track",
+            "description": "Remove a track (and every clip on it) by id. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "track_id": { "type": "string" } },
+                "required": ["track_id"]
+            }
+        },
+        {
+            "name": "set_track_prop",
+            "description": "Universal track-property setter — name/enabled/locked/height_px, only supplied fields change. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "enabled": { "type": "boolean" },
+                    "locked": { "type": "boolean" },
+                    "height_px": { "type": "number" }
+                },
+                "required": ["track_id"]
+            }
+        },
+        {
+            "name": "reorder_track",
+            "description": "Move a track to a new index within its own lane (video tracks reorder among video tracks, audio among audio). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "track_id": { "type": "string" }, "new_index": { "type": "integer" } },
+                "required": ["track_id","new_index"]
+            }
+        },
+
+        // Clip edit ops (10 §3.4)
+        {
+            "name": "insert_clip",
+            "description": "Insert a new clip on a track. Time args follow ticks > tc > seconds precedence (at_tc requires the track's sequence context, resolved automatically). Fails on overlap with an existing clip, non-positive duration, or a NestedSequence cycle. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string", "description": "HH:MM:SS:FF or HH:MM:SS;FF" },
+                    "start_seconds": { "type": "number" },
+                    "source": { "type": "object", "description": "ClipSource — {\"kind\":\"asset\",\"asset_id\":...} | {\"kind\":\"vector\",\"asset_id\":...} | {\"kind\":\"nested_sequence\",\"sequence_id\":...} | {\"kind\":\"solid_color\",\"color\":\"#rrggbb\"} | {\"kind\":\"adjustment\"}" },
+                    "source_in_ticks": { "type": "integer" },
+                    "source_in_tc": { "type": "string" },
+                    "source_in_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer", "description": "Always exact ticks — no dual-unit ambiguity." }
+                },
+                "required": ["track_id","source","duration_ticks"]
+            }
+        },
+        {
+            "name": "move_clip",
+            "description": "Move a clip to a new start position on its current track. `new_track_id` (cross-track move) is NOT supported in v1 — supplying one that differs from the clip's current track returns error_code NotSupportedV1. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "new_start_ticks": { "type": "integer" },
+                    "new_start_tc": { "type": "string" },
+                    "new_start_seconds": { "type": "number" },
+                    "new_track_id": { "type": "string", "description": "NOT SUPPORTED in v1 unless equal to the clip's current track — see description." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "trim_clip",
+            "description": "Trim a clip's in or out edge to an exact position. edge=in adjusts start+source_in and shortens/lengthens duration, keeping the out point fixed; edge=out changes only duration. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "edge": { "type": "string", "enum": ["in","out"] },
+                    "new_ticks": { "type": "integer" },
+                    "new_tc": { "type": "string" },
+                    "new_seconds": { "type": "number" }
+                },
+                "required": ["clip_id","edge"]
+            }
+        },
+        {
+            "name": "split_clip",
+            "description": "Split a clip into two at an exact tick, strictly inside the clip's span. Returns the new (right-hand) clip's id. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "remove_clip",
+            "description": "Remove a clip. ripple=true also shifts every later clip on the track left by the removed clip's duration (one undo step). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "ripple": { "type": "boolean", "description": "Default false." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "roll_edit",
+            "description": "Roll the shared edge between two adjacent clips on the same track — one clip's out point and the other's in point move together by delta_ticks, total span unchanged. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id_a": { "type": "string" },
+                    "clip_id_b": { "type": "string" },
+                    "delta_ticks": { "type": "integer", "description": "Positive = later." }
+                },
+                "required": ["clip_id_a","clip_id_b","delta_ticks"]
+            }
+        },
+        {
+            "name": "slip_clip",
+            "description": "Shift a clip's source in/out (source_in) by delta_ticks without moving it on the timeline. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" }, "delta_ticks": { "type": "integer" } },
+                "required": ["clip_id","delta_ticks"]
+            }
+        },
+        {
+            "name": "slide_clip",
+            "description": "Slide a clip over its neighbors by delta_ticks — the clip moves, its immediate neighbors trim to absorb the change, total span unchanged. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" }, "delta_ticks": { "type": "integer" } },
+                "required": ["clip_id","delta_ticks"]
+            }
+        },
+
+        // Clip properties (10 §3.5)
+        {
+            "name": "set_clip_prop",
+            "description": "Universal clip-property setter — name, base transform (pos/scale/rotation/anchor/opacity), per-format reframe override, enabled — only supplied fields change. Speed and transitions have dedicated tools (set_clip_speed/set_transition). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "transform": { "type": "object", "description": "Full base-transform replace: {\"x\":0,\"y\":0,\"scale_x\":1,\"scale_y\":1,\"rotation\":0,\"anchor_x\":0,\"anchor_y\":0,\"opacity\":1}" },
+                    "reframe": { "type": "object", "description": "{\"format_index\":N,\"transform\":{...}|null} — null clears the override for that format index." },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_clip_speed",
+            "description": "Set a clip's playback speed as an exact rational ratio (SpeedMap::Constant — the only variant in v1; keyframed speed ramps are a post-v1 non-goal). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "ratio": { "type": "object", "description": "{\"num\":int,\"den\":uint} — e.g. {\"num\":2,\"den\":1} for 2x, {\"num\":-1,\"den\":1} for reverse.", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] }
+                },
+                "required": ["clip_id","ratio"]
+            }
+        },
+        {
+            "name": "set_transition",
+            "description": "Add, replace, or remove (transition=null) a clip's in or out transition. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "edge": { "type": "string", "enum": ["in","out"] },
+                    "transition": { "type": ["object","null"], "description": "{\"kind\":\"cross_dissolve\"|\"dip_to_black\"|\"dip_to_color\"|\"wipe\"|\"push\",\"duration_ticks\":int,\"params\":{\"curve\":\"linear\"|\"ease_in\"|\"ease_out\"|\"ease_in_out\",\"color\":\"#rrggbb\"?,\"direction\":\"left\"|\"right\"|\"up\"|\"down\",\"softness\":number}}" }
+                },
+                "required": ["clip_id","edge"]
+            }
+        },
+        {
+            "name": "list_clips",
+            "description": "List clips, optionally filtered by track, sequence, and/or a [range_start_ticks, range_end_ticks) time range.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "track_id": { "type": "string" },
+                    "range_start_ticks": { "type": "integer" },
+                    "range_end_ticks": { "type": "integer" }
+                }
+            }
+        },
+        {
+            "name": "get_clip",
+            "description": "Full clip dump — timing, source, transform (incl. keyframe tracks), reframe overrides, effects, grade, composition ref, transitions, audio, speed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" } },
+                "required": ["clip_id"]
+            }
+        },
+
+        // Effects (10 §3.6)
+        {
+            "name": "add_effect",
+            "description": "Push (or insert at `index`) an effect onto a clip's effect stack, seeded with the kind's registry default params. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["blur","sharpen","glow","chroma_key","luma_key","invert","mask_shape_gen"] },
+                    "index": { "type": "integer" }
+                },
+                "required": ["clip_id","kind"]
+            }
+        },
+        {
+            "name": "remove_effect",
+            "description": "Remove one effect from a clip's stack by index. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" }, "effect_index": { "type": "integer" } },
+                "required": ["clip_id","effect_index"]
+            }
+        },
+        {
+            "name": "reorder_effects",
+            "description": "Reorder a clip's effect stack — new_order is a permutation of 0..effects.len(). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" }, "new_order": { "type": "array", "items": { "type": "integer" } } },
+                "required": ["clip_id","new_order"]
+            }
+        },
+        {
+            "name": "set_effect_param",
+            "description": "Set one static (non-keyframed) param under effects[effect_index].params — path is a registry PropPath (e.g. \"params.radius\"), or the literal path \"enabled\" to toggle the effect itself. Use set_keyframe for animated params. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer" },
+                    "path": { "type": "string" },
+                    "value": { "type": "object", "description": "PropValue — {\"t\":\"float\",\"v\":number} | {\"t\":\"vec2\",\"v\":[number,number]} | {\"t\":\"color\",\"v\":{\"r\":n,\"g\":n,\"b\":n,\"a\":n}} | {\"t\":\"bool\",\"v\":boolean} | {\"t\":\"enum\",\"v\":integer}" }
+                },
+                "required": ["clip_id","effect_index","path","value"]
+            }
+        },
+        {
+            "name": "list_effect_kinds",
+            "description": "Registry introspection: every EffectKind plus its animatable PropPath/value-kind/range table — lets an agent discover params without guessing.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+
+        // Keyframes (10 §3.7)
+        {
+            "name": "set_keyframe",
+            "description": "Upsert one keyframe on a PropertyTrack (creates the track if absent), creating animation. target=clip_transform needs only clip_id; target=clip_effect also needs effect_index. P2 scope: clip transform + clip-effect params only (grade/audio/graph-node targets land with their domains). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "enum": ["clip_transform","clip_effect"] },
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer", "description": "Required when target=clip_effect." },
+                    "path": { "type": "string", "description": "Registry PropPath, e.g. \"transform.x\" or \"params.radius\"." },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" },
+                    "value": { "type": "object", "description": "PropValue — {\"t\":\"float\",\"v\":number} | {\"t\":\"vec2\",\"v\":[number,number]} | {\"t\":\"color\",\"v\":{...}} | {\"t\":\"bool\",\"v\":boolean} | {\"t\":\"enum\",\"v\":integer}" },
+                    "interp": { "type": "object", "description": "{\"kind\":\"hold\"} | {\"kind\":\"linear\"} | {\"kind\":\"bezier\",\"out_handle\":[x,y],\"in_handle\":[x,y]}" }
+                },
+                "required": ["target","clip_id","path","value","interp"]
+            }
+        },
+        {
+            "name": "remove_keyframe",
+            "description": "Remove the keyframe at exactly `at_*` on a target's PropertyTrack. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "enum": ["clip_transform","clip_effect"] },
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer" },
+                    "path": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["target","clip_id","path"]
+            }
+        },
+        {
+            "name": "batch_set_keyframes",
+            "description": "Set N keyframes (same or different targets/paths) as ONE undo step. Each entry has the same shape as set_keyframe's args.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ops": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": { "type": "string", "enum": ["clip_transform","clip_effect"] },
+                                "clip_id": { "type": "string" },
+                                "effect_index": { "type": "integer" },
+                                "path": { "type": "string" },
+                                "at_ticks": { "type": "integer" },
+                                "at_tc": { "type": "string" },
+                                "at_seconds": { "type": "number" },
+                                "value": { "type": "object" },
+                                "interp": { "type": "object" }
+                            },
+                            "required": ["target","clip_id","path","value","interp"]
+                        }
+                    }
+                },
+                "required": ["ops"]
+            }
+        },
+        {
+            "name": "get_keyframes",
+            "description": "Full PropertyTrack list (all keyframes) for a target.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "enum": ["clip_transform","clip_effect"] },
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer", "description": "Required when target=clip_effect." }
+                },
+                "required": ["target","clip_id"]
+            }
+        },
+
+        // Media (P2 subset — import/relink/list/remove; probe/proxy/transcode are P3 engine jobs)
+        {
+            "name": "import_media",
+            "description": "Register one or more files as MediaAsset(s) in the media pool. probe is always null at this phase (ffprobe integration is P3) — the result flags each asset probed:false. Content-hashes each file now (head+tail+len digest) as a relink identity. `bin` is accepted but not yet honored (no bin field on MediaAsset yet — result flags bin_assignment_supported:false). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "items": { "type": "string" } },
+                    "bin": { "type": "string", "description": "Not yet supported — see description." }
+                },
+                "required": ["paths"]
+            }
+        },
+        {
+            "name": "relink_media",
+            "description": "Repoint an offline (or any) asset to a new file path. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "asset_id": { "type": "string" }, "new_path": { "type": "string" } },
+                "required": ["asset_id","new_path"]
+            }
+        },
+        {
+            "name": "list_media",
+            "description": "List media-pool assets with probe/proxy status and content hash. `bin` filter is accepted but not yet honored (result flags bin_filter_supported:false when supplied).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "bin": { "type": "string" } }
+            }
+        },
+        {
+            "name": "remove_asset",
+            "description": "Remove an asset from the media pool. Not in the original 10-mcp-tools.md §3.1 catalog table — added to the P2 scope explicitly (ops::remove_asset already existed). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "asset_id": { "type": "string" } },
+                "required": ["asset_id"]
+            }
         }
     ])
 }

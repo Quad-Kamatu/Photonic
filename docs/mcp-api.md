@@ -3,11 +3,11 @@
 <!-- GENERATED FILE — do not edit by hand. -->
 <!-- Regenerate with: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md -->
 
-This document lists all **326** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
+This document lists all **349** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
 
 ## Tools
 
-[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_artboard`](#add-artboard), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_qr_code`](#create-qr-code), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_artboard`](#duplicate-artboard), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_artboards`](#export-artboards), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_color_mode`](#get-document-color-mode), [`get_document_dpi`](#get-document-dpi), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_artboards`](#list-artboards), [`list_audit_log`](#list-audit-log), [`list_character_styles`](#list-character-styles), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_artboard`](#move-artboard), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`remove_artboard`](#remove-artboard), [`remove_background`](#remove-background), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_stroke`](#remove-stroke), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_artboard`](#set-active-artboard), [`set_active_layer`](#set-active-layer), [`set_artboard_margins`](#set-artboard-margins), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_document_color_mode`](#set-document-color-mode), [`set_document_dpi`](#set-document-dpi), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`simplify_path`](#simplify-path), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_artboard`](#update-artboard), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
+[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
 
 ---
 
@@ -38,18 +38,6 @@ Returns the new `annotation_id` UUID.
 | `text` | string | yes | The comment or design note (required, non-empty). |
 | `author` | string | no | Optional author identity, e.g. "claude" or "design-reviewer". |
 | `node_id` | string | no | UUID of the node to annotate. Omit to create a document-level annotation. |
-
-## `add_artboard`
-
-Create a new artboard (a named crop/export rectangle) at the given top-left (x, y) with width×height in document units, and make it the active artboard. Returns the new artboard_id. Use for multi-artboard layouts (e.g. responsive frames, icon sizes, print pages side by side).
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `height` | number | yes | Height in document units (> 0). |
-| `width` | number | yes | Width in document units (> 0). |
-| `x` | number | yes | Top-left X in document units. |
-| `y` | number | yes | Top-left Y in document units. |
-| `name` | string | no | Optional name. Default: 'Artboard N'. |
 
 ## `add_color_swatch`
 
@@ -113,6 +101,16 @@ The shadow copy has its fill replaced with the shadow color and stroke removed. 
 | `offset_y` | number | no | Shadow Y offset (default: 5) |
 | `opacity` | number | no | Shadow opacity 0–1 (default: 0.4) |
 
+## `add_effect`
+
+Push (or insert at `index`) an effect onto a clip's effect stack, seeded with the kind's registry default params. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `kind` | enum (`blur`, `sharpen`, `glow`, `chroma_key`, `luma_key`, `invert`, `mask_shape_gen`) | yes |  |
+| `index` | integer | no |  |
+
 ## `add_export_profile`
 
 Save a named export configuration to the document. Profiles store format and quality settings so you can re-export with consistent settings using run_export_profile. If a profile with the same name exists it is replaced.
@@ -135,6 +133,17 @@ Add a ruler guide (horizontal or vertical reference line) at a precise document-
 | `orientation` | enum (`horizontal`, `vertical`) | yes | Guide orientation. 'horizontal' creates a fixed-Y line; 'vertical' creates a fixed-X line. |
 | `position` | number | yes | Position in document units. Y coordinate for horizontal guides; X coordinate for vertical guides. |
 | `color` | array<number> | no | Optional RGBA color override as [R, G, B, A] in [0, 1] range. Omit to use the default cyan. |
+
+## `add_track`
+
+Append (or insert at `index`) a video or audio track on a sequence. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `kind` | enum (`video`, `audio`) | yes |  |
+| `sequence_id` | string | yes |  |
+| `index` | integer | no | Insertion index within the track's lane; defaults to the end. |
+| `name` | string | no |  |
 
 ## `adjust_colors`
 
@@ -359,6 +368,14 @@ Reposition all on-curve anchor points in each selected path node to their averag
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | IDs of path nodes to average |
 | `axis` | enum (`horizontal`, `vertical`, `both`) | no | Which axis to average (default: both) |
+
+## `batch_set_keyframes`
+
+Set N keyframes (same or different targets/paths) as ONE undo step. Each entry has the same shape as set_keyframe's args.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ops` | array<object> | yes |  |
 
 ## `bind_text_variable`
 
@@ -974,26 +991,6 @@ Create a polar (radial) grid centered at a point. Draws concentric circles and r
 | `sectors` | integer | no | Number of radial sectors/spokes (default: 8) |
 | `stroke` | object | no |  |
 
-## `create_qr_code`
-
-Generate a native, resolution-independent QR code as a group of vectors (a compound path of all dark modules, plus an optional background). Encodes a URL/text and lets you style the modules while staying scannable — the three finder 'eyes' are always rendered recognizably so stylized codes still scan.
-
-Styles: square (classic), rounded (rounded squares), dot (circles), connected ('blob' — neighbouring modules merge with smooth joins). Dark modules take any fill (solid or gradient). Keep good dark-on-light contrast and use a higher error-correction level (q/h) when heavily stylized.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `data` | string | yes | Content to encode (URL or text) |
-| `background` | string | no | Background behind the code: a #rrggbb hex (default white) or 'none' for transparent |
-| `ecc` | enum (`l`, `m`, `q`, `h`) | no | Error-correction level (default: m). Higher = more robust but denser. |
-| `fill` | object | no | Fill for the dark modules — solid or gradient (default solid black) |
-| `layer_id` | string | no |  |
-| `module_shape` | enum (`square`, `rounded`, `dot`, `connected`) | no | Module style (default: square) |
-| `quiet_zone` | integer | no | Quiet-zone margin in modules (default 4; keep >= 2 to stay scannable) |
-| `radius` | number | no | Corner radius as a fraction of one module, 0..0.5 (default 0.4). Used by rounded/connected. |
-| `size` | number | no | Total artwork size in document units incl. quiet zone (default 200) |
-| `x` | number | no | Top-left X (default 0) |
-| `y` | number | no | Top-left Y (default 0) |
-
 ## `create_radar_chart`
 
 Create a radar (spider) chart from multi-dimensional data. Each axis represents one dimension; each series is drawn as a polygon scaled to its values per axis. Supports filled semi-transparent overlays, configurable grid rings, and multiple overlapping series. Default Tableau-10 color palette.
@@ -1042,6 +1039,16 @@ Create a scatter plot from X/Y data points. Points are auto-scaled to fit the pl
 | `height` | number | no | Plot height (default: 300) |
 | `layer_id` | string | no |  |
 | `width` | number | no | Plot width (default: 300) |
+
+## `create_sequence`
+
+Create a new timeline sequence (creates the timeline project itself, undoably, if this is the first video-mode action). Requires at least one SequenceFormat (aspect-ratio variant, CAP-012). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `formats` | array<object> | yes | At least one SequenceFormat (aspect-ratio variant). |
+| `frame_rate` | object | yes | {"num": 30, "den": 1} — a rational frame rate, e.g. 30000/1001 for 29.97 fps. |
+| `name` | string | yes |  |
 
 ## `create_shape`
 
@@ -1389,6 +1396,14 @@ Delete a named pattern from the registry. Does not affect nodes already filled w
 | --- | --- | --- | --- |
 | `name` | string | yes | Name of the pattern to delete. |
 
+## `delete_sequence`
+
+Delete a sequence. Fails if referenced by a NestedSequence clip elsewhere (cycle/dangling-ref guard). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+
 ## `delete_spot_color`
 
 Delete a named spot color from the document. Does not alter existing node fills.
@@ -1490,17 +1505,6 @@ Use a selected path as a cutting edge to divide all path nodes beneath it in z-o
 | --- | --- | --- | --- |
 | `node_id` | string | yes | UUID of the cutting path node (must be a path; will be removed after cutting) |
 
-## `duplicate_artboard`
-
-Duplicate an artboard together with all content/nodes inside it, as one undoable step. The copy becomes active. By default it is placed to the right of the original with a 40-unit gutter (offset_x = original width + 40, offset_y = 0). Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to duplicate (from list_artboards). |
-| `new_name` | string | no | Optional name for the copy. Default: '{original name} copy'. |
-| `offset_x` | number | no | Horizontal offset for the copy in document units. Default: original width + 40. |
-| `offset_y` | number | no | Vertical offset for the copy in document units. Default: 0. |
-
 ## `duplicate_layer`
 
 Duplicate a layer with all its nodes. Creates a copy of the layer and deep-clones every node with new IDs. Single undoable batch.
@@ -1545,22 +1549,6 @@ Expand a blend group into individual discrete objects. Dissolves the group wrapp
 | --- | --- | --- | --- |
 | `group_id` | string | yes | UUID or name of the blend group to expand. |
 
-## `export_artboards`
-
-Export one or more artboards to raster images — one image per artboard. Returns base64 by default, OR — when `path` is given — writes each image to disk and returns only a small result (path + dimensions per artboard), keeping full-resolution PNGs off the socket. Unlike export_raster (which snapshots the live editor viewport), each artboard's rectangle is rendered off-screen at its own aspect ratio, so results are exact regardless of the current zoom/scroll. Select artboards by (precedence): all=true → every artboard; range=[start,end] → 1-based inclusive index range; artboards=[...] → a list of UUIDs, exact names, or 1-based index strings; otherwise the active artboard. Get ids/names/indices from list_artboards. Set bleed=true to include the document print bleed around each artboard (for print upload). Max 24 artboards per call; each side capped at 8192 px.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `all` | boolean | no | Export every artboard in document order. Overrides range/artboards. |
-| `artboards` | array<string> | no | Specific artboards to export, each a UUID, an exact name, or a 1-based index string ("1", "2", …). Exported in the given order. |
-| `bleed` | boolean | no | Expand each artboard's rectangle by the document print bleed (bleed_mm, at the export scale/DPI) on all four sides, so the output includes the bleed area for print upload. Output dimensions become artboard px + 2×bleed px. Default false (trim only). |
-| `format` | enum (`png`, `jpeg`, `webp`, `gif`, `tiff`) | no | Output format (default: png). |
-| `path` | string | no | Write each artboard's image to disk (parent dirs created) and return a small result (path + dimensions) instead of base64. With multiple artboards, include a {name} or {index} placeholder (or an extension, before which -{index} is inserted); a single artboard is written to `path` verbatim. Omit to return base64 inline. |
-| `quality` | integer | no | JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG. |
-| `range` | array<integer> | no | Inclusive 1-based index range [start, end] (e.g. [2, 5] exports artboards 2–5). |
-| `scale` | number | no | Output pixels per document unit (default 1.0). A 400×300 artboard at scale 2 exports 800×600 px. Clamped to 0.05–8.0. |
-| `transparent` | boolean | no | Transparent background instead of the artboard fill (default false). Ignored by JPEG (always opaque). |
-
 ## `export_audit_log`
 
 Export the complete in-memory MCP audit log as a JSON array (oldest first). Includes every tool call recorded since the server started, up to 1000 entries.
@@ -1591,28 +1579,17 @@ Batch-export a set of icons to normalized .svg files in a single call — the ca
 
 ## `export_pdf`
 
-Export the document as a vector PDF, at its physical size for the document DPI. Returns the PDF bytes as base64 in `data_base64`; also writes to `path` when given.
+Export the entire document as a single-page vector PDF (1 document unit = 1 PDF point). Returns the PDF bytes as base64 in `data_base64`.
 
-Vector paths with solid colours, transforms and nesting (gradients approximate to their first stop). With `color_mode: "cmyk"` the output is a print-ready PDF/X-1a:2001 file: DeviceCMYK via an ICC profile, embedded GTS_PDFX OutputIntent, PDF 1.3, and MediaBox/TrimBox/BleedBox from the document bleed. `outline_text` converts every glyph to a vector path (zero font dependencies); `marks` renders trim + registration marks.
-
-PER-ARTBOARD / MULTI-PAGE: set `all`, `range`, or `artboards` to emit one page per artboard, each clipped to its rectangle + bleed with its own page boxes and marks — a single multi-page PDF by default, or one file per artboard with `separate_files: true` (needs a `path` template). This is the native card-batch path; without any selector the whole canvas is one page. Note: documents that use layer opacity/blend still emit transparency (not yet flattened for strict X-1a).
+MVP scope: filled/stroked vector paths with solid colours, node/group transforms and nesting. Gradient fills are approximated by their first stop colour; text, clipping, per-node opacity, blend modes and multi-page artboards are not yet emitted.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `all` | boolean | no | Export every artboard, one page each (overrides range/artboards). |
-| `artboards` | array<string> | no | Per-artboard export: specific artboards, each a UUID, an exact name, or a 1-based index string ("1", "2"). One clipped page per artboard, in this order. Get ids/names from list_artboards. |
 | `background` | string | no | Optional page background colour, e.g. "#ffffff". Omit for an unpainted (white-in-viewers) page. |
-| `color_mode` | enum (`rgb`, `cmyk`) | no | Export colour model. "rgb" (default) preserves on-screen colours. "cmyk" separates to DeviceCMYK via the ICC profile and emits a PDF/X-1a file. When omitted, the document's own color_mode is used. |
-| `marks` | boolean | no | Render trim and registration marks in the bleed/slug area. Default false. |
-| `outline_text` | boolean | no | Convert text nodes to vector outlines (zero font dependencies). Default false. |
-| `path` | string | no | Also write the exported PDF to this filesystem path. The base64 payload is still returned. |
-| `profile` | string | no | Path to a CMYK ICC profile for colour conversion and the OutputIntent (defaults to the bundled Coated FOGRA39 when color_mode is cmyk). |
-| `range` | array<integer> | no | Export a 1-based inclusive artboard index range [start, end], one page each. |
-| `separate_files` | boolean | no | With a multi-artboard selection, write one file PER artboard instead of a single multi-page PDF. Requires `path` with a {name} or {index} placeholder (or a filename, before whose extension -{index} is inserted). |
 
 ## `export_raster`
 
-Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF). Returns the image data as a base64-encoded string, OR — when `path` is given — writes the image to disk and returns only a small result (path + dimensions), keeping full-resolution PNGs off the socket.
+Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF) and return the image data as a base64-encoded string.
 
 PNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.
 
@@ -1622,7 +1599,6 @@ Optionally specify width/height to resize the output. If omitted, the capture us
 | --- | --- | --- | --- |
 | `format` | enum (`png`, `jpeg`, `webp`, `gif`, `tiff`) | no | Output format (default: png) |
 | `height` | integer | no | Output height in pixels. Omit to use current canvas height. |
-| `path` | string | no | Write the encoded image to this filesystem path (parent dirs created) and return a small result (path + width/height) instead of base64. Omit to return base64 inline. Use this for full-resolution PNGs, whose base64 is too large for the MCP socket. |
 | `quality` | integer | no | JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG. |
 | `width` | integer | no | Output width in pixels. Omit to use current canvas width. |
 
@@ -1789,6 +1765,14 @@ Return a compact spatial map of all visible nodes: bounding box, layer, kind, an
 | --- | --- | --- | --- |
 | `include_hidden` | boolean | no | When true, include hidden nodes in the overview. Default: false. |
 
+## `get_clip`
+
+Full clip dump — timing, source, transform (incl. keyframe tracks), reframe overrides, effects, grade, composition ref, transitions, audio, speed.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+
 ## `get_clipboard_history`
 
 Return a summary of all entries currently in the clipboard ring.
@@ -1808,18 +1792,6 @@ Return the CSS equivalent of a node's visual properties for developer handoff. S
 ## `get_document_bleed`
 
 Return the current document bleed and slug values in millimetres. Read-only.
-
-_No parameters._
-
-## `get_document_color_mode`
-
-Return the current document color mode ('rgb' or 'cmyk'). Read-only.
-
-_No parameters._
-
-## `get_document_dpi`
-
-Return the current document DPI and the physical page size (pt and inches) it implies for export. Read-only.
 
 _No parameters._
 
@@ -1843,6 +1815,16 @@ Get the full document tree: layers, nodes, styles, transforms
 Capture the current document as a reusable template — preserving canvas size, layer structure, guides, and export profiles while stripping all node content. Use the returned template_json with apply_document_template to stamp these settings onto a different document.
 
 _No parameters._
+
+## `get_keyframes`
+
+Full PropertyTrack list (all keyframes) for a target.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `target` | enum (`clip_transform`, `clip_effect`) | yes |  |
+| `effect_index` | integer | no | Required when target=clip_effect. |
 
 ## `get_node`
 
@@ -1940,6 +1922,32 @@ Counterpart to export_design_tokens: register named color swatches from a design
 | `format` | enum (`auto`, `css`, `json`) | no | Parse hint (default: auto — CSS if it doesn't start with { or [, else JSON). |
 | `path` | string | no | Path to a tokens file to read. Provide this OR `content`. |
 | `prefix` | string | no | Optional prefix prepended to every imported swatch name (e.g. 'brand/'). |
+
+## `import_media`
+
+Register one or more files as MediaAsset(s) in the media pool. probe is always null at this phase (ffprobe integration is P3) — the result flags each asset probed:false. Content-hashes each file now (head+tail+len digest) as a relink identity. `bin` is accepted but not yet honored (no bin field on MediaAsset yet — result flags bin_assignment_supported:false). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `paths` | array<string> | yes |  |
+| `bin` | string | no | Not yet supported — see description. |
+
+## `insert_clip`
+
+Insert a new clip on a track. Time args follow ticks > tc > seconds precedence (at_tc requires the track's sequence context, resolved automatically). Fails on overlap with an existing clip, non-positive duration, or a NestedSequence cycle. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `duration_ticks` | integer | yes | Always exact ticks — no dual-unit ambiguity. |
+| `source` | object | yes | ClipSource — {"kind":"asset","asset_id":...} \| {"kind":"vector","asset_id":...} \| {"kind":"nested_sequence","sequence_id":...} \| {"kind":"solid_color","color":"#rrggbb"} \| {"kind":"adjustment"} |
+| `track_id` | string | yes |  |
+| `name` | string | no |  |
+| `source_in_seconds` | number | no |  |
+| `source_in_tc` | string | no |  |
+| `source_in_ticks` | integer | no |  |
+| `start_seconds` | number | no |  |
+| `start_tc` | string | no | HH:MM:SS:FF or HH:MM:SS;FF |
+| `start_ticks` | integer | no |  |
 
 ## `inspect_node`
 
@@ -2062,12 +2070,6 @@ By default only unresolved annotations are returned. Pass `include_resolved: tru
 | `include_resolved` | boolean | no | When true, include annotations that have already been resolved. Default: false. |
 | `node_id` | string | no | Filter to annotations attached to this specific node UUID. Omit to list all annotations. |
 
-## `list_artboards`
-
-List every artboard (named crop/export rectangle) in the document, with id, name, position (x, y = top-left), size (width, height), and which one is active. Artboards live in the shared document coordinate space; a fresh document has one 'Artboard 1' at the origin. Read-only. Use before update_artboard / remove_artboard / set_active_artboard to get ids. Distinct from the document canvas size (get_document_info) and from artboard safe-area margins (get_artboard_margins).
-
-_No parameters._
-
 ## `list_audit_log`
 
 Return the most recent MCP tool calls recorded since the server started.
@@ -2086,6 +2088,17 @@ List all named character styles saved in the document.
 
 _No parameters._
 
+## `list_clips`
+
+List clips, optionally filtered by track, sequence, and/or a [range_start_ticks, range_end_ticks) time range.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `range_end_ticks` | integer | no |  |
+| `range_start_ticks` | integer | no |  |
+| `sequence_id` | string | no |  |
+| `track_id` | string | no |  |
+
 ## `list_color_swatches`
 
 List all named color swatches saved in the document palette.
@@ -2101,6 +2114,12 @@ _No parameters._
 ## `list_dimensions`
 
 List all dimension annotations in the document, including their IDs, node references, axis, and measured distance. Read-only.
+
+_No parameters._
+
+## `list_effect_kinds`
+
+Registry introspection: every EffectKind plus its animatable PropPath/value-kind/range table — lets an agent discover params without guessing.
 
 _No parameters._
 
@@ -2148,6 +2167,14 @@ Return the most recent edit history entries from the undo stack, newest first. U
 | --- | --- | --- | --- |
 | `limit` | integer | no | Maximum entries to return. Default: 20. |
 
+## `list_media`
+
+List media-pool assets with probe/proxy status and content hash. `bin` filter is accepted but not yet honored (result flags bin_filter_supported:false when supplied).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `bin` | string | no |  |
+
 ## `list_paragraph_styles`
 
 List all named paragraph styles saved in the document.
@@ -2157,6 +2184,12 @@ _No parameters._
 ## `list_patterns`
 
 List all named patterns in the document pattern registry, with their tile dimensions and transform.
+
+_No parameters._
+
+## `list_sequences`
+
+List all sequences in the timeline project.
 
 _No parameters._
 
@@ -2317,15 +2350,17 @@ Duplicate each selected node and flip the copy across its bounding-box center, p
 | `axis` | enum (`horizontal`, `vertical`) | no | "horizontal" flips left-right (default); "vertical" flips top-bottom. |
 | `node_ids` | array<string> | no | UUIDs or names of nodes to mirror. Uses current selection if empty. |
 
-## `move_artboard`
+## `move_clip`
 
-Move an artboard together with all content/nodes inside it by (dx, dy), as one undoable step. Unlike update_artboard, which repositions only the frame, this tool also moves the artboard's contents. Get the artboard_id from list_artboards.
+Move a clip to a new start position on its current track. `new_track_id` (cross-track move) is NOT supported in v1 — supplying one that differs from the clip's current track returns error_code NotSupportedV1. Supports undo.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to move (from list_artboards). |
-| `dx` | number | yes | Horizontal movement in document units. |
-| `dy` | number | yes | Vertical movement in document units. |
+| `clip_id` | string | yes |  |
+| `new_start_seconds` | number | no |  |
+| `new_start_tc` | string | no |  |
+| `new_start_ticks` | integer | no |  |
+| `new_track_id` | string | no | NOT SUPPORTED in v1 unless equal to the clip's current track — see description. |
 
 ## `move_to_layer`
 
@@ -2610,13 +2645,22 @@ Move each node into its own newly created layer — the inverse of collect_in_ne
 | `node_ids` | array<string> | yes | IDs of nodes to release. Each top-level node goes into its own new layer. |
 | `name_prefix` | string | no | Prefix for new layer names. Layers are named '<prefix> 1', '<prefix> 2', … Default: 'Layer'. |
 
-## `remove_artboard`
+## `relink_media`
 
-Delete an artboard by id. Refuses to remove the last remaining artboard (a document must keep at least one). If the removed artboard was active, the first remaining one becomes active. Get the artboard_id from list_artboards.
+Repoint an offline (or any) asset to a new file path. Supports undo.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to remove (from list_artboards). |
+| `asset_id` | string | yes |  |
+| `new_path` | string | yes |  |
+
+## `remove_asset`
+
+Remove an asset from the media pool. Not in the original 10-mcp-tools.md §3.1 catalog table — added to the P2 scope explicitly (ops::remove_asset already existed). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes |  |
 
 ## `remove_background`
 
@@ -2625,6 +2669,15 @@ Detect the subject of a raster layer with a local on-device matting model (U²-N
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Raster node id or name |
+
+## `remove_clip`
+
+Remove a clip. ripple=true also shifts every later clip on the track left by the removed clip's duration (one undo step). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `ripple` | boolean | no | Default false. |
 
 ## `remove_constraint`
 
@@ -2641,6 +2694,15 @@ Remove a dimension annotation by its ID. Use list_dimensions to find the ID.
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `id` | string | yes | UUID of the dimension annotation to remove. |
+
+## `remove_effect`
+
+Remove one effect from a clip's stack by index. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `effect_index` | integer | yes |  |
 
 ## `remove_event_trigger`
 
@@ -2675,6 +2737,20 @@ Remove a specific ruler guide by its UUID. Returns an error if the guide is lock
 | --- | --- | --- | --- |
 | `guide_id` | string | yes | UUID of the guide to remove. Obtain from list_guides. |
 
+## `remove_keyframe`
+
+Remove the keyframe at exactly `at_*` on a target's PropertyTrack. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `path` | string | yes |  |
+| `target` | enum (`clip_transform`, `clip_effect`) | yes |  |
+| `at_seconds` | number | no |  |
+| `at_tc` | string | no |  |
+| `at_ticks` | integer | no |  |
+| `effect_index` | integer | no |  |
+
 ## `remove_stroke`
 
 Remove the stroke from selected nodes (set to none).
@@ -2682,6 +2758,23 @@ Remove the stroke from selected nodes (set to none).
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
+
+## `remove_track`
+
+Remove a track (and every clip on it) by id. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `track_id` | string | yes |  |
+
+## `reorder_effects`
+
+Reorder a clip's effect stack — new_order is a permutation of 0..effects.len(). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `new_order` | array<integer> | yes |  |
 
 ## `reorder_layers`
 
@@ -2700,6 +2793,15 @@ Change the z-order (stacking position) of a node within its layer. Use send_to_b
 | `node_id` | string | yes | ID of the node to reorder |
 | `operation` | enum (`send_to_back`, `bring_to_front`, `send_backward`, `bring_forward`, `move_above`, `move_below`) | yes | send_to_back = lowest z; bring_to_front = highest z; move_above/move_below require relative_id |
 | `relative_id` | string | no | Required for move_above / move_below — the reference node |
+
+## `reorder_track`
+
+Move a track to a new index within its own lane (video tracks reorder among video tracks, audio among audio). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `new_index` | integer | yes |  |
+| `track_id` | string | yes |  |
 
 ## `resize_canvas`
 
@@ -2752,6 +2854,16 @@ Reverse the winding direction of one or more path nodes. For open paths this fli
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | IDs of path nodes to reverse |
+
+## `roll_edit`
+
+Roll the shared edge between two adjacent clips on the same track — one clip's out point and the other's in point move together by delta_ticks, total span unchanged. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id_a` | string | yes |  |
+| `clip_id_b` | string | yes |  |
+| `delta_ticks` | integer | yes | Positive = later. |
 
 ## `rotate_copies`
 
@@ -2918,13 +3030,14 @@ Select all nodes in the document whose visual attributes match those of the refe
 | `node_ids` | array<string> | no | Reference node UUIDs or names. Uses current selection if empty. |
 | `tolerance` | integer | no | Color match tolerance 0–255 per channel. Default: 5. |
 
-## `set_active_artboard`
+## `set_active_format`
 
-Make an artboard the active one. The active artboard is the default target for artboard-relative operations and export. Soft view state — not an undo step. Get the artboard_id from list_artboards.
+Switch a sequence's active aspect-ratio variant by index. Supports undo.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to activate (from list_artboards). |
+| `format_index` | integer | yes |  |
+| `sequence_id` | string | yes |  |
 
 ## `set_active_layer`
 
@@ -2933,6 +3046,14 @@ Set the active layer. New nodes created without an explicit layer_id will be pla
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `layer_id` | string | yes | Layer UUID or name |
+
+## `set_active_sequence`
+
+Set (or clear, if omitted/null) the project's active sequence. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string \| null | no |  |
 
 ## `set_artboard_margins`
 
@@ -2973,6 +3094,27 @@ Set advanced node-level character metrics on a text node: baseline shift and sup
 | `baseline_shift` | number | no | Baseline shift in document units (positive = up). Default: unchanged. |
 | `script_position` | enum (`normal`, `superscript`, `subscript`) | no | Script position. Default: unchanged. |
 
+## `set_clip_prop`
+
+Universal clip-property setter — name, base transform (pos/scale/rotation/anchor/opacity), per-format reframe override, enabled — only supplied fields change. Speed and transitions have dedicated tools (set_clip_speed/set_transition). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `enabled` | boolean | no |  |
+| `name` | string | no |  |
+| `reframe` | object | no | {"format_index":N,"transform":{...}\|null} — null clears the override for that format index. |
+| `transform` | object | no | Full base-transform replace: {"x":0,"y":0,"scale_x":1,"scale_y":1,"rotation":0,"anchor_x":0,"anchor_y":0,"opacity":1} |
+
+## `set_clip_speed`
+
+Set a clip's playback speed as an exact rational ratio (SpeedMap::Constant — the only variant in v1; keyframed speed ramps are a post-v1 non-goal). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `ratio` | object | yes | {"num":int,"den":uint} — e.g. {"num":2,"den":1} for 2x, {"num":-1,"den":1} for reverse. |
+
 ## `set_constraint`
 
 Create a live property constraint binding a node property to an arithmetic expression over other nodes' properties (e.g. 'nodes[\'logo\'].x + 20'). Re-evaluated after every edit. Target property must be one of x, y, opacity, font_size. Cycles are rejected.
@@ -2992,21 +3134,16 @@ Set the print bleed and/or slug margins for the document. Bleed is the extra art
 | `bleed_mm` | number | no | Bleed in millimetres (all four sides). Typical values: 3.0 (EU) or 3.175 (US 0.125 in). Default: unchanged. |
 | `slug_mm` | number | no | Slug area in millimetres outside the bleed. Default: unchanged. |
 
-## `set_document_color_mode`
+## `set_effect_param`
 
-Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photonic file and is used as the default color space when exporting PDF without an explicit color_mode override.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `mode` | enum (`rgb`, `cmyk`) | yes | Color mode. 'rgb' for screen/web; 'cmyk' for print production. |
-
-## `set_document_dpi`
-
-Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photonic file.
+Set one static (non-keyframed) param under effects[effect_index].params — path is a registry PropPath (e.g. "params.radius"), or the literal path "enabled" to toggle the effect itself. Use set_keyframe for animated params. Supports undo.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `dpi` | number | yes | Dots per inch. Common print value: 300. |
+| `clip_id` | string | yes |  |
+| `effect_index` | integer | yes |  |
+| `path` | string | yes |  |
+| `value` | object | yes | PropValue — {"t":"float","v":number} \| {"t":"vec2","v":[number,number]} \| {"t":"color","v":{"r":n,"g":n,"b":n,"a":n}} \| {"t":"bool","v":boolean} \| {"t":"enum","v":integer} |
 
 ## `set_font_style`
 
@@ -3025,6 +3162,22 @@ Set the font weight (100–900) on a text node. Common values: 400 = Regular, 70
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Text node ID (UUID or name). |
 | `weight` | integer | yes | Font weight (100=Thin, 400=Regular, 700=Bold, 900=Black). |
+
+## `set_keyframe`
+
+Upsert one keyframe on a PropertyTrack (creates the track if absent), creating animation. target=clip_transform needs only clip_id; target=clip_effect also needs effect_index. P2 scope: clip transform + clip-effect params only (grade/audio/graph-node targets land with their domains). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `interp` | object | yes | {"kind":"hold"} \| {"kind":"linear"} \| {"kind":"bezier","out_handle":[x,y],"in_handle":[x,y]} |
+| `path` | string | yes | Registry PropPath, e.g. "transform.x" or "params.radius". |
+| `target` | enum (`clip_transform`, `clip_effect`) | yes |  |
+| `value` | object | yes | PropValue — {"t":"float","v":number} \| {"t":"vec2","v":[number,number]} \| {"t":"color","v":{...}} \| {"t":"bool","v":boolean} \| {"t":"enum","v":integer} |
+| `at_seconds` | number | no |  |
+| `at_tc` | string | no |  |
+| `at_ticks` | integer | no |  |
+| `effect_index` | integer | no | Required when target=clip_effect. |
 
 ## `set_layer_mask`
 
@@ -3130,6 +3283,17 @@ Set the active selection to specific node IDs. Replaces current selection unless
 | `additive` | boolean | no | Add to existing selection (default: false = replace) |
 | `node_ids` | array<string> | no | Node IDs to select |
 
+## `set_sequence_format`
+
+Add, update, or remove a SequenceFormat (aspect-ratio variant) on a sequence. op=add requires `format`; op=update requires `format_index` and `format`; op=remove requires `format_index` (refused if it's the sequence's last format). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `op` | enum (`add`, `update`, `remove`) | yes |  |
+| `sequence_id` | string | yes |  |
+| `format` | object | no | {"name":str,"width":int,"height":int} — required for add/update. |
+| `format_index` | integer | no | Required for update/remove. |
+
 ## `set_symbol_override`
 
 Set per-instance fill and/or stroke color overrides on a symbol instance node. Overrides apply to this instance only; the master symbol is unaffected. Pass fill_hex and/or stroke_hex as '#rrggbb' strings. Supports undo.
@@ -3186,6 +3350,28 @@ Place a text node along a path spine (Type on a Path). The text flows along the 
 | `text_node_id` | string | yes | Text node ID (UUID or name) to place on the path. |
 | `offset` | number | no | Start offset along the path in document units. Default: 0.0. |
 
+## `set_track_prop`
+
+Universal track-property setter — name/enabled/locked/height_px, only supplied fields change. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `track_id` | string | yes |  |
+| `enabled` | boolean | no |  |
+| `height_px` | number | no |  |
+| `locked` | boolean | no |  |
+| `name` | string | no |  |
+
+## `set_transition`
+
+Add, replace, or remove (transition=null) a clip's in or out transition. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `edge` | enum (`in`, `out`) | yes |  |
+| `transition` | object \| null | no | {"kind":"cross_dissolve"\|"dip_to_black"\|"dip_to_color"\|"wipe"\|"push","duration_ticks":int,"params":{"curve":"linear"\|"ease_in"\|"ease_out"\|"ease_in_out","color":"#rrggbb"?,"direction":"left"\|"right"\|"up"\|"down","softness":number}} |
+
 ## `set_variable_value`
 
 Update the value of an existing document variable. Use apply_variables to propagate the change to all bound text nodes.
@@ -3214,6 +3400,24 @@ Reduce the anchor-point count of a path using Ramer-Douglas-Peucker simplificati
 | `tolerance` | number | yes | RDP tolerance in document coordinates. Larger values remove more points. Typical: 0.5–5.0 for screen work, 0.1–1.0 for precise technical illustration. |
 | `dry_run` | boolean | no | If true, return before/after point counts without modifying the document. Default false. |
 
+## `slide_clip`
+
+Slide a clip over its neighbors by delta_ticks — the clip moves, its immediate neighbors trim to absorb the change, total span unchanged. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `delta_ticks` | integer | yes |  |
+
+## `slip_clip`
+
+Shift a clip's source in/out (source_in) by delta_ticks without moving it on the timeline. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `delta_ticks` | integer | yes |  |
+
 ## `smooth_path`
 
 Smooth jagged or polygonal paths using Chaikin's corner-cutting algorithm. Converts sharp LineTo segments into smooth cubic Bézier curves. Applies to the specified node IDs or the current selection. factor (0–0.5) controls rounding strength; 0.25 is the classic value. iterations (1–8) controls how many passes are applied.
@@ -3231,6 +3435,17 @@ Round the position (translation) of one or more nodes to the nearest integer coo
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | IDs of nodes to snap to integer pixel coordinates |
+
+## `split_clip`
+
+Split a clip into two at an exact tick, strictly inside the clip's span. Returns the new (right-hand) clip's id. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `at_seconds` | number | no |  |
+| `at_tc` | string | no |  |
+| `at_ticks` | integer | no |  |
 
 ## `split_into_grid`
 
@@ -3349,6 +3564,18 @@ Geometric op on a raster node's pixels. op ∈ {crop(x,y,width,height), resize(w
 | `op` | string | yes | Operation name (see description) |
 | `params` | object | no |  |
 
+## `trim_clip`
+
+Trim a clip's in or out edge to an exact position. edge=in adjusts start+source_in and shortens/lengthens duration, keeping the out point fixed; edge=out changes only duration. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `edge` | enum (`in`, `out`) | yes |  |
+| `new_seconds` | number | no |  |
+| `new_tc` | string | no |  |
+| `new_ticks` | integer | no |  |
+
 ## `twirl_path`
 
 Rotate path points around a center with a spiral falloff — points near the center rotate more, creating a twirl/vortex effect. Useful for decorative spirals, logo flourishes, and abstract patterns.
@@ -3402,19 +3629,6 @@ Remove a text node from its thread chain, severing both the previous and next fr
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_id` | string | yes | ID or name of the text node to remove from its thread chain. |
-
-## `update_artboard`
-
-Edit an existing artboard's name, position (x, y = top-left) and/or size (width, height). Only the fields you pass change; others are left as-is. Repositioning with this tool moves only the artboard frame, not its contents. One undoable step. Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to edit (from list_artboards). |
-| `height` | number | no | New height in document units (> 0). Default: unchanged. |
-| `name` | string | no | New name. Default: unchanged. |
-| `width` | number | no | New width in document units (> 0). Default: unchanged. |
-| `x` | number | no | New top-left X in document units. Default: unchanged. |
-| `y` | number | no | New top-left Y in document units. Default: unchanged. |
 
 ## `update_color_swatch`
 
