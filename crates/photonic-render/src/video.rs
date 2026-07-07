@@ -550,11 +550,35 @@ mod tests {
     use crate::color;
     use crate::renderer::align256;
 
-    /// 03 §4.4 rule 1: the WGSL YUV shader's numeric literals are the
-    /// `crate::color` constants. A drift on either side fails here.
+    /// Whether `value` appears in `src` as a **complete numeric token** — the
+    /// literal (Debug-formatted, so it carries a decimal point) bounded on both
+    /// sides by a non-`[0-9.]` character. Rejects substring false positives
+    /// (e.g. `16.0` inside `216.0`, or `0.5` inside `0.55`).
+    fn contains_token(src: &str, value: f32) -> bool {
+        let lit = format!("{value:?}");
+        let bytes = src.as_bytes();
+        let boundary = |b: u8| !matches!(b, b'0'..=b'9' | b'.');
+        let mut from = 0;
+        while let Some(rel) = src[from..].find(&lit) {
+            let start = from + rel;
+            let end = start + lit.len();
+            let before_ok = start == 0 || boundary(bytes[start - 1]);
+            let after_ok = end >= bytes.len() || boundary(bytes[end]);
+            if before_ok && after_ok {
+                return true;
+            }
+            from = start + 1;
+        }
+        false
+    }
+
+    /// 03 §4.4 rule 1 (hardened): every YUV/present shader numeric literal is a
+    /// `crate::color` constant, matched as a whole token so drift on either side
+    /// fails here. Covers the matrix coefficients, the full limited-range
+    /// expansion constants, the BT.709 transfer, and the sRGB OETF.
     #[test]
     fn wgsl_yuv_constants_match_rust() {
-        for c in [
+        let yuv = [
             color::BT709_CR_R,
             color::BT709_CB_G,
             color::BT709_CR_G,
@@ -563,30 +587,44 @@ mod tests {
             color::BT601_CB_G,
             color::BT601_CR_G,
             color::BT601_CB_B,
+            // Limited-range expansion: 16/219 luma, 16/224 chroma, code max, centre.
+            color::LIMITED_LUMA_MIN,
+            color::LIMITED_LUMA_SCALE,
+            color::LIMITED_CHROMA_MIN,
+            color::LIMITED_CHROMA_SCALE,
+            color::CODE_MAX,
+            color::CHROMA_CENTRE,
+            // BT.709 EOTF.
             color::BT709_EOTF_THRESHOLD,
             color::BT709_SLOPE,
             color::BT709_ALPHA,
             color::BT709_BETA,
             color::BT709_GAMMA,
-        ] {
-            let lit = format!("{c}");
+        ];
+        for c in yuv {
             assert!(
-                YUV_CONVERT_SHADER.contains(&lit),
-                "YUV shader missing constant literal {lit}"
+                contains_token(YUV_CONVERT_SHADER, c),
+                "YUV shader missing constant token {c:?}"
             );
         }
-        // Present shader carries the sRGB OETF constants.
-        for c in [
+        // Present shader carries the full sRGB OETF constant set.
+        let srgb = [
             color::SRGB_OETF_THRESHOLD,
             color::SRGB_SLOPE,
             color::SRGB_ALPHA,
-        ] {
-            let lit = format!("{c}");
+            color::SRGB_BETA,
+            color::SRGB_GAMMA_INV,
+        ];
+        for c in srgb {
             assert!(
-                PRESENT_SHADER.contains(&lit),
-                "present shader missing {lit}"
+                contains_token(PRESENT_SHADER, c),
+                "present shader missing constant token {c:?}"
             );
         }
+        // The matcher must reject substrings, not just accept whole tokens.
+        assert!(!contains_token("value = 216.0;", 16.0));
+        assert!(!contains_token("value = 0.55;", 0.5));
+        assert!(contains_token("value = 16.0;", 16.0));
     }
 
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {

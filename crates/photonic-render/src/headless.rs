@@ -1360,7 +1360,7 @@ fn group_opacity_map(
 /// One blurred effect to render into the offscreen effects layer (composited
 /// beneath the sharp document): geometry already transformed into document
 /// space, plus the blur radius in document units (scaled by zoom at render time).
-struct BlurJob {
+pub(crate) struct BlurJob {
     verts: Vec<Vertex>,
     idxs: Vec<u32>,
     radius_doc: f64,
@@ -1444,7 +1444,7 @@ pub fn document_needs_cpu_compositor(document: &Document) -> bool {
     has_raster || has_pattern || has_isolated_layer || has_non_print_layer || has_stack_effects
 }
 
-fn build_geometry(
+pub(crate) fn build_geometry(
     doc: &Document,
     include_artboard_bg: bool,
     overprint_preview: bool,
