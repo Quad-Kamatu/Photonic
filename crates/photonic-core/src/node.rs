@@ -249,6 +249,11 @@ pub struct SceneNode {
     pub object_blur: ObjectBlur,
     #[serde(default, skip_serializing_if = "feather_disabled")]
     pub feather: Feather,
+    /// Layer Styles stack (drop/inner shadow, glows, bevel, satin, overlays,
+    /// stroke) composited in list order. The older fixed-field effects above are
+    /// migrated into this on load; empty for un-styled nodes.
+    #[serde(default, skip_serializing_if = "is_empty_vec")]
+    pub effects: Vec<crate::effects::LayerEffect>,
     /// Optional per-asset export specification (Asset Export panel equivalent).
     #[serde(default, skip_serializing_if = "is_none_export_spec")]
     pub export_spec: Option<AssetExportSpec>,
@@ -298,6 +303,7 @@ impl SceneNode {
             drop_shadow: DropShadow::default(),
             object_blur: ObjectBlur::default(),
             feather: Feather::default(),
+            effects: Vec::new(),
             export_spec: None,
             symbol_ref: None,
             symbol_fill_override: None,

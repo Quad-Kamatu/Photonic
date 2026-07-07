@@ -3,6 +3,7 @@ pub mod audit;
 pub mod color;
 pub mod diagnostics;
 pub mod document;
+pub mod effects;
 pub mod export;
 pub mod history;
 pub mod import;
