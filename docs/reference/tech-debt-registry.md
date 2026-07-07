@@ -375,3 +375,23 @@ Adding a version field requires a decision about what "version 1" means and when
 **Resolution (TD-013):** Added `pub const CURRENT_FORMAT_VERSION: u32 = 1` to `document.rs`. Added `format_version: u32` as the first field of `Document` with `#[serde(default = "default_format_version")]` (defaults to 1 for files that predate the field). `Document::new()` sets `format_version: CURRENT_FORMAT_VERSION`. `from_json` now rejects files with `format_version > CURRENT_FORMAT_VERSION` via `serde::de::Error::custom`, keeping the existing signature unchanged — no callers updated. Committed on 2026-03-23.
 
 ---
+
+### TD-017: Live Canvas Blends in Gamma Space While Export Blends in Linear — Stale #145 "Pixel-Identical" Claim
+
+**Type:** Correctness / Documentation drift
+**Severity:** Medium
+**Effort:** Days (full fix is the P7 color-unification work; comment fix is minutes)
+**Area:** Rendering (photonic-render)
+**Affected Files:**
+- `crates/photonic-render/src/pipeline.rs:10-13` (stale claim)
+- `crates/photonic-render/src/renderer/mod.rs:300`, `:322` (live fill pipelines target `surface_format`)
+- `crates/photonic-render/src/headless.rs:23` (`FORMAT = Rgba8UnormSrgb`)
+
+**Description:**
+`pipeline.rs:10-13` claims the windowed document pass targets `PhotonicRenderer::scene_format` (sRGB), "which is what makes on-canvas rendering and exported output pixel-identical (issue #145)." That symbol does not exist — the live renderer's fill pipelines target the window `surface_format`, which is deliberately non-sRGB (`renderer/mod.rs:250`, chosen so egui doesn't double-gamma-correct). Consequence: live-canvas fixed-function blending (Multiply/Screen/Darken/Lighten and partial-alpha src-over) runs in gamma space while headless/export blends in linear — live separable blends likely already diverge from export by the usual ~1-2% midtone delta, contradicting the comment. Discovered during video-editor P1 S4 (`docs/specs/video-editor/03-render-color-pipeline.md`); S4's live isolation pass deliberately follows the same live=gamma convention (option B decision) for internal consistency.
+
+**Recommended Approach:**
+Short term: fix the stale comment to describe reality. Long term: the video module's P7 color-unification phase (`03-render-color-pipeline.md` §4.3) is the scheduled home for deciding whether the live canvas moves to linear intermediates + explicit OETF blit; do not unify piecemeal before then.
+
+**Why Not Auto-Fixed:**
+The comment fix is trivial but the underlying divergence is load-bearing color behavior on the primary editing surface with no automated pixel test for the windowed path; changing it belongs to the planned P7 work with proper golden coverage.
