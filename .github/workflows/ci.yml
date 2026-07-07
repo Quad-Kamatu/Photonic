@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly, 03:00 UTC. Only the video-nightly job below runs on this
+    # trigger (build-test/lint stay gated to push/pull_request) — see
+    # docs/specs/video-editor/11-testing-phasing.md §1.6 / §4.
+    - cron: '0 3 * * *'
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -17,6 +22,9 @@ env:
 jobs:
   build-test:
     name: Build & Test (${{ matrix.os }})
+    # Skip on the nightly schedule trigger — that trigger is only for the
+    # video-nightly job below; this job already runs on every push/PR.
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -27,8 +35,11 @@ jobs:
 
       # Linux needs system libraries for winit/wgpu/egui (X11 + Wayland),
       # rfd (GTK file dialogs), reqwest's native-tls (OpenSSL), and mlua needs a
-      # C toolchain (preinstalled on the runner). Windows pulls these in via the
-      # MSVC toolchain + schannel and needs no extra packages.
+      # C toolchain (preinstalled on the runner), plus ffmpeg for video-decode
+      # tests (docs/specs/video-editor/11-testing-phasing.md §3.4). Windows
+      # pulls the Rust-side deps in via the MSVC toolchain + schannel and
+      # needs no extra packages beyond ffmpeg; macOS needs only ffmpeg too
+      # (native Cocoa/Metal + Security.framework cover the rest).
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -37,7 +48,16 @@ jobs:
             pkg-config libssl-dev libgtk-3-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            ffmpeg
+
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,6 +75,8 @@ jobs:
 
   lint:
     name: Lint (fmt + clippy)
+    # Skip on the nightly schedule trigger — see build-test's comment above.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # Blocking: `cargo fmt --all --check` is enforced (the tree is now
     # rustfmt-clean). clippy runs but warnings are not denied yet (~50 in the
@@ -126,3 +148,41 @@ jobs:
 
       - name: Preflight the committed sample card (must be valid PDF/X-1a)
         run: scripts/preflight-pdfx.sh docs/print/samples/kamatu-business-card.pdf
+
+  video-nightly:
+    name: Video nightly (soak / SS-3, advisory)
+    # Only runs on the cron schedule above, never on push/PR — these are the
+    # long-running #[ignore]-annotated tests (playback soak test, 10-minute
+    # SS-3 sync-drift export test) that must never run in the default
+    # `cargo test --workspace` path. continue-on-error at the job level so a
+    # soak-test flake never blocks merges (nothing in this job gates PRs).
+    #
+    # Skeleton only as of this commit: no #[ignore] soak/SS-3 tests exist
+    # yet (they land with the P3 engine work), so `-- --ignored` currently
+    # matches nothing and this job is a no-op that succeeds trivially. It is
+    # advisory, not a real regression gate, until P3 populates it — see
+    # docs/specs/video-editor/11-testing-phasing.md §1.6 / §4.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libgtk-3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run ignored video soak / SS-3 tests
+        run: cargo test --workspace --locked -- --ignored
