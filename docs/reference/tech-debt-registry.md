@@ -396,7 +396,7 @@ Short term: fix the stale comment to describe reality. Long term: the video modu
 **Why Not Auto-Fixed:**
 The comment fix is trivial but the underlying divergence is load-bearing color behavior on the primary editing surface with no automated pixel test for the windowed path; changing it belongs to the planned P7 work with proper golden coverage.
 
-### TD-018: Text Nodes Render as Nothing in ALL Headless Output (Export + MCP render)
+### TD-018: Text Nodes Render as Nothing in ALL Headless Output (Export + MCP render) *(solved)*
 
 **Type:** Correctness (user-facing)
 **Severity:** High
@@ -431,3 +431,5 @@ Fix per-feature alongside TD-018's headless text work where they share plumbing;
 
 **Why Not Auto-Fixed:**
 Each is a distinct feature implementation, not a wiring one-liner; needs prioritization against video-module phases.
+
+**Resolution (TD-018):** Fixed in 8b2806e — `headless_text.rs` drives the canvas's glyphon pipeline against the headless device; CPU-compositor output is wrapped with the identical glyphon pass so both export paths produce the same text pixels. `text_basic` re-blessed (renders), new `text_styled` golden case added; `text_on_path` remains a TD-019 forward-guard. Committed 2026-07-07.
