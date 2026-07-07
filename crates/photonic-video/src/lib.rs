@@ -11,6 +11,13 @@
 
 pub mod graph;
 
+/// Media probing, pool services, keyframe index (02 §1 module map).
+pub mod media;
+/// FFmpeg-sidecar decode: process mgmt, pipes, scheduling, rings (02 §3).
+pub mod decode;
+/// Audio engine host + mixer (02 §1, 09).
+pub mod audio;
+
 /// Pooled `Rgba16Float` working-texture allocator (03 §3.4). The P1 renderer /
 /// P3 evaluator request textures from here keyed by [`graph::ir::ContentHash`].
 pub mod pool;
