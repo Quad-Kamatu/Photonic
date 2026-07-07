@@ -332,6 +332,65 @@ impl PhotonicApp {
         *doc_modified = true;
     }
 
+    /// Duplicate a layer and deep-copy all its objects into a new layer (named
+    /// "… Copy") inserted directly above the source. One undoable step. Mirrors
+    /// the `duplicate_layer` MCP tool.
+    pub(crate) fn do_duplicate_layer(
+        &mut self,
+        layer_id: LayerId,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        doc_modified: &mut bool,
+    ) {
+        let Some(src) = doc.layers.get(&layer_id).cloned() else {
+            return;
+        };
+        let mut new_layer = photonic_core::layer::Layer::new(format!("{} Copy", src.name));
+        new_layer.visible = src.visible;
+        new_layer.locked = src.locked;
+        new_layer.opacity = src.opacity;
+        new_layer.blend_mode = src.blend_mode;
+        new_layer.color = src.color;
+        new_layer.is_template = src.is_template;
+        let new_layer_id = new_layer.id;
+
+        let mut commands = vec![Command::AddLayer { layer: new_layer }];
+        for &nid in &src.node_ids {
+            if let Some(node) = doc.nodes.get(&nid) {
+                let mut cloned = node.clone();
+                cloned.id = uuid::Uuid::new_v4();
+                cloned.name = format!("{} (copy)", node.name);
+                cloned.layer_id = new_layer_id;
+                commands.push(Command::AddNode {
+                    node: cloned,
+                    layer_id: Some(new_layer_id),
+                });
+            }
+        }
+        history.execute(Command::Batch(commands), doc);
+        // Place the copy directly above the source in the stack.
+        if let (Some(src_pos), Some(new_pos)) = (
+            doc.layer_order.iter().position(|l| *l == layer_id),
+            doc.layer_order.iter().position(|l| *l == new_layer_id),
+        ) {
+            let mut order = doc.layer_order.clone();
+            let moved = order.remove(new_pos);
+            let insert_at = order.iter().position(|l| *l == layer_id).unwrap_or(src_pos) + 1;
+            order.insert(insert_at.min(order.len()), moved);
+            if order != doc.layer_order {
+                history.execute(
+                    Command::ReorderLayers {
+                        old_order: doc.layer_order.clone(),
+                        new_order: order,
+                    },
+                    doc,
+                );
+            }
+        }
+        self.selected_layer_ids = vec![new_layer_id];
+        *doc_modified = true;
+    }
+
     /// Create a new empty group ("sublayer") nesting container at the top of the
     /// active layer and select it. Objects can then be dragged into it in the
     /// Layers tree. One undoable step.

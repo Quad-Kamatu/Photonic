@@ -343,6 +343,8 @@ pub enum PanelAction {
     OpenLayerOptions { layer_id: LayerId },
     /// Open the Options modal for a single object, scoped to its type.
     OpenObjectOptions { node_id: NodeId },
+    /// Duplicate a layer and all its objects as a new layer above it.
+    DuplicateLayer { layer_id: LayerId },
     /// Create a new empty group ("sublayer") nesting container. When a group is
     /// selected it is nested inside that group; otherwise it lands at the top of
     /// the active layer.

@@ -2712,6 +2712,10 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::DuplicateLayer { layer_id } => {
+                    self.do_duplicate_layer(layer_id, doc, history, &mut doc_modified);
+                }
+
                 PanelAction::AddSublayer => {
                     self.do_add_sublayer(doc, history, &mut doc_modified);
                 }

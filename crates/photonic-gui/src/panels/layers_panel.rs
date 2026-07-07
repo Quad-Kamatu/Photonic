@@ -608,7 +608,7 @@ fn draw_layers_tree(
         });
     }
 
-    // Flatten Artwork button (always shown when > 1 layer)
+    // Flatten Artwork + Reverse Order (shown when > 1 layer)
     if doc.layer_order.len() > 1 {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -618,6 +618,15 @@ fn draw_layers_tree(
                 .clicked()
             {
                 *action = Some(PanelAction::FlattenArtwork);
+            }
+            if ui
+                .button(format!("{} Reverse Order", ph::ARROWS_DOWN_UP))
+                .on_hover_text("Reverse the stacking order of all layers")
+                .clicked()
+            {
+                *action = Some(PanelAction::ReorderLayers {
+                    new_order: doc.layer_order.iter().rev().copied().collect(),
+                });
             }
         });
     }
@@ -687,6 +696,14 @@ fn layer_menu_items(
             .clicked()
         {
             *action = Some(PanelAction::OpenLayerOptions { layer_id: lid });
+            ui.close_menu();
+        }
+        if ui
+            .button(format!("{} Duplicate Layer", ph::COPY))
+            .on_hover_text("Copy this layer and all its objects into a new layer above")
+            .clicked()
+        {
+            *action = Some(PanelAction::DuplicateLayer { layer_id: lid });
             ui.close_menu();
         }
         ui.separator();
