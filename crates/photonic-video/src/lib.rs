@@ -17,6 +17,12 @@ pub mod media;
 pub mod decode;
 /// Audio engine host + mixer (02 §1, 09).
 pub mod audio;
+/// Export render loop + encoder sidecar + presets (02 §7, 05).
+pub mod export;
+/// Caption/TTS provider abstraction + subtitle interchange (06).
+pub mod captions;
+/// Playback controller, clock, prefetch (02 §4).
+pub mod playback;
 
 /// Pooled `Rgba16Float` working-texture allocator (03 §3.4). The P1 renderer /
 /// P3 evaluator request textures from here keyed by [`graph::ir::ContentHash`].
