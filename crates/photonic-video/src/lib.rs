@@ -1,0 +1,20 @@
+//! photonic-video — the temporal engine for Photonic's video editor module.
+//!
+//! Spec: `docs/specs/video-editor/02-engine.md` (engine architecture) and
+//! `01-data-model.md` (timeline data model this crate evaluates).
+//!
+//! P1 status: **signature stub only** (execution-plan spine item 0b,
+//! `12-agent-execution-plan.md` §3). The `graph::ir` module pins the frame-graph
+//! IR type contract that the P1 renderer work (03 §3.4 texture pool, Tier-B
+//! conversion pass) compiles against. Evaluator, decode, playback, audio, and
+//! export land in P3 per the phase plan.
+
+pub mod graph;
+
+/// Timeline-contract types the IR references ahead of the P2 data-model landing.
+///
+/// `01-data-model.md` §1/§3 pins these shapes; P2 moves them into
+/// `photonic_core::timeline` and this module becomes a re-export of that home
+/// (one import-path swap, no semantic change). Kept here so the P1 stub is
+/// self-contained and compile-checked without front-running P2's crate work.
+pub mod contract;
