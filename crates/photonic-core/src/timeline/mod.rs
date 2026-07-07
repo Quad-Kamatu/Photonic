@@ -65,7 +65,7 @@ pub use media::{
     AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe,
     ProbedColor, ProxyRef, ProxyStatus, VectorRef, VectorStateKey, VideoStreamInfo,
 };
-pub use ops::EditError;
+pub use ops::{ClipEdge, EditError};
 pub use prop_registry::{PropEntry, PropTargetKind};
 pub use sequence::{
     Marker, ProjectVideoSettings, Sequence, SequenceFormat, TimelineProject, Track, TrackKind,

@@ -33,8 +33,8 @@ use super::clip::{Clip, ClipEffect};
 use super::grade::Grade;
 use super::graph::{GraphEdge, GraphNode, GraphNodeParams, NodePos};
 use super::ids::*;
-use super::media::{AssetSource, MediaAsset};
-use super::sequence::{Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
+use super::media::{AssetSource, MediaAsset, MediaBin};
+use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
 use super::time::Tick;
 use crate::document::Document;
 use serde::{Deserialize, Serialize};
@@ -419,10 +419,16 @@ pub enum TimelineCmd {
     },
     MoveClip {
         seq: SequenceId,
+        /// The clip's track at apply time (source track for a cross-track move).
         track: TrackId,
         clip: ClipId,
         old_start: Tick,
         new_start: Tick,
+        /// Destination track for a cross-track move; `None` = same-track move.
+        /// Additive field (serde-defaulted) so pre-existing serialized
+        /// `MoveClip` commands stay loadable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_track: Option<TrackId>,
     },
     TrimClip {
         seq: SequenceId,
@@ -540,6 +546,45 @@ pub enum TimelineCmd {
     SetProjectGraph {
         old: Option<GraphId>,
         new: Option<GraphId>,
+    },
+    /// Add a sequence marker (01 §4).
+    AddMarker {
+        seq: SequenceId,
+        marker: Marker,
+    },
+    /// Remove a sequence marker (carries the full marker for a self-contained
+    /// inverse).
+    RemoveMarker {
+        seq: SequenceId,
+        marker: Marker,
+    },
+    /// Edit a marker's fields (name/color/note/position) — old/new full markers.
+    SetMarker {
+        seq: SequenceId,
+        id: MarkerId,
+        old: Marker,
+        new: Marker,
+    },
+    /// Set (or clear, with `None`) a sequence's preview/export work range.
+    SetWorkRange {
+        seq: SequenceId,
+        old: Option<(Tick, Tick)>,
+        new: Option<(Tick, Tick)>,
+    },
+    /// Add a media bin (folder) to the pool (01 §3).
+    AddBin {
+        bin: MediaBin,
+    },
+    /// Remove a media bin (inverse of `AddBin`). Assets referencing it are left
+    /// untouched (a dangling bin ref reads as unfiled/root); re-adding restores.
+    RemoveBin {
+        bin: MediaBin,
+    },
+    /// Move an asset into a bin (or to the pool root with `None`).
+    AssignAssetBin {
+        asset: AssetId,
+        old: Option<BinId>,
+        new: Option<BinId>,
     },
     GraphEdit(GraphCmd),
     CaptionEdit(CaptionCmd),
@@ -679,6 +724,12 @@ fn reorder<T>(v: &mut Vec<T>, new_order: &[usize]) {
             v.push(item);
         }
     }
+}
+
+/// Keep markers in a deterministic order (by tick, then id) so add/remove/set
+/// round-trip to an identical vector regardless of insertion order.
+fn sort_markers(markers: &mut [Marker]) {
+    markers.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
 }
 
 fn apply_timing_changes(
@@ -1477,6 +1528,13 @@ impl TimelineCmd {
             TimelineCmd::RemoveGraph { .. } => "Remove composition".into(),
             TimelineCmd::SetClipComposition { .. } => "Set composition".into(),
             TimelineCmd::SetProjectGraph { .. } => "Set project graph".into(),
+            TimelineCmd::AddMarker { .. } => "Add marker".into(),
+            TimelineCmd::RemoveMarker { .. } => "Remove marker".into(),
+            TimelineCmd::SetMarker { .. } => "Edit marker".into(),
+            TimelineCmd::SetWorkRange { .. } => "Set work range".into(),
+            TimelineCmd::AddBin { .. } => "Add bin".into(),
+            TimelineCmd::RemoveBin { .. } => "Remove bin".into(),
+            TimelineCmd::AssignAssetBin { .. } => "Move to bin".into(),
             TimelineCmd::GraphEdit(_) => "Edit composition".into(),
             TimelineCmd::CaptionEdit(_) => "Edit captions".into(),
             TimelineCmd::TtsEdit(_) => "Voiceover".into(),
@@ -1630,14 +1688,35 @@ impl TimelineCmd {
                 track,
                 clip,
                 new_start,
+                new_track,
                 ..
             } => {
-                if let Some(t) = find_track_mut(p, *track) {
-                    if let Some(pos) = t.clips.iter().position(|c| c.id == *clip) {
-                        let mut c = t.clips.remove(pos);
+                let dest = new_track.unwrap_or(*track);
+                if dest == *track {
+                    // Same-track move: reposition and keep the track sorted.
+                    if let Some(t) = find_track_mut(p, *track) {
+                        if let Some(pos) = t.clips.iter().position(|c| c.id == *clip) {
+                            let mut c = t.clips.remove(pos);
+                            c.start = *new_start;
+                            let i = t.insert_index_for(c.start);
+                            t.clips.insert(i, c);
+                        }
+                    }
+                } else {
+                    // Cross-track move: pull from the source track, insert into
+                    // the destination at its sorted position.
+                    let taken = find_track_mut(p, *track).and_then(|t| {
+                        t.clips
+                            .iter()
+                            .position(|c| c.id == *clip)
+                            .map(|pos| t.clips.remove(pos))
+                    });
+                    if let Some(mut c) = taken {
                         c.start = *new_start;
-                        let i = t.insert_index_for(c.start);
-                        t.clips.insert(i, c);
+                        if let Some(dt) = find_track_mut(p, dest) {
+                            let i = dt.insert_index_for(c.start);
+                            dt.clips.insert(i, c);
+                        }
                     }
                 }
             }
@@ -1789,6 +1868,42 @@ impl TimelineCmd {
             TimelineCmd::SetProjectGraph { new, .. } => {
                 p.project_graph = *new;
             }
+            TimelineCmd::AddMarker { seq, marker } => {
+                if let Some(s) = p.sequences.get_mut(seq) {
+                    s.markers.push(marker.clone());
+                    sort_markers(&mut s.markers);
+                }
+            }
+            TimelineCmd::RemoveMarker { seq, marker } => {
+                if let Some(s) = p.sequences.get_mut(seq) {
+                    s.markers.retain(|m| m.id != marker.id);
+                }
+            }
+            TimelineCmd::SetMarker { seq, id, new, .. } => {
+                if let Some(s) = p.sequences.get_mut(seq) {
+                    if let Some(m) = s.markers.iter_mut().find(|m| m.id == *id) {
+                        *m = new.clone();
+                    }
+                    sort_markers(&mut s.markers);
+                }
+            }
+            TimelineCmd::SetWorkRange { seq, new, .. } => {
+                if let Some(s) = p.sequences.get_mut(seq) {
+                    s.work_range = *new;
+                }
+            }
+            TimelineCmd::AddBin { bin } => {
+                p.media.bins.push(bin.clone());
+                p.media.bins.sort_by_key(|b| b.id);
+            }
+            TimelineCmd::RemoveBin { bin } => {
+                p.media.bins.retain(|b| b.id != bin.id);
+            }
+            TimelineCmd::AssignAssetBin { asset, new, .. } => {
+                if let Some(a) = p.media.assets.get_mut(asset) {
+                    a.bin = *new;
+                }
+            }
             TimelineCmd::GraphEdit(g) => g.apply(p),
             TimelineCmd::CaptionEdit(c) => c.apply(p),
             TimelineCmd::TtsEdit(t) => t.apply(p),
@@ -1891,13 +2006,20 @@ impl TimelineCmd {
                 clip,
                 old_start,
                 new_start,
-            } => TimelineCmd::MoveClip {
-                seq: *seq,
-                track: *track,
-                clip: *clip,
-                old_start: *new_start,
-                new_start: *old_start,
-            },
+                new_track,
+            } => {
+                // After apply the clip lives on `dest`; the inverse moves it
+                // back from `dest` to the original `track` at `old_start`.
+                let dest = new_track.unwrap_or(*track);
+                TimelineCmd::MoveClip {
+                    seq: *seq,
+                    track: dest,
+                    clip: *clip,
+                    old_start: *new_start,
+                    new_start: *old_start,
+                    new_track: new_track.map(|_| *track),
+                }
+            }
             TimelineCmd::TrimClip {
                 seq,
                 track,
@@ -2109,6 +2231,32 @@ impl TimelineCmd {
                 old: *new,
                 new: *old,
             },
+            TimelineCmd::AddMarker { seq, marker } => TimelineCmd::RemoveMarker {
+                seq: *seq,
+                marker: marker.clone(),
+            },
+            TimelineCmd::RemoveMarker { seq, marker } => TimelineCmd::AddMarker {
+                seq: *seq,
+                marker: marker.clone(),
+            },
+            TimelineCmd::SetMarker { seq, id, old, new } => TimelineCmd::SetMarker {
+                seq: *seq,
+                id: *id,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::SetWorkRange { seq, old, new } => TimelineCmd::SetWorkRange {
+                seq: *seq,
+                old: *new,
+                new: *old,
+            },
+            TimelineCmd::AddBin { bin } => TimelineCmd::RemoveBin { bin: bin.clone() },
+            TimelineCmd::RemoveBin { bin } => TimelineCmd::AddBin { bin: bin.clone() },
+            TimelineCmd::AssignAssetBin { asset, old, new } => TimelineCmd::AssignAssetBin {
+                asset: *asset,
+                old: *new,
+                new: *old,
+            },
             TimelineCmd::GraphEdit(g) => TimelineCmd::GraphEdit(g.inverse()?),
             TimelineCmd::CaptionEdit(c) => TimelineCmd::CaptionEdit(c.inverse()?),
             TimelineCmd::TtsEdit(t) => TimelineCmd::TtsEdit(t.inverse()?),
@@ -2131,14 +2279,18 @@ impl TimelineCmd {
                 MoveClip {
                     clip: c2,
                     new_start,
+                    new_track,
                     ..
                 },
             ) if clip == c2 => Some(MoveClip {
                 seq: *seq,
+                // Keep the anchor's source track + before-state; adopt the
+                // incoming destination + position (a drag may cross tracks).
                 track: *track,
                 clip: *clip,
                 old_start: *old_start,
                 new_start: *new_start,
+                new_track: *new_track,
             }),
             (
                 TrimClip {

@@ -51,6 +51,10 @@ pub struct MediaAsset {
     /// xxh3 of file head+tail+len — the relink identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    /// Containing bin (folder), or `None` for the pool root/unfiled (01 §3).
+    /// Additive field: v3 files written before bins load with this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<BinId>,
 }
 
 impl MediaAsset {
@@ -62,6 +66,7 @@ impl MediaAsset {
             probe: None,
             proxy: None,
             content_hash: None,
+            bin: None,
         }
     }
 

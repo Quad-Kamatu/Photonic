@@ -20,7 +20,8 @@ use super::commands::{
 use super::grade::Grade;
 use super::graph::NodeGraph;
 use super::ids::*;
-use super::sequence::{Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
+use super::media::MediaBin;
+use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
 use super::time::Tick;
 use std::path::PathBuf;
 
@@ -325,6 +326,8 @@ pub fn remove_clip(
     })
 }
 
+/// Move a clip within its track. Signature preserved for existing callers;
+/// cross-track moves use [`move_clip_to_track`].
 pub fn move_clip(
     p: &TimelineProject,
     id: SequenceId,
@@ -332,21 +335,59 @@ pub fn move_clip(
     clip_id: ClipId,
     new_start: Tick,
 ) -> Result<TimelineCmd, EditError> {
+    move_clip_to_track(p, id, track_id, clip_id, new_start, None)
+}
+
+/// Move a clip, optionally to a different track (`new_track = Some(dest)`).
+/// The destination must be the same [`TrackKind`] and have room at `new_start`
+/// (non-overlap enforced here). Inverse returns the clip to its original
+/// track + position (lossless).
+pub fn move_clip_to_track(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    new_start: Tick,
+    new_track: Option<TrackId>,
+) -> Result<TimelineCmd, EditError> {
     if new_start.0 < 0 {
         return Err(EditError::Overlap);
     }
     let s = seq(p, id)?;
-    let t = track(s, track_id)?;
-    let c = clip(t, clip_id)?;
-    if overlaps_other(t, new_start, new_start + c.duration, Some(clip_id)) {
-        return Err(EditError::Overlap);
+    let src = track(s, track_id)?;
+    let c = clip(src, clip_id)?;
+
+    // Normalize: a `Some(same)` destination is really a same-track move.
+    let dest_id = match new_track {
+        Some(t) if t != track_id => Some(t),
+        _ => None,
+    };
+
+    match dest_id {
+        None => {
+            if overlaps_other(src, new_start, new_start + c.duration, Some(clip_id)) {
+                return Err(EditError::Overlap);
+            }
+        }
+        Some(dest) => {
+            let dst = track(s, dest)?;
+            if dst.kind != src.kind {
+                return Err(EditError::NoTrack(dest));
+            }
+            // On the destination the clip is new — nothing to ignore.
+            if overlaps_other(dst, new_start, new_start + c.duration, None) {
+                return Err(EditError::Overlap);
+            }
+        }
     }
+
     Ok(TimelineCmd::MoveClip {
         seq: id,
         track: track_id,
         clip: clip_id,
         old_start: c.start,
         new_start,
+        new_track: dest_id,
     })
 }
 
@@ -453,6 +494,102 @@ pub fn ripple_delete(
             changes,
         },
     ])
+}
+
+/// Which edge of a clip a trim targets.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ClipEdge {
+    Start,
+    End,
+}
+
+/// Ripple-trim one edge of a clip to `new_boundary` (a timeline tick) and shift
+/// every later clip on the same track by the resulting delta, closing the gap
+/// (04 §2.4 "Shift + edge" ripple; distinct from [`ripple_delete`]).
+///
+/// - **End edge**: the clip's out-point moves to `new_boundary` (duration
+///   `= new_boundary - start`); later clips shift by `new_boundary - old_end`.
+/// - **Start edge**: the clip's in-point moves; the clip keeps its timeline
+///   `start`, its `source_in` advances by the delta (`speed`-scaled) and its
+///   duration shrinks/grows by the delta; later clips shift by `-delta` so the
+///   left gap closes. `new_boundary` is the new in-point position on the timeline.
+///
+/// Emitted as a single `RippleEdit` command (one undo step) whose changes list
+/// carries the trimmed clip plus every shifted clip — invariant-safe by
+/// construction and inverted by the existing `RippleEdit` logic.
+pub fn ripple_trim(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    edge: ClipEdge,
+    new_boundary: Tick,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let c = clip(t, clip_id)?;
+    let old_start = c.start;
+    let old_end = c.end();
+
+    let (trimmed, shift) = match edge {
+        ClipEdge::End => {
+            if new_boundary <= old_start {
+                return Err(EditError::NonPositiveDuration);
+            }
+            let new_dur = new_boundary - old_start;
+            let delta = new_boundary - old_end;
+            (
+                ClipTiming {
+                    start: old_start,
+                    duration: new_dur,
+                    source_in: c.source_in,
+                },
+                delta,
+            )
+        }
+        ClipEdge::Start => {
+            let delta = new_boundary - old_start;
+            let new_dur = c.duration - delta;
+            if new_dur.0 <= 0 {
+                return Err(EditError::NonPositiveDuration);
+            }
+            let new_source_in = c.source_in + c.speed.source_delta(delta);
+            if new_source_in.0 < 0 {
+                // Cannot pull the in-point before the start of the source media.
+                return Err(EditError::InvalidSplit);
+            }
+            (
+                ClipTiming {
+                    start: old_start,
+                    duration: new_dur,
+                    source_in: new_source_in,
+                },
+                // Later clips move opposite the in-point drag to close the gap.
+                Tick(-delta.0),
+            )
+        }
+    };
+
+    let mut changes = vec![(clip_id, ClipTiming::of(c), trimmed)];
+    for other in &t.clips {
+        if other.id != clip_id && other.start >= old_end {
+            let old = ClipTiming::of(other);
+            changes.push((
+                other.id,
+                old,
+                ClipTiming {
+                    start: other.start + shift,
+                    ..old
+                },
+            ));
+        }
+    }
+
+    Ok(TimelineCmd::RippleEdit {
+        seq: id,
+        track: track_id,
+        changes,
+    })
 }
 
 /// Roll the shared edit point between two adjacent clips.
@@ -940,4 +1077,114 @@ fn seq_of_track(p: &TimelineProject, id: TrackId) -> Result<&Sequence, EditError
         .values()
         .find(|s| s.track(id).is_some())
         .ok_or(EditError::NoTrack(id))
+}
+
+// ── Markers & work range ────────────────────────────────────────────────────
+
+/// Add a marker to a sequence. The caller supplies the fully-built `Marker`
+/// (name/color/note/position); `Marker::new` fills a fresh `MarkerId`.
+pub fn add_marker(
+    p: &TimelineProject,
+    id: SequenceId,
+    marker: Marker,
+) -> Result<TimelineCmd, EditError> {
+    seq(p, id)?;
+    Ok(TimelineCmd::AddMarker { seq: id, marker })
+}
+
+pub fn remove_marker(
+    p: &TimelineProject,
+    id: SequenceId,
+    marker_id: MarkerId,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let marker = s
+        .markers
+        .iter()
+        .find(|m| m.id == marker_id)
+        .ok_or(EditError::IndexOutOfRange)?
+        .clone();
+    Ok(TimelineCmd::RemoveMarker { seq: id, marker })
+}
+
+/// Edit a marker's fields (name/color/note/position). `new.id` identifies the
+/// marker; the op captures the old state for a self-contained inverse.
+pub fn set_marker(
+    p: &TimelineProject,
+    id: SequenceId,
+    new: Marker,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let old = s
+        .markers
+        .iter()
+        .find(|m| m.id == new.id)
+        .ok_or(EditError::IndexOutOfRange)?
+        .clone();
+    Ok(TimelineCmd::SetMarker {
+        seq: id,
+        id: new.id,
+        old,
+        new,
+    })
+}
+
+/// Set (or clear, with `None`) a sequence's preview/export work range.
+pub fn set_work_range(
+    p: &TimelineProject,
+    id: SequenceId,
+    new: Option<(Tick, Tick)>,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    Ok(TimelineCmd::SetWorkRange {
+        seq: id,
+        old: s.work_range,
+        new,
+    })
+}
+
+// ── Media bins ──────────────────────────────────────────────────────────────
+
+/// Create a media bin (folder), optionally nested under `parent`.
+pub fn create_bin(name: impl Into<String>, parent: Option<BinId>) -> TimelineCmd {
+    TimelineCmd::AddBin {
+        bin: MediaBin::new(name, parent),
+    }
+}
+
+/// Remove a media bin. Assets/child bins referencing it are left untouched (a
+/// dangling ref reads as unfiled); re-adding restores the bin verbatim.
+pub fn remove_bin(p: &TimelineProject, bin_id: BinId) -> Result<TimelineCmd, EditError> {
+    let bin = p
+        .media
+        .bins
+        .iter()
+        .find(|b| b.id == bin_id)
+        .ok_or(EditError::IndexOutOfRange)?
+        .clone();
+    Ok(TimelineCmd::RemoveBin { bin })
+}
+
+/// Move an asset into `new_bin` (or to the pool root with `None`).
+pub fn assign_asset_bin(
+    p: &TimelineProject,
+    asset: AssetId,
+    new_bin: Option<BinId>,
+) -> Result<TimelineCmd, EditError> {
+    let a = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?;
+    // A target bin, if given, must exist.
+    if let Some(b) = new_bin {
+        if !p.media.bins.iter().any(|bin| bin.id == b) {
+            return Err(EditError::IndexOutOfRange);
+        }
+    }
+    Ok(TimelineCmd::AssignAssetBin {
+        asset,
+        old: a.bin,
+        new: new_bin,
+    })
 }

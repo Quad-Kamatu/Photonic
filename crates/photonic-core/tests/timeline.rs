@@ -390,6 +390,200 @@ fn nested_sequence_cycle_is_rejected() {
     );
 }
 
+// ── Follow-up gaps: markers, work range, cross-track move, ripple-trim, bins ──
+
+#[test]
+fn marker_and_work_range_ops_roundtrip() {
+    let f = fixture();
+    let p = f.project();
+
+    let add = ops::add_marker(p, f.seq, Marker::new(Tick(500), "cue A")).unwrap();
+    assert_undo_roundtrip(&f.doc, &add);
+    let set_wr = ops::set_work_range(p, f.seq, Some((Tick(100), Tick(1500)))).unwrap();
+    assert_undo_roundtrip(&f.doc, &set_wr);
+
+    // After adding two markers, remove and edit round-trip against that state.
+    let mut d = f.doc.clone();
+    Command::Timeline(add.clone()).apply(&mut d);
+    let m2 = Marker::new(Tick(200), "cue B");
+    let m2_id = m2.id;
+    Command::Timeline(ops::add_marker(d.timeline.as_ref().unwrap(), f.seq, m2).unwrap())
+        .apply(&mut d);
+
+    let rem = ops::remove_marker(d.timeline.as_ref().unwrap(), f.seq, m2_id).unwrap();
+    assert_undo_roundtrip(&d, &rem);
+
+    let mut edited = Marker::new(Tick(900), "renamed");
+    edited.id = m2_id; // edit the existing marker (id preserved)
+    edited.note = "note".into();
+    let set = ops::set_marker(d.timeline.as_ref().unwrap(), f.seq, edited).unwrap();
+    assert_undo_roundtrip(&d, &set);
+
+    // Clearing the work range (None) also round-trips.
+    let mut d2 = f.doc.clone();
+    Command::Timeline(set_wr).apply(&mut d2);
+    let clear = ops::set_work_range(d2.timeline.as_ref().unwrap(), f.seq, None).unwrap();
+    assert_undo_roundtrip(&d2, &clear);
+}
+
+#[test]
+fn media_bin_ops_roundtrip() {
+    let f = fixture();
+    // Put an asset in the pool first.
+    let mut d = f.doc.clone();
+    let asset = MediaAsset::from_file(AssetKind::Video, "/clips/a.mp4");
+    let asset_id = asset.id;
+    Command::Timeline(ops::add_asset(asset)).apply(&mut d);
+
+    let create = ops::create_bin("Footage", None);
+    assert_undo_roundtrip(&d, &create);
+    Command::Timeline(create.clone()).apply(&mut d);
+    let bin_id = match &create {
+        TimelineCmd::AddBin { bin } => bin.id,
+        _ => unreachable!(),
+    };
+
+    let assign =
+        ops::assign_asset_bin(d.timeline.as_ref().unwrap(), asset_id, Some(bin_id)).unwrap();
+    assert_undo_roundtrip(&d, &assign);
+    Command::Timeline(assign).apply(&mut d);
+    assert_eq!(
+        d.timeline.as_ref().unwrap().media.assets[&asset_id].bin,
+        Some(bin_id)
+    );
+
+    let remove = ops::remove_bin(d.timeline.as_ref().unwrap(), bin_id).unwrap();
+    assert_undo_roundtrip(&d, &remove);
+
+    // Assigning to a nonexistent bin is rejected.
+    assert_eq!(
+        ops::assign_asset_bin(d.timeline.as_ref().unwrap(), asset_id, Some(BinId::new())),
+        Err(ops::EditError::IndexOutOfRange)
+    );
+}
+
+#[test]
+fn cross_track_move_roundtrip_and_invariants() {
+    let f = fixture();
+    // Add a second video track to move onto.
+    let mut d = f.doc.clone();
+    let v2 = Track::new(TrackKind::Video, "V2");
+    let v2_id = v2.id;
+    Command::Timeline(ops::add_track(d.timeline.as_ref().unwrap(), f.seq, v2, None).unwrap())
+        .apply(&mut d);
+
+    // Move clip B from V1 to V2 (lossless inverse returns it).
+    let mv = ops::move_clip_to_track(
+        d.timeline.as_ref().unwrap(),
+        f.seq,
+        f.vtrack,
+        f.clip_b,
+        Tick(0),
+        Some(v2_id),
+    )
+    .unwrap();
+    assert_undo_roundtrip(&d, &mv);
+
+    // Apply it: B leaves V1, lands on V2.
+    let mut d2 = d.clone();
+    Command::Timeline(mv).apply(&mut d2);
+    let seq = &d2.timeline.as_ref().unwrap().sequences[&f.seq];
+    assert!(seq
+        .track(f.vtrack)
+        .unwrap()
+        .clips
+        .iter()
+        .all(|c| c.id != f.clip_b));
+    assert!(seq
+        .track(v2_id)
+        .unwrap()
+        .clips
+        .iter()
+        .any(|c| c.id == f.clip_b));
+    assert!(seq.validate().is_ok());
+
+    // Moving onto an occupied region of the destination is rejected.
+    let occupied = ops::move_clip_to_track(
+        d.timeline.as_ref().unwrap(),
+        f.seq,
+        f.vtrack,
+        f.clip_b,
+        Tick(0), // clip A occupies 0..1000 on V1; move onto V1 start collides via A
+        None,
+    );
+    assert_eq!(occupied, Err(ops::EditError::Overlap));
+
+    // Cross-kind moves (video → audio) are rejected.
+    let wrong_kind = ops::move_clip_to_track(
+        d.timeline.as_ref().unwrap(),
+        f.seq,
+        f.vtrack,
+        f.clip_a,
+        Tick(3000),
+        Some(f.atrack),
+    );
+    assert_eq!(wrong_kind, Err(ops::EditError::NoTrack(f.atrack)));
+
+    // The plain 5-arg move_clip still works (same-track) and round-trips.
+    let same = ops::move_clip(
+        d.timeline.as_ref().unwrap(),
+        f.seq,
+        f.vtrack,
+        f.clip_b,
+        Tick(2200),
+    )
+    .unwrap();
+    assert_undo_roundtrip(&d, &same);
+}
+
+#[test]
+fn ripple_trim_end_and_start() {
+    let f = fixture();
+    let p = f.project();
+    // V1: A[0..1000], B[1000..2000]. Ripple-trim A's END to 600 → A[0..600],
+    // and B shifts left by -400 to [600..1600].
+    let end = ops::ripple_trim(p, f.seq, f.vtrack, f.clip_a, ClipEdge::End, Tick(600)).unwrap();
+    assert_undo_roundtrip(&f.doc, &end);
+    let mut d = f.doc.clone();
+    Command::Timeline(end).apply(&mut d);
+    let seq = &d.timeline.as_ref().unwrap().sequences[&f.seq];
+    let clips = &seq.track(f.vtrack).unwrap().clips;
+    assert_eq!(clips[0].duration, Tick(600));
+    assert_eq!(clips[1].start, Tick(600));
+    assert_eq!(clips[1].end(), Tick(1600));
+    assert!(seq.validate().is_ok());
+
+    // Ripple-trim B's START later to 1200 → B head trimmed by 200, B keeps its
+    // timeline start, later clips (none) unaffected; invariant holds.
+    let start = ops::ripple_trim(
+        f.project(),
+        f.seq,
+        f.vtrack,
+        f.clip_b,
+        ClipEdge::Start,
+        Tick(1200),
+    )
+    .unwrap();
+    assert_undo_roundtrip(&f.doc, &start);
+    let mut d2 = f.doc.clone();
+    Command::Timeline(start).apply(&mut d2);
+    let seq2 = &d2.timeline.as_ref().unwrap().sequences[&f.seq];
+    assert!(seq2.validate().is_ok());
+
+    // Trimming the end before the start is rejected.
+    assert_eq!(
+        ops::ripple_trim(
+            f.project(),
+            f.seq,
+            f.vtrack,
+            f.clip_a,
+            ClipEdge::End,
+            Tick(0)
+        ),
+        Err(ops::EditError::NonPositiveDuration)
+    );
+}
+
 // ── Serde round-trip ────────────────────────────────────────────────────────
 
 #[test]
@@ -506,6 +700,8 @@ enum RandomEdit {
     Trim { idx: usize, start: i64, dur: i64 },
     Remove { idx: usize },
     Split { idx: usize, at: i64 },
+    RippleTrimEnd { idx: usize, boundary: i64 },
+    RippleTrimStart { idx: usize, boundary: i64 },
 }
 
 fn edit_strategy() -> impl Strategy<Value = RandomEdit> {
@@ -519,6 +715,10 @@ fn edit_strategy() -> impl Strategy<Value = RandomEdit> {
         }),
         (0usize..8).prop_map(|idx| RandomEdit::Remove { idx }),
         (0usize..8, 0i64..6000).prop_map(|(idx, at)| RandomEdit::Split { idx, at }),
+        (0usize..8, 0i64..6000)
+            .prop_map(|(idx, boundary)| RandomEdit::RippleTrimEnd { idx, boundary }),
+        (0usize..8, 0i64..6000)
+            .prop_map(|(idx, boundary)| RandomEdit::RippleTrimStart { idx, boundary }),
     ]
 }
 
@@ -560,6 +760,16 @@ proptest! {
                 }
                 RandomEdit::Split { idx, at } => {
                     nth_id(idx).and_then(|id| ops::split_clip(p, f.seq, f.vtrack, id, Tick(at)).ok())
+                }
+                RandomEdit::RippleTrimEnd { idx, boundary } => {
+                    nth_id(idx).and_then(|id| ops::ripple_trim(
+                        p, f.seq, f.vtrack, id, ClipEdge::End, Tick(boundary),
+                    ).ok())
+                }
+                RandomEdit::RippleTrimStart { idx, boundary } => {
+                    nth_id(idx).and_then(|id| ops::ripple_trim(
+                        p, f.seq, f.vtrack, id, ClipEdge::Start, Tick(boundary),
+                    ).ok())
                 }
             };
 
