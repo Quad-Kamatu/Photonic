@@ -4,6 +4,16 @@ version.workspace = true
 edition = "2021"
 license.workspace = true
 
+[features]
+# TDD contract tests for the video-editor P1 prerequisite (revision counter +
+# affected-node tracking, docs/specs/video-editor/03-render-color-pipeline.md
+# §2.1). Off by default so `cargo test --workspace` stays green: the API
+# these tests target (CommandHistory::revision/changes_since, Command::
+# affected_nodes, ChangeSummary) does not exist yet, so enabling this feature
+# is EXPECTED to fail to compile until P1 lands it. See
+# docs/specs/video-editor/14-qa-spec.md §5 for the rationale.
+video-p1-contract = []
+
 [dependencies]
 kurbo = { workspace = true }
 peniko = { workspace = true }
