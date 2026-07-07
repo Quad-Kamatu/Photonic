@@ -3296,7 +3296,7 @@ impl PhotonicApp {
             .default_height(220.0)
             .min_height(120.0)
             .show_animated(ctx, self.mode == AppMode::Video, |ui| {
-                timeline::draw_timeline_panel(ui);
+                self.draw_timeline_panel(ui, doc, history);
             });
 
         // ── Audit panel (floating window) ────────────────────────────────────
