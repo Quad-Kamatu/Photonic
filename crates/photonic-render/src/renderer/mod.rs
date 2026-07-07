@@ -494,11 +494,55 @@ impl PhotonicRenderer {
             self.pending_texts.clear();
             self.pending_path_text.clear();
             let mut nodes: Vec<NodeSnapshot> = Vec::new();
+
+            // Fold each layer's opacity + blend mode onto its nodes so layer-level
+            // compositing previews live. This is the live-canvas approximation (the
+            // export path composites each layer exactly as an isolated unit; true
+            // on-canvas isolation for the backdrop-read blend modes is #226). Only
+            // layers that differ from opaque/Normal are mapped, so the common case
+            // costs nothing.
+            let mut layer_fold: std::collections::HashMap<
+                photonic_core::node::NodeId,
+                (f32, BlendMode),
+            > = std::collections::HashMap::new();
+            for lid in &doc.layer_order {
+                if let Some(layer) = doc.layers.get(lid) {
+                    if (layer.opacity - 1.0).abs() > f32::EPSILON
+                        || layer.blend_mode != BlendMode::Normal
+                    {
+                        for n in doc.draw_nodes_in_layer(lid) {
+                            layer_fold.insert(n.id, (layer.opacity, layer.blend_mode));
+                        }
+                    }
+                }
+            }
+
             for node in doc.nodes_in_draw_order() {
                 // Symbol instances render from the *current* master so master
                 // edits and per-instance overrides take effect live.
+                let orig_id = node.id;
                 let resolved = doc.resolve_render_node(node);
-                let node = resolved.as_ref();
+                let base = resolved.as_ref();
+                // Apply the owning layer's opacity/blend (folded onto a copy so the
+                // rest of the loop transparently uses the composited values).
+                let (lmul, lblend) = layer_fold
+                    .get(&orig_id)
+                    .copied()
+                    .unwrap_or((1.0, BlendMode::Normal));
+                let folded_node;
+                let node = if (lmul - 1.0).abs() > f32::EPSILON || lblend != BlendMode::Normal {
+                    let mut f = base.clone();
+                    f.opacity *= lmul;
+                    // Node keeps its own non-Normal blend; otherwise it inherits the
+                    // layer's, so the layer's content blends against the backdrop.
+                    if f.blend_mode == BlendMode::Normal {
+                        f.blend_mode = lblend;
+                    }
+                    folded_node = f;
+                    &folded_node
+                } else {
+                    base
+                };
                 match &node.kind {
                     SceneNodeKind::Text(text_node) => {
                         // Text-on-path: render glyph outlines along the spine as
