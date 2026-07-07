@@ -421,6 +421,10 @@ struct ObjectOptionsDialog {
     // Group-node only:
     is_group: bool,
     clip_children: bool,
+    // Pristine originals, captured at open, for live-preview revert (Cancel) and
+    // the single undo step (OK: orig → edited).
+    orig_layer: Option<photonic_core::layer::Layer>,
+    orig_node: Option<photonic_core::node::SceneNode>,
 }
 
 impl ObjectOptionsDialog {
@@ -438,6 +442,8 @@ impl ObjectOptionsDialog {
             color: l.color.unwrap_or([0.42, 0.51, 0.9, 1.0]),
             is_group: false,
             clip_children: false,
+            orig_layer: Some(l.clone()),
+            orig_node: None,
         }
     }
 
@@ -462,7 +468,37 @@ impl ObjectOptionsDialog {
             color: [0.42, 0.51, 0.9, 1.0],
             is_group,
             clip_children,
+            orig_layer: None,
+            orig_node: Some(n.clone()),
         }
+    }
+
+    /// The layer's fields set to this dialog's currently-edited values (a template
+    /// layer is implicitly locked). Used for live preview and the final command.
+    fn edited_layer(&self, base: &photonic_core::layer::Layer) -> photonic_core::layer::Layer {
+        let mut l = base.clone();
+        l.name = self.name.clone();
+        l.visible = self.visible;
+        l.locked = if self.is_template { true } else { self.locked };
+        l.opacity = self.opacity.clamp(0.0, 1.0);
+        l.blend_mode = self.blend_mode;
+        l.is_template = self.is_template;
+        l.color = if self.color_enabled { Some(self.color) } else { None };
+        l
+    }
+
+    /// The node with this dialog's currently-edited values applied.
+    fn edited_node(&self, base: &photonic_core::node::SceneNode) -> photonic_core::node::SceneNode {
+        let mut n = base.clone();
+        n.name = self.name.clone();
+        n.visible = self.visible;
+        n.locked = self.locked;
+        n.opacity = self.opacity.clamp(0.0, 1.0);
+        n.blend_mode = self.blend_mode;
+        if let photonic_core::node::SceneNodeKind::Group(g) = &mut n.kind {
+            g.clip_children = self.clip_children;
+        }
+        n
     }
 }
 

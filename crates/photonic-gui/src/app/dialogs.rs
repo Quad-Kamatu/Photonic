@@ -741,52 +741,96 @@ impl PhotonicApp {
                 });
             });
 
+        // ── Live preview ──────────────────────────────────────────────────────
+        // Apply the edited values straight to the document every frame so the
+        // canvas updates while dragging. This is NOT recorded in history — OK
+        // commits a single undo step and Cancel/close reverts to the original.
+        {
+            let dlg = self.object_options_dialog.as_ref().unwrap();
+            match dlg.target {
+                OptionsTarget::Layer(lid) => {
+                    if let Some(cur) = doc.layers.get(&lid) {
+                        let edited = dlg.edited_layer(cur);
+                        if let Some(slot) = doc.layers.get_mut(&lid) {
+                            *slot = edited;
+                        }
+                    }
+                }
+                OptionsTarget::Node(nid) => {
+                    if let Some(cur) = doc.nodes.get(&nid) {
+                        let edited = dlg.edited_node(cur);
+                        if let Some(slot) = doc.nodes.get_mut(&nid) {
+                            *slot = edited;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cancel or window close: revert the live preview, no undo entry.
         if !open || act == A::Cancel {
-            self.object_options_dialog = None;
+            if let Some(dlg) = self.object_options_dialog.take() {
+                match dlg.target {
+                    OptionsTarget::Layer(lid) => {
+                        if let (Some(orig), Some(slot)) =
+                            (dlg.orig_layer, doc.layers.get_mut(&lid))
+                        {
+                            *slot = orig;
+                        }
+                    }
+                    OptionsTarget::Node(nid) => {
+                        if let (Some(orig), Some(slot)) = (dlg.orig_node, doc.nodes.get_mut(&nid)) {
+                            *slot = orig;
+                        }
+                    }
+                }
+            }
             return;
         }
+
+        // OK: the doc already holds the edited state (from the preview). Restore
+        // the original, then execute one command orig → edited so it's a single,
+        // clean undo step.
         if act == A::Ok {
             if let Some(dlg) = self.object_options_dialog.take() {
                 match dlg.target {
                     OptionsTarget::Layer(layer_id) => {
-                        if let Some(layer) = doc.layers.get(&layer_id) {
-                            let new_color = if dlg.color_enabled { Some(dlg.color) } else { None };
-                            // A template layer is implicitly locked.
-                            let new_locked = if dlg.is_template { true } else { dlg.locked };
+                        if let (Some(orig), Some(edited)) =
+                            (dlg.orig_layer.clone(), doc.layers.get(&layer_id).cloned())
+                        {
+                            if let Some(slot) = doc.layers.get_mut(&layer_id) {
+                                *slot = orig.clone();
+                            }
                             let cmd = Command::UpdateLayer {
                                 layer_id,
-                                old_name: layer.name.clone(),
-                                new_name: dlg.name.clone(),
-                                old_visible: layer.visible,
-                                new_visible: dlg.visible,
-                                old_locked: layer.locked,
-                                new_locked,
-                                old_color: layer.color,
-                                new_color,
-                                old_is_template: layer.is_template,
-                                new_is_template: dlg.is_template,
-                                old_opacity: layer.opacity,
-                                new_opacity: dlg.opacity.clamp(0.0, 1.0),
-                                old_blend_mode: layer.blend_mode,
-                                new_blend_mode: dlg.blend_mode,
+                                old_name: orig.name.clone(),
+                                new_name: edited.name.clone(),
+                                old_visible: orig.visible,
+                                new_visible: edited.visible,
+                                old_locked: orig.locked,
+                                new_locked: edited.locked,
+                                old_color: orig.color,
+                                new_color: edited.color,
+                                old_is_template: orig.is_template,
+                                new_is_template: edited.is_template,
+                                old_opacity: orig.opacity,
+                                new_opacity: edited.opacity,
+                                old_blend_mode: orig.blend_mode,
+                                new_blend_mode: edited.blend_mode,
                             };
                             history.execute(cmd, doc);
                         }
                     }
                     OptionsTarget::Node(node_id) => {
-                        if let Some(node) = doc.nodes.get(&node_id) {
-                            let mut new_node = node.clone();
-                            new_node.name = dlg.name.clone();
-                            new_node.visible = dlg.visible;
-                            new_node.locked = dlg.locked;
-                            new_node.opacity = dlg.opacity.clamp(0.0, 1.0);
-                            new_node.blend_mode = dlg.blend_mode;
-                            if let photonic_core::node::SceneNodeKind::Group(g) = &mut new_node.kind {
-                                g.clip_children = dlg.clip_children;
+                        if let (Some(orig), Some(edited)) =
+                            (dlg.orig_node.clone(), doc.nodes.get(&node_id).cloned())
+                        {
+                            if let Some(slot) = doc.nodes.get_mut(&node_id) {
+                                *slot = orig.clone();
                             }
                             let cmd = Command::UpdateNode {
-                                old: node.clone(),
-                                new: new_node,
+                                old: orig,
+                                new: edited,
                             };
                             history.execute(cmd, doc);
                         }
