@@ -1702,6 +1702,51 @@ mod blend_tests {
         );
     }
 
+    /// P4 (headless): a Stroke layer style paints an outline. A small RED rect
+    /// centred in the canvas with a thick GREEN stroke → the rect's edge is green.
+    #[test]
+    fn stroke_effect_paints_outline() {
+        use photonic_core::effects::{LayerEffect, StrokeEffect};
+        use photonic_core::style::{Fill, StrokeAlign};
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping stroke-effect test");
+            return;
+        };
+        let mut doc = Document::new("st", 40.0, 40.0);
+        let mut node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(10.0, 10.0, 20.0, 20.0))
+                    .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        node.effects.push(LayerEffect::Stroke(StrokeEffect {
+            enabled: true,
+            width: 6.0,
+            position: StrokeAlign::Center,
+            fill: Fill::solid(Color::new(0.0, 1.0, 0.0, 1.0)),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+        }));
+        doc.add_node(node, None);
+
+        let png = r.render_png_at_size(&doc, 40, 40);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        // On the rect's edge (x=10, y=20): green stroke (centred → straddles edge).
+        let edge = img.get_pixel(10, 20).0;
+        // Interior (x=20, y=20): still red fill.
+        let interior = img.get_pixel(20, 20).0;
+        assert!(
+            edge[1] > 180 && edge[0] < 80,
+            "stroke edge should be green, got {edge:?}"
+        );
+        assert!(
+            interior[0] > 180 && interior[1] < 80,
+            "interior should stay red, got {interior:?}"
+        );
+    }
+
     /// P7 (headless): a non-print layer stays off exports. A full-canvas BLUE
     /// non-print layer over a RED print layer → export shows RED.
     #[test]

@@ -144,23 +144,36 @@ fn composite_node(
                 node.blend_mode,
                 pn,
             );
-            // Layer Styles rendered on the CPU reference path (effect-by-effect).
+            // Layer Styles rendered on the CPU reference path, in stack order
+            // (over-fill effects; below-fill shadows migrate here later).
+            use photonic_core::effects::LayerEffect;
             for eff in &node.effects {
-                if let photonic_core::effects::LayerEffect::ColorOverlay(co) = eff {
-                    if co.enabled {
-                        render_color_overlay(
-                            target,
-                            w,
-                            h,
-                            view,
-                            cov,
-                            &node.transform,
-                            node.opacity,
-                            gop,
-                            pn,
-                            co,
-                        );
-                    }
+                match eff {
+                    LayerEffect::ColorOverlay(co) if co.enabled => render_color_overlay(
+                        target,
+                        w,
+                        h,
+                        view,
+                        cov,
+                        &node.transform,
+                        node.opacity,
+                        gop,
+                        pn,
+                        co,
+                    ),
+                    LayerEffect::Stroke(st) if st.enabled => render_stroke_effect(
+                        target,
+                        w,
+                        h,
+                        view,
+                        cov,
+                        &node.transform,
+                        node.opacity,
+                        gop,
+                        pn,
+                        st,
+                    ),
+                    _ => {}
                 }
             }
         }
@@ -262,6 +275,49 @@ fn render_color_overlay(
     if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
         let rgb = [overlay.color.r, overlay.color.g, overlay.color.b];
         composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |_, _| (rgb, a));
+    }
+}
+
+/// Composite a Stroke effect: an outline hugging the shape edge, at the effect's
+/// width, colour, blend and opacity. v1 renders a solid, centred stroke (the CPU
+/// reference draws all strokes centred); gradient/pattern stroke and outside/
+/// inside positioning are follow-ups.
+#[allow(clippy::too_many_arguments)]
+fn render_stroke_effect(
+    base: &mut [u8],
+    w: u32,
+    h: u32,
+    view: &CanvasView,
+    cov: &mut [f32],
+    transform: &Transform,
+    node_opacity: f32,
+    gop: f32,
+    pn: &photonic_core::node::PathNode,
+    stroke: &photonic_core::effects::StrokeEffect,
+) {
+    use photonic_core::style::{FillKind, LineCap, LineJoin};
+    if stroke.width <= 0.0 {
+        return;
+    }
+    let FillKind::Solid(c) = &stroke.fill.kind else {
+        return; // gradient/pattern stroke paint: follow-up
+    };
+    let a = c.a * stroke.fill.opacity * stroke.opacity * node_opacity * gop;
+    if a <= 0.0 {
+        return;
+    }
+    let m = &transform.matrix;
+    let obj_scale = (m[0] * m[3] - m[1] * m[2]).abs().sqrt().max(1e-6);
+    let mesh = tessellate_stroke(
+        &pn.path_data,
+        (stroke.width as f64 / obj_scale) as f32,
+        LineCap::Butt,
+        LineJoin::Miter,
+        4.0,
+    );
+    if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
+        let rgb = [c.r, c.g, c.b];
+        composite_coverage(base, w, view, cov, bbox, stroke.blend_mode, |_, _| (rgb, a));
     }
 }
 

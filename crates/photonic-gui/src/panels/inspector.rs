@@ -494,7 +494,9 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             .id_salt("layer_styles")
                             .open(forced_open)
                             .show(ui, |ui| {
-                                use photonic_core::effects::{ColorOverlay, LayerEffect};
+                                use photonic_core::effects::{
+                                    ColorOverlay, LayerEffect, StrokeEffect,
+                                };
                                 let mut effects = node.effects.clone();
                                 let mut changed = false;
                                 let mut remove: Option<usize> = None;
@@ -531,6 +533,44 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                                 changed = true;
                                             }
                                         }
+                                        LayerEffect::Stroke(st) => {
+                                            ui.horizontal(|ui| {
+                                                if ui.checkbox(&mut st.enabled, "").changed() {
+                                                    changed = true;
+                                                }
+                                                ui.label("Stroke");
+                                                if let photonic_core::style::FillKind::Solid(sc) =
+                                                    &mut st.fill.kind
+                                                {
+                                                    let mut col = egui::Color32::from_rgb(
+                                                        (sc.r * 255.0) as u8,
+                                                        (sc.g * 255.0) as u8,
+                                                        (sc.b * 255.0) as u8,
+                                                    );
+                                                    if ui
+                                                        .color_edit_button_srgba(&mut col)
+                                                        .changed()
+                                                    {
+                                                        sc.r = col.r() as f32 / 255.0;
+                                                        sc.g = col.g() as f32 / 255.0;
+                                                        sc.b = col.b() as f32 / 255.0;
+                                                        changed = true;
+                                                    }
+                                                }
+                                                if ui.small_button("Remove").clicked() {
+                                                    remove = Some(i);
+                                                }
+                                            });
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(&mut st.width, 0.0..=50.0)
+                                                        .text("width"),
+                                                )
+                                                .changed()
+                                            {
+                                                changed = true;
+                                            }
+                                        }
                                         other => {
                                             ui.horizontal(|ui| {
                                                 ui.label(other.kind());
@@ -545,10 +585,19 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                     effects.remove(i);
                                     changed = true;
                                 }
-                                if ui.button("+ Color Overlay").clicked() {
-                                    effects.push(LayerEffect::ColorOverlay(ColorOverlay::default()));
-                                    changed = true;
-                                }
+                                ui.horizontal(|ui| {
+                                    if ui.button("+ Color Overlay").clicked() {
+                                        effects.push(LayerEffect::ColorOverlay(
+                                            ColorOverlay::default(),
+                                        ));
+                                        changed = true;
+                                    }
+                                    if ui.button("+ Stroke").clicked() {
+                                        effects
+                                            .push(LayerEffect::Stroke(StrokeEffect::default()));
+                                        changed = true;
+                                    }
+                                });
                                 if changed {
                                     action = Some(PanelAction::SetNodeEffects {
                                         node_id: nid,

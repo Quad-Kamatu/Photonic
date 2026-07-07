@@ -463,6 +463,8 @@ impl PhotonicRenderer {
             /// Enabled Color Overlay layer styles, as premultiplied-into-alpha
             /// RGBA (color.a × opacity × node opacity). Drawn over the fill.
             color_overlays: Vec<[f32; 4]>,
+            /// Enabled solid Stroke layer styles: (width in doc units, RGBA).
+            stroke_effects: Vec<(f32, [f32; 4])>,
         }
 
         let (artboard_w, artboard_h, artboards, nodes): (
@@ -666,6 +668,24 @@ impl PhotonicRenderer {
                                     {
                                         let a = co.color.a * co.opacity * node.opacity;
                                         Some([co.color.r, co.color.g, co.color.b, a])
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                            stroke_effects: node
+                                .effects
+                                .iter()
+                                .filter_map(|e| match e {
+                                    photonic_core::effects::LayerEffect::Stroke(st)
+                                        if st.enabled =>
+                                    {
+                                        if let FillKind::Solid(c) = &st.fill.kind {
+                                            let a =
+                                                c.a * st.fill.opacity * st.opacity * node.opacity;
+                                            Some((st.width, [c.r, c.g, c.b, a]))
+                                        } else {
+                                            None
+                                        }
                                     }
                                     _ => None,
                                 })
@@ -1338,6 +1358,37 @@ impl PhotonicRenderer {
                     continue;
                 }
                 let [a, b, c, d, e, f] = node.matrix;
+                let base = verts.len() as u32;
+                for v in &mesh.vertices {
+                    let x = a * v[0] as f64 + c * v[1] as f64 + e;
+                    let y = b * v[0] as f64 + d * v[1] as f64 + f;
+                    verts.push(Vertex {
+                        position: [x as f32, y as f32],
+                        color: rgba,
+                    });
+                }
+                for &i in &mesh.indices {
+                    idxs.push(base + i);
+                }
+            }
+
+            // ── Stroke layer style (solid, centred) ───────────────────────────
+            for &(width, rgba) in &node.stroke_effects {
+                if width <= 0.0 || rgba[3] <= 0.0 {
+                    continue;
+                }
+                let [a, b, c, d, e, f] = node.matrix;
+                let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
+                let mesh = tessellate_stroke(
+                    &node.path_data,
+                    (width as f64 / obj_scale) as f32,
+                    photonic_core::style::LineCap::Butt,
+                    photonic_core::style::LineJoin::Miter,
+                    4.0,
+                );
+                if mesh.is_empty() {
+                    continue;
+                }
                 let base = verts.len() as u32;
                 for v in &mesh.vertices {
                     let x = a * v[0] as f64 + c * v[1] as f64 + e;
