@@ -55,7 +55,7 @@ pub trait FormatMigration: Send + Sync {
 
 /// The ordered migration chain. Each entry upgrades version N → N+1.
 pub fn migrations() -> Vec<Box<dyn FormatMigration>> {
-    vec![Box::new(V1ToV2)]
+    vec![Box::new(V1ToV2), Box::new(V2ToV3)]
 }
 
 /// v1 → v2: the `Raster` node kind was added. The change is purely additive —
@@ -68,6 +68,23 @@ impl FormatMigration for V1ToV2 {
     }
     fn to_version(&self) -> u32 {
         2
+    }
+    fn migrate(&self, _value: &mut Value) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// v2 → v3: introduced the video-editor `timeline` field (01 §2). Purely
+/// additive — `timeline` is `Option` + `#[serde(default)]`, so existing v2
+/// documents contain no timeline and load unchanged; this only stamps the new
+/// version number.
+struct V2ToV3;
+impl FormatMigration for V2ToV3 {
+    fn from_version(&self) -> u32 {
+        2
+    }
+    fn to_version(&self) -> u32 {
+        3
     }
     fn migrate(&self, _value: &mut Value) -> Result<(), String> {
         Ok(())

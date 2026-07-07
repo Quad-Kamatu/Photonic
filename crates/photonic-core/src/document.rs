@@ -101,7 +101,10 @@ impl Guide {
 /// - v1 → v2: introduced `SceneNodeKind::Raster` (pixel layers). Additive — v1
 ///   files contain no raster nodes and load unchanged; the migration is a
 ///   no-op version bump (see `migration::migrations`).
-pub const CURRENT_FORMAT_VERSION: u32 = 2;
+/// - v2 → v3: introduced the video-editor `timeline` field (01 §2). Additive —
+///   `timeline` is `Option` + `#[serde(default)]`, so v2 files load untouched;
+///   the migration is a no-op version bump.
+pub const CURRENT_FORMAT_VERSION: u32 = 3;
 
 fn default_format_version() -> u32 {
     CURRENT_FORMAT_VERSION
@@ -773,6 +776,11 @@ pub struct Document {
     /// Colour model used when exporting for print. Default Rgb.
     #[serde(default)]
     pub color_mode: ColorMode,
+    /// The video-editor timeline project (01 §2). `None` until the first
+    /// video-mode action creates it (undoably, via `TimelineCmd::CreateProject`).
+    /// Additive at the 01 §2 seam: v2 files load with this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<crate::timeline::TimelineProject>,
 }
 
 // ─── Dimension Annotation ─────────────────────────────────────────────────────
@@ -933,6 +941,7 @@ impl Document {
             dpi: 72.0,
             display_unit: crate::units::DocumentUnit::default(),
             color_mode: ColorMode::default(),
+            timeline: None,
         }
     }
 
@@ -1529,9 +1538,8 @@ impl Document {
         use crate::node::SceneNode;
         use std::collections::BTreeSet;
         let ours = self;
-        let node_eq = |a: &SceneNode, b: &SceneNode| {
-            serde_json::to_vec(a).ok() == serde_json::to_vec(b).ok()
-        };
+        let node_eq =
+            |a: &SceneNode, b: &SceneNode| serde_json::to_vec(a).ok() == serde_json::to_vec(b).ok();
         let mut merged = ours.clone();
         let mut conflicts = Vec::new();
 
@@ -1549,7 +1557,11 @@ impl Document {
         let mut to_remove: Vec<NodeId> = Vec::new();
 
         for id in ids {
-            match (base.nodes.get(&id), ours.nodes.get(&id), theirs.nodes.get(&id)) {
+            match (
+                base.nodes.get(&id),
+                ours.nodes.get(&id),
+                theirs.nodes.get(&id),
+            ) {
                 (Some(b), Some(o), Some(t)) => {
                     let o_changed = !node_eq(b, o);
                     let t_changed = !node_eq(b, t);
@@ -1853,7 +1865,11 @@ mod tests {
             set_fill(&mut theirs, aid, "#0000ff");
             let out = ours.merge_3way(&base, &theirs);
             assert!(out.conflicts.is_empty());
-            assert_eq!(json(&out.merged, &aid), json(&theirs, &aid), "theirs edit taken");
+            assert_eq!(
+                json(&out.merged, &aid),
+                json(&theirs, &aid),
+                "theirs edit taken"
+            );
         }
 
         // 3. both edit A differently → conflict, keep ours.
@@ -1864,7 +1880,11 @@ mod tests {
             set_fill(&mut theirs, aid, "#0000ff");
             let out = ours.merge_3way(&base, &theirs);
             assert_eq!(out.conflicts, vec![MergeConflict::BothEdited(aid)]);
-            assert_eq!(json(&out.merged, &aid), json(&ours, &aid), "ours kept on conflict");
+            assert_eq!(
+                json(&out.merged, &aid),
+                json(&ours, &aid),
+                "ours kept on conflict"
+            );
         }
 
         // 4. theirs deletes A; ours untouched → removed.
@@ -2005,7 +2025,10 @@ mod tests {
         assert_eq!(back.history_max_mb, Some(120.0));
         // Old files without the field deserialize to None.
         let no_field = serde_json::to_string(&Document::new("t", 100.0, 100.0)).unwrap();
-        assert!(!no_field.contains("history_max_mb"), "None should skip the key");
+        assert!(
+            !no_field.contains("history_max_mb"),
+            "None should skip the key"
+        );
     }
 
     /// Build a minimal document with one layer and the supplied path nodes

@@ -33,3 +33,7 @@ miniz_oxide = { workspace = true }
 moxcms = "0.8"
 qrcodegen = "1.8"
 tracing = { workspace = true }
+
+[dev-dependencies]
+# Property-based testing for timeline edit-op invariants (11 §3.1).
+proptest = { workspace = true }

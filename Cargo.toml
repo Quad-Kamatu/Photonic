@@ -74,3 +74,6 @@ pollster = "0.3"
 bitflags = "2"
 smallvec = "1"
 roxmltree = "0.20"
+
+# Property-based testing (dev-only; timeline edit-op invariants, 11 §3.1)
+proptest = "1"

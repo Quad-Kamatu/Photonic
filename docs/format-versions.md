@@ -22,7 +22,18 @@ deserializing into `Document`.
 
 ## Versions
 
-### v2 — current
+### v3 — current
+
+Added the video-editor `timeline` field on `Document`
+(`Option<timeline::TimelineProject>`, docs/specs/video-editor/01-data-model.md
+§2) — the media pool, sequences/tracks/clips, node graphs, grades, captions, and
+audio mixer for the video editor. The change is purely additive: `timeline` is
+`Option` + `#[serde(default)]` + `skip_serializing_if = "Option::is_none"`, so
+v2 documents (which have no timeline) load unchanged and v3 documents without
+video features omit the key entirely. The v2→v3 migration is a no-op version
+bump (`migration::V2ToV3`).
+
+### v2
 
 Added the `Raster` scene-node kind (`SceneNodeKind::Raster`) for Photoshop-style
 pixel layers — see [`raster-editing.md`](raster-editing.md). The change is purely

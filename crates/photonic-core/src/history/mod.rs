@@ -629,7 +629,10 @@ mod tests {
         // Budget with headroom → pressure well under 1.0.
         history.set_limits(100_000, Some(full * 4));
         let p = history.size_pressure().unwrap();
-        assert!(p > 0.0 && p < 0.5, "expected low pressure with a roomy budget, got {p}");
+        assert!(
+            p > 0.0 && p < 0.5,
+            "expected low pressure with a roomy budget, got {p}"
+        );
 
         // A tight budget trims the payload back to (at most just over) budget.
         history.set_limits(100_000, Some(full / 2));
@@ -1625,10 +1628,22 @@ mod tests {
 
         let a = make_node(&doc);
         let a_id = a.id;
-        h.execute(Command::AddNode { node: a, layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: a,
+                layer_id: None,
+            },
+            &mut doc,
+        );
         let b = make_node(&doc);
         let b_id = b.id;
-        h.execute(Command::AddNode { node: b, layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: b,
+                layer_id: None,
+            },
+            &mut doc,
+        );
 
         // Undo B, then make a different edit C — this must FORK (keep B), not
         // discard it the way a flat redo stack would.
@@ -1636,7 +1651,13 @@ mod tests {
         assert!(!doc.nodes.contains_key(&b_id));
         let c = make_node(&doc);
         let c_id = c.id;
-        h.execute(Command::AddNode { node: c, layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: c,
+                layer_id: None,
+            },
+            &mut doc,
+        );
 
         // Tree now: root → A → { B (undone), C (current) }.
         let graph = h.history_graph();
@@ -1647,12 +1668,26 @@ mod tests {
         let cur = graph.iter().find(|n| n.is_current).unwrap();
         let parent_id = cur.parent.unwrap();
         let parent = graph.iter().find(|n| n.id == parent_id).unwrap();
-        let b_node = parent.children.iter().copied().find(|&x| x != cur.id).unwrap();
+        let b_node = parent
+            .children
+            .iter()
+            .copied()
+            .find(|&x| x != cur.id)
+            .unwrap();
 
         assert!(h.jump_to_node(b_node, &mut doc), "jump to B branch");
-        assert!(doc.nodes.contains_key(&b_id), "B restored after cross-branch jump");
-        assert!(!doc.nodes.contains_key(&c_id), "C removed after jump to B branch");
-        assert!(doc.nodes.contains_key(&a_id), "shared ancestor A still present");
+        assert!(
+            doc.nodes.contains_key(&b_id),
+            "B restored after cross-branch jump"
+        );
+        assert!(
+            !doc.nodes.contains_key(&c_id),
+            "C removed after jump to B branch"
+        );
+        assert!(
+            doc.nodes.contains_key(&a_id),
+            "shared ancestor A still present"
+        );
 
         // Jump back to C and confirm the other branch swaps back in.
         assert!(h.jump_to_node(cur.id, &mut doc), "jump back to C branch");
@@ -1664,10 +1699,28 @@ mod tests {
     fn branching_survives_snapshot_round_trip() {
         let mut doc = make_doc();
         let mut h = CommandHistory::new(200);
-        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
-        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: make_node(&doc),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        h.execute(
+            Command::AddNode {
+                node: make_node(&doc),
+                layer_id: None,
+            },
+            &mut doc,
+        );
         h.undo(&mut doc);
-        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: make_node(&doc),
+                layer_id: None,
+            },
+            &mut doc,
+        );
         // 3 edits made across two branches → 4 tree nodes (root + 3).
         assert_eq!(h.history_graph().len(), 4);
 
@@ -1676,7 +1729,11 @@ mod tests {
         let mut fresh = CommandHistory::new(200);
         fresh.restore_state(restored);
         // The whole tree (both branches) survives, not just the linear path.
-        assert_eq!(fresh.history_graph().len(), 4, "branch lost across save/load");
+        assert_eq!(
+            fresh.history_graph().len(),
+            4,
+            "branch lost across save/load"
+        );
     }
 
     #[test]
@@ -1825,7 +1882,15 @@ mod tests {
 
         // It was stored as a tight region delta, not two full bitmap clones.
         match h.current_command() {
-            Some(Command::UpdateRasterRegion { x, y, w, h: rh, old, new, .. }) => {
+            Some(Command::UpdateRasterRegion {
+                x,
+                y,
+                w,
+                h: rh,
+                old,
+                new,
+                ..
+            }) => {
                 assert_eq!((*x, *y, *w, *rh), (20, 30, 10, 10));
                 assert_eq!(old.len(), 10 * 10 * 4);
                 assert_eq!(new.len(), 10 * 10 * 4);
@@ -2302,6 +2367,11 @@ pub enum Command {
         new_width: f64,
         new_height: f64,
     },
+
+    /// A video-editor timeline edit (01 §10). All timeline commands nest under
+    /// this single arm; `TimelineCmd` owns their apply/inverse/coalesce, so the
+    /// history layer pays the multi-touch-point friction exactly once.
+    Timeline(crate::timeline::TimelineCmd),
 }
 
 /// Produce an informative label for an `UpdateNode` edit by diffing the node's
@@ -2322,7 +2392,10 @@ fn describe_node_update(old: &SceneNode, new: &SceneNode) -> String {
 
     // Geometry (move / resize / rotate).
     if old.transform != new.transform {
-        return format!("{} {name}", classify_transform(&old.transform, &new.transform));
+        return format!(
+            "{} {name}",
+            classify_transform(&old.transform, &new.transform)
+        );
     }
 
     // Kind-specific appearance / content changes.
@@ -2444,6 +2517,7 @@ impl Command {
                     + new.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
             }
             Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
+            Command::Timeline(t) => BASE + t.mem_estimate(),
             _ => BASE,
         }
     }
@@ -2500,6 +2574,11 @@ impl Command {
             }
             Command::SetWidthProfiles { .. } => SmallVec::new(),
             Command::ResizeCanvas { .. } => SmallVec::new(),
+            // Timeline commands mutate `doc.timeline`, not the `SceneNode` graph
+            // (03 §2.1's `changes_since` tracks SceneNode-cache invalidation),
+            // so they touch no `NodeId`. The engine watches `doc_generation`
+            // (02 §1) for timeline changes on its own separate path.
+            Command::Timeline(_) => SmallVec::new(),
         }
     }
 
@@ -2582,6 +2661,7 @@ impl Command {
                         None => "Batch".to_string(),
                     })
             }
+            Command::Timeline(t) => t.description(),
         }
     }
 
@@ -2896,6 +2976,8 @@ impl Command {
                 doc.width = *new_width;
                 doc.height = *new_height;
             }
+
+            Command::Timeline(t) => t.apply(doc),
         }
     }
 
@@ -2978,6 +3060,9 @@ impl Command {
                 new_width: *new_width,
                 new_height: *new_height,
             }),
+            (Command::Timeline(a), Command::Timeline(b)) => {
+                crate::timeline::TimelineCmd::coalesce(a, b).map(Command::Timeline)
+            }
             _ => None,
         }
     }
@@ -3209,6 +3294,8 @@ impl Command {
                 new_width: *old_width,
                 new_height: *old_height,
             }),
+
+            Command::Timeline(t) => t.inverse(doc).map(Command::Timeline),
         }
     }
 }

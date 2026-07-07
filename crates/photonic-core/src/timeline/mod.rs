@@ -1,0 +1,74 @@
+//! Timeline data model (video editor) — pure data + pure functions; no I/O, no
+//! GPU, no threads (01-data-model.md §3).
+//!
+//! This module family is the normative home for the video-editor timeline: time
+//! (`Tick`/`FrameRate`), media pool, sequences/tracks/clips, the generic
+//! keyframe-animation system, per-clip and project node graphs, color grades,
+//! captions, and audio — plus the pure edit ops (`ops`, `graph_ops`) and undo
+//! commands (`commands`) that mutate them. The engine (`photonic-video`),
+//! renderer, GUI, and MCP layers all build on these types; several core types
+//! (`Tick`, `FrameRate`, `AssetId`, `VectorRef`, `VectorStateKey`, `EffectKind`)
+//! were relocated here from `photonic-video::contract`, which now re-exports
+//! them.
+
+pub mod anim;
+pub mod audio;
+pub mod captions;
+pub mod clip;
+pub mod commands;
+pub mod effect_kind;
+pub mod grade;
+pub mod graph;
+pub mod graph_ops;
+pub mod ids;
+pub mod media;
+pub mod ops;
+pub mod prop_registry;
+pub mod sequence;
+pub mod time;
+
+// ── Curated re-exports (the surface most callers use) ───────────────────────
+
+pub use anim::{
+    cubic_bezier_ease, eval, AnimProps, Interp, Keyframe, PropPath, PropSet, PropValue,
+    PropValueKind, PropertyTrack,
+};
+pub use audio::{
+    AudioFade, AudioFxKind, AudioFxUnit, ChannelMap, ClipAudio, ClipAudioParams, FadeShape,
+    LoudnessTarget, MasterBus, MasterBusParams, TrackAudio, TrackAudioParams,
+};
+pub use captions::{
+    CaptionAnim, CaptionBackground, CaptionCue, CaptionStyle, CaptionTrack, CaptionWord,
+    KaraokeMode, KaraokeStyle,
+};
+pub use clip::{
+    Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, Ratio, SpeedMap, Transition,
+    TransitionKind, TransitionParams, WipeDirection,
+};
+pub use commands::{
+    AnimTarget, AudioCmd, CaptionCmd, ClipTiming, FadeEdge, FormatOp, FxOwner, GraphCmd,
+    StyleTarget, TimelineCmd, TrackSettings, TtsCmd,
+};
+pub use effect_kind::{EffectKind, EffectParams};
+pub use grade::{
+    parse_cdl_xml, write_cdl_xml, CdlParams, CdlXmlError, Grade, GradeMask, GradeOp, GradeOpKind,
+    GradeOpParams, LutInterp, MaskRef, WindowShape,
+};
+pub use graph::{
+    FitMode, GraphEdge, GraphNode, GraphNodeParams, GraphOp, InPort, MaskShapeKind, NodeGraph,
+    NodePos, OutPort, TextGen, TimeSource,
+};
+pub use ids::{
+    AssetId, BinId, ClipId, CueId, GradeOpId, GraphId, GraphNodeId, MarkerId, SequenceId, TrackId,
+};
+pub use media::{
+    AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe,
+    ProbedColor, ProxyRef, ProxyStatus, VectorRef, VectorStateKey, VideoStreamInfo,
+};
+pub use ops::EditError;
+pub use prop_registry::{PropEntry, PropTargetKind};
+pub use sequence::{
+    Marker, ProjectVideoSettings, Sequence, SequenceFormat, TimelineProject, Track, TrackKind,
+    ValidationError,
+};
+pub use time::{FrameRate, Tick, TICKS_PER_SECOND};

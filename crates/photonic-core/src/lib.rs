@@ -17,6 +17,7 @@ pub mod photon_file;
 pub mod raster;
 pub mod selection;
 pub mod style;
+pub mod timeline;
 pub mod tokens;
 pub mod transform;
 pub mod units;
@@ -45,8 +46,8 @@ pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
     interpolate_stops, interpolate_stops_with, ArrowheadStyle, Fill, FillKind, FluidGradient,
-    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop,
-    GradientUnits, MeshGradient, Stroke,
+    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop, GradientUnits,
+    MeshGradient, Stroke,
 };
 pub use transform::Transform;
 pub use units::{from_px, to_px, DocumentUnit};
