@@ -396,32 +396,72 @@ struct FindReplaceTextDialog {
     selection_only: bool,
 }
 
-/// Working copy of a layer's settings, edited in the Layer Options modal and
-/// applied as one `UpdateLayer` on OK (right-click a layer → Layer Options…).
-struct LayerOptionsDialog {
-    layer_id: photonic_core::layer::LayerId,
+/// What an [`ObjectOptionsDialog`] is editing — a whole layer or a single object.
+enum OptionsTarget {
+    Layer(photonic_core::layer::LayerId),
+    Node(NodeId),
+}
+
+/// Working copy of a layer's or object's settings, edited in the Options modal
+/// (right-click any Layers-tab row → Options…) and applied as one `UpdateLayer`
+/// or `UpdateNode` on OK. Fields are shown scoped to the target's type.
+struct ObjectOptionsDialog {
+    target: OptionsTarget,
+    /// Human label of the target's kind: "Layer", "Path", "Group", "Text", "Image".
+    kind_label: &'static str,
     name: String,
     visible: bool,
     locked: bool,
-    is_template: bool,
     opacity: f32,
     blend_mode: photonic_core::layer::BlendMode,
+    // Layer-only:
+    is_template: bool,
     color_enabled: bool,
     color: [f32; 4],
+    // Group-node only:
+    is_group: bool,
+    clip_children: bool,
 }
 
-impl LayerOptionsDialog {
+impl ObjectOptionsDialog {
     fn from_layer(layer_id: photonic_core::layer::LayerId, l: &photonic_core::layer::Layer) -> Self {
         Self {
-            layer_id,
+            target: OptionsTarget::Layer(layer_id),
+            kind_label: "Layer",
             name: l.name.clone(),
             visible: l.visible,
             locked: l.locked,
-            is_template: l.is_template,
             opacity: l.opacity,
             blend_mode: l.blend_mode,
+            is_template: l.is_template,
             color_enabled: l.color.is_some(),
             color: l.color.unwrap_or([0.42, 0.51, 0.9, 1.0]),
+            is_group: false,
+            clip_children: false,
+        }
+    }
+
+    fn from_node(node_id: NodeId, n: &photonic_core::node::SceneNode) -> Self {
+        use photonic_core::node::SceneNodeKind as K;
+        let (kind_label, is_group, clip_children) = match &n.kind {
+            K::Path(_) => ("Path", false, false),
+            K::Group(g) => ("Group", true, g.clip_children),
+            K::Text(_) => ("Text", false, false),
+            K::Raster(_) => ("Image", false, false),
+        };
+        Self {
+            target: OptionsTarget::Node(node_id),
+            kind_label,
+            name: n.name.clone(),
+            visible: n.visible,
+            locked: n.locked,
+            opacity: n.opacity,
+            blend_mode: n.blend_mode,
+            is_template: false,
+            color_enabled: false,
+            color: [0.42, 0.51, 0.9, 1.0],
+            is_group,
+            clip_children,
         }
     }
 }
@@ -774,8 +814,8 @@ pub struct PhotonicApp {
     merge_vertices_dialog: Option<MergeVerticesDialog>,
     /// Find / Replace Text dialog — Some while open.
     find_replace_text_dialog: Option<FindReplaceTextDialog>,
-    /// Layer Options modal (blend, opacity, name, color, template…) — Some while open.
-    layer_options_dialog: Option<LayerOptionsDialog>,
+    /// Options modal for a Layers-tab row (layer or object), type-scoped — Some while open.
+    object_options_dialog: Option<ObjectOptionsDialog>,
 
     // ── Multi-document tabs ───────────────────────────────────────────────────
     /// All open documents, in tab-bar order. The ACTIVE tab's live engine state
@@ -1252,7 +1292,7 @@ impl Default for PhotonicApp {
             simplify_dialog: None,
             merge_vertices_dialog: None,
             find_replace_text_dialog: None,
-            layer_options_dialog: None,
+            object_options_dialog: None,
             tabs: Vec::new(),
             active_tab: 0,
             pending_tab_switch: None,
@@ -2425,8 +2465,8 @@ impl PhotonicApp {
         // ── Find / Replace Text dialog ────────────────────────────────────────
         self.draw_find_replace_text_dialog(ctx, doc, history);
 
-        // ── Layer Options modal ───────────────────────────────────────────────
-        self.draw_layer_options_dialog(ctx, doc, history);
+        // ── Object/Layer Options modal ────────────────────────────────────────
+        self.draw_object_options_dialog(ctx, doc, history);
 
         // ── Top toolbar ──────────────────────────────────────────────────────
         let toolbar_resp = egui::TopBottomPanel::top("toolbar")

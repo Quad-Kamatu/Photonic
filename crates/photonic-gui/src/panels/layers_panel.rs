@@ -227,6 +227,15 @@ fn draw_drop_indicator(ui: &Ui, rect: egui::Rect, above: bool) {
 /// The shared body of the object/node options menu: z-order ops and "Collect in
 /// New Layer". Used by both the row's right-click menu and its ⋯ options button.
 fn node_menu_items(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction>) {
+    if ui
+        .button(format!("{} Options…", ph::SLIDERS_HORIZONTAL))
+        .on_hover_text("Name, blend mode, opacity, visibility, lock — scoped to this object's type")
+        .clicked()
+    {
+        *action = Some(PanelAction::OpenObjectOptions { node_id });
+        ui.close_menu();
+    }
+    ui.separator();
     if ui.button("Bring to Front").clicked() {
         *action = Some(PanelAction::ReorderNode {
             node_id,

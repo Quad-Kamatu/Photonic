@@ -603,22 +603,25 @@ impl PhotonicApp {
         }
     }
 
-    /// The Layer Options modal (right-click a layer → Layer Options…): name,
-    /// blend mode, opacity, colour tag, and the show/lock/template flags. Applied
-    /// as one `UpdateLayer` on OK; Cancel/close discards.
-    pub(crate) fn draw_layer_options_dialog(
+    /// The Options modal for a Layers-tab row — a whole layer or a single object,
+    /// with fields scoped to the target's type (opened from the row's right-click →
+    /// Options…). Applied as one UpdateLayer/UpdateNode on OK; Cancel/close discards.
+    pub(crate) fn draw_object_options_dialog(
         &mut self,
         ctx: &egui::Context,
         doc: &mut Document,
         history: &mut CommandHistory,
     ) {
-        if self.layer_options_dialog.is_none() {
+        if self.object_options_dialog.is_none() {
             return;
         }
-        let layer_id = self.layer_options_dialog.as_ref().unwrap().layer_id;
-        // The layer may have been deleted since the dialog opened.
-        if !doc.layers.contains_key(&layer_id) {
-            self.layer_options_dialog = None;
+        // The target may have been deleted since the dialog opened.
+        let target_ok = match &self.object_options_dialog.as_ref().unwrap().target {
+            OptionsTarget::Layer(lid) => doc.layers.contains_key(lid),
+            OptionsTarget::Node(nid) => doc.nodes.contains_key(nid),
+        };
+        if !target_ok {
+            self.object_options_dialog = None;
             return;
         }
 
@@ -653,14 +656,16 @@ impl PhotonicApp {
         let mut act = A::None;
         let mut open = true;
 
-        egui::Window::new(format!("{}  Layer Options", ph::SLIDERS_HORIZONTAL))
+        let kind_label = self.object_options_dialog.as_ref().unwrap().kind_label;
+        egui::Window::new(format!("{}  {kind_label} Options", ph::SLIDERS_HORIZONTAL))
             .collapsible(false)
             .resizable(false)
             .fixed_size([300.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                let dlg = self.layer_options_dialog.as_mut().unwrap();
-                egui::Grid::new("layer_options_grid")
+                let dlg = self.object_options_dialog.as_mut().unwrap();
+                let is_layer = matches!(dlg.target, OptionsTarget::Layer(_));
+                egui::Grid::new("object_options_grid")
                     .num_columns(2)
                     .spacing([10.0, 8.0])
                     .show(ui, |ui| {
@@ -685,35 +690,43 @@ impl PhotonicApp {
                         });
                         ui.end_row();
 
-                        ui.label("Colour");
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut dlg.color_enabled, "")
-                                .on_hover_text("Give this layer a colour tag");
-                            if dlg.color_enabled {
-                                let mut c = egui::Color32::from_rgb(
-                                    (dlg.color[0] * 255.0) as u8,
-                                    (dlg.color[1] * 255.0) as u8,
-                                    (dlg.color[2] * 255.0) as u8,
-                                );
-                                if ui.color_edit_button_srgba(&mut c).changed() {
-                                    dlg.color = [
-                                        c.r() as f32 / 255.0,
-                                        c.g() as f32 / 255.0,
-                                        c.b() as f32 / 255.0,
-                                        1.0,
-                                    ];
+                        if is_layer {
+                            ui.label("Colour");
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut dlg.color_enabled, "")
+                                    .on_hover_text("Give this layer a colour tag");
+                                if dlg.color_enabled {
+                                    let mut c = egui::Color32::from_rgb(
+                                        (dlg.color[0] * 255.0) as u8,
+                                        (dlg.color[1] * 255.0) as u8,
+                                        (dlg.color[2] * 255.0) as u8,
+                                    );
+                                    if ui.color_edit_button_srgba(&mut c).changed() {
+                                        dlg.color = [
+                                            c.r() as f32 / 255.0,
+                                            c.g() as f32 / 255.0,
+                                            c.b() as f32 / 255.0,
+                                            1.0,
+                                        ];
+                                    }
                                 }
-                            }
-                        });
-                        ui.end_row();
+                            });
+                            ui.end_row();
+                        }
                     });
 
                 ui.separator();
                 ui.checkbox(&mut dlg.visible, "Show");
                 ui.checkbox(&mut dlg.locked, "Lock")
-                    .on_hover_text("Prevent selecting or editing this layer's contents");
-                ui.checkbox(&mut dlg.is_template, "Template")
-                    .on_hover_text("Locked, dimmed reference layer for tracing over");
+                    .on_hover_text("Prevent selecting or editing this item's contents");
+                if is_layer {
+                    ui.checkbox(&mut dlg.is_template, "Template")
+                        .on_hover_text("Locked, dimmed reference layer for tracing over");
+                }
+                if dlg.is_group {
+                    ui.checkbox(&mut dlg.clip_children, "Clip contents")
+                        .on_hover_text("Clip this group's children to its topmost child (clipping mask)");
+                }
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -729,33 +742,55 @@ impl PhotonicApp {
             });
 
         if !open || act == A::Cancel {
-            self.layer_options_dialog = None;
+            self.object_options_dialog = None;
             return;
         }
         if act == A::Ok {
-            if let Some(dlg) = self.layer_options_dialog.take() {
-                if let Some(layer) = doc.layers.get(&layer_id) {
-                    let new_color = if dlg.color_enabled { Some(dlg.color) } else { None };
-                    // A template layer is implicitly locked.
-                    let new_locked = if dlg.is_template { true } else { dlg.locked };
-                    let cmd = Command::UpdateLayer {
-                        layer_id,
-                        old_name: layer.name.clone(),
-                        new_name: dlg.name.clone(),
-                        old_visible: layer.visible,
-                        new_visible: dlg.visible,
-                        old_locked: layer.locked,
-                        new_locked,
-                        old_color: layer.color,
-                        new_color,
-                        old_is_template: layer.is_template,
-                        new_is_template: dlg.is_template,
-                        old_opacity: layer.opacity,
-                        new_opacity: dlg.opacity.clamp(0.0, 1.0),
-                        old_blend_mode: layer.blend_mode,
-                        new_blend_mode: dlg.blend_mode,
-                    };
-                    history.execute(cmd, doc);
+            if let Some(dlg) = self.object_options_dialog.take() {
+                match dlg.target {
+                    OptionsTarget::Layer(layer_id) => {
+                        if let Some(layer) = doc.layers.get(&layer_id) {
+                            let new_color = if dlg.color_enabled { Some(dlg.color) } else { None };
+                            // A template layer is implicitly locked.
+                            let new_locked = if dlg.is_template { true } else { dlg.locked };
+                            let cmd = Command::UpdateLayer {
+                                layer_id,
+                                old_name: layer.name.clone(),
+                                new_name: dlg.name.clone(),
+                                old_visible: layer.visible,
+                                new_visible: dlg.visible,
+                                old_locked: layer.locked,
+                                new_locked,
+                                old_color: layer.color,
+                                new_color,
+                                old_is_template: layer.is_template,
+                                new_is_template: dlg.is_template,
+                                old_opacity: layer.opacity,
+                                new_opacity: dlg.opacity.clamp(0.0, 1.0),
+                                old_blend_mode: layer.blend_mode,
+                                new_blend_mode: dlg.blend_mode,
+                            };
+                            history.execute(cmd, doc);
+                        }
+                    }
+                    OptionsTarget::Node(node_id) => {
+                        if let Some(node) = doc.nodes.get(&node_id) {
+                            let mut new_node = node.clone();
+                            new_node.name = dlg.name.clone();
+                            new_node.visible = dlg.visible;
+                            new_node.locked = dlg.locked;
+                            new_node.opacity = dlg.opacity.clamp(0.0, 1.0);
+                            new_node.blend_mode = dlg.blend_mode;
+                            if let photonic_core::node::SceneNodeKind::Group(g) = &mut new_node.kind {
+                                g.clip_children = dlg.clip_children;
+                            }
+                            let cmd = Command::UpdateNode {
+                                old: node.clone(),
+                                new: new_node,
+                            };
+                            history.execute(cmd, doc);
+                        }
+                    }
                 }
             }
         }

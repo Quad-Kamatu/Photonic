@@ -364,6 +364,37 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::SetNodeOpacity { node_id, opacity } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        let opacity = opacity.clamp(0.0, 1.0);
+                        if (node.opacity - opacity).abs() > f32::EPSILON {
+                            let mut new_node = node.clone();
+                            new_node.opacity = opacity;
+                            let cmd = Command::UpdateNode {
+                                old: node.clone(),
+                                new: new_node,
+                            };
+                            history.execute(cmd, doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+
+                PanelAction::SetNodeBlendMode { node_id, blend_mode } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if node.blend_mode != blend_mode {
+                            let mut new_node = node.clone();
+                            new_node.blend_mode = blend_mode;
+                            let cmd = Command::UpdateNode {
+                                old: node.clone(),
+                                new: new_node,
+                            };
+                            history.execute(cmd, doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+
                 PanelAction::SetNodeSize {
                     node_id,
                     width,
@@ -2669,8 +2700,15 @@ impl PhotonicApp {
 
                 PanelAction::OpenLayerOptions { layer_id } => {
                     if let Some(layer) = doc.layers.get(&layer_id) {
-                        self.layer_options_dialog =
-                            Some(LayerOptionsDialog::from_layer(layer_id, layer));
+                        self.object_options_dialog =
+                            Some(ObjectOptionsDialog::from_layer(layer_id, layer));
+                    }
+                }
+
+                PanelAction::OpenObjectOptions { node_id } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        self.object_options_dialog =
+                            Some(ObjectOptionsDialog::from_node(node_id, node));
                     }
                 }
 

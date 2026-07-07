@@ -219,6 +219,13 @@ pub enum PanelAction {
     SetVisible { node_id: NodeId, visible: bool },
     /// Move a node to an absolute canvas position by setting its translation directly.
     SetNodePosition { node_id: NodeId, x: f64, y: f64 },
+    /// Set a single object's opacity (0.0–1.0).
+    SetNodeOpacity { node_id: NodeId, opacity: f32 },
+    /// Set a single object's blend mode.
+    SetNodeBlendMode {
+        node_id: NodeId,
+        blend_mode: photonic_core::layer::BlendMode,
+    },
     /// Resize a node to the given world-space width and height. A scale transform is
     /// composed onto the existing transform so the top-left anchor stays fixed.
     SetNodeSize {
@@ -332,8 +339,10 @@ pub enum PanelAction {
         layer_id: LayerId,
         blend_mode: photonic_core::layer::BlendMode,
     },
-    /// Open the Layer Options modal (name, blend, opacity, color, template, …).
+    /// Open the Options modal for a whole layer (name, blend, opacity, color, template…).
     OpenLayerOptions { layer_id: LayerId },
+    /// Open the Options modal for a single object, scoped to its type.
+    OpenObjectOptions { node_id: NodeId },
     /// Create a new empty group ("sublayer") nesting container. When a group is
     /// selected it is nested inside that group; otherwise it lands at the top of
     /// the active layer.
