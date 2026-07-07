@@ -395,3 +395,39 @@ Short term: fix the stale comment to describe reality. Long term: the video modu
 
 **Why Not Auto-Fixed:**
 The comment fix is trivial but the underlying divergence is load-bearing color behavior on the primary editing surface with no automated pixel test for the windowed path; changing it belongs to the planned P7 work with proper golden coverage.
+
+### TD-018: Text Nodes Render as Nothing in ALL Headless Output (Export + MCP render)
+
+**Type:** Correctness (user-facing)
+**Severity:** High
+**Effort:** Days
+**Area:** Rendering (photonic-render)
+**Affected Files:**
+- `crates/photonic-render/src/compositor.rs:185` (`SceneNodeKind::Text(_) => {}` explicit no-op)
+- `crates/photonic-render/src/headless.rs` (zero glyphon/text wiring on the GPU headless path)
+
+**Description:**
+Discovered during video-editor P1 golden-corpus expansion (e964e75): text renders only in the interactive windowed renderer (glyphon pass). Both headless paths — the CPU compositor and the headless GPU path behind `render_rgba_with_opts` — silently drop every `Text` node. Consequence: PNG/JPEG/WebP/GIF/TIFF export and MCP `screenshot`-class/`render_frame_at`-class output lose all text today. The committed `text_basic` and `text_on_path` golden references are (correctly, per current behavior) blank — they act as change detectors that must be re-blessed when this is fixed. Blocks the video module's AS-1 vector-title export (Tier A rasterization uses `render_rgba_with_opts`) — must land before video P3/P4.
+
+**Recommended Approach:**
+Add a text rasterization path usable off the GUI thread: either drive glyphon against the headless device (preferred — same pixels as canvas), or a CPU glyph rasterizer (swash/ab_glyph) into the CPU compositor. Wire into both `composite_document` and the headless GPU pass; re-bless the two text golden cases; extend the corpus with a styled-text case.
+
+**Why Not Auto-Fixed:**
+Cross-cutting rendering work with font-stack implications; needs its own story + review, scheduled as a pre-P3 story in the video execution plan.
+
+### TD-019: Windowed-Only Rendering Features — Headless Export Silently Drops Them
+
+**Type:** Correctness (user-facing)
+**Severity:** Medium
+**Effort:** Weeks (sum of parts)
+**Area:** Rendering (photonic-render)
+**Affected Files:** `crates/photonic-render/src/headless.rs`, `compositor.rs` vs `renderer/mod.rs`
+
+**Description:**
+Same class as TD-018, found in the same sweep: variable-width strokes (`width_profile_id`), text-on-path (`path_spine_id`), fixed-field glows (`outer_glow`/`inner_glow`/`gaussian_glow`), and arrowheads (`arrowhead_start`/`arrowhead_end`) are wired only in the interactive renderer — zero references in headless paths, so exports drop them. Additionally `dash_array` has no rendering implementation anywhere (windowed included — dashed strokes draw solid), and `GroupNode::clip_children`/`clip_node_id` is data-model-only. Golden cases `variable_width_stroke`, `stroke_arrowheads`, `effect_glow_stack`, `text_on_path` are committed as forward-guards with doc comments citing this gap.
+
+**Recommended Approach:**
+Fix per-feature alongside TD-018's headless text work where they share plumbing; `dash_array` is a tessellator feature (lyon supports dashing via path iteration) independent of headless.
+
+**Why Not Auto-Fixed:**
+Each is a distinct feature implementation, not a wiring one-liner; needs prioritization against video-module phases.
