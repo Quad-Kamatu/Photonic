@@ -9,3 +9,7 @@ description = "Video engine for Photonic: frame-graph IR, decode, playback, audi
 photonic-core = { path = "../photonic-core" }
 uuid = { workspace = true }
 glam = { workspace = true }
+wgpu = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

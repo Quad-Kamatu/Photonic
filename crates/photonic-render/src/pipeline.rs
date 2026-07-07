@@ -1068,6 +1068,8 @@ mod tests {
             ("blur", BLUR_SHADER),
             ("composite", COMPOSITE_SHADER),
             ("convert", CONVERT_SHADER),
+            ("yuv_convert", crate::video::YUV_CONVERT_SHADER),
+            ("present", crate::video::PRESENT_SHADER),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name} shader failed to parse: {e:?}"));

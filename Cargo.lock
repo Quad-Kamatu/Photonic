@@ -3983,7 +3983,9 @@ version = "0.2.2"
 dependencies = [
  "glam",
  "photonic-core",
+ "pollster 0.3.0",
  "uuid",
+ "wgpu",
 ]
 
 [[package]]

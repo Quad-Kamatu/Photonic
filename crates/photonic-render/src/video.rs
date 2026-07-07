@@ -1,0 +1,823 @@
+//! Video texture path (03-render-color-pipeline.md §3): YUV plane upload +
+//! YUV→working conversion, and the `EngineFrame`→screen present pass (§5).
+//!
+//! The YUV conversion is the GPU twin of [`crate::color::yuv_to_working`] — they
+//! share the constants in [`crate::color`] (§4.4 rule 1), and
+//! `wgsl_yuv_constants_match_rust` asserts the shader source contains each one.
+
+use wgpu::util::DeviceExt;
+
+use crate::color::{Colorimetry, Matrix, Range};
+use crate::pipeline::WORKING_FORMAT;
+
+/// Decoded YUV planes ready for GPU upload (03 §3.1). Each plane is 8-bit,
+/// row-major, tightly packed (`bytes_per_row == plane_width`).
+pub enum YuvPlanes<'a> {
+    /// 4:2:0 — full-res luma, half-res (both dims) Cb/Cr, no alpha.
+    Yuv420 {
+        width: u32,
+        height: u32,
+        y: &'a [u8],
+        cb: &'a [u8],
+        cr: &'a [u8],
+    },
+    /// 4:4:4 with alpha — four full-res planes (ProRes 4444 / VP9-alpha etc.).
+    Yuva444 {
+        width: u32,
+        height: u32,
+        y: &'a [u8],
+        cb: &'a [u8],
+        cr: &'a [u8],
+        a: &'a [u8],
+    },
+}
+
+impl YuvPlanes<'_> {
+    fn dims(&self) -> (u32, u32) {
+        match *self {
+            YuvPlanes::Yuv420 { width, height, .. } | YuvPlanes::Yuva444 { width, height, .. } => {
+                (width, height)
+            }
+        }
+    }
+}
+
+/// Uniform selecting matrix + range + alpha presence for the YUV shader.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct YuvParams {
+    matrix_id: u32, // 0 = BT.709, 1 = BT.601
+    range_id: u32,  // 0 = limited, 1 = full
+    has_alpha: u32, // 0 / 1
+    _pad: u32,
+}
+
+/// YUV→linear-premultiplied-`Rgba16Float` conversion pass (03 §3.2/§3.3). The
+/// numeric literals here are the [`crate::color`] constants; keep the two in
+/// sync (a CI test enforces it).
+pub const YUV_CONVERT_SHADER: &str = r#"
+@group(0) @binding(0) var t_y:  texture_2d<f32>;
+@group(0) @binding(1) var t_cb: texture_2d<f32>;
+@group(0) @binding(2) var t_cr: texture_2d<f32>;
+@group(0) @binding(3) var t_a:  texture_2d<f32>;
+@group(0) @binding(4) var samp_n: sampler;  // nearest: luma, alpha
+@group(0) @binding(5) var samp_l: sampler;  // linear: chroma upsample
+struct Params { matrix_id: u32, range_id: u32, has_alpha: u32, _pad: u32 }
+@group(0) @binding(6) var<uniform> params: Params;
+
+struct VOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0)       uv:       vec2<f32>,
+}
+
+@vertex
+fn vs_quad(@builtin(vertex_index) vi: u32) -> VOut {
+    var pos = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0,  1.0), vec2<f32>(-1.0, 1.0)
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 0.0)
+    );
+    var out: VOut;
+    out.clip_pos = vec4<f32>(pos[vi], 0.0, 1.0);
+    out.uv       = uvs[vi];
+    return out;
+}
+
+// ITU-R BT.709 EOTF: video signal → scene-linear (exact, not the sRGB curve).
+fn bt709_eotf(e: f32) -> f32 {
+    if (e < 0.081) { return e / 4.5; }
+    return pow((e + 0.099) / 1.099, 1.0 / 0.45);
+}
+
+@fragment
+fn fs_yuv(in: VOut) -> @location(0) vec4<f32> {
+    let y_raw  = textureSample(t_y,  samp_n, in.uv).r;
+    let cb_raw = textureSample(t_cb, samp_l, in.uv).r;
+    let cr_raw = textureSample(t_cr, samp_l, in.uv).r;
+    var a = 1.0;
+    if (params.has_alpha == 1u) { a = textureSample(t_a, samp_n, in.uv).r; }
+
+    // 1. Range expansion (0..255 code domain), chroma centred on 0.
+    var yp: f32;
+    var cb: f32;
+    var cr: f32;
+    if (params.range_id == 0u) {
+        yp = (y_raw  * 255.0 - 16.0) / 219.0;
+        cb = (cb_raw * 255.0 - 16.0) / 224.0 - 0.5;
+        cr = (cr_raw * 255.0 - 16.0) / 224.0 - 0.5;
+    } else {
+        yp = y_raw;
+        cb = cb_raw - 0.5;
+        cr = cr_raw - 0.5;
+    }
+
+    // 2. YUV→RGB matrix (video-signal domain, still gamma-encoded).
+    var r: f32;
+    var g: f32;
+    var b: f32;
+    if (params.matrix_id == 0u) {
+        r = yp + 1.5748 * cr;
+        g = yp - 0.1873 * cb - 0.4681 * cr;
+        b = yp + 1.8556 * cb;
+    } else {
+        r = yp + 1.402 * cr;
+        g = yp - 0.344136 * cb - 0.714136 * cr;
+        b = yp + 1.772 * cb;
+    }
+
+    // 3. BT.709 EOTF → scene-linear.  4. Straight alpha, then premultiply.
+    let lin = vec3<f32>(bt709_eotf(r), bt709_eotf(g), bt709_eotf(b));
+    return vec4<f32>(lin * a, a);
+}
+"#;
+
+/// `EngineFrame`→screen present pass (03 §5): sample the linear premultiplied
+/// working texture, unpremultiply, sRGB-OETF encode, write the non-sRGB surface
+/// (the shader does the encode itself since the surface is not an sRGB format).
+pub const PRESENT_SHADER: &str = r#"
+@group(0) @binding(0) var t_src: texture_2d<f32>;
+@group(0) @binding(1) var samp:  sampler;
+
+struct VOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0)       uv:       vec2<f32>,
+}
+
+@vertex
+fn vs_quad(@builtin(vertex_index) vi: u32) -> VOut {
+    var pos = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0,  1.0), vec2<f32>(-1.0, 1.0)
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 0.0)
+    );
+    var out: VOut;
+    out.clip_pos = vec4<f32>(pos[vi], 0.0, 1.0);
+    out.uv       = uvs[vi];
+    return out;
+}
+
+fn srgb_oetf(c: f32) -> f32 {
+    if (c <= 0.0031308) { return 12.92 * c; }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+@fragment
+fn fs_present(in: VOut) -> @location(0) vec4<f32> {
+    let p = textureSample(t_src, samp, in.uv);
+    let a = max(p.a, 1e-6);
+    let straight = p.rgb / a;
+    let enc = vec3<f32>(srgb_oetf(straight.r), srgb_oetf(straight.g), srgb_oetf(straight.b));
+    return vec4<f32>(enc, p.a);
+}
+"#;
+
+fn plane_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let tex = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let samp = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("yuv_bgl"),
+        entries: &[
+            tex(0),
+            tex(1),
+            tex(2),
+            tex(3),
+            samp(4),
+            samp(5),
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn fullscreen_pipeline(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    shader_src: &str,
+    fs_entry: &str,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("video_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("video_layout"),
+        bind_group_layouts: &[bgl],
+        push_constant_ranges: &[],
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("video_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_quad",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: fs_entry,
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn r8_plane(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    w: u32,
+    h: u32,
+    data: &[u8],
+) -> wgpu::Texture {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("yuv_plane"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        tex.as_image_copy(),
+        data,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(w),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    tex
+}
+
+/// Upload YUV planes and convert to a linear, premultiplied `Rgba16Float`
+/// working texture (03 §3.2/§3.3). `yuv420p` chroma is bilinearly upsampled;
+/// `yuva444p` alpha passes straight through. The returned texture is sized to
+/// the luma resolution with `TEXTURE_BINDING | COPY_SRC | RENDER_ATTACHMENT`.
+///
+/// A fresh bind-group-layout and pipeline are built per call; the P3 engine will
+/// hold a persistent `YuvConverter` — kept inline here for the P1 contract.
+pub fn convert_yuv_planes_to_working(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    planes: &YuvPlanes,
+    colorimetry: Colorimetry,
+) -> wgpu::Texture {
+    let (w, h) = planes.dims();
+    let (w, h) = (w.max(1), h.max(1));
+
+    // Plane textures.
+    let (y_tex, cb_tex, cr_tex, a_tex, has_alpha) = match *planes {
+        YuvPlanes::Yuv420 { y, cb, cr, .. } => {
+            let cw = w.div_ceil(2);
+            let ch = h.div_ceil(2);
+            (
+                r8_plane(device, queue, w, h, y),
+                r8_plane(device, queue, cw, ch, cb),
+                r8_plane(device, queue, cw, ch, cr),
+                r8_plane(device, queue, 1, 1, &[255]), // dummy, unsampled
+                0u32,
+            )
+        }
+        YuvPlanes::Yuva444 { y, cb, cr, a, .. } => (
+            r8_plane(device, queue, w, h, y),
+            r8_plane(device, queue, w, h, cb),
+            r8_plane(device, queue, w, h, cr),
+            r8_plane(device, queue, w, h, a),
+            1u32,
+        ),
+    };
+
+    let params = YuvParams {
+        matrix_id: match colorimetry.matrix {
+            Matrix::Bt709 => 0,
+            Matrix::Bt601 => 1,
+        },
+        range_id: match colorimetry.range {
+            Range::Limited => 0,
+            Range::Full => 1,
+        },
+        has_alpha,
+        _pad: 0,
+    };
+    let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("yuv_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
+    let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("yuv_nearest"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        ..Default::default()
+    });
+    let linear = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("yuv_linear"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    let bgl = plane_bgl(device);
+    let pipeline = fullscreen_pipeline(device, &bgl, YUV_CONVERT_SHADER, "fs_yuv", WORKING_FORMAT);
+
+    let v = |t: &wgpu::Texture| t.create_view(&Default::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("yuv_bg"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&v(&y_tex)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&v(&cb_tex)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&v(&cr_tex)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&v(&a_tex)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(&nearest),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&linear),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: pbuf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("yuv_working"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: WORKING_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = out.create_view(&Default::default());
+    let mut enc = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("yuv_convert_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &out_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..6, 0..1);
+    }
+    queue.submit([enc.finish()]);
+    out
+}
+
+/// Presents a working-format (`Rgba16Float`, linear, premultiplied) texture to a
+/// non-sRGB surface, per 03 §5 — the normative `EngineFrame`→screen handoff 04
+/// conforms to. Holds the pipeline + sampler for one target format; call
+/// [`Self::present_engine_frame`] per displayed frame.
+pub struct VideoPresenter {
+    bgl: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+}
+
+impl VideoPresenter {
+    /// Build the present pipeline for `target_format` (the negotiated
+    /// `Rgba8Unorm` / `Bgra8Unorm` surface format).
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("present_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pipeline =
+            fullscreen_pipeline(device, &bgl, PRESENT_SHADER, "fs_present", target_format);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("present_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            bgl,
+            pipeline,
+            sampler,
+        }
+    }
+
+    /// Record the present pass: sample `source` (working format) → unpremultiply
+    /// → sRGB OETF → write `target` (03 §5).
+    pub fn present_engine_frame(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+    ) {
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present_bg"),
+            layout: &self.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("present_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color;
+    use crate::renderer::align256;
+
+    /// 03 §4.4 rule 1: the WGSL YUV shader's numeric literals are the
+    /// `crate::color` constants. A drift on either side fails here.
+    #[test]
+    fn wgsl_yuv_constants_match_rust() {
+        for c in [
+            color::BT709_CR_R,
+            color::BT709_CB_G,
+            color::BT709_CR_G,
+            color::BT709_CB_B,
+            color::BT601_CR_R,
+            color::BT601_CB_G,
+            color::BT601_CR_G,
+            color::BT601_CB_B,
+            color::BT709_EOTF_THRESHOLD,
+            color::BT709_SLOPE,
+            color::BT709_ALPHA,
+            color::BT709_BETA,
+            color::BT709_GAMMA,
+        ] {
+            let lit = format!("{c}");
+            assert!(
+                YUV_CONVERT_SHADER.contains(&lit),
+                "YUV shader missing constant literal {lit}"
+            );
+        }
+        // Present shader carries the sRGB OETF constants.
+        for c in [
+            color::SRGB_OETF_THRESHOLD,
+            color::SRGB_SLOPE,
+            color::SRGB_ALPHA,
+        ] {
+            let lit = format!("{c}");
+            assert!(
+                PRESENT_SHADER.contains(&lit),
+                "present shader missing {lit}"
+            );
+        }
+    }
+
+    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        pollster::block_on(adapter.request_device(&Default::default(), None)).ok()
+    }
+
+    fn f16_to_f32(bits: u16) -> f32 {
+        let sign = ((bits >> 15) & 1) as u32;
+        let exp = ((bits >> 10) & 0x1f) as i32;
+        let frac = (bits & 0x3ff) as u32;
+        let v = if exp == 0 {
+            frac as f32 * 2f32.powi(-24)
+        } else if exp == 0x1f {
+            f32::INFINITY
+        } else {
+            (1.0 + frac as f32 / 1024.0) * 2f32.powi(exp - 15)
+        };
+        if sign == 1 {
+            -v
+        } else {
+            v
+        }
+    }
+
+    fn f32_to_f16(v: f32) -> u16 {
+        let b = v.to_bits();
+        let sign = ((b >> 16) & 0x8000) as u16;
+        let e = ((b >> 23) & 0xff) as i32 - 112; // 127 - 15
+        let m = b & 0x7fffff;
+        if e <= 0 {
+            sign
+        } else if e >= 0x1f {
+            sign | 0x7c00
+        } else {
+            sign | ((e as u16) << 10) | ((m >> 13) as u16)
+        }
+    }
+
+    fn readback(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tex: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        bytes_per_px: u32,
+    ) -> Vec<u8> {
+        let bpr = align256(w * bytes_per_px);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rb"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        let raw = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((w * h * bytes_per_px) as usize);
+        for row in 0..h {
+            let start = (row * bpr) as usize;
+            out.extend_from_slice(&raw[start..start + (w * bytes_per_px) as usize]);
+        }
+        drop(raw);
+        staging.unmap();
+        out
+    }
+
+    /// 03 §6: YUV→linear GPU output matches the CPU reference (identical
+    /// constants + operation order, §4.4) within 1e-3 linear. Constant planes so
+    /// chroma upsampling is a no-op and every pixel has the same expected value.
+    #[test]
+    fn yuv_gpu_matches_cpu_reference() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter — skipping YUV GPU/CPU parity test");
+            return;
+        };
+        let (w, h) = (4u32, 4u32);
+        let (yv, cbv, crv, av) = (128u8, 100u8, 150u8, 200u8);
+        let planes = YuvPlanes::Yuva444 {
+            width: w,
+            height: h,
+            y: &vec![yv; (w * h) as usize],
+            cb: &vec![cbv; (w * h) as usize],
+            cr: &vec![crv; (w * h) as usize],
+            a: &vec![av; (w * h) as usize],
+        };
+        let cm = Colorimetry::BT709_LIMITED;
+        let tex = convert_yuv_planes_to_working(&device, &queue, &planes, cm);
+        let bytes = readback(&device, &queue, &tex, w, h, 8);
+
+        let want = color::yuv_to_working(
+            yv as f32 / 255.0,
+            cbv as f32 / 255.0,
+            crv as f32 / 255.0,
+            av as f32 / 255.0,
+            cm,
+        );
+        for px in bytes.chunks_exact(8) {
+            let got = [
+                f16_to_f32(u16::from_le_bytes([px[0], px[1]])),
+                f16_to_f32(u16::from_le_bytes([px[2], px[3]])),
+                f16_to_f32(u16::from_le_bytes([px[4], px[5]])),
+                f16_to_f32(u16::from_le_bytes([px[6], px[7]])),
+            ];
+            for i in 0..4 {
+                assert!(
+                    (got[i] - want[i]).abs() < 1e-3,
+                    "channel {i}: gpu {:.5} vs cpu {:.5}",
+                    got[i],
+                    want[i],
+                );
+            }
+        }
+    }
+
+    /// 03 §6 / §5: the present pass round-trips a known linear value to the
+    /// expected sRGB byte within 1 LSB. Alpha 1 so premultiplied == straight.
+    #[test]
+    fn present_round_trips_linear_to_srgb() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter — skipping present round-trip test");
+            return;
+        };
+        let (w, h) = (2u32, 2u32);
+        // Working texture: linear 0.5 grey, premultiplied (alpha 1).
+        let working = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("present_src"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let px = [
+            f32_to_f16(0.5),
+            f32_to_f16(0.5),
+            f32_to_f16(0.5),
+            f32_to_f16(1.0),
+        ];
+        let mut data = Vec::new();
+        for _ in 0..(w * h) {
+            for c in px {
+                data.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        queue.write_texture(
+            working.as_image_copy(),
+            &data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 8),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("present_target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let presenter = VideoPresenter::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut enc = device.create_command_encoder(&Default::default());
+        presenter.present_engine_frame(
+            &device,
+            &mut enc,
+            &working.create_view(&Default::default()),
+            &target.create_view(&Default::default()),
+        );
+        queue.submit([enc.finish()]);
+
+        let bytes = readback(&device, &queue, &target, w, h, 4);
+        let want = (color::srgb_oetf(0.5) * 255.0).round() as i32;
+        for px in bytes.chunks_exact(4) {
+            for &ch in &px[0..3] {
+                assert!(
+                    (ch as i32 - want).abs() <= 1,
+                    "present grey: got {ch}, want {want} (±1 LSB)"
+                );
+            }
+            assert_eq!(px[3], 255, "alpha must be opaque");
+        }
+    }
+}

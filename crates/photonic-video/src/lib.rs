@@ -11,6 +11,10 @@
 
 pub mod graph;
 
+/// Pooled `Rgba16Float` working-texture allocator (03 §3.4). The P1 renderer /
+/// P3 evaluator request textures from here keyed by [`graph::ir::ContentHash`].
+pub mod pool;
+
 /// Timeline-contract types the IR references ahead of the P2 data-model landing.
 ///
 /// `01-data-model.md` §1/§3 pins these shapes; P2 moves them into

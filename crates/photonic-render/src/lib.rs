@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod color;
 pub mod compositor;
 pub mod headless;
 pub mod pipeline;
@@ -6,8 +7,10 @@ pub mod renderer;
 pub mod tessellator;
 pub mod text_outline;
 pub mod text_path;
+pub mod video;
 
 pub use canvas::CanvasView;
+pub use color::{Colorimetry, Matrix, Range};
 pub use headless::{
     document_needs_cpu_compositor, ExportBackground, ExportOptions, HeadlessRenderer,
 };
