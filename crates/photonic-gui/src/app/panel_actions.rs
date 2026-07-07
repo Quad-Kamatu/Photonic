@@ -2667,6 +2667,13 @@ impl PhotonicApp {
                     self.do_set_layer_flag(layer_id, None, None, None, Some(blend_mode), doc, history, &mut doc_modified);
                 }
 
+                PanelAction::OpenLayerOptions { layer_id } => {
+                    if let Some(layer) = doc.layers.get(&layer_id) {
+                        self.layer_options_dialog =
+                            Some(LayerOptionsDialog::from_layer(layer_id, layer));
+                    }
+                }
+
                 PanelAction::AddSublayer => {
                     self.do_add_sublayer(doc, history, &mut doc_modified);
                 }

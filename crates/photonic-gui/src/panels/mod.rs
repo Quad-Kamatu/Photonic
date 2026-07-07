@@ -332,6 +332,8 @@ pub enum PanelAction {
         layer_id: LayerId,
         blend_mode: photonic_core::layer::BlendMode,
     },
+    /// Open the Layer Options modal (name, blend, opacity, color, template, …).
+    OpenLayerOptions { layer_id: LayerId },
     /// Create a new empty group ("sublayer") nesting container. When a group is
     /// selected it is nested inside that group; otherwise it lands at the top of
     /// the active layer.

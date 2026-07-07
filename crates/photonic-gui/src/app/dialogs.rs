@@ -603,6 +603,164 @@ impl PhotonicApp {
         }
     }
 
+    /// The Layer Options modal (right-click a layer → Layer Options…): name,
+    /// blend mode, opacity, colour tag, and the show/lock/template flags. Applied
+    /// as one `UpdateLayer` on OK; Cancel/close discards.
+    pub(crate) fn draw_layer_options_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.layer_options_dialog.is_none() {
+            return;
+        }
+        let layer_id = self.layer_options_dialog.as_ref().unwrap().layer_id;
+        // The layer may have been deleted since the dialog opened.
+        if !doc.layers.contains_key(&layer_id) {
+            self.layer_options_dialog = None;
+            return;
+        }
+
+        use photonic_core::layer::BlendMode as Bm;
+        const MODES: [(Bm, &str); 16] = [
+            (Bm::Normal, "Normal"),
+            (Bm::Multiply, "Multiply"),
+            (Bm::Screen, "Screen"),
+            (Bm::Overlay, "Overlay"),
+            (Bm::Darken, "Darken"),
+            (Bm::Lighten, "Lighten"),
+            (Bm::ColorDodge, "Color Dodge"),
+            (Bm::ColorBurn, "Color Burn"),
+            (Bm::HardLight, "Hard Light"),
+            (Bm::SoftLight, "Soft Light"),
+            (Bm::Difference, "Difference"),
+            (Bm::Exclusion, "Exclusion"),
+            (Bm::Hue, "Hue"),
+            (Bm::Saturation, "Saturation"),
+            (Bm::Color, "Color"),
+            (Bm::Luminosity, "Luminosity"),
+        ];
+        let blend_label =
+            |m: Bm| MODES.iter().find(|(x, _)| *x == m).map(|(_, n)| *n).unwrap_or("Normal");
+
+        #[derive(PartialEq)]
+        enum A {
+            None,
+            Cancel,
+            Ok,
+        }
+        let mut act = A::None;
+        let mut open = true;
+
+        egui::Window::new(format!("{}  Layer Options", ph::SLIDERS_HORIZONTAL))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([300.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let dlg = self.layer_options_dialog.as_mut().unwrap();
+                egui::Grid::new("layer_options_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Name");
+                        ui.text_edit_singleline(&mut dlg.name);
+                        ui.end_row();
+
+                        ui.label("Blend");
+                        egui::ComboBox::from_id_salt("layer_opts_blend")
+                            .selected_text(blend_label(dlg.blend_mode))
+                            .show_ui(ui, |ui| {
+                                for (m, name) in MODES {
+                                    ui.selectable_value(&mut dlg.blend_mode, m, name);
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Opacity");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Slider::new(&mut dlg.opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:.0}%", dlg.opacity * 100.0));
+                        });
+                        ui.end_row();
+
+                        ui.label("Colour");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut dlg.color_enabled, "")
+                                .on_hover_text("Give this layer a colour tag");
+                            if dlg.color_enabled {
+                                let mut c = egui::Color32::from_rgb(
+                                    (dlg.color[0] * 255.0) as u8,
+                                    (dlg.color[1] * 255.0) as u8,
+                                    (dlg.color[2] * 255.0) as u8,
+                                );
+                                if ui.color_edit_button_srgba(&mut c).changed() {
+                                    dlg.color = [
+                                        c.r() as f32 / 255.0,
+                                        c.g() as f32 / 255.0,
+                                        c.b() as f32 / 255.0,
+                                        1.0,
+                                    ];
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    });
+
+                ui.separator();
+                ui.checkbox(&mut dlg.visible, "Show");
+                ui.checkbox(&mut dlg.locked, "Lock")
+                    .on_hover_text("Prevent selecting or editing this layer's contents");
+                ui.checkbox(&mut dlg.is_template, "Template")
+                    .on_hover_text("Locked, dimmed reference layer for tracing over");
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        act = A::Cancel;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("OK").clicked() {
+                            act = A::Ok;
+                        }
+                    });
+                });
+            });
+
+        if !open || act == A::Cancel {
+            self.layer_options_dialog = None;
+            return;
+        }
+        if act == A::Ok {
+            if let Some(dlg) = self.layer_options_dialog.take() {
+                if let Some(layer) = doc.layers.get(&layer_id) {
+                    let new_color = if dlg.color_enabled { Some(dlg.color) } else { None };
+                    // A template layer is implicitly locked.
+                    let new_locked = if dlg.is_template { true } else { dlg.locked };
+                    let cmd = Command::UpdateLayer {
+                        layer_id,
+                        old_name: layer.name.clone(),
+                        new_name: dlg.name.clone(),
+                        old_visible: layer.visible,
+                        new_visible: dlg.visible,
+                        old_locked: layer.locked,
+                        new_locked,
+                        old_color: layer.color,
+                        new_color,
+                        old_is_template: layer.is_template,
+                        new_is_template: dlg.is_template,
+                        old_opacity: layer.opacity,
+                        new_opacity: dlg.opacity.clamp(0.0, 1.0),
+                        old_blend_mode: layer.blend_mode,
+                        new_blend_mode: dlg.blend_mode,
+                    };
+                    history.execute(cmd, doc);
+                }
+            }
+        }
+    }
+
     pub(crate) fn draw_merge_vertices_dialog(
         &mut self,
         ctx: &egui::Context,

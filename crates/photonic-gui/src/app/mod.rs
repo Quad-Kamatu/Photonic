@@ -396,6 +396,36 @@ struct FindReplaceTextDialog {
     selection_only: bool,
 }
 
+/// Working copy of a layer's settings, edited in the Layer Options modal and
+/// applied as one `UpdateLayer` on OK (right-click a layer → Layer Options…).
+struct LayerOptionsDialog {
+    layer_id: photonic_core::layer::LayerId,
+    name: String,
+    visible: bool,
+    locked: bool,
+    is_template: bool,
+    opacity: f32,
+    blend_mode: photonic_core::layer::BlendMode,
+    color_enabled: bool,
+    color: [f32; 4],
+}
+
+impl LayerOptionsDialog {
+    fn from_layer(layer_id: photonic_core::layer::LayerId, l: &photonic_core::layer::Layer) -> Self {
+        Self {
+            layer_id,
+            name: l.name.clone(),
+            visible: l.visible,
+            locked: l.locked,
+            is_template: l.is_template,
+            opacity: l.opacity,
+            blend_mode: l.blend_mode,
+            color_enabled: l.color.is_some(),
+            color: l.color.unwrap_or([0.42, 0.51, 0.9, 1.0]),
+        }
+    }
+}
+
 // ── Extracted sub-structs ─────────────────────────────────────────────────────
 
 /// State for the Lua REPL console panel.
@@ -744,6 +774,8 @@ pub struct PhotonicApp {
     merge_vertices_dialog: Option<MergeVerticesDialog>,
     /// Find / Replace Text dialog — Some while open.
     find_replace_text_dialog: Option<FindReplaceTextDialog>,
+    /// Layer Options modal (blend, opacity, name, color, template…) — Some while open.
+    layer_options_dialog: Option<LayerOptionsDialog>,
 
     // ── Multi-document tabs ───────────────────────────────────────────────────
     /// All open documents, in tab-bar order. The ACTIVE tab's live engine state
@@ -1220,6 +1252,7 @@ impl Default for PhotonicApp {
             simplify_dialog: None,
             merge_vertices_dialog: None,
             find_replace_text_dialog: None,
+            layer_options_dialog: None,
             tabs: Vec::new(),
             active_tab: 0,
             pending_tab_switch: None,
@@ -2391,6 +2424,9 @@ impl PhotonicApp {
 
         // ── Find / Replace Text dialog ────────────────────────────────────────
         self.draw_find_replace_text_dialog(ctx, doc, history);
+
+        // ── Layer Options modal ───────────────────────────────────────────────
+        self.draw_layer_options_dialog(ctx, doc, history);
 
         // ── Top toolbar ──────────────────────────────────────────────────────
         let toolbar_resp = egui::TopBottomPanel::top("toolbar")

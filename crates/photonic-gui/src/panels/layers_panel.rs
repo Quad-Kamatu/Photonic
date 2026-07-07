@@ -333,76 +333,6 @@ pub fn draw_layers_panel(
                     .color(Color32::from_rgb(80, 80, 110)),
             );
             ui.add_space(2.0);
-
-            // ── Active-layer compositing strip (Photoshop-style: blend + opacity) ──
-            // Acts on the selected layer (or the active layer). It lives here — not
-            // in the row's options popup — because that popup closes on click, which
-            // makes a slider impossible to drag.
-            let target = selected_layer_ids.first().copied().or(doc.active_layer_id);
-            if let Some(lid) = target {
-                if let Some(layer) = doc.layers.get(&lid) {
-                    use photonic_core::layer::BlendMode as Bm;
-                    const MODES: [(Bm, &str); 16] = [
-                        (Bm::Normal, "Normal"),
-                        (Bm::Multiply, "Multiply"),
-                        (Bm::Screen, "Screen"),
-                        (Bm::Overlay, "Overlay"),
-                        (Bm::Darken, "Darken"),
-                        (Bm::Lighten, "Lighten"),
-                        (Bm::ColorDodge, "Color Dodge"),
-                        (Bm::ColorBurn, "Color Burn"),
-                        (Bm::HardLight, "Hard Light"),
-                        (Bm::SoftLight, "Soft Light"),
-                        (Bm::Difference, "Difference"),
-                        (Bm::Exclusion, "Exclusion"),
-                        (Bm::Hue, "Hue"),
-                        (Bm::Saturation, "Saturation"),
-                        (Bm::Color, "Color"),
-                        (Bm::Luminosity, "Luminosity"),
-                    ];
-                    let cur = MODES
-                        .iter()
-                        .find(|(m, _)| *m == layer.blend_mode)
-                        .map(|(_, n)| *n)
-                        .unwrap_or("Normal");
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Blend").small());
-                        egui::ComboBox::from_id_salt("active_layer_blend")
-                            .selected_text(cur)
-                            .show_ui(ui, |ui| {
-                                for (m, name) in MODES {
-                                    if ui
-                                        .selectable_label(m == layer.blend_mode, name)
-                                        .clicked()
-                                    {
-                                        action = Some(PanelAction::SetLayerBlendMode {
-                                            layer_id: lid,
-                                            blend_mode: m,
-                                        });
-                                    }
-                                }
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Opacity").small());
-                        let mut op = layer.opacity;
-                        if ui
-                            .add(egui::Slider::new(&mut op, 0.0..=1.0).show_value(false))
-                            .changed()
-                        {
-                            action = Some(PanelAction::SetLayerOpacity {
-                                layer_id: lid,
-                                opacity: op,
-                            });
-                        }
-                        ui.label(
-                            RichText::new(format!("{:.0}%", layer.opacity * 100.0)).small(),
-                        );
-                    });
-                    ui.separator();
-                }
-            }
-
             egui::ScrollArea::vertical()
                 .id_salt("layers_scroll")
                 .auto_shrink([false, false])
@@ -741,6 +671,16 @@ fn layer_menu_items(
     action: &mut Option<PanelAction>,
 ) {
     {
+        // Layer Options… — the full modal (name, blend, opacity, colour, template…).
+        if ui
+            .button(format!("{} Layer Options…", ph::SLIDERS_HORIZONTAL))
+            .on_hover_text("Blend mode, opacity, name, colour, template — all in one dialog")
+            .clicked()
+        {
+            *action = Some(PanelAction::OpenLayerOptions { layer_id: lid });
+            ui.close_menu();
+        }
+        ui.separator();
         // Template toggle — relocated here from the old inline "T" button. A
         // template layer is locked and dimmed as a tracing reference.
         let t_label = if layer.is_template {
