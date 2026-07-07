@@ -39,7 +39,9 @@ Second gap: nothing lets a caller ask "which nodes did this command touch." No `
 
 ### 2.2 Per-node tessellation cache
 
-Keyed by `(NodeId, TessKind)` where `TessKind ∈ {Fill, Stroke, Glow, Shadow, Overlay}` (mirrors `build_geometry`'s existing per-node draw categories, `renderer/mod.rs:426-467`). Cache entry: `CachedGeometry { vertices: Range<u32>, indices: Range<u32>, node_revision: u64, tess_inputs_hash: u64 }`.
+**As built (P1 S3, accepted deviation):** the cache is a **content-addressed memo at the `tessellate_*` boundary** (`renderer/tess_cache.rs`), keyed by `tess_inputs_hash` alone rather than `(NodeId, TessKind)` bundles. Rationale: this renderer resolves symbol instances and live-boolean groups to derived paths at draw time, and `Command::affected_nodes` reports the *edited* node id, not the instance/group that actually renders — id-keyed invalidation would reuse stale meshes after a master edit. Content-addressing is correct by construction (memo of a pure function), dedupes identical geometry, and makes undo/redo reversions cache hits. `revision()` still gates a whole-frame skip; `changes_since().overflowed` still clears the memo. The original id-keyed design below is retained for archaeology; the hash-input rules stand unchanged.
+
+Original sketch: keyed by `(NodeId, TessKind)` where `TessKind ∈ {Fill, Stroke, Glow, Shadow, Overlay}` (mirrors `build_geometry`'s existing per-node draw categories, `renderer/mod.rs:426-467`). Cache entry: `CachedGeometry { vertices: Range<u32>, indices: Range<u32>, node_revision: u64, tess_inputs_hash: u64 }`.
 
 `tess_inputs_hash` covers exactly the fields that affect vertex geometry (path points, stroke width/cap/join/dash, glow/shadow radius) — **not** color, opacity, or blend mode, which don't change vertex count/position and are applied at draw time via the existing per-node uniform path. This keeps color-only edits (very common: opacity drag, fill-color pick) from invalidating tessellation at all.
 
@@ -52,7 +54,9 @@ This is additive to §1's fallback: the lock-contention `cached_vertices`/`cache
 
 ### 2.3 Persistent GPU vertex/index buffers
 
-Replace `scene_renderer.rs:18-31`'s per-frame `create_buffer_init` with two growable persistent buffers (`vbuf: wgpu::Buffer`, `ibuf: wgpu::Buffer`) owned by `PhotonicRenderer`, sized via doubling growth (`usage: VERTEX | COPY_DST` / `INDEX | COPY_DST`).
+**As built (P1 S3, accepted deviation):** persistent doubling-growth buffers with **whole-buffer `queue.write_buffer` upload** per changed frame — no bump allocator/freelist/compaction. Rationale: vertices carry baked color and are reassembled in draw order into one buffer drawn by `draw_indexed` ranges; per-node stable slots would require decoupling physical from draw order (a much larger rewrite) for zero additional tessellation savings. The per-frame allocation — the actual cost §1 identified — is gone. The allocator design below is retained as the escalation path if upload bandwidth ever becomes the measured bottleneck.
+
+Original sketch: replace `scene_renderer.rs:18-31`'s per-frame `create_buffer_init` with two growable persistent buffers (`vbuf: wgpu::Buffer`, `ibuf: wgpu::Buffer`) owned by `PhotonicRenderer`, sized via doubling growth (`usage: VERTEX | COPY_DST` / `INDEX | COPY_DST`).
 
 Slot allocation: a bump allocator per buffer with per-node reserved byte ranges recorded in `CachedGeometry` (§2.2). Update rule:
 - **In-place update** (the common case: geometry unchanged, only a re-tessellation with identical vertex/index count — e.g., stroke width edit that doesn't change point count): `queue.write_buffer(&vbuf, entry.vertices.start, &new_bytes)` at the existing offset. No reallocation.
