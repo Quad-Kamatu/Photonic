@@ -2,6 +2,7 @@ pub mod canvas;
 pub mod color;
 pub mod compositor;
 pub mod headless;
+mod headless_text;
 pub mod pipeline;
 pub mod renderer;
 pub mod tessellator;

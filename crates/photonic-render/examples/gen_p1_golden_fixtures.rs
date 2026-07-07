@@ -57,6 +57,7 @@ fn fixtures() -> Vec<(&'static str, Document)> {
         ("blend_separable", blend_separable()),
         ("blend_nonseparable", blend_nonseparable()),
         ("text_basic", text_basic()),
+        ("text_styled", text_styled()),
         ("raster_placement", raster_placement()),
         ("effect_stack_color_overlay_stroke", effect_stack()),
         ("boolean_groups", boolean_group("boolean-groups", BooleanOp::Union)),
@@ -250,6 +251,37 @@ fn text_basic() -> Document {
     );
     node.transform = Transform::translate(10.0, 15.0);
     doc.add_node(node, None);
+    doc
+}
+
+/// Styled text (TD-018 headless-text coverage): font-size variation, per-node
+/// colour, and a multi-line node. Pure-vector so it exercises the GPU glyphon
+/// path; re-blessed once headless text renders.
+fn text_styled() -> Document {
+    let mut doc = Document::new("text-styled", 200.0, 130.0);
+    let layer = doc.active_layer_id.unwrap();
+
+    let mut title = TextNode::new("Title");
+    title.font_size = 28.0;
+    title.fill = Fill::solid(Color::new(0.85, 0.15, 0.15, 1.0));
+    let mut n = SceneNode::new("title", layer, SceneNodeKind::Text(title));
+    n.transform = Transform::translate(12.0, 10.0);
+    doc.add_node(n, None);
+
+    let mut sub = TextNode::new("subtitle");
+    sub.font_size = 12.0;
+    sub.fill = Fill::solid(Color::new(0.15, 0.30, 0.80, 1.0));
+    let mut n = SceneNode::new("subtitle", layer, SceneNodeKind::Text(sub));
+    n.transform = Transform::translate(12.0, 48.0);
+    doc.add_node(n, None);
+
+    let mut body = TextNode::new("line one\nline two");
+    body.font_size = 14.0;
+    body.fill = Fill::solid(Color::new(0.1, 0.1, 0.1, 1.0));
+    let mut n = SceneNode::new("body", layer, SceneNodeKind::Text(body));
+    n.transform = Transform::translate(12.0, 72.0);
+    doc.add_node(n, None);
+
     doc
 }
 
