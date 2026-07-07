@@ -289,7 +289,17 @@ impl HeadlessRenderer {
                 .get(lid)
                 .is_some_and(|l| !l.print && l.visible && !l.node_ids.is_empty())
         });
-        if has_raster || has_pattern || has_isolated_layer || has_non_print_layer {
+        // Layer Styles (the effect stack) render on the CPU compositor path.
+        let has_stack_effects = document
+            .nodes
+            .values()
+            .any(|n| n.effects.iter().any(|e| e.enabled()));
+        if has_raster
+            || has_pattern
+            || has_isolated_layer
+            || has_non_print_layer
+            || has_stack_effects
+        {
             let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
             let bg = match opts.background {
                 ExportBackground::Artboard => [
@@ -1654,6 +1664,41 @@ mod blend_tests {
         assert!(
             (p[0] as i32 - 127).abs() < 32 && p[1] < 32 && (p[2] as i32 - 127).abs() < 32,
             "half-opacity blue over red should be ~purple, got {p:?}"
+        );
+    }
+
+    /// P4 (headless): a Color Overlay layer style recolours the shape. A RED
+    /// rect with an opaque BLUE Color Overlay exports BLUE.
+    #[test]
+    fn color_overlay_recolours_shape() {
+        use photonic_core::effects::{ColorOverlay, LayerEffect};
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping color-overlay test");
+            return;
+        };
+        let mut doc = Document::new("co", 20.0, 20.0);
+        let mut node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        node.effects.push(LayerEffect::ColorOverlay(ColorOverlay {
+            enabled: true,
+            color: Color::new(0.0, 0.0, 1.0, 1.0),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+        }));
+        doc.add_node(node, None);
+
+        let png = r.render_png_at_size(&doc, 20, 20);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        let p = img.get_pixel(10, 10).0;
+        assert!(
+            p[2] > 200 && p[0] < 40,
+            "opaque blue Color Overlay should recolour the red rect blue, got {p:?}"
         );
     }
 

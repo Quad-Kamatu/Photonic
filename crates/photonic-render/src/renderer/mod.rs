@@ -460,6 +460,9 @@ impl PhotonicRenderer {
             arrowhead_start: photonic_core::style::ArrowheadStyle,
             arrowhead_end: photonic_core::style::ArrowheadStyle,
             blend_mode: BlendMode,
+            /// Enabled Color Overlay layer styles, as premultiplied-into-alpha
+            /// RGBA (color.a × opacity × node opacity). Drawn over the fill.
+            color_overlays: Vec<[f32; 4]>,
         }
 
         let (artboard_w, artboard_h, artboards, nodes): (
@@ -654,6 +657,19 @@ impl PhotonicRenderer {
                             arrowhead_start: sc.arrowhead_start,
                             arrowhead_end: sc.arrowhead_end,
                             blend_mode: node.blend_mode,
+                            color_overlays: node
+                                .effects
+                                .iter()
+                                .filter_map(|e| match e {
+                                    photonic_core::effects::LayerEffect::ColorOverlay(co)
+                                        if co.enabled =>
+                                    {
+                                        let a = co.color.a * co.opacity * node.opacity;
+                                        Some([co.color.r, co.color.g, co.color.b, a])
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
                             outer_glow: if node.outer_glow.enabled {
                                 let c = &node.outer_glow.color;
                                 Some((
@@ -1305,6 +1321,34 @@ impl PhotonicRenderer {
                     if node.stroke_enabled {
                         append_fill(node, &mut verts, &mut idxs);
                     }
+                }
+            }
+
+            // ── Color Overlay layer style ─────────────────────────────────────
+            // The shape's silhouette recoloured, drawn over the fill. Part of the
+            // node's blend segment (exact for Normal/opaque overlays — the common
+            // case; exotic overlay blend modes preview approximately, like the rest
+            // of the live path, but export exactly via the CPU compositor).
+            for &rgba in &node.color_overlays {
+                if rgba[3] <= 0.0 {
+                    continue;
+                }
+                let mesh = tessellate_fill(&node.path_data, node.is_compound);
+                if mesh.is_empty() {
+                    continue;
+                }
+                let [a, b, c, d, e, f] = node.matrix;
+                let base = verts.len() as u32;
+                for v in &mesh.vertices {
+                    let x = a * v[0] as f64 + c * v[1] as f64 + e;
+                    let y = b * v[0] as f64 + d * v[1] as f64 + f;
+                    verts.push(Vertex {
+                        position: [x as f32, y as f32],
+                        color: rgba,
+                    });
+                }
+                for &i in &mesh.indices {
+                    idxs.push(base + i);
                 }
             }
 

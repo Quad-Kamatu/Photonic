@@ -226,6 +226,11 @@ pub enum PanelAction {
         node_id: NodeId,
         blend_mode: photonic_core::layer::BlendMode,
     },
+    /// Replace a node's Layer Styles effect stack (one undoable step).
+    SetNodeEffects {
+        node_id: NodeId,
+        effects: Vec<photonic_core::effects::LayerEffect>,
+    },
     /// Resize a node to the given world-space width and height. A scale transform is
     /// composed onto the existing transform so the top-left anchor stays fixed.
     SetNodeSize {

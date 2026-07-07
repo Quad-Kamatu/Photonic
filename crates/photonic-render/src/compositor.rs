@@ -144,6 +144,25 @@ fn composite_node(
                 node.blend_mode,
                 pn,
             );
+            // Layer Styles rendered on the CPU reference path (effect-by-effect).
+            for eff in &node.effects {
+                if let photonic_core::effects::LayerEffect::ColorOverlay(co) = eff {
+                    if co.enabled {
+                        render_color_overlay(
+                            target,
+                            w,
+                            h,
+                            view,
+                            cov,
+                            &node.transform,
+                            node.opacity,
+                            gop,
+                            pn,
+                            co,
+                        );
+                    }
+                }
+            }
         }
         SceneNodeKind::Raster(_) => {
             render_raster_node(target, w, h, doc, view, node, gop);
@@ -214,6 +233,36 @@ fn group_opacity_map(doc: &Document) -> std::collections::HashMap<NodeId, f32> {
         out.insert(*id, op);
     }
     out
+}
+
+// ─── Layer Styles (effect stack) ──────────────────────────────────────────────
+
+/// Composite a Color Overlay effect over a path node's fill: the shape's
+/// silhouette recoloured with the overlay colour, at the overlay's blend mode +
+/// opacity (Photoshop draws Color Overlay above the fill). The CPU compositor is
+/// the reference path; the GPU/live path mirrors this in `build_geometry`.
+#[allow(clippy::too_many_arguments)]
+fn render_color_overlay(
+    base: &mut [u8],
+    w: u32,
+    h: u32,
+    view: &CanvasView,
+    cov: &mut [f32],
+    transform: &Transform,
+    node_opacity: f32,
+    gop: f32,
+    pn: &photonic_core::node::PathNode,
+    overlay: &photonic_core::effects::ColorOverlay,
+) {
+    let a = overlay.color.a * overlay.opacity * node_opacity * gop;
+    if a <= 0.0 {
+        return;
+    }
+    let mesh = tessellate_fill(&pn.path_data, false);
+    if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
+        let rgb = [overlay.color.r, overlay.color.g, overlay.color.b];
+        composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |_, _| (rgb, a));
+    }
 }
 
 // ─── Vector (path) node rendering ─────────────────────────────────────────────

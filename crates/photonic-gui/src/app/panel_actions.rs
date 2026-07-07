@@ -395,6 +395,21 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::SetNodeEffects { node_id, effects } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if node.effects != effects {
+                            let mut new_node = node.clone();
+                            new_node.effects = effects;
+                            let cmd = Command::UpdateNode {
+                                old: node.clone(),
+                                new: new_node,
+                            };
+                            history.execute(cmd, doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+
                 PanelAction::SetNodeSize {
                     node_id,
                     width,

@@ -488,6 +488,74 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                     .id_salt("effects_section")
                     .open(forced_open)
                     .show(ui, |ui| {
+                        // ── Layer Styles (reorderable effect stack) ─────────────
+                        egui::CollapsingHeader::new("Layer Styles")
+                            .default_open(true)
+                            .id_salt("layer_styles")
+                            .open(forced_open)
+                            .show(ui, |ui| {
+                                use photonic_core::effects::{ColorOverlay, LayerEffect};
+                                let mut effects = node.effects.clone();
+                                let mut changed = false;
+                                let mut remove: Option<usize> = None;
+                                for (i, eff) in effects.iter_mut().enumerate() {
+                                    match eff {
+                                        LayerEffect::ColorOverlay(co) => {
+                                            ui.horizontal(|ui| {
+                                                if ui.checkbox(&mut co.enabled, "").changed() {
+                                                    changed = true;
+                                                }
+                                                ui.label("Color Overlay");
+                                                let mut col = egui::Color32::from_rgb(
+                                                    (co.color.r * 255.0) as u8,
+                                                    (co.color.g * 255.0) as u8,
+                                                    (co.color.b * 255.0) as u8,
+                                                );
+                                                if ui.color_edit_button_srgba(&mut col).changed() {
+                                                    co.color.r = col.r() as f32 / 255.0;
+                                                    co.color.g = col.g() as f32 / 255.0;
+                                                    co.color.b = col.b() as f32 / 255.0;
+                                                    changed = true;
+                                                }
+                                                if ui.small_button("Remove").clicked() {
+                                                    remove = Some(i);
+                                                }
+                                            });
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(&mut co.opacity, 0.0..=1.0)
+                                                        .text("opacity"),
+                                                )
+                                                .changed()
+                                            {
+                                                changed = true;
+                                            }
+                                        }
+                                        other => {
+                                            ui.horizontal(|ui| {
+                                                ui.label(other.kind());
+                                                if ui.small_button("Remove").clicked() {
+                                                    remove = Some(i);
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                if let Some(i) = remove {
+                                    effects.remove(i);
+                                    changed = true;
+                                }
+                                if ui.button("+ Color Overlay").clicked() {
+                                    effects.push(LayerEffect::ColorOverlay(ColorOverlay::default()));
+                                    changed = true;
+                                }
+                                if changed {
+                                    action = Some(PanelAction::SetNodeEffects {
+                                        node_id: nid,
+                                        effects,
+                                    });
+                                }
+                            });
                         // Inner Glow
                         if matches("Inner Glow") || matches("Effects") {
                             egui::CollapsingHeader::new("Inner Glow")
