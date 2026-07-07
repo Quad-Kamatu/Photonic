@@ -24,6 +24,10 @@ mod tabs;
 mod tool_handlers;
 mod width_tool;
 pub(crate) mod mode;
+// TEMP — delete alongside `app/mode_fallbacks.rs` once the timeline-panel
+// story lands its real methods (see that file's header comment).
+mod mode_fallbacks;
+pub(crate) mod monitor;
 pub(crate) mod timeline;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
@@ -801,6 +805,33 @@ pub struct PhotonicApp {
     /// the document (04 §6).
     pub timeline_snap_enabled: bool,
 
+    // ── Program monitor / transport (04 §3.2) ───────────────────────────────
+    // Session-only placeholder playback state — there is no engine until P3
+    // lands, so "playing" is simulated by advancing `playhead` from wall-clock
+    // dt each frame (`advance_monitor_playback`, `app/monitor.rs`) purely so
+    // the transport/scrub UX is testable pre-engine. Real playback replaces
+    // this with `EngineCmd`/`EngineStatus` (02 §1) without changing the public
+    // transport methods' call sites (command palette, keyboard, buttons).
+    /// True while the placeholder transport is "playing".
+    pub(crate) monitor_playing: bool,
+    /// Playback direction while `monitor_playing` (J = reverse, L = forward).
+    pub(crate) monitor_play_reverse: bool,
+    /// J/L repeat-press speed multiplier (reference-NLE convention, 04 §3.2).
+    pub(crate) monitor_play_speed: f64,
+    /// Timeline loop-playback toggle (04 §3.2 transport bar).
+    pub(crate) monitor_loop_enabled: bool,
+    /// Safe-area guide overlay toggle (04 §3.3).
+    pub(crate) monitor_safe_area: bool,
+    /// One-time keyboard-shortcut overlay (Space/JKL/I/O/S) visible — opened
+    /// automatically on first video-mode entry and re-openable via `?` (04
+    /// §1.2 First-run hint). Session state; the "has this been shown before"
+    /// bit is `prefs.video_shortcuts_intro_shown` (persisted).
+    pub(crate) show_video_shortcut_sheet: bool,
+    /// First frame's CLI/double-click auto-enter check (04 §1.2 "Auto-enter on
+    /// open") has run. Guards `ensure_initial_tab`'s one-shot sibling check so
+    /// it only inspects `doc.timeline` once, on the very first `draw` call.
+    pub(crate) initial_mode_checked: bool,
+
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
 
@@ -1396,6 +1427,13 @@ impl Default for PhotonicApp {
             playhead: Tick::default(),
             timeline_selection: Vec::new(),
             timeline_snap_enabled: true,
+            monitor_playing: false,
+            monitor_play_reverse: false,
+            monitor_play_speed: 1.0,
+            monitor_loop_enabled: false,
+            monitor_safe_area: false,
+            show_video_shortcut_sheet: false,
+            initial_mode_checked: false,
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
@@ -2527,11 +2565,32 @@ impl PhotonicApp {
                         self.show_welcome = false;
                         doc_modified = true;
                     }
-                    WelcomeAction::CreateNewVideo(_spec) => {
-                        // P2 wave / mode-switch story fills this: call
-                        // create_document_from_spec-equivalent for a video
-                        // project, create the TimelineProject (04 §1.3), and
-                        // set self.mode = AppMode::Video (04 §1.2).
+                    WelcomeAction::CreateNewVideo(spec) => {
+                        // Video-mode counterpart of `CreateNew` above (04
+                        // §1.2): a fresh document, THEN the timeline project
+                        // it's paired with (§1.3) — same undo-reset discipline
+                        // as `create_document_from_spec`, plus entering Video.
+                        let crate::welcome::VideoProjectSpec {
+                            name,
+                            width,
+                            height,
+                            frame_rate,
+                        } = spec;
+                        *doc = photonic_core::Document::new(name, width, height);
+                        history.reset();
+                        self.fit_pending = true;
+                        self.current_file = None;
+                        self.selected_id = None;
+                        self.ensure_timeline_project_with(
+                            doc,
+                            history,
+                            width as u32,
+                            height as u32,
+                            frame_rate,
+                        );
+                        self.mode = AppMode::Video;
+                        self.show_welcome = false;
+                        doc_modified = true;
                     }
                     WelcomeAction::OpenFile(path) => match load_document(&path) {
                         Ok((loaded, hist_snap)) => {
@@ -2543,6 +2602,13 @@ impl PhotonicApp {
                             self.selected_id = None;
                             self.show_welcome = false;
                             doc_modified = true;
+                            // Auto-enter (04 §1.2): a project with a timeline
+                            // always opens into video mode.
+                            self.mode = if doc.timeline.is_some() {
+                                AppMode::Video
+                            } else {
+                                AppMode::Vector
+                            };
                         }
                         Err(e) => {
                             self.file_status = Some(format!("Open failed: {e}"));
@@ -2620,6 +2686,13 @@ impl PhotonicApp {
                                         self.selected_id = None;
                                         self.show_welcome = false;
                                         doc_modified = true;
+                                        // Auto-enter (04 §1.2), same rule as
+                                        // the WelcomeAction::OpenFile arm.
+                                        self.mode = if doc.timeline.is_some() {
+                                            AppMode::Video
+                                        } else {
+                                            AppMode::Vector
+                                        };
                                     }
                                     Err(e) => {
                                         self.file_status = Some(format!("Open failed: {e}"));
@@ -2638,6 +2711,10 @@ impl PhotonicApp {
         // and the first editor frame), then apply any switch/close requested by
         // last frame's tab-bar UI before the canvas draws this frame.
         self.ensure_initial_tab(doc, history);
+        // Auto-enter video mode (04 §1.2) for a CLI/double-click-opened
+        // document that already has a timeline — runs exactly once, the
+        // first frame after the initial tab lands.
+        self.check_initial_auto_enter(doc);
         if let Some(target) = self.pending_tab_switch.take() {
             self.switch_tab(target, doc, history, view);
         }
@@ -2725,6 +2802,21 @@ impl PhotonicApp {
                         };
                         self.selected_drawer_option = None;
                     }
+
+                    // Video mode toggle (video-editor-module 04-ui-mode-timeline.md
+                    // §1.2) — same selectable_label + active_drawer-flush idiom as
+                    // File/Edit/Tools above. `enter_or_exit_video_mode` lazily
+                    // creates `doc.timeline` on the way in (§1.3) and always issues
+                    // the exit-pause seam on the way out (§7).
+                    let video_active = self.mode == AppMode::Video;
+                    let video_resp = ui.selectable_label(video_active, "Video");
+                    if video_resp.clicked() {
+                        if self.active_drawer == Some(DrawerKind::Edit) {
+                            self.prefs.save();
+                        }
+                        self.enter_or_exit_video_mode(doc, history);
+                    }
+                    self.draw_video_hint_callout(ui.ctx(), video_resp.rect);
 
                     // Audit log toggle
                     if ui
@@ -3358,6 +3450,30 @@ impl PhotonicApp {
                         fg_painter.rect_filled(text_rect.expand(2.0), 2.0, bg_color);
                         fg_painter.galley(text_pos, galley, text_color);
                     }
+                }
+
+                // ── Video-mode program monitor (04 §1.1 point 3, §3) ─────────
+                // D-02: same canvas rect, same fit/zoom/pan session state —
+                // reused, not duplicated. Branches here and returns for the
+                // rest of this frame's central-panel content: every block
+                // below (raster/preview overlays, outline mode, grid,
+                // gradient handles, the tool if-chain, and the space-pan/
+                // arrow-nudge/WASD-pan blocks §5.2 calls out as colliding
+                // with video-mode keys) is a *vector-canvas* concern and is
+                // skipped this frame instead of being individually wrapped —
+                // the same "gate vector-canvas input by mode, dispatch video.*
+                // as a sibling block at the same call site" effect as one
+                // early exit, at far lower risk than threading if/else
+                // through the ~2000-line vector tool if-chain below.
+                if self.mode == AppMode::Video {
+                    debug_assert!(
+                        doc.timeline.is_some(),
+                        "AppMode::Video requires doc.timeline once entered (04 \
+                         §1.3) — every entry path must call \
+                         ensure_timeline_project[_with] first"
+                    );
+                    self.draw_video_monitor(ui, ctx, rect, doc, history);
+                    return;
                 }
 
                 // ── Raster (pixel) layers ──────────────────────────────────────

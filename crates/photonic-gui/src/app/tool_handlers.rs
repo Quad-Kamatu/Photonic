@@ -308,6 +308,14 @@ impl PhotonicApp {
             doc_modified = true;
         }
 
+        // Video mode toggle (default Ctrl+Shift+V) — keymap-resolved, mode-
+        // agnostic (it's the one binding that must fire in *both* modes: it's
+        // how you leave Video too), routed through the same `dispatch_command`
+        // entry point as every other global shortcut here (04 §1.2).
+        if self.binding_pressed(ctx, "mode.toggle_video") {
+            self.dispatch_command("mode.toggle_video", doc, history);
+        }
+
         doc_modified
     }
 

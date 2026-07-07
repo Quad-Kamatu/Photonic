@@ -124,6 +124,15 @@ pub struct AppPreferences {
     /// toggles, not document state.
     #[serde(default = "default_true")]
     pub timeline_snap_enabled: bool,
+    /// First-run discoverability callout on the toolbar's Video toggle (04
+    /// §1.2) has been dismissed — never shown again once true.
+    #[serde(default)]
+    pub video_hint_dismissed: bool,
+    /// The one-time keyboard-shortcut overlay has already been shown on a
+    /// first video-mode entry (04 §1.2). Re-openable anytime after via `?`
+    /// regardless of this flag — it only gates the *automatic* first showing.
+    #[serde(default)]
+    pub video_shortcuts_intro_shown: bool,
 
     // HOTBAR — the always-on adaptive second toolbar row (#154 Phase 4).
     /// Static (curated default order) or Adaptive (ranked by the user's usage).
@@ -237,6 +246,8 @@ impl Default for AppPreferences {
             right_drawer_width: 280.0,
             reduced_motion: false,
             timeline_snap_enabled: true,
+            video_hint_dismissed: false,
+            video_shortcuts_intro_shown: false,
             hotbar_mode: HotbarMode::default(),
             hotbar_usage: HashMap::new(),
             keymap: HashMap::new(),

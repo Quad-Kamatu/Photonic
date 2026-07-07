@@ -140,45 +140,48 @@ impl PhotonicApp {
             "view.toggle_audit" => self.audit.panel_open = !self.audit.panel_open,
             "palette.open" => self.command_palette_open = true,
             // ── Mode switch (video-editor-module 04 §1.2) ────────────────────
-            // Real wiring for the toggle only — `enter_video`/`exit_video` and
-            // the toolbar/welcome/auto-enter entry points, the `doc.timeline`
-            // lazy-creation invariant (04 §1.3), and the exit-pauses-playback
-            // rule (04 §7) are the mode-switch story, not this skeleton PR.
-            "mode.toggle_video" => {
-                self.mode = match self.mode {
-                    AppMode::Video => AppMode::Vector,
-                    AppMode::Vector => AppMode::Video,
-                };
-                // A drawer open in the old mode is meaningless in the new one
-                // (04 §4).
-                self.open_drawer = None;
+            // All three route through the same helper (`app/monitor.rs`) so
+            // the lazy-creation invariant (§1.3: `doc.timeline.is_some()`
+            // whenever `self.mode == Video`) and the exit-pauses-playback
+            // seam (§7) apply no matter which entry point fired.
+            "mode.toggle_video" => self.enter_or_exit_video_mode(doc, history),
+            "mode.enter_video" => {
+                if self.mode != AppMode::Video {
+                    self.enter_or_exit_video_mode(doc, history);
+                }
             }
-            "mode.enter_video" | "mode.exit_video" => {
-                // P2 wave / mode-switch story fills this in.
+            "mode.exit_video" => {
+                if self.mode == AppMode::Video {
+                    self.enter_or_exit_video_mode(doc, history);
+                }
             }
-            // ── Video transport / timeline keys (04 §5.1) ─────────────────────
-            // Registered so they're palette-reachable and rebindable; actual
-            // engine/timeline dispatch is P2-wave work (02-engine.md,
-            // app/timeline/interact.rs + ops_bridge.rs don't exist yet).
-            "video.play_pause"
-            | "video.play_reverse"
-            | "video.pause"
-            | "video.play_forward"
-            | "video.step_back"
-            | "video.step_forward"
-            | "video.prev_edit_point"
-            | "video.next_edit_point"
-            | "video.set_in"
-            | "video.set_out"
-            | "video.split_at_playhead"
-            | "video.toggle_snap"
-            | "video.zoom_in"
-            | "video.zoom_out"
-            | "video.zoom_fit"
-            | "video.playhead_home"
-            | "video.playhead_end" => {
-                // P2 wave fills this.
-            }
+            // ── Video transport (04 §5.1, §3.2) — owned by this story; each
+            // calls a real placeholder method on `PhotonicApp` (`app/monitor.rs`)
+            // that moves `self.playhead` until the P3 engine lands.
+            "video.play_pause" => self.video_play_pause(),
+            "video.play_reverse" => self.video_play_reverse(),
+            "video.pause" => self.video_pause(),
+            "video.play_forward" => self.video_play_forward(),
+            "video.step_back" => self.video_step_back(doc),
+            "video.step_forward" => self.video_step_forward(doc),
+            "video.set_in" => self.video_set_in(doc),
+            "video.set_out" => self.video_set_out(doc),
+            "video.playhead_home" => self.video_playhead_home(),
+            "video.playhead_end" => self.video_playhead_end(doc),
+            // ── Timeline-panel edit commands (04 §5.1) — owned by the P2-wave
+            // timeline-panel story (`app/timeline/interact.rs`+`ops_bridge.rs`,
+            // not yet landed in this tree). Calls are written against the
+            // `pub(crate) fn <name>(&mut self, ...)` methods that story adds to
+            // `PhotonicApp`; see `app/mode_fallbacks.rs` for the TEMP no-op
+            // shims that make this compile until they land (delete that file
+            // once they do — it's marked for the orchestrator).
+            "video.prev_edit_point" => self.prev_edit_point(doc),
+            "video.next_edit_point" => self.next_edit_point(doc),
+            "video.split_at_playhead" => self.split_at_playhead(doc, history),
+            "video.toggle_snap" => self.toggle_snap(),
+            "video.zoom_in" => self.zoom_in(),
+            "video.zoom_out" => self.zoom_out(),
+            "video.zoom_fit" => self.zoom_fit(),
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the
