@@ -24,9 +24,6 @@ mod tabs;
 mod tool_handlers;
 mod width_tool;
 pub(crate) mod mode;
-// TEMP — delete alongside `app/mode_fallbacks.rs` once the timeline-panel
-// story lands its real methods (see that file's header comment).
-mod mode_fallbacks;
 pub(crate) mod monitor;
 pub(crate) mod timeline;
 use egui::{Color32, RichText};

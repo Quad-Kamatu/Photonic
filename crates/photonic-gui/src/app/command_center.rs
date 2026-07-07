@@ -166,8 +166,8 @@ impl PhotonicApp {
             "video.step_forward" => self.video_step_forward(doc),
             "video.set_in" => self.video_set_in(doc),
             "video.set_out" => self.video_set_out(doc),
-            "video.playhead_home" => self.video_playhead_home(),
-            "video.playhead_end" => self.video_playhead_end(doc),
+            "video.playhead_home" => self.timeline_playhead_home(),
+            "video.playhead_end" => self.timeline_playhead_end(doc),
             // ── Timeline-panel edit commands (04 §5.1) — owned by the P2-wave
             // timeline-panel story (`app/timeline/interact.rs`+`ops_bridge.rs`,
             // not yet landed in this tree). Calls are written against the
@@ -175,13 +175,13 @@ impl PhotonicApp {
             // `PhotonicApp`; see `app/mode_fallbacks.rs` for the TEMP no-op
             // shims that make this compile until they land (delete that file
             // once they do — it's marked for the orchestrator).
-            "video.prev_edit_point" => self.prev_edit_point(doc),
-            "video.next_edit_point" => self.next_edit_point(doc),
-            "video.split_at_playhead" => self.split_at_playhead(doc, history),
-            "video.toggle_snap" => self.toggle_snap(),
-            "video.zoom_in" => self.zoom_in(),
-            "video.zoom_out" => self.zoom_out(),
-            "video.zoom_fit" => self.zoom_fit(),
+            "video.prev_edit_point" => self.timeline_prev_edit_point(doc),
+            "video.next_edit_point" => self.timeline_next_edit_point(doc),
+            "video.split_at_playhead" => self.timeline_split_at_playhead(doc, history),
+            "video.toggle_snap" => self.timeline_toggle_snap(),
+            "video.zoom_in" => self.timeline_zoom_in(),
+            "video.zoom_out" => self.timeline_zoom_out(),
+            "video.zoom_fit" => self.timeline_zoom_fit(doc),
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the
