@@ -4,6 +4,7 @@ use crate::{
     node::{NodeId, SceneNode},
 };
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 use uuid::Uuid;
 
 mod branches;
@@ -2447,6 +2448,61 @@ impl Command {
         }
     }
 
+    /// The node id(s) this command reads/writes, straight from the fields it
+    /// already carries for `apply`/`inverse` — no document lookup needed. Used
+    /// by [`CommandHistory::changes_since`] (03 §2.1) to tell a renderer cache
+    /// which nodes a revision range actually touched. Document-level commands
+    /// (layer ops, guides, artboards, canvas resize) touch no specific node and
+    /// return empty.
+    pub fn affected_nodes(&self) -> SmallVec<[NodeId; 4]> {
+        match self {
+            Command::AddNode { node, .. } => smallvec![node.id],
+            Command::RemoveNode { node_id } => smallvec![*node_id],
+            Command::UpdateNode { new, .. } => smallvec![new.id],
+            Command::UpdateRasterRegion { node_id, .. } => smallvec![*node_id],
+            Command::UpdateRasterMeta { new, .. } => smallvec![new.id],
+            Command::AddSubtree { nodes, .. } => nodes.iter().map(|n| n.id).collect(),
+            Command::RemoveSubtree { nodes, .. } => nodes.iter().map(|n| n.id).collect(),
+            Command::AddLayer { .. } => SmallVec::new(),
+            Command::RemoveLayer { .. } => SmallVec::new(),
+            Command::ReorderLayers { .. } => SmallVec::new(),
+            Command::SetActiveLayer { .. } => SmallVec::new(),
+            Command::Batch(cmds) => cmds.iter().flat_map(|c| c.affected_nodes()).collect(),
+            Command::ReorderNode { node_id, .. } => smallvec![*node_id],
+            Command::GroupNodes {
+                group, children, ..
+            } => {
+                let mut ids: SmallVec<[NodeId; 4]> = smallvec![group.id];
+                ids.extend(children.iter().copied());
+                ids
+            }
+            Command::UngroupNodes {
+                group, children, ..
+            } => {
+                let mut ids: SmallVec<[NodeId; 4]> = smallvec![group.id];
+                ids.extend(children.iter().copied());
+                ids
+            }
+            Command::RemoveLayerFull { layer } => layer.node_ids.iter().copied().collect(),
+            Command::RemoveNodeFull { node } => smallvec![node.id],
+            Command::UpdateLayer { .. } => SmallVec::new(),
+            Command::ReplaceLayer { .. } => SmallVec::new(),
+            Command::MoveNodeToLayer { node_id, .. } => smallvec![*node_id],
+            Command::ReparentNode { node_id, .. } => smallvec![*node_id],
+            Command::SetGuides { .. } => SmallVec::new(),
+            Command::SetArtboards { .. } => SmallVec::new(),
+            // A whole-document swap is not "no nodes changed" — every node on
+            // either side is suspect, so report the union rather than an empty
+            // set, which `changes_since` would otherwise trust as "nothing to
+            // invalidate".
+            Command::ReplaceDocument { old, new, .. } => {
+                old.nodes.keys().chain(new.nodes.keys()).copied().collect()
+            }
+            Command::SetWidthProfiles { .. } => SmallVec::new(),
+            Command::ResizeCanvas { .. } => SmallVec::new(),
+        }
+    }
+
     /// Rewrite a raster `UpdateNode` into a compact delta that holds **no** full
     /// bitmap clone (#194/#196), so raster history stays tiny. Applied once per
     /// `execute`, recursing into batches so brush / filter / adjustment edits —
@@ -3334,6 +3390,15 @@ pub struct CommandHistory {
     /// changes cheaply without re-serializing the whole document each frame.
     /// Never reset, so it cannot collide across document replacements.
     revision: u64,
+    /// Ring of the last [`CommandHistory::REVISION_RING_CAPACITY`] revisions'
+    /// affected-node sets, oldest first — one entry per `execute`/`undo`/`redo`
+    /// (03 §2.1). Backs [`changes_since`](CommandHistory::changes_since); a
+    /// document-wide event (restore/reset) clears it instead of pushing an
+    /// entry, since "which nodes changed" isn't meaningful for a whole-document
+    /// swap — the empty ring then forces `overflowed = true` for any query that
+    /// spans it. Transient runtime state, deliberately excluded from
+    /// [`HistorySnapshot`] like `revision` itself.
+    revision_ring: std::collections::VecDeque<(u64, SmallVec<[NodeId; 4]>)>,
     /// A pointer gesture is open (set by [`begin_coalescing`]): mergeable
     /// same-target edits streamed through [`execute`] fold into the current
     /// gesture's anchor undo entry instead of pushing a new step, so one
@@ -3359,6 +3424,21 @@ impl Default for CommandHistory {
     }
 }
 
+/// Result of [`CommandHistory::changes_since`] (03 §2.1): which nodes changed
+/// between a caller-remembered revision and now, or a signal that the answer
+/// can't be known and everything must be treated as changed.
+#[derive(Debug, Clone)]
+pub struct ChangeSummary {
+    /// The revision this summary was computed against (`CommandHistory::revision()`
+    /// at call time).
+    pub revision: u64,
+    /// Union of `affected_nodes()` across every recorded command since `from`.
+    /// Meaningless (and left empty) when `overflowed` is true.
+    pub touched: std::collections::HashSet<NodeId>,
+    /// `true` when `from` predates the retained ring, so `touched` is
+    /// incomplete — the caller must invalidate everything rather than trust it.
+    pub overflowed: bool,
+}
 
 /// Recursively collect the `old` side of any `UpdateNode` command in `cmd`
 /// that touches `node_id`, appending to `out`.
