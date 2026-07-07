@@ -16,8 +16,8 @@
 //! `timeline/ops.rs` fn, which does take explicit ids.
 
 use photonic_core::timeline::{
-    AssetId, ClipId, ClipTransform, FrameRate, Interp, PropValue, SequenceFormat, SequenceId,
-    TrackId, TrackKind, TransitionKind, TransitionParams,
+    AssetId, BinId, ClipId, ClipTransform, FrameRate, Interp, MarkerId, PropValue, SequenceFormat,
+    SequenceId, TrackId, TrackKind, TransitionKind, TransitionParams,
 };
 use serde::Deserialize;
 
@@ -135,6 +135,58 @@ pub struct SetActiveFormatArgs {
     pub format_index: usize,
 }
 
+/// `null`/omitted `range` clears the sequence's work range.
+#[derive(Debug, Deserialize)]
+pub struct SetWorkRangeArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub range: Option<WorkRangeArg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkRangeArg {
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_ticks: Option<i64>,
+    #[serde(default)]
+    pub end_tc: Option<String>,
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddMarkerArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `#rrggbb` or `#rrggbbaa`.
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveMarkerArgs {
+    pub marker_id: MarkerId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListMarkersArgs {
+    pub sequence_id: SequenceId,
+}
+
 // ─── Track (10 §3.3) ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -214,11 +266,22 @@ pub struct MoveClipArgs {
     pub new_start_tc: Option<String>,
     #[serde(default)]
     pub new_start_seconds: Option<f64>,
-    /// Cross-track move. NOT SUPPORTED in v1 — `TimelineCmd::MoveClip` has no
-    /// track-change field (core gap, see P2 report). Supplying a value that
-    /// differs from the clip's current track returns `NotSupportedV1`.
+    /// Cross-track move (destination must be the same `TrackKind`, routes
+    /// through `ops::move_clip_to_track`). Omit for a same-track move.
     #[serde(default)]
     pub new_track_id: Option<TrackId>,
+}
+
+/// Args for `ripple_edit` — trims `edge` to `current_edge_position +
+/// delta_ticks` and ripples every later clip on the track to close/open the
+/// gap (`ops::ripple_trim`). `edge` uses the same in/out vocabulary as
+/// `trim_clip` (in = clip's in-point/`ClipEdge::Start`, out = clip's
+/// out-point/`ClipEdge::End`).
+#[derive(Debug, Deserialize)]
+pub struct RippleEditArgs {
+    pub clip_id: ClipId,
+    pub edge: ClipEdge,
+    pub delta_ticks: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -446,7 +509,9 @@ pub struct GetKeyframesArgs {
 /// Registers `MediaAsset`s with `probe: None` (ffprobe integration is P3, 02
 /// §6) — the result data flags each asset `"probed": false`. Content-hashes
 /// the file now (head+tail+len) so `relink_media`'s future by-hash matching
-/// has an identity to match against.
+/// has an identity to match against. `bin` names a bin to file the imported
+/// asset(s) under — looked up by exact name, created (top-level, no parent)
+/// if it doesn't exist yet.
 #[derive(Debug, Deserialize)]
 pub struct ImportMediaArgs {
     pub paths: Vec<String>,
@@ -460,6 +525,7 @@ pub struct RelinkMediaArgs {
     pub new_path: String,
 }
 
+/// `bin` filters to assets filed under the bin with that exact name.
 #[derive(Debug, Deserialize, Default)]
 pub struct ListMediaArgs {
     #[serde(default)]
@@ -472,3 +538,32 @@ pub struct ListMediaArgs {
 pub struct RemoveAssetArgs {
     pub asset_id: AssetId,
 }
+
+// ─── Media bins (not in the original §3.1 catalog table — added because the
+// media gap-fix (photonic-core commit ab7557f) landed real `MediaAsset.bin`
+// support; folded in as standard `create_/remove_/set_/list_` tools rather
+// than an op-field mega-tool, since each maps 1:1 to a distinct
+// `TimelineCmd` variant, matching design rule 1/2) ─────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBinArgs {
+    pub name: String,
+    #[serde(default)]
+    pub parent: Option<BinId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveBinArgs {
+    pub bin_id: BinId,
+}
+
+/// `null`/omitted `bin_id` moves the asset to the pool root (unfiled).
+#[derive(Debug, Deserialize)]
+pub struct SetAssetBinArgs {
+    pub asset_id: AssetId,
+    #[serde(default)]
+    pub bin_id: Option<BinId>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListBinsArgs {}

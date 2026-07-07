@@ -11,24 +11,14 @@
 //! Engine-backed tools (probe/proxy/playback/render/export/captions/tts/grade
 //! scopes) are P3+ and are not implemented here.
 //!
-//! ## Known gaps (no backing `TimelineCmd`/op in `photonic-core` — reported,
-//! not worked around by re-deriving edit logic in the handler layer)
-//! - `set_work_range`, `add_marker`, `remove_marker`, `list_markers`:
-//!   `Sequence::work_range`/`Sequence::markers` are data fields with no
-//!   `TimelineCmd` variant or `ops.rs` fn to mutate them undoably. Not
-//!   implemented.
-//! - `ripple_edit` (trim one edge + ripple every later clip on the track):
-//!   `ops.rs` only has `ripple_delete` (delete + ripple), used here for
-//!   `remove_clip`'s `ripple` flag. There is no "trim + ripple" op. Not
-//!   implemented.
-//! - `move_clip`'s `new_track_id` (cross-track move): `TimelineCmd::MoveClip`
-//!   has a single `track` field, no track-change support. Implemented for
-//!   same-track moves only; a differing `new_track_id` returns
-//!   `NotSupportedV1`.
-//! - Media `bin` (folder) assignment/filtering: `MediaAsset` has no bin
-//!   reference field. `import_media`/`list_media` accept the arg but flag
-//!   `bin_assignment_supported`/`bin_filter_supported: false` rather than
-//!   silently no-op.
+//! ## Resolved gaps (P2 top-up, photonic-core commit ab7557f)
+//! `set_work_range`/`add_marker`/`remove_marker`/`list_markers`,
+//! `ripple_edit` (via `ops::ripple_trim`), `move_clip`'s cross-track path
+//! (via `ops::move_clip_to_track`), and media bins (`MediaAsset.bin` +
+//! `ops::{create_bin,remove_bin,assign_asset_bin}`) all landed in core and
+//! are implemented below.
+//!
+//! ## Remaining gap
 //! - `content_hash` uses a stopgap `DefaultHasher` (SipHash) digest over
 //!   head+tail+len, not the `xxh3` the core doc comment (media.rs:6)
 //!   describes as the eventual relink identity (that's P3 engine work).
@@ -38,8 +28,9 @@ use crate::server::AppState;
 use photonic_core::history::Command;
 use photonic_core::timeline::{
     ops, AnimTarget, AssetId, AssetKind, Clip, ClipEffect, ClipId, ClipSource, ClipTiming,
-    EditError, FormatOp, FrameRate, Keyframe, PropPath, Ratio, SequenceId, SpeedMap, Tick,
-    TimelineCmd, TimelineProject, Track, TrackId, TrackSettings, Transition, TICKS_PER_SECOND,
+    EditError, FormatOp, FrameRate, Keyframe, Marker, MarkerId, PropPath, Ratio, SequenceId,
+    SpeedMap, Tick, TimelineCmd, TimelineProject, Track, TrackId, TrackSettings, Transition,
+    TICKS_PER_SECOND,
 };
 use photonic_core::Color;
 use serde_json::json;
@@ -122,6 +113,22 @@ fn locate_track(p: &TimelineProject, track: TrackId) -> Option<SequenceId> {
         .iter()
         .find(|(_, s)| s.track(track).is_some())
         .map(|(sid, _)| *sid)
+}
+
+/// Which `SequenceId` owns a marker.
+fn locate_marker(p: &TimelineProject, marker: MarkerId) -> Option<SequenceId> {
+    p.sequences
+        .iter()
+        .find(|(_, s)| s.markers.iter().any(|m| m.id == marker))
+        .map(|(sid, _)| *sid)
+}
+
+/// Resolve a bin by exact name.
+fn find_bin_by_name<'a>(
+    p: &'a TimelineProject,
+    name: &str,
+) -> Option<&'a photonic_core::timeline::MediaBin> {
+    p.media.bins.iter().find(|b| b.name == name)
 }
 
 fn map_edit_error(e: EditError) -> ToolResult {
@@ -343,6 +350,126 @@ pub async fn set_active_format(state: &AppState, args: SetActiveFormatArgs) -> T
         }
         Err(e) => map_edit_error(e),
     }
+}
+
+pub async fn set_work_range(state: &AppState, args: SetWorkRangeArgs) -> ToolResult {
+    tracing::debug!("tool: set_work_range {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let fr = seq.frame_rate;
+    let new_range = match args.range {
+        None => None,
+        Some(r) => {
+            let start = match resolve_tick(
+                r.start_ticks,
+                r.start_tc.as_deref(),
+                r.start_seconds,
+                Some(fr),
+            ) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            let end = match resolve_tick(r.end_ticks, r.end_tc.as_deref(), r.end_seconds, Some(fr))
+            {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            if end <= start {
+                return err_code("TickOutOfRange", "work range end must be after start");
+            }
+            Some((start, end))
+        }
+    };
+    match ops::set_work_range(project, args.sequence_id, new_range) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Work range updated")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn add_marker(state: &AppState, args: AddMarkerArgs) -> ToolResult {
+    tracing::debug!("tool: add_marker {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let color = match args.color {
+        Some(hex) => match Color::from_hex(&hex) {
+            Some(c) => Some(c),
+            None => {
+                return ToolResult::error(format!(
+                    "invalid color {hex:?} — expected #rrggbb or #rrggbbaa"
+                ))
+            }
+        },
+        None => None,
+    };
+    let mut marker = Marker::new(at, args.name.unwrap_or_default());
+    marker.color = color;
+    if let Some(note) = args.note {
+        marker.note = note;
+    }
+    let marker_id = marker.id;
+    match ops::add_marker(project, args.sequence_id, marker) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Added marker").with_data(json!({ "marker_id": marker_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn remove_marker(state: &AppState, args: RemoveMarkerArgs) -> ToolResult {
+    tracing::debug!("tool: remove_marker {}", args.marker_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_marker(project, args.marker_id) else {
+        return ToolResult::error(format!("marker {} not found", args.marker_id));
+    };
+    match ops::remove_marker(project, seq_id, args.marker_id) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Removed marker")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn list_markers(state: &AppState, args: ListMarkersArgs) -> ToolResult {
+    tracing::debug!("tool: list_markers {}", args.sequence_id);
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    ToolResult::text(format!("{} marker(s)", seq.markers.len()))
+        .with_data(json!({ "markers": seq.markers }))
 }
 
 // ─── Track (10 §3.3) ────────────────────────────────────────────────────────
@@ -570,14 +697,6 @@ pub async fn move_clip(state: &AppState, args: MoveClipArgs) -> ToolResult {
     let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
         return ToolResult::error(format!("clip {} not found", args.clip_id));
     };
-    if let Some(new_track) = args.new_track_id {
-        if new_track != track_id {
-            return err_code(
-                "NotSupportedV1",
-                "cross-track move_clip is not supported in v1 (TimelineCmd::MoveClip has no track-change field) — use remove_clip then insert_clip on the target track instead",
-            );
-        }
-    }
     let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
     let new_start = match resolve_tick(
         args.new_start_ticks,
@@ -588,7 +707,14 @@ pub async fn move_clip(state: &AppState, args: MoveClipArgs) -> ToolResult {
         Ok(t) => t,
         Err(e) => return e,
     };
-    match ops::move_clip(project, seq_id, track_id, args.clip_id, new_start) {
+    match ops::move_clip_to_track(
+        project,
+        seq_id,
+        track_id,
+        args.clip_id,
+        new_start,
+        args.new_track_id,
+    ) {
         Ok(cmd) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
             ToolResult::text("Moved clip")
@@ -781,6 +907,42 @@ pub async fn slide_clip(state: &AppState, args: SlideClipArgs) -> ToolResult {
         Ok(cmd) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
             ToolResult::text("Slid clip")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn ripple_edit(state: &AppState, args: RippleEditArgs) -> ToolResult {
+    tracing::debug!("tool: ripple_edit {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    // `edge` uses the same in/out vocabulary as trim_clip: in = the clip's
+    // in-point (`ops::ClipEdge::Start`), out = its out-point (`::End`).
+    let (core_edge, current_boundary) = match args.edge {
+        ClipEdge::In => (photonic_core::timeline::ClipEdge::Start, clip.start),
+        ClipEdge::Out => (photonic_core::timeline::ClipEdge::End, clip.end()),
+    };
+    let new_boundary = current_boundary + Tick(args.delta_ticks);
+    match ops::ripple_trim(
+        project,
+        seq_id,
+        track_id,
+        args.clip_id,
+        core_edge,
+        new_boundary,
+    ) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Rippled edit")
         }
         Err(e) => map_edit_error(e),
     }
@@ -1265,8 +1427,8 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
     if args.paths.is_empty() {
         return ToolResult::error("paths must not be empty");
     }
-    let mut created = Vec::new();
-    let mut cmds = Vec::new();
+    // Validate + build each asset first (no project state needed for this part).
+    let mut pending = Vec::new();
     for p in &args.paths {
         let path = std::path::PathBuf::from(p);
         let Some(kind) = guess_asset_kind(&path) else {
@@ -1280,27 +1442,60 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
         let hash = content_hash(&path);
         let mut asset = photonic_core::timeline::MediaAsset::from_file(kind, path.clone());
         asset.content_hash = hash;
-        let asset_id = asset.id;
-        cmds.push(Command::Timeline(ops::add_asset(asset)));
-        created.push(json!({ "asset_id": asset_id, "path": p, "kind": kind, "probed": false }));
+        pending.push((p.clone(), asset));
     }
 
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    if doc.timeline.is_none() {
-        cmds.insert(0, Command::Timeline(ops::create_project()));
+    let mut cmds = Vec::new();
+    let needs_project = doc.timeline.is_none();
+    if needs_project {
+        cmds.push(Command::Timeline(ops::create_project()));
+    }
+
+    // Resolve (or create) the target bin by exact name, then file every
+    // imported asset under it directly at construction — cheaper and avoids
+    // a chicken-and-egg AssignAssetBin-before-AddAsset ordering problem.
+    let bin_id = match &args.bin {
+        None => None,
+        Some(bin_name) => {
+            let existing = if needs_project {
+                None
+            } else {
+                doc.timeline
+                    .as_ref()
+                    .and_then(|p| find_bin_by_name(p, bin_name))
+                    .map(|b| b.id)
+            };
+            Some(existing.unwrap_or_else(|| {
+                let cmd = ops::create_bin(bin_name.clone(), None);
+                let id = match &cmd {
+                    TimelineCmd::AddBin { bin } => bin.id,
+                    _ => unreachable!("ops::create_bin always returns AddBin"),
+                };
+                cmds.push(Command::Timeline(cmd));
+                id
+            }))
+        }
+    };
+
+    let mut created = Vec::new();
+    for (p, mut asset) in pending {
+        asset.bin = bin_id;
+        let asset_id = asset.id;
+        let kind = asset.kind;
+        cmds.push(Command::Timeline(ops::add_asset(asset)));
+        created.push(json!({
+            "asset_id": asset_id, "path": p, "kind": kind, "probed": false, "bin_id": bin_id
+        }));
     }
     history.execute_discrete(Command::Batch(cmds), &mut doc);
 
-    let mut data = json!({ "assets": created });
-    if args.bin.is_some() {
-        data["bin_assignment_supported"] = json!(false);
-    }
     ToolResult::text(format!(
         "Imported {} asset(s) — probing lands in P3 (ffprobe integration)",
         created.len()
     ))
-    .with_data(data)
+    .with_data(json!({ "assets": created }))
 }
 
 pub async fn relink_media(state: &AppState, args: RelinkMediaArgs) -> ToolResult {
@@ -1329,10 +1524,21 @@ pub async fn list_media(state: &AppState, args: ListMediaArgs) -> ToolResult {
     let Some(project) = doc.timeline.as_ref() else {
         return ToolResult::text("No timeline project yet").with_data(json!({ "assets": [] }));
     };
+    let filter_bin = match &args.bin {
+        None => None,
+        Some(name) => match find_bin_by_name(project, name) {
+            Some(b) => Some(b.id),
+            None => {
+                return ToolResult::text(format!("no bin named {name:?}"))
+                    .with_data(json!({ "assets": [] }))
+            }
+        },
+    };
     let assets: Vec<_> = project
         .media
         .assets
         .values()
+        .filter(|a| filter_bin.is_none() || a.bin == filter_bin)
         .map(|a| {
             json!({
                 "asset_id": a.id,
@@ -1341,14 +1547,12 @@ pub async fn list_media(state: &AppState, args: ListMediaArgs) -> ToolResult {
                 "probed": a.probe.is_some(),
                 "proxy_status": a.proxy.as_ref().map(|p| p.status),
                 "content_hash": a.content_hash,
+                "bin_id": a.bin,
             })
         })
         .collect();
-    let mut data = json!({ "assets": assets });
-    if args.bin.is_some() {
-        data["bin_filter_supported"] = json!(false);
-    }
-    ToolResult::text(format!("{} media asset(s)", assets.len())).with_data(data)
+    ToolResult::text(format!("{} media asset(s)", assets.len()))
+        .with_data(json!({ "assets": assets }))
 }
 
 pub async fn remove_asset(state: &AppState, args: RemoveAssetArgs) -> ToolResult {
@@ -1365,6 +1569,84 @@ pub async fn remove_asset(state: &AppState, args: RemoveAssetArgs) -> ToolResult
         }
         Err(e) => map_edit_error(e),
     }
+}
+
+// ─── Media bins (added for the P2 top-up — not in the original §3.1 table) ──
+
+pub async fn create_bin(state: &AppState, args: CreateBinArgs) -> ToolResult {
+    tracing::debug!("tool: create_bin {}", args.name);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let needs_project = doc.timeline.is_none();
+    if let Some(parent) = args.parent {
+        let exists = doc
+            .timeline
+            .as_ref()
+            .map(|p| p.media.bins.iter().any(|b| b.id == parent))
+            .unwrap_or(false);
+        if !exists {
+            return ToolResult::error(format!("bin {parent} not found"));
+        }
+    }
+    let mut cmds = Vec::new();
+    if needs_project {
+        cmds.push(Command::Timeline(ops::create_project()));
+    }
+    let cmd = ops::create_bin(args.name, args.parent);
+    let bin_id = match &cmd {
+        TimelineCmd::AddBin { bin } => bin.id,
+        _ => unreachable!("ops::create_bin always returns AddBin"),
+    };
+    cmds.push(Command::Timeline(cmd));
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
+    ToolResult::text("Created bin").with_data(json!({ "bin_id": bin_id }))
+}
+
+pub async fn remove_bin(state: &AppState, args: RemoveBinArgs) -> ToolResult {
+    tracing::debug!("tool: remove_bin {}", args.bin_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    match ops::remove_bin(project, args.bin_id) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Removed bin")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn set_asset_bin(state: &AppState, args: SetAssetBinArgs) -> ToolResult {
+    tracing::debug!("tool: set_asset_bin {}", args.asset_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    match ops::assign_asset_bin(project, args.asset_id, args.bin_id) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Updated asset bin")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn list_bins(state: &AppState, _args: ListBinsArgs) -> ToolResult {
+    tracing::debug!("tool: list_bins");
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::text("No timeline project yet").with_data(json!({ "bins": [] }));
+    };
+    let bins: Vec<_> = project
+        .media
+        .bins
+        .iter()
+        .map(|b| json!({ "bin_id": b.id, "name": b.name, "parent": b.parent }))
+        .collect();
+    ToolResult::text(format!("{} bin(s)", bins.len())).with_data(json!({ "bins": bins }))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1559,7 +1841,7 @@ mod tests {
         .await;
         assert_ne!(r.is_error, Some(true), "move_clip: {r:?}");
 
-        // Cross-track move is a documented v1 gap — NotSupportedV1.
+        // Cross-track move.
         let other_track = create_track(&state, &seq_id, "video").await;
         let r = call(
             &state,
@@ -1567,8 +1849,14 @@ mod tests {
             json!({ "clip_id": clip_a, "new_start_ticks": 6000, "new_track_id": other_track }),
         )
         .await;
-        assert_eq!(r.is_error, Some(true));
-        assert_eq!(data(&r)["error_code"], json!("NotSupportedV1"));
+        assert_ne!(r.is_error, Some(true), "cross-track move_clip: {r:?}");
+        let r = call(&state, "list_clips", json!({ "track_id": other_track })).await;
+        let clips_on_dest = data(&r)["clips"].as_array().cloned().unwrap_or_default();
+        assert_eq!(
+            clips_on_dest.len(),
+            1,
+            "clip should have landed on the destination track: {clips_on_dest:?}"
+        );
 
         let r = call(
             &state,
@@ -1622,6 +1910,248 @@ mod tests {
         )
         .await;
         assert_eq!(r.is_error, Some(true), "overlapping insert should fail");
+    }
+
+    #[tokio::test]
+    async fn ripple_edit_trims_and_shifts_later_clips() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "video").await;
+        let clip_a = insert_solid_clip(&state, &track_id, 0, 1000).await;
+        let clip_b = insert_solid_clip(&state, &track_id, 1000, 1000).await;
+
+        // Trim clip_a's out-point later by 200 ticks; clip_b should shift later
+        // by 200 to close the resulting gap — one undo step.
+        let r = call(
+            &state,
+            "ripple_edit",
+            json!({ "clip_id": clip_a, "edge": "out", "delta_ticks": 200 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "ripple_edit: {r:?}");
+
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_a })).await;
+        assert_eq!(data(&r)["clip"]["duration"], json!(1200));
+
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_b })).await;
+        assert_eq!(
+            data(&r)["clip"]["start"],
+            json!(1200),
+            "clip_b should shift later by 200 to close the gap"
+        );
+
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_a })).await;
+        assert_eq!(
+            data(&r)["clip"]["duration"],
+            json!(1000),
+            "ripple_edit should undo as one step"
+        );
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_b })).await;
+        assert_eq!(data(&r)["clip"]["start"], json!(1000));
+    }
+
+    #[tokio::test]
+    async fn cross_track_move_round_trips_via_undo() {
+        let state = test_state();
+        let (seq_id, track_a) = create_seq_and_track(&state, "video").await;
+        let track_b = create_track(&state, &seq_id, "video").await;
+        let clip_id = insert_solid_clip(&state, &track_a, 0, 1000).await;
+
+        let r = call(
+            &state,
+            "move_clip",
+            json!({ "clip_id": clip_id, "new_start_ticks": 2000, "new_track_id": track_b }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "move_clip cross-track: {r:?}");
+
+        let r = call(&state, "list_clips", json!({ "track_id": track_b })).await;
+        assert_eq!(
+            data(&r)["clips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            1
+        );
+        let r = call(&state, "list_clips", json!({ "track_id": track_a })).await;
+        assert_eq!(
+            data(&r)["clips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+
+        let r = call(&state, "list_clips", json!({ "track_id": track_a })).await;
+        let clips_a = data(&r)["clips"].as_array().cloned().unwrap_or_default();
+        assert_eq!(
+            clips_a.len(),
+            1,
+            "clip should be back on track_a after undo"
+        );
+        assert_eq!(clips_a[0]["start_ticks"], json!(0));
+        let r = call(&state, "list_clips", json!({ "track_id": track_b })).await;
+        assert_eq!(
+            data(&r)["clips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+    }
+
+    // ── Tool family: markers + work range ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn family_markers_and_work_range() {
+        let state = test_state();
+        let (seq_id, _) = create_seq_and_track(&state, "video").await;
+
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_ticks": 100, "name": "Beat 1", "color": "#ff0000" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_marker: {r:?}");
+        let marker_id = data(&r)["marker_id"].clone();
+
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_ticks": 500, "name": "Beat 2" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_marker 2: {r:?}");
+
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert_ne!(r.is_error, Some(true), "list_markers: {r:?}");
+        let markers = data(&r)["markers"].as_array().cloned().unwrap_or_default();
+        assert_eq!(markers.len(), 2, "{markers:?}");
+
+        let r = call(&state, "remove_marker", json!({ "marker_id": marker_id })).await;
+        assert_ne!(r.is_error, Some(true), "remove_marker: {r:?}");
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert_eq!(
+            data(&r)["markers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            1
+        );
+
+        let r = call(
+            &state,
+            "set_work_range",
+            json!({ "sequence_id": seq_id, "range": {"start_ticks": 0, "end_ticks": 1000} }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_work_range: {r:?}");
+
+        let r = call(&state, "set_work_range", json!({ "sequence_id": seq_id })).await;
+        assert_ne!(r.is_error, Some(true), "set_work_range clear: {r:?}");
+    }
+
+    // ── Tool family: media bins ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn family_media_bins() {
+        let state = test_state();
+        let tmp = std::env::temp_dir().join(format!(
+            "photonic_mcp_bin_test_{}.mp4",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&tmp, b"bin test bytes").unwrap();
+
+        // import_media auto-creates the bin by name.
+        let r = call(
+            &state,
+            "import_media",
+            json!({ "paths": [tmp.to_string_lossy()], "bin": "Interviews" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "import_media: {r:?}");
+        let assets = data(&r)["assets"].as_array().cloned().unwrap_or_default();
+        assert_eq!(assets.len(), 1);
+        let asset_id = assets[0]["asset_id"].clone();
+        assert!(
+            !assets[0]["bin_id"].is_null(),
+            "asset should carry a bin_id"
+        );
+
+        let r = call(&state, "list_bins", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "list_bins: {r:?}");
+        let bins = data(&r)["bins"].as_array().cloned().unwrap_or_default();
+        assert_eq!(bins.len(), 1);
+        assert_eq!(bins[0]["name"], json!("Interviews"));
+        let interviews_bin_id = bins[0]["bin_id"].clone();
+
+        let r = call(&state, "list_media", json!({ "bin": "Interviews" })).await;
+        assert_ne!(r.is_error, Some(true), "list_media filter: {r:?}");
+        assert_eq!(
+            data(&r)["assets"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            1
+        );
+
+        let r = call(&state, "list_media", json!({ "bin": "Nonexistent" })).await;
+        assert_ne!(
+            r.is_error,
+            Some(true),
+            "list_media filter (no match): {r:?}"
+        );
+        assert_eq!(
+            data(&r)["assets"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+
+        let r = call(
+            &state,
+            "set_asset_bin",
+            json!({ "asset_id": asset_id, "bin_id": null }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_asset_bin clear: {r:?}");
+        let r = call(&state, "list_media", json!({ "bin": "Interviews" })).await;
+        assert_eq!(
+            data(&r)["assets"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+
+        let r = call(&state, "create_bin", json!({ "name": "B-Roll" })).await;
+        assert_ne!(r.is_error, Some(true), "create_bin: {r:?}");
+        let broll_bin_id = data(&r)["bin_id"].clone();
+        let r = call(
+            &state,
+            "set_asset_bin",
+            json!({ "asset_id": asset_id, "bin_id": broll_bin_id }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_asset_bin: {r:?}");
+
+        let r = call(&state, "remove_bin", json!({ "bin_id": interviews_bin_id })).await;
+        assert_ne!(r.is_error, Some(true), "remove_bin: {r:?}");
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     // ── Tool family: clip properties ─────────────────────────────────────────
@@ -1922,6 +2452,10 @@ mod tests {
         "set_active_sequence",
         "set_sequence_format",
         "set_active_format",
+        "set_work_range",
+        "add_marker",
+        "remove_marker",
+        "list_markers",
         "add_track",
         "remove_track",
         "set_track_prop",
@@ -1934,6 +2468,7 @@ mod tests {
         "roll_edit",
         "slip_clip",
         "slide_clip",
+        "ripple_edit",
         "set_clip_prop",
         "set_clip_speed",
         "set_transition",
@@ -1952,6 +2487,10 @@ mod tests {
         "relink_media",
         "list_media",
         "remove_asset",
+        "create_bin",
+        "remove_bin",
+        "set_asset_bin",
+        "list_bins",
     ];
 
     #[test]

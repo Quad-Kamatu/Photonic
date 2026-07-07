@@ -2165,6 +2165,22 @@ pub(crate) async fn dispatch_tool_inner(
             let a: SetActiveFormatArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(handlers::video::set_active_format(state, a).await))
         }
+        "set_work_range" => {
+            let a: SetWorkRangeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_work_range(state, a).await))
+        }
+        "add_marker" => {
+            let a: AddMarkerArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::add_marker(state, a).await))
+        }
+        "remove_marker" => {
+            let a: RemoveMarkerArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::remove_marker(state, a).await))
+        }
+        "list_markers" => {
+            let a: ListMarkersArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::list_markers(state, a).await))
+        }
 
         // Track (10 §3.3)
         "add_track" => {
@@ -2216,6 +2232,10 @@ pub(crate) async fn dispatch_tool_inner(
         "slide_clip" => {
             let a: SlideClipArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(handlers::video::slide_clip(state, a).await))
+        }
+        "ripple_edit" => {
+            let a: RippleEditArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::ripple_edit(state, a).await))
         }
 
         // Clip properties (10 §3.5)
@@ -2296,6 +2316,22 @@ pub(crate) async fn dispatch_tool_inner(
         "remove_asset" => {
             let a: RemoveAssetArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(handlers::video::remove_asset(state, a).await))
+        }
+        "create_bin" => {
+            let a: CreateBinArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::create_bin(state, a).await))
+        }
+        "remove_bin" => {
+            let a: RemoveBinArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::remove_bin(state, a).await))
+        }
+        "set_asset_bin" => {
+            let a: SetAssetBinArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_asset_bin(state, a).await))
+        }
+        "list_bins" => {
+            let a: ListBinsArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(handlers::video::list_bins(state, a).await))
         }
 
         _ => Err(format!("Unknown tool: {}", name)),

@@ -4991,6 +4991,60 @@ pub fn tool_list() -> Value {
                 "required": ["sequence_id","format_index"]
             }
         },
+        {
+            "name": "set_work_range",
+            "description": "Set (or clear, by omitting `range`) a sequence's preview/export in/out work range. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "range": {
+                        "type": ["object","null"],
+                        "description": "null/omitted clears the work range.",
+                        "properties": {
+                            "start_ticks": { "type": "integer" }, "start_tc": { "type": "string" }, "start_seconds": { "type": "number" },
+                            "end_ticks": { "type": "integer" }, "end_tc": { "type": "string" }, "end_seconds": { "type": "number" }
+                        }
+                    }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "add_marker",
+            "description": "Add a marker to a sequence. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" },
+                    "name": { "type": "string" },
+                    "color": { "type": "string", "description": "#rrggbb or #rrggbbaa." },
+                    "note": { "type": "string" }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "remove_marker",
+            "description": "Remove a sequence marker by id. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "marker_id": { "type": "string" } },
+                "required": ["marker_id"]
+            }
+        },
+        {
+            "name": "list_markers",
+            "description": "List a sequence's markers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence_id": { "type": "string" } },
+                "required": ["sequence_id"]
+            }
+        },
 
         // Track (10 §3.3)
         {
@@ -5064,7 +5118,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "move_clip",
-            "description": "Move a clip to a new start position on its current track. `new_track_id` (cross-track move) is NOT supported in v1 — supplying one that differs from the clip's current track returns error_code NotSupportedV1. Supports undo.",
+            "description": "Move a clip to a new start position, optionally onto a different track of the same kind (`new_track_id`, cross-track move — the destination must have room, non-overlap enforced). Supports undo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5072,7 +5126,7 @@ pub fn tool_list() -> Value {
                     "new_start_ticks": { "type": "integer" },
                     "new_start_tc": { "type": "string" },
                     "new_start_seconds": { "type": "number" },
-                    "new_track_id": { "type": "string", "description": "NOT SUPPORTED in v1 unless equal to the clip's current track — see description." }
+                    "new_track_id": { "type": "string", "description": "Omit for a same-track move. Must be the same TrackKind (video/audio) as the clip's current track." }
                 },
                 "required": ["clip_id"]
             }
@@ -5147,6 +5201,19 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": { "clip_id": { "type": "string" }, "delta_ticks": { "type": "integer" } },
                 "required": ["clip_id","delta_ticks"]
+            }
+        },
+        {
+            "name": "ripple_edit",
+            "description": "Ripple-trim one edge of a clip by delta_ticks and shift every later clip on the track to close/open the resulting gap, as ONE undo step. edge=in trims the in-point (source_in advances, speed-scaled); edge=out trims the out-point. Distinct from remove_clip's ripple flag (which deletes the clip).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "edge": { "type": "string", "enum": ["in","out"] },
+                    "delta_ticks": { "type": "integer" }
+                },
+                "required": ["clip_id","edge","delta_ticks"]
             }
         },
 
@@ -5348,12 +5415,12 @@ pub fn tool_list() -> Value {
         // Media (P2 subset — import/relink/list/remove; probe/proxy/transcode are P3 engine jobs)
         {
             "name": "import_media",
-            "description": "Register one or more files as MediaAsset(s) in the media pool. probe is always null at this phase (ffprobe integration is P3) — the result flags each asset probed:false. Content-hashes each file now (head+tail+len digest) as a relink identity. `bin` is accepted but not yet honored (no bin field on MediaAsset yet — result flags bin_assignment_supported:false). Supports undo.",
+            "description": "Register one or more files as MediaAsset(s) in the media pool. probe is always null at this phase (ffprobe integration is P3) — the result flags each asset probed:false. Content-hashes each file now (head+tail+len digest) as a relink identity. `bin` names a bin to file the imported asset(s) under, looked up by exact name and created (top-level) if it doesn't exist. Supports undo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "paths": { "type": "array", "items": { "type": "string" } },
-                    "bin": { "type": "string", "description": "Not yet supported — see description." }
+                    "bin": { "type": "string", "description": "Bin name to file the imported asset(s) under; created if it doesn't exist." }
                 },
                 "required": ["paths"]
             }
@@ -5369,7 +5436,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "list_media",
-            "description": "List media-pool assets with probe/proxy status and content hash. `bin` filter is accepted but not yet honored (result flags bin_filter_supported:false when supplied).",
+            "description": "List media-pool assets with probe/proxy status, content hash, and bin. `bin` filters to assets filed under the bin with that exact name.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "bin": { "type": "string" } }
@@ -5383,6 +5450,43 @@ pub fn tool_list() -> Value {
                 "properties": { "asset_id": { "type": "string" } },
                 "required": ["asset_id"]
             }
+        },
+
+        // Media bins (not in the original §3.1 catalog table — added when
+        // MediaAsset.bin support landed in core; standard create_/remove_/
+        // set_/list_ tools rather than an op-field mega-tool since each maps
+        // 1:1 to a distinct TimelineCmd variant, per design rules 1/2)
+        {
+            "name": "create_bin",
+            "description": "Create a media bin (folder), optionally nested under `parent`. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" }, "parent": { "type": "string" } },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "remove_bin",
+            "description": "Remove a media bin. Assets/child bins referencing it are left untouched (a dangling ref reads as unfiled); re-adding restores the bin verbatim on undo. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "bin_id": { "type": "string" } },
+                "required": ["bin_id"]
+            }
+        },
+        {
+            "name": "set_asset_bin",
+            "description": "Move an asset into a bin (or to the pool root, by omitting/nulling bin_id). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "asset_id": { "type": "string" }, "bin_id": { "type": ["string","null"] } },
+                "required": ["asset_id"]
+            }
+        },
+        {
+            "name": "list_bins",
+            "description": "List every media bin (folder) in the pool.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }

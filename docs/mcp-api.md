@@ -3,11 +3,11 @@
 <!-- GENERATED FILE — do not edit by hand. -->
 <!-- Regenerate with: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md -->
 
-This document lists all **349** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
+This document lists all **358** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
 
 ## Tools
 
-[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
+[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
 
 ---
 
@@ -133,6 +133,20 @@ Add a ruler guide (horizontal or vertical reference line) at a precise document-
 | `orientation` | enum (`horizontal`, `vertical`) | yes | Guide orientation. 'horizontal' creates a fixed-Y line; 'vertical' creates a fixed-X line. |
 | `position` | number | yes | Position in document units. Y coordinate for horizontal guides; X coordinate for vertical guides. |
 | `color` | array<number> | no | Optional RGBA color override as [R, G, B, A] in [0, 1] range. Omit to use the default cyan. |
+
+## `add_marker`
+
+Add a marker to a sequence. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+| `at_seconds` | number | no |  |
+| `at_tc` | string | no |  |
+| `at_ticks` | integer | no |  |
+| `color` | string | no | #rrggbb or #rrggbbaa. |
+| `name` | string | no |  |
+| `note` | string | no |  |
 
 ## `add_track`
 
@@ -733,6 +747,15 @@ For vertical charts, y is the baseline (bottom) and bars grow upward. For horizo
 | `labels` | array<string> | no | Bar labels |
 | `layer_id` | string | no |  |
 | `width` | number | no | Chart width (default: 300) |
+
+## `create_bin`
+
+Create a media bin (folder), optionally nested under `parent`. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes |  |
+| `parent` | string | no |  |
 
 ## `create_character_style`
 
@@ -1925,12 +1948,12 @@ Counterpart to export_design_tokens: register named color swatches from a design
 
 ## `import_media`
 
-Register one or more files as MediaAsset(s) in the media pool. probe is always null at this phase (ffprobe integration is P3) — the result flags each asset probed:false. Content-hashes each file now (head+tail+len digest) as a relink identity. `bin` is accepted but not yet honored (no bin field on MediaAsset yet — result flags bin_assignment_supported:false). Supports undo.
+Register one or more files as MediaAsset(s) in the media pool. probe is always null at this phase (ffprobe integration is P3) — the result flags each asset probed:false. Content-hashes each file now (head+tail+len digest) as a relink identity. `bin` names a bin to file the imported asset(s) under, looked up by exact name and created (top-level) if it doesn't exist. Supports undo.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `paths` | array<string> | yes |  |
-| `bin` | string | no | Not yet supported — see description. |
+| `bin` | string | no | Bin name to file the imported asset(s) under; created if it doesn't exist. |
 
 ## `insert_clip`
 
@@ -2082,6 +2105,12 @@ Useful for multi-agent accountability: see exactly what was called, by whom (if 
 | --- | --- | --- | --- |
 | `limit` | integer | no | Maximum number of entries to return, newest first. Default: 50, maximum: 1000. |
 
+## `list_bins`
+
+List every media bin (folder) in the pool.
+
+_No parameters._
+
 ## `list_character_styles`
 
 List all named character styles saved in the document.
@@ -2167,9 +2196,17 @@ Return the most recent edit history entries from the undo stack, newest first. U
 | --- | --- | --- | --- |
 | `limit` | integer | no | Maximum entries to return. Default: 20. |
 
+## `list_markers`
+
+List a sequence's markers.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+
 ## `list_media`
 
-List media-pool assets with probe/proxy status and content hash. `bin` filter is accepted but not yet honored (result flags bin_filter_supported:false when supplied).
+List media-pool assets with probe/proxy status, content hash, and bin. `bin` filters to assets filed under the bin with that exact name.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -2352,7 +2389,7 @@ Duplicate each selected node and flip the copy across its bounding-box center, p
 
 ## `move_clip`
 
-Move a clip to a new start position on its current track. `new_track_id` (cross-track move) is NOT supported in v1 — supplying one that differs from the clip's current track returns error_code NotSupportedV1. Supports undo.
+Move a clip to a new start position, optionally onto a different track of the same kind (`new_track_id`, cross-track move — the destination must have room, non-overlap enforced). Supports undo.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -2360,7 +2397,7 @@ Move a clip to a new start position on its current track. `new_track_id` (cross-
 | `new_start_seconds` | number | no |  |
 | `new_start_tc` | string | no |  |
 | `new_start_ticks` | integer | no |  |
-| `new_track_id` | string | no | NOT SUPPORTED in v1 unless equal to the clip's current track — see description. |
+| `new_track_id` | string | no | Omit for a same-track move. Must be the same TrackKind (video/audio) as the clip's current track. |
 
 ## `move_to_layer`
 
@@ -2670,6 +2707,14 @@ Detect the subject of a raster layer with a local on-device matting model (U²-N
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Raster node id or name |
 
+## `remove_bin`
+
+Remove a media bin. Assets/child bins referencing it are left untouched (a dangling ref reads as unfiled); re-adding restores the bin verbatim on undo. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `bin_id` | string | yes |  |
+
 ## `remove_clip`
 
 Remove a clip. ripple=true also shifts every later clip on the track left by the removed clip's duration (one undo step). Supports undo.
@@ -2750,6 +2795,14 @@ Remove the keyframe at exactly `at_*` on a target's PropertyTrack. Supports undo
 | `at_tc` | string | no |  |
 | `at_ticks` | integer | no |  |
 | `effect_index` | integer | no |  |
+
+## `remove_marker`
+
+Remove a sequence marker by id. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `marker_id` | string | yes |  |
 
 ## `remove_stroke`
 
@@ -2854,6 +2907,16 @@ Reverse the winding direction of one or more path nodes. For open paths this fli
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | IDs of path nodes to reverse |
+
+## `ripple_edit`
+
+Ripple-trim one edge of a clip by delta_ticks and shift every later clip on the track to close/open the resulting gap, as ONE undo step. edge=in trims the in-point (source_in advances, speed-scaled); edge=out trims the out-point. Distinct from remove_clip's ripple flag (which deletes the clip).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `delta_ticks` | integer | yes |  |
+| `edge` | enum (`in`, `out`) | yes |  |
 
 ## `roll_edit`
 
@@ -3065,6 +3128,15 @@ Set the artboard safe-area margins (top, right, bottom, left) in document units.
 | `left` | number | no | Left margin in document units. Default: unchanged. |
 | `right` | number | no | Right margin in document units. Default: unchanged. |
 | `top` | number | no | Top margin in document units. Default: unchanged. |
+
+## `set_asset_bin`
+
+Move an asset into a bin (or to the pool root, by omitting/nulling bin_id). Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes |  |
+| `bin_id` | string \| null | no |  |
 
 ## `set_blend_mode`
 
@@ -3389,6 +3461,15 @@ Show or hide nodes. Omit `visible` to toggle current state. Hidden nodes are not
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
 | `visible` | boolean | no | Set visible. Omit to toggle. |
+
+## `set_work_range`
+
+Set (or clear, by omitting `range`) a sequence's preview/export in/out work range. Supports undo.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+| `range` | object \| null | no | null/omitted clears the work range. |
 
 ## `simplify_path`
 
