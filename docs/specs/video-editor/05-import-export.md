@@ -219,6 +219,17 @@ Overlay draws two guide rectangles (toggleable independently, on by default when
 
 ---
 
+## 4b. Starter title-template library (D-11, ships P6)
+
+The v1 answer to "CapCut has templates" (PM review): a small shipped set of **vector title/lower-third templates** — Photonic's native strength — with stock music explicitly out (SPEC Non-goals).
+
+- **What a template is:** a `.photon` snippet (a `VectorDoc`-shaped document fragment: styled text + shapes) with pre-authored `PropertyTrack` keyframes for entrance/exit (01 §6 — e.g., slide-up + fade lower third, typewriter title, scale-pop caption card). No new file format: templates are ordinary documents with animation tracks.
+- **Shipped set (v1, ~8–10):** lower third (name/role), centered title + subtitle, corner bug/watermark, end card (CTA + handle), caption card, quote card, chapter marker, subscribe/like reminder. Each in light/dark variants driven by swatch slots, not baked colors, so DESIGN.md-consistent recoloring is one click.
+- **Where they live:** built-ins ship in the app bundle (read-only); user templates in an app-level library dir (same family as export presets, 05 §3.6). "Save selection as title template" from the vector canvas exports the selected group + its keyframe tracks.
+- **Browsing/insertion:** a "Titles" group in the Effects browser drawer (04 §4.1; interior owned here) shows thumbnail previews (rendered via `HeadlessRenderer` at first browse, cached in the sidecar dir). Drag-drop onto the timeline creates a `VectorDoc` asset (embedded, 01 §3 `AssetSource::EmbeddedVector`) + a clip with the template's `PropertyTrack`s copied in — after insertion it's plain editable vector content + keyframes, no live template link (deliberate: no template-versioning complexity in v1).
+- **Editing:** double-click the clip → the vector document opens for editing in Vector mode (mode switch per 04 §1.2), exactly like any embedded vector asset; text is retargeted by normal text editing.
+- **MCP:** `list_title_templates` + `insert_title_template { template, track_id, start_* , text_overrides? }` — 2 tools added to 10's catalog at P6 (10's count updates then; flagged there by the doc-drift gate automatically).
+
 ## 5. Convert/Compress tool (standalone transcode)
 
 Addresses the user requirement to "change video types" / compress independent of building a timeline.

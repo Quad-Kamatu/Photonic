@@ -71,6 +71,15 @@ Four symmetric entry points, one shared exit:
 
 ---
 
+### 1.4 Autosave & crash recovery (CAP-022, D-12)
+
+Photonic already runs timed autosave (`app/autosave.rs`, `prefs.autosave_enabled` default on, `autosave_interval_secs` default 300s, floor 15s): titled documents write to their real `.photon` file plus a named "Autosave" history branch; untitled documents write to `crash_dir()/recovery` and are offered on next launch. Because `Document.timeline` serializes inside the document (01 §2/§9), timeline projects ride this machinery with **zero new subsystems**. The deltas this module owes:
+
+1. **Media survives recovery by reference discipline, not copying:** recovery files carry the same absolute + project-relative asset paths as normal saves (01 §9); a recovered untitled project relinks by content hash exactly like a moved project. The sidecar cache dir (`<project>.photon.cache/`) is rebuildable and never part of recovery.
+2. **Autosave cost stays flat:** media is never embedded (SPEC constraint), so a timeline project's JSON stays small regardless of footage volume — no interval change needed for video mode. The P3 exit test (11 §6) asserts an autosave pass on the AS-2 reference project completes within the existing frame-budget tolerance (no visible hitch).
+3. **Engine state is disposable by design:** playhead, caches, decode rings are session state (01 §11) — recovery restores the document, and the engine cold-starts from it. Nothing engine-side needs persisting.
+4. **Recovery prompt copy** gains a video-aware line when the recovered document has a timeline ("Recovered video project — media will relink automatically; proxies rebuild in the background").
+
 ## 2. Timeline panel
 
 New module family `crates/photonic-gui/src/app/timeline/` (mirrors the existing `panels/` split-by-concern pattern):
