@@ -85,7 +85,7 @@ D-01…D-10 in [SPEC.md](SPEC.md#decisions). Every doc cites decisions it depend
 | P3 Playback + media | photonic-video engine: decode, frame graph v1 (decode→transform→merge→output), A/V playback, media pool, proxies | AS-1: play; AS-2: proxy edit |
 | P4 Import/export + reframe | Export presets, encoder integration, aspect-ratio system, mobile preview | AS-1 complete except captions |
 | P5 Captions + AI audio | Provider trait, hosted transcription + TTS, caption track UI, styling | AS-1 complete |
-| P6 Keyframes + motion | Keyframe curves UI, animatable vector documents in timeline, transitions, effect params animatable | AS-3 core |
+| P6 Keyframes + motion | Keyframe curves UI, animatable vector documents in timeline, transitions catalog (08 §2.0b), starter vector title-template set (D-11), effect params animatable | AS-3 core |
 | P7 Color page | Grade operators, wheels/curves/LUT UI, scopes | AS-2 grade pass |
 | P8 Fusion + full mixer | Per-clip/global node UI + node catalog, audio EQ/compression/automation/ducking | AS-2, AS-3 complete |
 

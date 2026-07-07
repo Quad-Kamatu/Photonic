@@ -32,13 +32,14 @@ Standing rules:
 | Domain builders | Sonnet | 1 per domain | Captions/providers (06), presets/import-export surface (05), grading ops (07 math may escalate Opus), audio DSP (09 DSP is Opus), node catalog (08) |
 | QA (arcwright-qa) | Sonnet | 1, reused via SendMessage | Runs test suites, MCP story scripts, perf harness per phase |
 | Verifier (arcwright-verifier) | Sonnet | 1, reused | Goal-backward check at each phase gate (L1 exists → L4 real data flows) |
-| Architect reviewer (arcwright-architect) | Opus | 1, reused | Design-conformance review of each wave's diff against these docs |
+| Architect reviewer (arcwright-architect) | Opus | 1 (2 during P3 and P8) | Design-conformance review of each wave's diff against these docs. P3/P8 run concurrent Opus builder waves — a single reviewer would queue them; spawn a second architect instance for those phases (or serialize the Opus waves if permission for a second is declined) |
 
 ## 3. Hard sequencing constraints (cannot parallelize)
 
 Dependency spine — each item blocks everything after it:
 
 0. **CommandHistory::revision extension** (bump on execute/undo/redo + public accessor + `changes_since` introspection, 03 §2.1) → P1 tessellation cache AND P3 engine snapshotting both consume it. Lives in `photonic-core/src/history/` (a §4 choke-point file) but must land in **P1**, before the P2 Core-model builder touches history.
+0b. **`ir.rs` signature stub (design-only)** — the `IrOp` enum + `FrameGraph` type signatures from 02 §2, landed as a compile-checked stub before P1's render-builder wave: 03 §3.4's texture pool and Tier-B conversion pass are keyed by IR-shaped contracts, and without the stub the P1 render builder guesses at them. Authored by the orchestrator or architect (design tier), reviewed against 02 verbatim; no evaluator body, types only.
 1. **01 data model types + migration** → everything (all crates import these types).
 2. **02 frame-graph IR definition** (ir.rs signatures, not full evaluator) → engine eval, 07 GradeOps, 08 catalog lowering, 03 texture pool contract.
 3. **P1 renderer rework** → any real-time playback work (P3+ GPU eval). Vector editing golden-corpus must pass BEFORE P1 merges (00 §7 risk 1).
@@ -70,9 +71,16 @@ NOT parallel-safe (serialize or pre-split):
 
 Notation: `[..]` = one parallel wave; `→` = barrier (previous wave merged + reviewed).
 
-**P1** `[Sonnet: CommandHistory::revision extension (spine item 0 — small, lands first)]` → `[Render builder (Opus): dirty-tracking+buffers]` ∥ `[Sonnet: vector golden corpus (11 §6)]` → `[Opus: COMPOSITE_SHADER wiring + render-to-texture]` → gate.
+**P1** — decomposed into gate-able stories (the pattern every phase follows; stories map 1:1 onto 11 §6's exit-criteria checkboxes):
+- **S1** `CommandHistory::revision` extension (spine 0, Sonnet) — bump on execute/undo/redo + accessor + `changes_since`; existing history tests stay green.
+- **S1b** `ir.rs` signature stub (spine 0b, design tier) — types only, reviewed against 02.
+- **S2** Vector golden-output baseline capture (Sonnet, ∥ S1) — corpus captured on pre-P1 code, blessed, committed.
+- **S3** Dirty tracking + persistent GPU buffers (Opus, after S1) — existing compositor/headless suites pass unchanged; S2 corpus byte-identical.
+- **S4** COMPOSITE_SHADER wiring + render-to-texture (Opus, after S3) — S2 corpus re-diffed: byte-identical for untouched paths, PSNR ≥45dB for previously-approximated blend modes (03 §2.6).
+- **S5** f16 video texture path + pool (Opus, after S1b+S4) — 03 §3 contract consumed, conversion-pass WGSL in the validation table.
+- Gate: architect diff review + QA full-suite + golden diff + CI green.
 **P2** `[Core-model (Sonnet, Opus review on commands/migration)]` → fields/skeleton PR (orchestrator) → `[Timeline panel ∥ mode switch+monitor shell ∥ MCP timeline-edit tools]` → gate (AS-1 arrange/cut via MCP script).
-**P3** IR review gate (08 authors + architect) → `[Engine graph (Opus) ∥ decode/media (Opus) ∥ audio core (Sonnet) ∥ proxy (Sonnet)]` → `[playback wiring in GUI ∥ MCP playback/render_frame_at ∥ media pool panel]` → gate (SS-1 subset on proxy).
+**P3** IR review gate (08 authors + architect) → `[Engine graph (Opus) ∥ decode/media (Opus) ∥ audio core (Sonnet) ∥ proxy (Sonnet)]` → **interim architect checkpoint on the engine facade** (EngineCmd/EngineFrame/EngineStatus as built, before any consumer code — a wrong facade decision must surface here, not at phase end) → `[playback wiring in GUI ∥ MCP playback/render_frame_at ∥ media pool panel]` → gate (SS-1 subset on proxy; CAP-022 crash-recovery of a timeline project verified per D-12).
 **P4** `[Export loop+encoders (Sonnet, Opus review) ∥ preset system+dialog ∥ aspect/reframe UX ∥ transcode tool]` → gate (AS-1 minus captions).
 **P5** `[Provider trait+adapters (Sonnet) ∥ caption track UI ∥ TTS flow ∥ subtitle interchange]` → gate (AS-1 complete, provider mock in CI).
 **P6** `[Keyframe curve editor ∥ vector-doc animation binding (Opus — touches core+render) ∥ transitions ∥ effect-param animation]` → gate (AS-3 core).
@@ -88,3 +96,6 @@ Every gate = QA suite green + verifier goal-backward pass + architect diff revie
 - Worktree isolation for any wave with ≥2 builders in one crate.
 - No agent edits another agent's in-flight files; conflicts escalate to orchestrator, never resolved by force-push.
 - Context economy: builders receive the relevant spec doc numbers, not the whole set; 01/02 always included.
+- **Story template** (every task-registry entry uses it): goal (one sentence), spec sections (doc §), files owned, DoD (tests that must pass + exit-criteria checkbox it closes), tier, blockers. Prevents scope drift between parallel builders in one wave.
+- **Phase-kickoff checklist** (orchestrator, before dispatching a wave): spine dependencies merged; CI green on branch tip; the phase's 11 §6 exit criteria re-read; choke-point skeleton PR landed if the wave needs one; reviewer capacity confirmed (§2 architect note).
+- **Rollback runbook:** every phase merge is revertable as one commit range; the `video` cargo feature (11 §7) is the runtime kill-switch. Incident procedure: flip feature off → ship → revert range on a fix branch → re-land. Recorded here so mid-incident nobody designs the procedure from scratch.

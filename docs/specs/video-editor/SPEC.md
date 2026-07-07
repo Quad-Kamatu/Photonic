@@ -77,6 +77,9 @@ CAP-020 — Editor can save and reopen a project containing all above state in P
 CAP-021 — Editor can render SVG assets to video frames with animation applied (the motion-graphics path), including transparent-background export.
   ↳ Test: animate a vector title, export with alpha; verify frames show correct animation and transparency.
 
+CAP-022 — Editor's project state survives an unexpected termination: on relaunch after a crash or kill, the editor offers recovery of the timeline project with at most a few minutes of work lost.
+  ↳ Test: build a timeline edit session, kill the process without saving, relaunch; verify the recovery prompt restores the project including timeline state.
+
 ---
 
 ## Constraints
@@ -102,13 +105,14 @@ CAP-021 — Editor can render SVG assets to video frames with animation applied 
 - 360°/VR video.
 - Mobile or web builds of the editor.
 - Audio recording (import + TTS only in v1).
+- Stock content library (royalty-free music/SFX/footage) — bring-your-own media in v1; a small starter set of vector title templates IS in scope (D-11), as titles are Photonic's native strength.
 
 ---
 
 ## Success Signal
 
 SS-1: A 1080p30 timeline with 3 concurrent video layers, a grade, and captions plays at full frame rate without dropped frames on the reference development machine; 4K sources achieve the same via proxies.
-SS-2: All three acceptance stories (social clip, short film, motion graphics — defined in 00-overview.md) are completable end-to-end by a first-time user without touching a config file, and by an automation agent through the machine interface.
+SS-2: All three acceptance stories (social clip, short film, motion graphics — defined in 00-overview.md) are completable end-to-end by a first-time user without touching a config file — the social-clip story in under 30 minutes — and by an automation agent through the machine interface.
 SS-3: Exported frames match preview rendering within a defined pixel tolerance on a golden-frame corpus, and exported A/V sync error stays under one video frame across a 10-minute sequence.
 
 ---
@@ -125,6 +129,8 @@ D-07: Acceptance = all three stories (locked 2026-07-07)
 D-08: Architecture Approach A — timeline-first with node-ready frame-graph IR (locked 2026-07-07)
 D-09: Video working color space: linear-light Rec.709, premultiplied alpha, f16 GPU textures (locked 2026-07-07)
 D-10: Renderer prerequisite work (dirty tracking, persistent GPU buffers, wire COMPOSITE_SHADER) precedes playback phases (locked 2026-07-07)
+D-11: v1 ships a small starter set of vector-based title/lower-third templates; stock music/SFX library is explicitly out — bring-your-own media (PM review, locked 2026-07-07)
+D-12: Crash recovery extends Photonic's existing recovery machinery (recovery_path + relaunch prompt) to timeline projects — CAP-022; verified as a P3 exit criterion (PM review, locked 2026-07-07)
 
 ---
 

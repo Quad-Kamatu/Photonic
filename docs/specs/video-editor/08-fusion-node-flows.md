@@ -51,6 +51,20 @@ Ports column format: `name:Type`. `Image` = `Rgba16Float` linear premultiplied (
 | `Switch` | `in0..inN:Image` | `out:Image` | `selected: u32` (Enum, animatable) | none — resolved at **compile time** by rewiring the chosen input's producer directly to `Switch`'s consumers (part of 02 §2 step 7 constant-fold) | Zero eval cost; unselected branches are dead-eliminated same as disabled clips. |
 | `Note` | — | — | `text: String` | none — never compiled | Pure canvas annotation; has no ports and cannot participate in edges. |
 
+### 2.0b Transition catalog v1 (clip-level, CAP-008)
+
+Transitions live on clips (01 §5 `Transition { kind, duration, params }`), not in graphs — cataloged here because this doc owns the effect/op registries. The engine renders a transition as a time-parameterized mix during the clip-overlap window (02 §2 step 1's "transition partner"). Named v1 set (PM review — the catalog must be explicit so P6 doesn't ship with one transition):
+
+| Kind | Params | Behavior over the overlap window t∈0..1 |
+|---|---|---|
+| `CrossDissolve` | curve (ease) | opacity mix a→b |
+| `DipToBlack` | curve | a→black (t<0.5), black→b (t≥0.5) |
+| `DipToColor` | color, curve | same, through the given color |
+| `Wipe` | direction (L/R/U/D), softness | animated edge reveal |
+| `Push` | direction | a slides out while b slides in |
+
+Audio: clips overlapping under a video transition crossfade with `FadeShape::EqualPower` by default (09 §2). Additional kinds are additive registry entries post-v1.
+
 ### 2.1 Post-v1 candidates (explicitly out of scope)
 
 `Tracker` (motion tracking — SPEC non-goal), `ParticleGen`, `Displace`/warp, 3D nodes (camera/depth/3D transform), keyframed `SpeedMap`-style time remap, per-vertex `MaskShape` polygon animation, Value-wire parameter linking / expression nodes, audio nodes inside the visual graph.
@@ -136,7 +150,7 @@ Escape path: an explicit "Back to Timeline" affordance (button + `Esc`) restores
 
 ### 6.2 Canvas interactions
 
-Pan/zoom (egui-snarl native), node drag (native), wire drag with **port-type-colored** sockets that refuse an incompatible drop (§3.1 — no invalid edge is ever representable). Add-node via the left-rail search palette (type-to-filter, grouped by family: Sources / Compositing / Filters / Keys / Masks / Color / Generators / Time / Utility) or a canvas-native right-click "Add Node" menu mirroring the same list. Box-select (marquee) + align/distribute are thin custom layers over snarl's selection primitives (same idiom as the timeline's marquee-select, 04 §2.6, for muscle-memory consistency).
+Pan/zoom (egui-snarl native), node drag (native), wire drag with **port-type-colored** sockets that refuse an incompatible drop (§3.1 — no invalid edge is ever representable). **Keyboard fallback (a11y, 13 §16):** Tab cycles node selection, arrows nudge the selected node, Enter opens its inspector, Delete removes it — the canvas is fully operable without a pointer except wire-drag, which has the palette's "connect to selected" affordance as fallback. Add-node via the left-rail search palette (type-to-filter, grouped by family: Sources / Compositing / Filters / Keys / Masks / Color / Generators / Time / Utility) or a canvas-native right-click "Add Node" menu mirroring the same list. Box-select (marquee) + align/distribute are thin custom layers over snarl's selection primitives (same idiom as the timeline's marquee-select, 04 §2.6, for muscle-memory consistency).
 
 ### 6.3 Node body previews
 

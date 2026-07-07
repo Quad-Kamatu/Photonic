@@ -196,6 +196,7 @@ This phase touches the *existing* renderer (dirty tracking, persistent GPU buffe
 - [ ] CI ffmpeg gap (§3.4) resolved: `ffmpeg` added to CI matrix across all 3 OSes — tracked as an explicit P3 task, not silently deferred.
 - [ ] Engine integration tests (§3.3) pass: seek accuracy, A/V sync (CAP-004 test hook), cache-hit assertions, sidecar-failure containment.
 - [ ] Perf budgets from 02 §8 that apply at this phase (compile, eval, seek, cut-ahead) measured via `criterion` (§4) and meet threshold on the reference dev machine.
+- [ ] CAP-022 crash recovery (D-12): kill the process mid-edit on a timeline project; relaunch offers recovery; restored document contains the timeline state (extends the existing `recovery_path` machinery — test asserts timeline survives the round-trip).
 - [ ] Proxies (CAP-014): generate + toggle proxy/original, verify scrubbing uses proxy path (mixer engine core — gain/pan only per 00 §7's mixer-scope risk mitigation — lands here too, ungated by full audio UI).
 - [ ] CAP-005 (nested sequences), CAP-006/CAP-021 (vector clip via `RasterVector`, CPU-composited per 02 §3) demonstrated.
 - [ ] AS-1 up through "play" and AS-2 up through "proxy edit" run manually end-to-end; MCP script versions (§3.4) exist for the slice of each story completable so far, expanded incrementally in later phases rather than written once at the end.
@@ -293,5 +294,6 @@ Every SPEC.md capability, mapped to where its test hook lives and which phase cl
 | CAP-019 (MCP parity, all capabilities headless) | Three AS-1/2/3 MCP scripts (§3.4), each testing the slice available at that phase, full scripts green at story completion | Incremental (P4 for AS-1, **P8** for AS-2/AS-3) |
 | CAP-020 (save/reopen, backward compat) | Format round-trip test (§3.1, P2) extended to cover each new feature class as it lands | Incremental every phase, **fully closed P8** |
 | CAP-021 (vector-to-video render incl. alpha export) | `RasterVector` golden case (P3, opaque) + `alpha_gradient.mov`-based alpha-export verification (§5) | P3 (opaque) → **P6** (animated) → **P8** (alpha export via full pipeline) |
+| CAP-022 (crash recovery of timeline projects, D-12) | Kill-and-relaunch recovery integration test (§6 P3 exit criterion) | **P3** |
 
 Rows without a single "closes here" phase are intentionally incremental — SPEC's own phase table (00 §6) treats CAP-018/019/020 as cross-cutting, so their tests are cross-cutting too: each phase's exit criteria (§6) extends the existing test rather than deferring it whole to P8.

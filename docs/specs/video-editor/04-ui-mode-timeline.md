@@ -62,6 +62,7 @@ Four symmetric entry points, one shared exit:
 - **Command palette** — new `CommandId`s `"mode.enter_video"` / `"mode.exit_video"` / `"mode.toggle_video"` registered in `commands.rs` next to the existing `TOOL_COMMANDS` table (`commands.rs:346`), dispatched through the existing `dispatch_command` (`app/command_center.rs:49`) — no new dispatch mechanism.
 - **Welcome action** — extend `WelcomeAction` (`welcome.rs:313`) with `WelcomeAction::CreateNewVideo(VideoProjectSpec)` alongside `CreateNew(spec)`; handled in the same `match action` arm group (`app/mod.rs:2372`) by calling `create_document_from_spec` then immediately setting `self.mode = Video` and creating the `TimelineProject` (§1.3), mirroring how `CreateNew` already sets `doc_modified = true` in that same match.
 - **Auto-enter on open** — in the `WelcomeAction::OpenFile` arm (`app/mod.rs:2381`) and the CLI/tab-open path, after `*doc = loaded`, check `loaded.timeline.is_some()` and set `self.mode = Video` if true. A project with a timeline always opens into video mode; this is the only *implicit* transition and it is D-02-safe because it's the same layout, just pre-selected.
+- **First-run hint (SS-2 discoverability)** — the first time video mode becomes available in a session (and only until dismissed once, persisted in `AppPreferences`), a small callout anchors to the Video toolbar toggle ("New: edit video timelines — click here or Ctrl+Shift+V"); on first *entry*, a one-time overlay lists the core shortcuts (Space/JKL/I/O/S) with "press ? anytime to see these again" — `?` opens the shortcut sheet in video mode thereafter.
 - **Exit** — toggling back to Vector never destroys `doc.timeline` (data persists per 01 §2, `Document::new()` only sets `timeline: None` for brand-new documents); it only hides the timeline panel and restores rail contents. Symmetric with entry: same toolbar button / command / one new `WelcomeAction`-adjacent affordance is unnecessary for exit since it's a toggle, not a distinct action.
 
 ### 1.3 First-action project creation
@@ -87,7 +88,7 @@ app/timeline/
 
 ### 2.1 Layout
 
-Two-column grid inside the bottom panel: fixed-width track-header column (left, resizable via a splitter, default 160px) + scrollable clip-lane area (right). Above the lane area, a ruler strip (fixed height, ~24px) shared across all tracks (horizontal scroll/zoom is one value for the whole panel, not per-track — matches every reference NLE and avoids desync bugs).
+Two-column grid inside the bottom panel: fixed-width track-header column (left, resizable via a splitter, default 160px, clamped 120–320px — same clamp discipline as the existing drawer widths) + scrollable clip-lane area (right). Above the lane area, a ruler strip (fixed height, ~24px) shared across all tracks (horizontal scroll/zoom is one value for the whole panel, not per-track — matches every reference NLE and avoids desync bugs).
 
 **Zoom/scroll model** (session state, §6), built on 01 §1's `Tick`/`FrameRate`:
 
