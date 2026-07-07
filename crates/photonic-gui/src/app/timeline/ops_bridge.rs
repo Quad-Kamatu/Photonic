@@ -18,8 +18,8 @@
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
-    ops, ClipTiming, FrameRate, Sequence, SequenceId, Tick, TimelineCmd, Track, TrackId, TrackKind,
-    TrackSettings,
+    ops, ClipTiming, FrameRate, Marker, MarkerId, Sequence, SequenceId, Tick, TimelineCmd, Track,
+    TrackId, TrackKind, TrackSettings,
 };
 
 /// Push one timeline command as a single, non-folding undo step.
@@ -212,8 +212,9 @@ pub(crate) fn move_clip(
     }
 }
 
-/// Move a clip to a different track (compose remove + insert as one undo step —
-/// no single cross-track op exists in the committed core).
+/// Move a clip to a different track via `ops::move_clip_to_track` — a single
+/// lossless `MoveClip` command (its inverse restores the clip to its original
+/// track + position), rather than composing remove+insert.
 pub(crate) fn move_clip_cross_track(
     doc: &mut Document,
     history: &mut CommandHistory,
@@ -226,38 +227,9 @@ pub(crate) fn move_clip_cross_track(
     let Some(p) = doc.timeline.as_ref() else {
         return;
     };
-    let Some(existing) = p
-        .sequences
-        .get(&seq)
-        .and_then(|s| s.track(from_track))
-        .and_then(|t| t.clips.iter().find(|c| c.id == clip).cloned())
-    else {
-        return;
-    };
-    let mut moved = existing.clone();
-    moved.start = if new_start.0 < 0 {
-        Tick::ZERO
-    } else {
-        new_start
-    };
-    // Reject if it would overlap on the destination track.
-    if let Some(dst) = p.sequences.get(&seq).and_then(|s| s.track(to_track)) {
-        let end = moved.start + moved.duration;
-        if dst
-            .clips
-            .iter()
-            .any(|c| c.start < end && moved.start < c.end())
-        {
-            return;
-        }
+    if let Ok(cmd) = ops::move_clip_to_track(p, seq, from_track, clip, new_start, Some(to_track)) {
+        commit(history, doc, cmd);
     }
-    let Ok(remove) = ops::remove_clip(p, seq, from_track, clip) else {
-        return;
-    };
-    let Ok(insert) = ops::insert_clip(p, seq, to_track, moved) else {
-        return;
-    };
-    commit_batch(history, doc, vec![remove, insert]);
 }
 
 pub(crate) fn trim(
@@ -455,6 +427,105 @@ pub(crate) fn set_clip_enabled(
     let mut new = existing;
     new.enabled = enabled;
     if let Ok(cmd) = ops::set_clip_prop(p, seq, track, new) {
+        commit(history, doc, cmd);
+    }
+}
+
+// ── Markers & work range ─────────────────────────────────────────────────────
+
+/// Add a marker to a sequence at `at` (double-click on the ruler, 04 §2.6/13
+/// §1.1).
+pub(crate) fn add_marker(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+    name: impl Into<String>,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmd) = ops::add_marker(p, seq, Marker::new(at, name)) {
+        commit(history, doc, cmd);
+    }
+}
+
+pub(crate) fn remove_marker(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    marker: MarkerId,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmd) = ops::remove_marker(p, seq, marker) {
+        commit(history, doc, cmd);
+    }
+}
+
+/// Change one field of a marker via `SetMarker` — the marker analogue of
+/// `set_track_settings`.
+fn set_marker_field(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    marker: MarkerId,
+    edit: impl FnOnce(&mut Marker),
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Some(existing) = p
+        .sequences
+        .get(&seq)
+        .and_then(|s| s.markers.iter().find(|m| m.id == marker).cloned())
+    else {
+        return;
+    };
+    let mut new = existing;
+    edit(&mut new);
+    if let Ok(cmd) = ops::set_marker(p, seq, new) {
+        commit(history, doc, cmd);
+    }
+}
+
+/// Rename a marker (context-menu "Rename").
+pub(crate) fn rename_marker(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    marker: MarkerId,
+    name: String,
+) {
+    set_marker_field(doc, history, seq, marker, |m| m.name = name);
+}
+
+/// Retime a marker (drag-to-retime on the ruler; commit once on release, one
+/// undo step per gesture — same discipline as clip drags).
+pub(crate) fn retime_marker(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    marker: MarkerId,
+    at: Tick,
+) {
+    set_marker_field(doc, history, seq, marker, |m| m.at = at);
+}
+
+/// Set (or clear, with `None`) a sequence's preview/export work range — the
+/// monitor's I/O transport buttons (04 §3.2) route through here instead of
+/// mutating `Sequence::work_range` directly.
+pub(crate) fn set_work_range(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    new: Option<(Tick, Tick)>,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmd) = ops::set_work_range(p, seq, new) {
         commit(history, doc, cmd);
     }
 }

@@ -164,8 +164,8 @@ impl PhotonicApp {
             "video.play_forward" => self.video_play_forward(),
             "video.step_back" => self.video_step_back(doc),
             "video.step_forward" => self.video_step_forward(doc),
-            "video.set_in" => self.video_set_in(doc),
-            "video.set_out" => self.video_set_out(doc),
+            "video.set_in" => self.video_set_in(doc, history),
+            "video.set_out" => self.video_set_out(doc, history),
             "video.playhead_home" => self.timeline_playhead_home(),
             "video.playhead_end" => self.timeline_playhead_end(doc),
             // ── Timeline-panel edit commands (04 §5.1) — owned by the P2-wave

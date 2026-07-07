@@ -10,6 +10,7 @@
 //! where the real engine will plug in is marked `EngineCmd::* when P3 lands`.
 
 use super::*;
+use crate::app::timeline::ops_bridge;
 use crate::commands;
 use photonic_core::timeline::{FrameRate, Sequence, SequenceFormat, TICKS_PER_SECOND};
 
@@ -232,27 +233,31 @@ impl PhotonicApp {
     }
 
     /// I: set in-point at playhead (`Sequence::work_range`, 01 §4 document
-    /// state). O: set out-point. TEMP: no `TimelineCmd` variant exists yet
-    /// for `work_range` (the P2-DATA command table has no `SetSequenceProp`-
-    /// style op for it) — this is a direct, non-undoable mutation until that
-    /// op lands; a real op + `history.execute` call is the natural follow-up.
-    pub(crate) fn video_set_in(&mut self, doc: &mut Document) {
-        self.set_work_range_bound(doc, true);
+    /// state). O: set out-point. Undoable via `ops::set_work_range` →
+    /// `TimelineCmd::SetWorkRange`, routed through `ops_bridge` like every
+    /// other timeline edit (04 §2.3).
+    pub(crate) fn video_set_in(&mut self, doc: &mut Document, history: &mut CommandHistory) {
+        self.set_work_range_bound(doc, history, true);
     }
 
-    pub(crate) fn video_set_out(&mut self, doc: &mut Document) {
-        self.set_work_range_bound(doc, false);
+    pub(crate) fn video_set_out(&mut self, doc: &mut Document, history: &mut CommandHistory) {
+        self.set_work_range_bound(doc, history, false);
     }
 
-    fn set_work_range_bound(&mut self, doc: &mut Document, is_in: bool) {
+    fn set_work_range_bound(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        is_in: bool,
+    ) {
         let playhead = self.playhead;
-        let Some(project) = doc.timeline.as_mut() else {
+        let Some(project) = doc.timeline.as_ref() else {
             return;
         };
         let Some(seq_id) = project.active_sequence else {
             return;
         };
-        let Some(seq) = project.sequences.get_mut(&seq_id) else {
+        let Some(seq) = project.sequences.get(&seq_id) else {
             return;
         };
         let (mut in_t, mut out_t) = seq.work_range.unwrap_or((Tick::ZERO, seq.content_end()));
@@ -267,7 +272,7 @@ impl PhotonicApp {
                 in_t = out_t;
             }
         }
-        seq.work_range = Some((in_t, out_t));
+        ops_bridge::set_work_range(doc, history, seq_id, Some((in_t, out_t)));
     }
 
     /// Advance the placeholder playhead by wall-clock dt while "playing"
@@ -352,13 +357,19 @@ impl PhotonicApp {
             egui::Color32::from_gray(130),
         );
 
-        self.draw_transport_bar(ui, transport_rect, doc);
+        self.draw_transport_bar(ui, transport_rect, doc, history);
         self.draw_video_shortcut_sheet(ctx);
     }
 
     /// Play/pause/step buttons, timecode readout, loop + safe-area toggles,
     /// and in/out buttons (04 §3.2).
-    fn draw_transport_bar(&mut self, ui: &mut egui::Ui, rect: egui::Rect, doc: &mut Document) {
+    fn draw_transport_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal_centered(|ui| {
                 if ui
@@ -417,10 +428,10 @@ impl PhotonicApp {
 
                 ui.separator();
                 if ui.button("I").on_hover_text("Set In Point (I)").clicked() {
-                    self.video_set_in(doc);
+                    self.video_set_in(doc, history);
                 }
                 if ui.button("O").on_hover_text("Set Out Point (O)").clicked() {
-                    self.video_set_out(doc);
+                    self.video_set_out(doc, history);
                 }
 
                 ui.separator();
@@ -557,12 +568,16 @@ impl PhotonicApp {
                     .num_columns(2)
                     .spacing([16.0, 6.0])
                     .show(ui, |ui| {
+                        // Kept in sync with the `video.*` default bindings in
+                        // `commands.rs` — verify there before editing here.
                         const ROWS: &[(&str, &str)] = &[
                             ("Space", "Play / Pause"),
                             ("J / K / L", "Play reverse / Pause / Play forward"),
                             ("← / →", "Step one frame"),
+                            ("Shift+← / Shift+→", "Previous / next edit point"),
                             ("I / O", "Set in / out point"),
                             ("S", "Split clip at playhead"),
+                            ("N", "Toggle snapping"),
                             ("?", "Show this sheet again"),
                         ];
                         for (key, desc) in ROWS {

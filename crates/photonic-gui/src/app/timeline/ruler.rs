@@ -2,12 +2,16 @@
 //!
 //! The ruler shows zoom-adaptive tick labels (timecode), a click/drag-to-scrub
 //! surface that moves the session playhead (frame-snapped), and marker diamonds
-//! read from `Sequence.markers`. Markers are click-to-seek here; add/remove is a
-//! P-later seam — the committed core has no marker `TimelineCmd`, so editing them
-//! undoably needs a core op first (documented in the P2 report).
+//! read from `Sequence.markers`. Marker edits route through `ops_bridge` like
+//! every other timeline mutation (04 §2.3): double-click empty ruler space adds
+//! one, drag retimes one (commit once on release, one undo step per gesture —
+//! same discipline as clip drags), right-click opens a rename/remove menu.
 
 use super::layout::TimelineView;
-use photonic_core::timeline::{FrameRate, Sequence, Tick, TICKS_PER_SECOND};
+use super::ops_bridge;
+use photonic_core::document::Document;
+use photonic_core::history::CommandHistory;
+use photonic_core::timeline::{FrameRate, MarkerId, Sequence, SequenceId, Tick, TICKS_PER_SECOND};
 
 /// Format a tick as `HH:MM:SS:FF` timecode at `fr` (04 §3.2).
 pub(crate) fn timecode(t: Tick, fr: FrameRate) -> String {
@@ -41,14 +45,58 @@ fn label_interval(view: &TimelineView, fr: FrameRate, target_px: f32) -> Tick {
     Tick(best)
 }
 
-/// Draw the ruler into `ruler_rect` and handle scrub/seek, mutating `playhead`.
-/// `lane_left` is the x of tick-space origin (the lane's left edge).
+/// Marker diamond hit-test / render radius, in screen px.
+const MARKER_R: f32 = 4.0;
+/// Marker pointer hit-test radius — a bit larger than the rendered radius so
+/// grabbing a marker doesn't require pixel-perfect aim.
+const MARKER_HIT_PX: f32 = 6.0;
+
+fn marker_diamond(x: f32, cy: f32, r: f32) -> Vec<egui::Pos2> {
+    vec![
+        egui::pos2(x, cy - r),
+        egui::pos2(x + r, cy),
+        egui::pos2(x, cy + r),
+        egui::pos2(x - r, cy),
+    ]
+}
+
+/// The nearest marker to `pos` within [`MARKER_HIT_PX`], if any (04 §2.6).
+fn marker_at(
+    seq: &Sequence,
+    view: &TimelineView,
+    lane_left: f32,
+    ruler_rect: egui::Rect,
+    pos: egui::Pos2,
+) -> Option<MarkerId> {
+    let cy = ruler_rect.top() + 5.0;
+    if (pos.y - cy).abs() > MARKER_HIT_PX {
+        return None;
+    }
+    seq.markers
+        .iter()
+        .map(|m| (m.id, (view.tick_to_x(m.at, lane_left) - pos.x).abs()))
+        .filter(|(_, dx)| *dx <= MARKER_HIT_PX)
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(id, _)| id)
+}
+
+fn marker_rename_id() -> egui::Id {
+    egui::Id::new("timeline_marker_rename")
+}
+
+/// Draw the ruler into `ruler_rect` and handle scrub/seek (mutating
+/// `playhead`, session state only) plus marker add/retime/rename/remove
+/// (undoable, routed through `ops_bridge`). `lane_left` is the x of
+/// tick-space origin (the lane's left edge).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_ruler(
     ui: &mut egui::Ui,
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
     view: &TimelineView,
     ruler_rect: egui::Rect,
     lane_left: f32,
-    seq: &Sequence,
     playhead: &mut Tick,
 ) {
     let painter = ui.painter_at(ruler_rect);
@@ -63,6 +111,14 @@ pub(crate) fn draw_ruler(
         [ruler_rect.left_bottom(), ruler_rect.right_bottom()],
         egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
     );
+
+    let seq = doc
+        .timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .get(&seq_id)
+        .unwrap();
 
     // Adaptive tick labels.
     let interval = label_interval(view, seq.frame_rate, 72.0);
@@ -93,14 +149,13 @@ pub(crate) fn draw_ruler(
         }
     }
 
-    // Marker diamonds (click-to-seek; add/remove is a core-op seam).
+    // Marker diamonds.
+    let cy = ruler_rect.top() + 5.0;
     for m in &seq.markers {
         let x = view.tick_to_x(m.at, lane_left);
         if x < ruler_rect.left() || x > ruler_rect.right() {
             continue;
         }
-        let cy = ruler_rect.top() + 5.0;
-        let r = 4.0;
         let col = m
             .color
             .map(|c| {
@@ -112,33 +167,220 @@ pub(crate) fn draw_ruler(
             })
             .unwrap_or(accent);
         painter.add(egui::Shape::convex_polygon(
-            vec![
-                egui::pos2(x, cy - r),
-                egui::pos2(x + r, cy),
-                egui::pos2(x, cy + r),
-                egui::pos2(x - r, cy),
-            ],
+            marker_diamond(x, cy, MARKER_R),
             col,
             egui::Stroke::NONE,
         ));
     }
 
-    // Scrub/seek: click or drag anywhere on the ruler moves the playhead,
-    // frame-snapped. Session state only (04 §6) — never touches history.
+    // ── Interaction ──────────────────────────────────────────────────────
+    // One sense region covers the whole strip; whether a gesture is a plain
+    // scrub or a marker grab is resolved by hit-testing the gesture's start
+    // position against the markers, mirroring `interact.rs`'s zone-resolved-
+    // at-drag-start discipline for clips.
     let resp = ui.interact(
         ruler_rect,
         ui.id().with("timeline_ruler"),
         egui::Sense::click_and_drag(),
     );
-    if resp.clicked() || resp.dragged() {
+    let marker_drag_id = ui.id().with("timeline_marker_drag");
+
+    if resp.drag_started() {
         if let Some(pos) = resp.interact_pointer_pos() {
+            let seq = doc
+                .timeline
+                .as_ref()
+                .unwrap()
+                .sequences
+                .get(&seq_id)
+                .unwrap();
+            if let Some(mid) = marker_at(seq, view, lane_left, ruler_rect, pos) {
+                ui.data_mut(|d| d.insert_temp(marker_drag_id, mid));
+            }
+        }
+    }
+    let dragging_marker = ui.data(|d| d.get_temp::<MarkerId>(marker_drag_id));
+
+    if resp.dragged() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let seq = doc
+                .timeline
+                .as_ref()
+                .unwrap()
+                .sequences
+                .get(&seq_id)
+                .unwrap();
             let raw = view.x_to_tick(pos.x, lane_left);
             let snapped = seq
                 .frame_rate
                 .snap(if raw.0 < 0 { Tick::ZERO } else { raw });
-            *playhead = snapped;
+            if dragging_marker.is_some() {
+                // Ghost preview only — the real marker moves on release.
+                let gx = view.tick_to_x(snapped, lane_left);
+                painter.add(egui::Shape::convex_polygon(
+                    marker_diamond(gx, cy, MARKER_R + 1.5),
+                    accent.gamma_multiply(0.5),
+                    egui::Stroke::new(1.0, accent),
+                ));
+            } else {
+                *playhead = snapped;
+            }
         }
     }
+
+    if resp.drag_stopped() {
+        if let Some(mid) = ui.data(|d| d.get_temp::<MarkerId>(marker_drag_id)) {
+            ui.data_mut(|d| d.remove::<MarkerId>(marker_drag_id));
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let seq = doc
+                    .timeline
+                    .as_ref()
+                    .unwrap()
+                    .sequences
+                    .get(&seq_id)
+                    .unwrap();
+                let raw = view.x_to_tick(pos.x, lane_left);
+                let snapped = seq
+                    .frame_rate
+                    .snap(if raw.0 < 0 { Tick::ZERO } else { raw });
+                ops_bridge::retime_marker(doc, history, seq_id, mid, snapped);
+            }
+        }
+    }
+
+    // Plain click (not the tail end of a marker drag): scrub/seek, frame-
+    // snapped. Session state only — never touches history.
+    if resp.clicked() && dragging_marker.is_none() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let seq = doc
+                .timeline
+                .as_ref()
+                .unwrap()
+                .sequences
+                .get(&seq_id)
+                .unwrap();
+            let raw = view.x_to_tick(pos.x, lane_left);
+            *playhead = seq
+                .frame_rate
+                .snap(if raw.0 < 0 { Tick::ZERO } else { raw });
+        }
+    }
+
+    // Double-click empty ruler space → add a marker at that tick (04 §2.6).
+    if resp.double_clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let seq = doc
+                .timeline
+                .as_ref()
+                .unwrap()
+                .sequences
+                .get(&seq_id)
+                .unwrap();
+            if marker_at(seq, view, lane_left, ruler_rect, pos).is_none() {
+                let raw = view.x_to_tick(pos.x, lane_left);
+                let snapped = seq
+                    .frame_rate
+                    .snap(if raw.0 < 0 { Tick::ZERO } else { raw });
+                ops_bridge::add_marker(doc, history, seq_id, snapped, "Marker");
+            }
+        }
+    }
+
+    // Right-click a marker → rename/remove context menu.
+    let menu_target = resp.hover_pos().and_then(|pos| {
+        let seq = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap();
+        marker_at(seq, view, lane_left, ruler_rect, pos)
+    });
+    resp.context_menu(|ui| marker_context_menu(ui, doc, history, seq_id, menu_target));
+
+    draw_marker_rename_popup(ui, doc, history, seq_id, view, lane_left, ruler_rect);
+}
+
+fn marker_context_menu(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    target: Option<MarkerId>,
+) {
+    let Some(mid) = target else {
+        ui.label("No marker");
+        return;
+    };
+    if ui.button("Rename").clicked() {
+        let name = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| s.markers.iter().find(|m| m.id == mid))
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        ui.data_mut(|d| d.insert_temp(marker_rename_id(), (mid, name)));
+        ui.close_menu();
+    }
+    if ui.button("Remove").clicked() {
+        ops_bridge::remove_marker(doc, history, seq_id, mid);
+        ui.close_menu();
+    }
+}
+
+/// Floating rename box for the marker `marker_context_menu`'s "Rename"
+/// started editing (mirrors `tracks.rs`'s inline track rename, but as a
+/// popup — the 24px ruler strip has no room for an inline text box).
+#[allow(clippy::too_many_arguments)]
+fn draw_marker_rename_popup(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    view: &TimelineView,
+    lane_left: f32,
+    ruler_rect: egui::Rect,
+) {
+    let Some((mid, mut buf)) = ui.data(|d| d.get_temp::<(MarkerId, String)>(marker_rename_id()))
+    else {
+        return;
+    };
+    let Some(at) = doc
+        .timeline
+        .as_ref()
+        .and_then(|p| p.sequences.get(&seq_id))
+        .and_then(|s| s.markers.iter().find(|m| m.id == mid))
+        .map(|m| m.at)
+    else {
+        ui.data_mut(|d| d.remove::<(MarkerId, String)>(marker_rename_id()));
+        return;
+    };
+    let x = view.tick_to_x(at, lane_left);
+    egui::Area::new(egui::Id::new(("timeline_marker_rename_popup", mid)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(x, ruler_rect.bottom() + 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let resp = ui.add(egui::TextEdit::singleline(&mut buf).hint_text("Marker name"));
+                resp.request_focus();
+                if resp.lost_focus() {
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !buf.trim().is_empty() {
+                        ops_bridge::rename_marker(
+                            doc,
+                            history,
+                            seq_id,
+                            mid,
+                            buf.trim().to_string(),
+                        );
+                    }
+                    ui.data_mut(|d| d.remove::<(MarkerId, String)>(marker_rename_id()));
+                } else {
+                    ui.data_mut(|d| d.insert_temp(marker_rename_id(), (mid, buf)));
+                }
+            });
+        });
 }
 
 /// Draw the full-height playhead line across the ruler + all lanes (13 §1.1).

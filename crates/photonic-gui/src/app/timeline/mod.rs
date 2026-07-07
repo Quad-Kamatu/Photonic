@@ -199,16 +199,16 @@ impl PhotonicApp {
         }
 
         // ── Ruler + playhead ────────────────────────────────────────────────
-        {
-            let seq = doc
-                .timeline
-                .as_ref()
-                .unwrap()
-                .sequences
-                .get(&seq_id)
-                .unwrap();
-            ruler::draw_ruler(ui, &view, ruler_rect, lane_left, seq, &mut playhead);
-        }
+        ruler::draw_ruler(
+            ui,
+            doc,
+            history,
+            seq_id,
+            &view,
+            ruler_rect,
+            lane_left,
+            &mut playhead,
+        );
 
         // ── Clip interaction (select / drag / marquee / context) ────────────
         let content_rect = egui::Rect::from_min_max(ruler_rect.min, lanes_rect.max);
