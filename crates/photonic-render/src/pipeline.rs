@@ -544,6 +544,17 @@ pub(crate) fn blend_mode_index(mode: BlendMode) -> u32 {
         BlendMode::Saturation => 13,
         BlendMode::Color => 14,
         BlendMode::Luminosity => 15,
+        // Photoshop extras: separable 16..=23, non-separable (whole-colour) 24..=25.
+        BlendMode::LinearDodge => 16,
+        BlendMode::LinearBurn => 17,
+        BlendMode::Subtract => 18,
+        BlendMode::Divide => 19,
+        BlendMode::VividLight => 20,
+        BlendMode::LinearLight => 21,
+        BlendMode::PinLight => 22,
+        BlendMode::HardMix => 23,
+        BlendMode::DarkerColor => 24,
+        BlendMode::LighterColor => 25,
     }
 }
 
@@ -602,6 +613,21 @@ fn soft_light1(cb: f32, cs: f32) -> f32 {
     if (cb <= 0.25) { d = ((16.0 * cb - 12.0) * cb + 4.0) * cb; } else { d = sqrt(cb); }
     return cb + (2.0 * cs - 1.0) * (d - cb);
 }
+fn color_dodge1(cb: f32, cs: f32) -> f32 {
+    if (cb == 0.0) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (1.0 - cs), 1.0);
+}
+fn color_burn1(cb: f32, cs: f32) -> f32 {
+    if (cb >= 1.0) { return 1.0; }
+    if (cs <= 0.0) { return 0.0; }
+    return 1.0 - min((1.0 - cb) / cs, 1.0);
+}
+// Non-recursive Vivid Light (WGSL forbids recursion, so it can't call blend_channel).
+fn vivid_light1(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return color_burn1(cb, min(2.0 * cs, 1.0)); }
+    return color_dodge1(cb, min(2.0 * (cs - 0.5), 1.0));
+}
 fn blend_channel(mode: u32, cb: f32, cs: f32) -> f32 {
     switch (mode) {
         case 1u:  { return cb * cs; }
@@ -609,20 +635,26 @@ fn blend_channel(mode: u32, cb: f32, cs: f32) -> f32 {
         case 3u:  { return hard_light1(cs, cb); }
         case 4u:  { return min(cb, cs); }
         case 5u:  { return max(cb, cs); }
-        case 6u:  {
-            if (cb == 0.0) { return 0.0; }
-            if (cs >= 1.0) { return 1.0; }
-            return min(cb / (1.0 - cs), 1.0);
-        }
-        case 7u:  {
-            if (cb >= 1.0) { return 1.0; }
-            if (cs <= 0.0) { return 0.0; }
-            return 1.0 - min((1.0 - cb) / cs, 1.0);
-        }
+        case 6u:  { return color_dodge1(cb, cs); }
+        case 7u:  { return color_burn1(cb, cs); }
         case 8u:  { return hard_light1(cb, cs); }
         case 9u:  { return soft_light1(cb, cs); }
         case 10u: { return abs(cb - cs); }
         case 11u: { return cb + cs - 2.0 * cb * cs; }
+        case 16u: { return min(cb + cs, 1.0); }                 // Linear Dodge
+        case 17u: { return max(cb + cs - 1.0, 0.0); }           // Linear Burn
+        case 18u: { return max(cb - cs, 0.0); }                 // Subtract
+        case 19u: { if (cs <= 0.0) { return 1.0; } return min(cb / cs, 1.0); } // Divide
+        case 20u: { return vivid_light1(cb, cs); }              // Vivid Light
+        case 21u: { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); } // Linear Light
+        case 22u: {                                             // Pin Light
+            if (cs <= 0.5) { return min(cb, 2.0 * cs); }
+            return max(cb, 2.0 * cs - 1.0);
+        }
+        case 23u: {                                             // Hard Mix
+            if (vivid_light1(cb, cs) < 0.5) { return 0.0; }
+            return 1.0;
+        }
         default:  { return cs; }
     }
 }
@@ -661,12 +693,17 @@ fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
     let mode = params.mode;
 
     var blended: vec3<f32>;
-    if (mode >= 12u) {
-        if (mode == 12u)      { blended = set_lum(set_sat(cs, sat(cb)), lum(cb)); } // Hue
-        else if (mode == 13u) { blended = set_lum(set_sat(cb, sat(cs)), lum(cb)); } // Saturation
-        else if (mode == 14u) { blended = set_lum(cs, lum(cb)); }                   // Color
-        else                  { blended = set_lum(cb, lum(cs)); }                   // Luminosity
-    } else {
+    if (mode == 12u)      { blended = set_lum(set_sat(cs, sat(cb)), lum(cb)); } // Hue
+    else if (mode == 13u) { blended = set_lum(set_sat(cb, sat(cs)), lum(cb)); } // Saturation
+    else if (mode == 14u) { blended = set_lum(cs, lum(cb)); }                   // Color
+    else if (mode == 15u) { blended = set_lum(cb, lum(cs)); }                   // Luminosity
+    else if (mode == 24u) {                                                     // Darker Color
+        if (lum(cb) <= lum(cs)) { blended = cb; } else { blended = cs; }
+    }
+    else if (mode == 25u) {                                                     // Lighter Color
+        if (lum(cb) >= lum(cs)) { blended = cb; } else { blended = cs; }
+    }
+    else {
         blended = vec3<f32>(
             blend_channel(mode, cb.r, cs.r),
             blend_channel(mode, cb.g, cs.g),

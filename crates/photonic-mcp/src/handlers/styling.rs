@@ -606,6 +606,16 @@ pub async fn set_blend_mode(state: &AppState, args: SetBlendModeArgs) -> ToolRes
         "saturation" => BlendMode::Saturation,
         "color" => BlendMode::Color,
         "luminosity" => BlendMode::Luminosity,
+        "linear_dodge" => BlendMode::LinearDodge,
+        "linear_burn" => BlendMode::LinearBurn,
+        "subtract" => BlendMode::Subtract,
+        "divide" => BlendMode::Divide,
+        "vivid_light" => BlendMode::VividLight,
+        "linear_light" => BlendMode::LinearLight,
+        "pin_light" => BlendMode::PinLight,
+        "hard_mix" => BlendMode::HardMix,
+        "darker_color" => BlendMode::DarkerColor,
+        "lighter_color" => BlendMode::LighterColor,
         other => return ToolResult::error(format!("Unknown blend mode: '{other}'")),
     };
 

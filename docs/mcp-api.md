@@ -2836,7 +2836,7 @@ Set blend mode on multiple nodes at once. All 16 blend modes supported: normal, 
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `blend_mode` | enum (`normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`, `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`, `saturation`, `color`, `luminosity`) | yes | Blend mode |
+| `blend_mode` | enum (`normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`, `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`, `saturation`, `color`, `luminosity`, `linear_dodge`, `linear_burn`, `subtract`, `divide`, `vivid_light`, `linear_light`, `pin_light`, `hard_mix`, `darker_color`, `lighter_color`) | yes | Blend mode |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
 
 ## `set_blend_spine`
@@ -3290,7 +3290,7 @@ Update mutable metadata on a layer: rename it, change visibility, lock/unlock, s
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `layer_id` | string | yes | UUID of the layer to update. |
-| `blend_mode` | enum (`normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`, `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`, `saturation`, `color`, `luminosity`) | no | Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity. |
+| `blend_mode` | enum (`normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color_dodge`, `color_burn`, `hard_light`, `soft_light`, `difference`, `exclusion`, `hue`, `saturation`, `color`, `luminosity`, `linear_dodge`, `linear_burn`, `subtract`, `divide`, `vivid_light`, `linear_light`, `pin_light`, `hard_mix`, `darker_color`, `lighter_color`) | no | Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity. |
 | `color` | any | no | Color tag as [r,g,b,a] floats 0.0–1.0. Pass null to clear. |
 | `is_template` | boolean | no | Mark as a template layer (locked, dimmed reference for tracing over artwork). Setting true also locks the layer. |
 | `locked` | boolean | no | Lock or unlock the layer. |

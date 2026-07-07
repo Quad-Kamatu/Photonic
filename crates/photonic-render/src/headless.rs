@@ -1649,6 +1649,21 @@ mod blend_tests {
         );
     }
 
+    /// P2 (headless): a Photoshop-extra mode (Linear Dodge / Add) exports
+    /// correctly — RED ⊕ BLUE = magenta (per channel min(cb+cs, 1)).
+    #[test]
+    fn layer_linear_dodge_via_headless() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping linear-dodge test");
+            return;
+        };
+        let p = layer_blend_center(&r, 1.0, BlendMode::LinearDodge);
+        assert!(
+            p[0] > 200 && p[1] < 40 && p[2] > 200,
+            "RED + BLUE via Linear Dodge should be ~magenta, got {p:?}"
+        );
+    }
+
     fn luma(px: [u8; 4]) -> f32 {
         (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) / 255.0
     }

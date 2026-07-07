@@ -626,7 +626,7 @@ impl PhotonicApp {
         }
 
         use photonic_core::layer::BlendMode as Bm;
-        const MODES: [(Bm, &str); 16] = [
+        const MODES: [(Bm, &str); 26] = [
             (Bm::Normal, "Normal"),
             (Bm::Multiply, "Multiply"),
             (Bm::Screen, "Screen"),
@@ -635,14 +635,24 @@ impl PhotonicApp {
             (Bm::Lighten, "Lighten"),
             (Bm::ColorDodge, "Color Dodge"),
             (Bm::ColorBurn, "Color Burn"),
+            (Bm::LinearDodge, "Linear Dodge (Add)"),
+            (Bm::LinearBurn, "Linear Burn"),
             (Bm::HardLight, "Hard Light"),
             (Bm::SoftLight, "Soft Light"),
+            (Bm::VividLight, "Vivid Light"),
+            (Bm::LinearLight, "Linear Light"),
+            (Bm::PinLight, "Pin Light"),
+            (Bm::HardMix, "Hard Mix"),
             (Bm::Difference, "Difference"),
             (Bm::Exclusion, "Exclusion"),
+            (Bm::Subtract, "Subtract"),
+            (Bm::Divide, "Divide"),
             (Bm::Hue, "Hue"),
             (Bm::Saturation, "Saturation"),
             (Bm::Color, "Color"),
             (Bm::Luminosity, "Luminosity"),
+            (Bm::DarkerColor, "Darker Color"),
+            (Bm::LighterColor, "Lighter Color"),
         ];
         let blend_label =
             |m: Bm| MODES.iter().find(|(x, _)| *x == m).map(|(_, n)| *n).unwrap_or("Normal");

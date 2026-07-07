@@ -1093,6 +1093,17 @@ fn pdf_blend_mode(m: crate::layer::BlendMode) -> pdf_writer::types::BlendMode {
         B::Saturation => P::Saturation,
         B::Color => P::Color,
         B::Luminosity => P::Luminosity,
+        // Photoshop extras have no PDF standard blend mode — fall back to Normal.
+        B::LinearDodge
+        | B::LinearBurn
+        | B::Subtract
+        | B::Divide
+        | B::VividLight
+        | B::LinearLight
+        | B::PinLight
+        | B::HardMix
+        | B::DarkerColor
+        | B::LighterColor => P::Normal,
     }
 }
 

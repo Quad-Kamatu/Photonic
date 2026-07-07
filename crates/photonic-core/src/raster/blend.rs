@@ -42,9 +42,51 @@ pub fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
         BlendMode::SoftLight => soft_light(cb, cs),
         BlendMode::Difference => (cb - cs).abs(),
         BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
+        // ── Photoshop extras (separable) ──────────────────────────────────────
+        BlendMode::LinearDodge => (cb + cs).min(1.0),
+        BlendMode::LinearBurn => (cb + cs - 1.0).max(0.0),
+        BlendMode::Subtract => (cb - cs).max(0.0),
+        BlendMode::Divide => {
+            if cs <= 0.0 {
+                1.0
+            } else {
+                (cb / cs).min(1.0)
+            }
+        }
+        // Vivid Light: burn for shadows, dodge for highlights.
+        BlendMode::VividLight => {
+            if cs <= 0.5 {
+                blend_channel(BlendMode::ColorBurn, cb, (2.0 * cs).min(1.0))
+            } else {
+                blend_channel(BlendMode::ColorDodge, cb, (2.0 * (cs - 0.5)).min(1.0))
+            }
+        }
+        // Linear Light: linear burn/dodge about mid-grey.
+        BlendMode::LinearLight => (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0),
+        // Pin Light: darken for shadows, lighten for highlights.
+        BlendMode::PinLight => {
+            if cs <= 0.5 {
+                cb.min(2.0 * cs)
+            } else {
+                cb.max(2.0 * cs - 1.0)
+            }
+        }
+        // Hard Mix: threshold Vivid Light to 0/1.
+        BlendMode::HardMix => {
+            if blend_channel(BlendMode::VividLight, cb, cs) < 0.5 {
+                0.0
+            } else {
+                1.0
+            }
+        }
         // Non-separable modes are handled in `blend_rgb`; per-channel falls back
         // to normal so callers that only do separable work stay correct.
-        BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => cs,
+        BlendMode::Hue
+        | BlendMode::Saturation
+        | BlendMode::Color
+        | BlendMode::Luminosity
+        | BlendMode::DarkerColor
+        | BlendMode::LighterColor => cs,
     }
 }
 
@@ -80,7 +122,12 @@ fn soft_light(cb: f32, cs: f32) -> f32 {
 fn is_separable(mode: BlendMode) -> bool {
     !matches!(
         mode,
-        BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
+        BlendMode::Hue
+            | BlendMode::Saturation
+            | BlendMode::Color
+            | BlendMode::Luminosity
+            | BlendMode::DarkerColor
+            | BlendMode::LighterColor
     )
 }
 
@@ -99,6 +146,21 @@ pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
             BlendMode::Saturation => set_lum(set_sat(cb, sat(cs)), lum(cb)),
             BlendMode::Color => set_lum(cs, lum(cb)),
             BlendMode::Luminosity => set_lum(cb, lum(cs)),
+            // Darker/Lighter Color pick the whole backdrop or source by luminosity.
+            BlendMode::DarkerColor => {
+                if lum(cb) <= lum(cs) {
+                    cb
+                } else {
+                    cs
+                }
+            }
+            BlendMode::LighterColor => {
+                if lum(cb) >= lum(cs) {
+                    cb
+                } else {
+                    cs
+                }
+            }
             _ => cs,
         }
     }
@@ -277,5 +339,30 @@ mod tests {
         // red source → reddish result (r > g, r > b).
         let out = blend_rgb(BlendMode::Color, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
         assert!(out[0] > out[1] && out[0] > out[2]);
+    }
+
+    #[test]
+    fn photoshop_extra_modes_match_formulas() {
+        use BlendMode::*;
+        let ch = blend_channel;
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(approx(ch(LinearDodge, 0.3, 0.3), 0.6));
+        assert!(approx(ch(LinearDodge, 0.8, 0.8), 1.0)); // clamps to 1
+        assert!(approx(ch(LinearBurn, 0.8, 0.8), 0.6));
+        assert!(approx(ch(LinearBurn, 0.2, 0.2), 0.0)); // clamps to 0
+        assert!(approx(ch(Subtract, 0.8, 0.3), 0.5));
+        assert!(approx(ch(Subtract, 0.3, 0.8), 0.0));
+        assert!(approx(ch(Divide, 0.5, 1.0), 0.5));
+        assert!(approx(ch(Divide, 0.5, 0.0), 1.0)); // divide-by-zero guard
+        assert!(approx(ch(PinLight, 0.5, 0.2), 0.4)); // darken side
+        assert!(approx(ch(PinLight, 0.5, 0.8), 0.6)); // lighten side
+        assert!(approx(ch(LinearLight, 0.5, 0.5), 0.5));
+        assert_eq!(ch(HardMix, 0.5, 0.8), 1.0); // thresholds to 0/1
+
+        // Non-separable whole-colour picks by luminosity.
+        let darker = blend_rgb(DarkerColor, [0.8, 0.8, 0.8], [0.2, 0.2, 0.2]);
+        assert!(darker[0] < 0.5, "DarkerColor keeps the darker whole colour");
+        let lighter = blend_rgb(LighterColor, [0.8, 0.8, 0.8], [0.2, 0.2, 0.2]);
+        assert!(lighter[0] > 0.5, "LighterColor keeps the lighter whole colour");
     }
 }

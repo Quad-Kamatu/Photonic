@@ -64,10 +64,26 @@ pub enum BlendMode {
     Saturation,
     Color,
     Luminosity,
+    // ── Photoshop extras: no CSS `mix-blend-mode` keyword. They render correctly
+    // on the raster/canvas paths (see `raster::blend`); in SVG/CSS they degrade to
+    // Normal in browsers but round-trip within Photonic via their hyphenated names.
+    LinearDodge,
+    LinearBurn,
+    Subtract,
+    Divide,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    DarkerColor,
+    LighterColor,
 }
 
 impl BlendMode {
-    /// The CSS `mix-blend-mode` keyword for this mode (1:1 with the CSS spec).
+    /// The CSS `mix-blend-mode` keyword. The first 16 are 1:1 with the CSS spec;
+    /// the Photoshop extras use hyphenated names browsers don't recognise (so they
+    /// fall back to Normal there) but which [`from_css`](BlendMode::from_css)
+    /// parses, keeping Photonic SVG round-trips lossless.
     pub fn to_css(self) -> &'static str {
         match self {
             BlendMode::Normal => "normal",
@@ -86,11 +102,21 @@ impl BlendMode {
             BlendMode::Saturation => "saturation",
             BlendMode::Color => "color",
             BlendMode::Luminosity => "luminosity",
+            BlendMode::LinearDodge => "linear-dodge",
+            BlendMode::LinearBurn => "linear-burn",
+            BlendMode::Subtract => "subtract",
+            BlendMode::Divide => "divide",
+            BlendMode::VividLight => "vivid-light",
+            BlendMode::LinearLight => "linear-light",
+            BlendMode::PinLight => "pin-light",
+            BlendMode::HardMix => "hard-mix",
+            BlendMode::DarkerColor => "darker-color",
+            BlendMode::LighterColor => "lighter-color",
         }
     }
 
-    /// Parse a CSS `mix-blend-mode` keyword. Case-insensitive; returns `None`
-    /// for unrecognized values.
+    /// Parse a CSS `mix-blend-mode` keyword (or a Photonic extra name).
+    /// Case-insensitive; returns `None` for unrecognized values.
     pub fn from_css(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "normal" => BlendMode::Normal,
@@ -109,6 +135,16 @@ impl BlendMode {
             "saturation" => BlendMode::Saturation,
             "color" => BlendMode::Color,
             "luminosity" => BlendMode::Luminosity,
+            "linear-dodge" => BlendMode::LinearDodge,
+            "linear-burn" => BlendMode::LinearBurn,
+            "subtract" => BlendMode::Subtract,
+            "divide" => BlendMode::Divide,
+            "vivid-light" => BlendMode::VividLight,
+            "linear-light" => BlendMode::LinearLight,
+            "pin-light" => BlendMode::PinLight,
+            "hard-mix" => BlendMode::HardMix,
+            "darker-color" => BlendMode::DarkerColor,
+            "lighter-color" => BlendMode::LighterColor,
             _ => return None,
         })
     }

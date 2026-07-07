@@ -1033,7 +1033,7 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Node IDs. Empty = use selection." },
-                    "blend_mode": { "type": "string", "enum": ["normal","multiply","screen","overlay","darken","lighten","color_dodge","color_burn","hard_light","soft_light","difference","exclusion","hue","saturation","color","luminosity"], "description": "Blend mode" }
+                    "blend_mode": { "type": "string", "enum": ["normal","multiply","screen","overlay","darken","lighten","color_dodge","color_burn","hard_light","soft_light","difference","exclusion","hue","saturation","color","luminosity","linear_dodge","linear_burn","subtract","divide","vivid_light","linear_light","pin_light","hard_mix","darker_color","lighter_color"], "description": "Blend mode" }
                 },
                 "required": ["blend_mode"]
             }
@@ -1693,7 +1693,7 @@ pub fn tool_list() -> Value {
                     "locked": { "type": "boolean", "description": "Lock or unlock the layer." },
                     "is_template": { "type": "boolean", "description": "Mark as a template layer (locked, dimmed reference for tracing over artwork). Setting true also locks the layer." },
                     "opacity": { "type": "number", "description": "Layer opacity 0.0–1.0; the layer composites as a unit at this opacity." },
-                    "blend_mode": { "type": "string", "description": "Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity.", "enum": ["normal","multiply","screen","overlay","darken","lighten","color_dodge","color_burn","hard_light","soft_light","difference","exclusion","hue","saturation","color","luminosity"] },
+                    "blend_mode": { "type": "string", "description": "Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity.", "enum": ["normal","multiply","screen","overlay","darken","lighten","color_dodge","color_burn","hard_light","soft_light","difference","exclusion","hue","saturation","color","luminosity","linear_dodge","linear_burn","subtract","divide","vivid_light","linear_light","pin_light","hard_mix","darker_color","lighter_color"] },
                     "color": {
                         "description": "Color tag as [r,g,b,a] floats 0.0–1.0. Pass null to clear.",
                         "oneOf": [
