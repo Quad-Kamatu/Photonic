@@ -217,7 +217,7 @@ pub fn export_svg(doc: &Document, opts: &SvgExportOptions) -> String {
     let mut used_layer_ids: HashSet<String> = HashSet::new();
     for layer_id in &doc.layer_order {
         let layer = match doc.layers.get(layer_id) {
-            Some(l) if l.visible => l,
+            Some(l) if l.visible && l.print => l,
             _ => continue,
         };
 
@@ -298,7 +298,7 @@ pub fn export_nodes_as_svg_opts(
     // Collect nodes in document order (layer order → z-order within layer).
     for layer_id in &doc.layer_order {
         let layer = match doc.layers.get(layer_id) {
-            Some(l) if l.visible => l,
+            Some(l) if l.visible && l.print => l,
             _ => continue,
         };
         for node_id in &layer.node_ids {
@@ -1009,7 +1009,7 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
     let mut gstates: Vec<(f32, pdf_writer::types::BlendMode)> = Vec::new();
     for layer_id in &doc.layer_order {
         let layer = match doc.layers.get(layer_id) {
-            Some(l) if l.visible => l,
+            Some(l) if l.visible && l.print => l,
             _ => continue,
         };
         let needs_gs =

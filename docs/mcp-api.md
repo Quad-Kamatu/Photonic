@@ -3296,6 +3296,7 @@ Update mutable metadata on a layer: rename it, change visibility, lock/unlock, s
 | `locked` | boolean | no | Lock or unlock the layer. |
 | `name` | string | no | New name for the layer. |
 | `opacity` | number | no | Layer opacity 0.0–1.0; the layer composites as a unit at this opacity. |
+| `print` | boolean | no | Include the layer in export/print output. false = visible on canvas but excluded from exports. |
 | `visible` | boolean | no | Show or hide the layer. |
 
 ## `update_node`

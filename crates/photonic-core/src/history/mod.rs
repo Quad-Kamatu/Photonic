@@ -1908,6 +1908,13 @@ pub enum Command {
         new_blend_mode: crate::layer::BlendMode,
     },
 
+    /// Replace a whole layer's settings in one step (name, visibility, locks,
+    /// opacity, blend, colour, template, print…). The layer's node list is
+    /// preserved from the live layer, so this only swaps settings. Used by the
+    /// Layer Options modal and `update_layer` so new layer fields don't ripple
+    /// through many typed command sites.
+    ReplaceLayer { old: Layer, new: Layer },
+
     /// Move a top-level node from one layer to another.
     /// All fields are stored so the inverse is fully self-contained.
     MoveNodeToLayer {
@@ -2147,6 +2154,7 @@ impl Command {
             Command::RemoveLayerFull { layer } => format!("Remove layer \"{}\"", layer.name),
             Command::RemoveNodeFull { node } => format!("Remove {}", node.name),
             Command::UpdateLayer { new_name, .. } => format!("Update layer \"{}\"", new_name),
+            Command::ReplaceLayer { new, .. } => format!("Update layer \"{}\"", new.name),
             Command::MoveNodeToLayer { .. } => "Move node to layer".to_string(),
             Command::ReparentNode { .. } => "Reparent node".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
@@ -2339,6 +2347,15 @@ impl Command {
                     layer.is_template = *new_is_template;
                     layer.opacity = *new_opacity;
                     layer.blend_mode = *new_blend_mode;
+                }
+            }
+
+            Command::ReplaceLayer { new, .. } => {
+                // Swap settings only; keep the live node list.
+                if let Some(cur) = doc.layers.get_mut(&new.id) {
+                    let node_ids = std::mem::take(&mut cur.node_ids);
+                    *cur = new.clone();
+                    cur.node_ids = node_ids;
                 }
             }
 
@@ -2644,6 +2661,11 @@ impl Command {
                 new_opacity: *old_opacity,
                 old_blend_mode: *new_blend_mode,
                 new_blend_mode: *old_blend_mode,
+            }),
+
+            Command::ReplaceLayer { old, new } => Some(Command::ReplaceLayer {
+                old: new.clone(),
+                new: old.clone(),
             }),
 
             Command::MoveNodeToLayer {

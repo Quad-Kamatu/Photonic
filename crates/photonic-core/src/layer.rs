@@ -18,8 +18,25 @@ pub struct Layer {
     /// Template layers are locked, dimmed reference layers for tracing over.
     #[serde(default)]
     pub is_template: bool,
+    /// Whether the layer is included in print/export output. Non-print layers
+    /// stay visible on the canvas but are excluded from exports (Illustrator's
+    /// "Print" layer option). Defaults to true for back-compat.
+    #[serde(default = "default_true")]
+    pub print: bool,
+    /// Granular locks (Photoshop's lock cluster). `locked` remains the "lock all"
+    /// master; these add finer control. Defaults false.
+    #[serde(default)]
+    pub lock_transparency: bool,
+    #[serde(default)]
+    pub lock_pixels: bool,
+    #[serde(default)]
+    pub lock_position: bool,
     /// Ordered list of node IDs (bottom to top).
     pub node_ids: Vec<uuid::Uuid>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Layer {
@@ -33,6 +50,10 @@ impl Layer {
             blend_mode: BlendMode::Normal,
             color: None,
             is_template: false,
+            print: true,
+            lock_transparency: false,
+            lock_pixels: false,
+            lock_position: false,
             node_ids: vec![],
         }
     }

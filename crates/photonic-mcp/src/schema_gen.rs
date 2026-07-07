@@ -1692,6 +1692,7 @@ pub fn tool_list() -> Value {
                     "visible": { "type": "boolean", "description": "Show or hide the layer." },
                     "locked": { "type": "boolean", "description": "Lock or unlock the layer." },
                     "is_template": { "type": "boolean", "description": "Mark as a template layer (locked, dimmed reference for tracing over artwork). Setting true also locks the layer." },
+                    "print": { "type": "boolean", "description": "Include the layer in export/print output. false = visible on canvas but excluded from exports." },
                     "opacity": { "type": "number", "description": "Layer opacity 0.0–1.0; the layer composites as a unit at this opacity." },
                     "blend_mode": { "type": "string", "description": "Layer blend mode: normal, multiply, screen, overlay, darken, lighten, color_dodge, color_burn, hard_light, soft_light, difference, exclusion, hue, saturation, color, luminosity.", "enum": ["normal","multiply","screen","overlay","darken","lighten","color_dodge","color_burn","hard_light","soft_light","difference","exclusion","hue","saturation","color","luminosity","linear_dodge","linear_burn","subtract","divide","vivid_light","linear_light","pin_light","hard_mix","darker_color","lighter_color"] },
                     "color": {

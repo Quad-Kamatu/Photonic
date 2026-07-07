@@ -477,6 +477,11 @@ pub struct UpdateLayerArgs {
     /// this mode against the layers beneath. Omit to keep existing value.
     #[serde(default)]
     pub blend_mode: Option<String>,
+    /// Whether the layer is included in export/print output (Illustrator's Print
+    /// option). Non-print layers stay on the canvas but are excluded from exports.
+    /// Omit to keep existing value.
+    #[serde(default)]
+    pub print: Option<bool>,
 }
 
 /// Arguments for `flatten_artwork`.

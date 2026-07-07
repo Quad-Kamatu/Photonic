@@ -418,6 +418,10 @@ struct ObjectOptionsDialog {
     is_template: bool,
     color_enabled: bool,
     color: [f32; 4],
+    print: bool,
+    lock_transparency: bool,
+    lock_pixels: bool,
+    lock_position: bool,
     // Group-node only:
     is_group: bool,
     clip_children: bool,
@@ -440,6 +444,10 @@ impl ObjectOptionsDialog {
             is_template: l.is_template,
             color_enabled: l.color.is_some(),
             color: l.color.unwrap_or([0.42, 0.51, 0.9, 1.0]),
+            print: l.print,
+            lock_transparency: l.lock_transparency,
+            lock_pixels: l.lock_pixels,
+            lock_position: l.lock_position,
             is_group: false,
             clip_children: false,
             orig_layer: Some(l.clone()),
@@ -466,6 +474,10 @@ impl ObjectOptionsDialog {
             is_template: false,
             color_enabled: false,
             color: [0.42, 0.51, 0.9, 1.0],
+            print: true,
+            lock_transparency: false,
+            lock_pixels: false,
+            lock_position: false,
             is_group,
             clip_children,
             orig_layer: None,
@@ -484,6 +496,10 @@ impl ObjectOptionsDialog {
         l.blend_mode = self.blend_mode;
         l.is_template = self.is_template;
         l.color = if self.color_enabled { Some(self.color) } else { None };
+        l.print = self.print;
+        l.lock_transparency = self.lock_transparency;
+        l.lock_pixels = self.lock_pixels;
+        l.lock_position = self.lock_position;
         l
     }
 

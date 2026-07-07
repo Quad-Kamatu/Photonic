@@ -75,6 +75,11 @@ pub fn composite_document(base: &mut [u8], w: u32, h: u32, doc: &Document, view:
         if !layer.visible {
             continue;
         }
+        // Non-print layers stay on the live canvas (windowed renderer) but are
+        // excluded from this export/compositor path (Illustrator's Print option).
+        if !layer.print {
+            continue;
+        }
         let nodes = doc.draw_nodes_in_layer(layer_id);
         if nodes.is_empty() {
             continue;

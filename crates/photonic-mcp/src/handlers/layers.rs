@@ -411,22 +411,22 @@ pub async fn update_layer(state: &AppState, args: UpdateLayerArgs) -> ToolResult
         None => layer.blend_mode,
     };
 
-    let cmd = photonic_core::history::Command::UpdateLayer {
-        layer_id: args.layer_id,
-        old_name: layer.name.clone(),
-        new_name: new_name.clone(),
-        old_visible: layer.visible,
-        new_visible,
-        old_locked: layer.locked,
-        new_locked,
-        old_color: layer.color,
-        new_color,
-        old_is_template: layer.is_template,
-        new_is_template,
-        old_opacity: layer.opacity,
-        new_opacity,
-        old_blend_mode: layer.blend_mode,
-        new_blend_mode,
+    let new_print = args.print.unwrap_or(layer.print);
+    let mut new_layer = layer.clone();
+    new_layer.name = new_name.clone();
+    new_layer.visible = new_visible;
+    new_layer.locked = new_locked;
+    new_layer.color = new_color;
+    new_layer.is_template = new_is_template;
+    new_layer.opacity = new_opacity;
+    new_layer.blend_mode = new_blend_mode;
+    new_layer.print = new_print;
+
+    // ReplaceLayer swaps all settings in one undoable step (adding new layer
+    // fields needs no per-field command plumbing).
+    let cmd = photonic_core::history::Command::ReplaceLayer {
+        old: layer.clone(),
+        new: new_layer,
     };
 
     let mut history = state.history.lock().await;
@@ -446,5 +446,6 @@ pub async fn update_layer(state: &AppState, args: UpdateLayerArgs) -> ToolResult
         "is_template": new_is_template,
         "opacity": new_opacity,
         "blend_mode": new_blend_mode.to_css(),
+        "print": new_print,
     }))
 }

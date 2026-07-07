@@ -281,7 +281,15 @@ impl HeadlessRenderer {
                     && (l.opacity < 1.0 || l.blend_mode != BlendMode::Normal)
             })
         });
-        if has_raster || has_pattern || has_isolated_layer {
+        // Non-print layers must be excluded from export; the CPU compositor does
+        // that, so route such documents through it too.
+        let has_non_print_layer = document.layer_order.iter().any(|lid| {
+            document
+                .layers
+                .get(lid)
+                .is_some_and(|l| !l.print && l.visible && !l.node_ids.is_empty())
+        });
+        if has_raster || has_pattern || has_isolated_layer || has_non_print_layer {
             let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
             let bg = match opts.background {
                 ExportBackground::Artboard => [
@@ -1646,6 +1654,48 @@ mod blend_tests {
         assert!(
             (p[0] as i32 - 127).abs() < 32 && p[1] < 32 && (p[2] as i32 - 127).abs() < 32,
             "half-opacity blue over red should be ~purple, got {p:?}"
+        );
+    }
+
+    /// P7 (headless): a non-print layer stays off exports. A full-canvas BLUE
+    /// non-print layer over a RED print layer → export shows RED.
+    #[test]
+    fn non_print_layer_excluded_from_export() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping non-print test");
+            return;
+        };
+        let mut doc = Document::new("np", 20.0, 20.0);
+        doc.add_node(
+            SceneNode::new(
+                "red",
+                doc.active_layer_id.unwrap(),
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                        .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+                ),
+            ),
+            None,
+        );
+        let top = doc.add_layer(photonic_core::layer::Layer::new("top"));
+        doc.layers.get_mut(&top).unwrap().print = false;
+        doc.add_node(
+            SceneNode::new(
+                "blue",
+                Default::default(),
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                        .with_fill(Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0))),
+                ),
+            ),
+            Some(top),
+        );
+        let png = r.render_png_at_size(&doc, 20, 20);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        let p = img.get_pixel(10, 10).0;
+        assert!(
+            p[0] > 200 && p[2] < 40,
+            "non-print blue layer must be excluded from export (centre should be red), got {p:?}"
         );
     }
 

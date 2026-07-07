@@ -732,6 +732,8 @@ impl PhotonicApp {
                 if is_layer {
                     ui.checkbox(&mut dlg.is_template, "Template")
                         .on_hover_text("Locked, dimmed reference layer for tracing over");
+                    ui.checkbox(&mut dlg.print, "Print")
+                        .on_hover_text("Include in exports/print. Off = visible on canvas but omitted from exported artwork.");
                 }
                 if dlg.is_group {
                     ui.checkbox(&mut dlg.clip_children, "Clip contents")
@@ -808,27 +810,13 @@ impl PhotonicApp {
                         if let (Some(orig), Some(edited)) =
                             (dlg.orig_layer.clone(), doc.layers.get(&layer_id).cloned())
                         {
+                            // Restore the original, then commit the whole-layer swap
+                            // as one undo step (ReplaceLayer carries every field, so
+                            // new layer settings need no per-field plumbing).
                             if let Some(slot) = doc.layers.get_mut(&layer_id) {
                                 *slot = orig.clone();
                             }
-                            let cmd = Command::UpdateLayer {
-                                layer_id,
-                                old_name: orig.name.clone(),
-                                new_name: edited.name.clone(),
-                                old_visible: orig.visible,
-                                new_visible: edited.visible,
-                                old_locked: orig.locked,
-                                new_locked: edited.locked,
-                                old_color: orig.color,
-                                new_color: edited.color,
-                                old_is_template: orig.is_template,
-                                new_is_template: edited.is_template,
-                                old_opacity: orig.opacity,
-                                new_opacity: edited.opacity,
-                                old_blend_mode: orig.blend_mode,
-                                new_blend_mode: edited.blend_mode,
-                            };
-                            history.execute(cmd, doc);
+                            history.execute(Command::ReplaceLayer { old: orig, new: edited }, doc);
                         }
                     }
                     OptionsTarget::Node(node_id) => {
