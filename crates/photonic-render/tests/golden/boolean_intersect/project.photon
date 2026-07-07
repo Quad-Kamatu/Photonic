@@ -1,15 +1,15 @@
 {
   "format_version": 2,
-  "id": "47f3e005-02ed-40d0-9a8e-18651e8ccdbb",
-  "name": "boolean-groups",
+  "id": "8fefb9cf-aec0-4ff3-89f8-a828b9f13745",
+  "name": "boolean-intersect",
   "width": 120.0,
   "height": 120.0,
   "layer_order": [
-    "a4378edf-da95-443f-bd75-318301dc4af9"
+    "165393a4-4080-4c15-8a70-5fff138ed6de"
   ],
   "layers": {
-    "a4378edf-da95-443f-bd75-318301dc4af9": {
-      "id": "a4378edf-da95-443f-bd75-318301dc4af9",
+    "165393a4-4080-4c15-8a70-5fff138ed6de": {
+      "id": "165393a4-4080-4c15-8a70-5fff138ed6de",
       "name": "Layer 1",
       "visible": true,
       "locked": false,
@@ -22,29 +22,29 @@
       "lock_pixels": false,
       "lock_position": false,
       "node_ids": [
-        "d1794533-e5ed-476e-bf4b-fb5faf7a5508"
+        "7642f190-208e-4354-ac8c-44a3baa796fc"
       ]
     }
   },
   "nodes": {
-    "d1794533-e5ed-476e-bf4b-fb5faf7a5508": {
-      "id": "d1794533-e5ed-476e-bf4b-fb5faf7a5508",
+    "7642f190-208e-4354-ac8c-44a3baa796fc": {
+      "id": "7642f190-208e-4354-ac8c-44a3baa796fc",
       "name": "resolved",
-      "layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+      "layer_id": "165393a4-4080-4c15-8a70-5fff138ed6de",
       "kind": {
         "type": "group",
         "children": [
-          "6df45e3e-1a66-4e2e-b7d1-7c0423eaea4b",
-          "d5071195-de74-41f9-929d-9d360e7e5792"
+          "e095aad6-df36-4d68-a46a-fcc8f602133e",
+          "199f4f68-7dc4-4292-afea-b02453bef5ff"
         ],
         "clip_children": false,
-        "live_boolean": "union"
+        "live_boolean": "intersect"
       }
     },
-    "d5071195-de74-41f9-929d-9d360e7e5792": {
-      "id": "d5071195-de74-41f9-929d-9d360e7e5792",
+    "199f4f68-7dc4-4292-afea-b02453bef5ff": {
+      "id": "199f4f68-7dc4-4292-afea-b02453bef5ff",
       "name": "operand-b",
-      "layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+      "layer_id": "165393a4-4080-4c15-8a70-5fff138ed6de",
       "kind": {
         "type": "path",
         "path_data": {
@@ -86,10 +86,10 @@
         "is_compound": false
       }
     },
-    "6df45e3e-1a66-4e2e-b7d1-7c0423eaea4b": {
-      "id": "6df45e3e-1a66-4e2e-b7d1-7c0423eaea4b",
+    "e095aad6-df36-4d68-a46a-fcc8f602133e": {
+      "id": "e095aad6-df36-4d68-a46a-fcc8f602133e",
       "name": "operand-a",
-      "layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+      "layer_id": "165393a4-4080-4c15-8a70-5fff138ed6de",
       "kind": {
         "type": "path",
         "path_data": {
@@ -132,7 +132,7 @@
       }
     }
   },
-  "active_layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+  "active_layer_id": "165393a4-4080-4c15-8a70-5fff138ed6de",
   "annotations": {},
   "guides": [],
   "recent_colors": [],
@@ -160,7 +160,7 @@
   "workspaces": [],
   "artboards": [
     {
-      "id": "59ac2cb3-a6a1-482c-a4f4-09bc7d307279",
+      "id": "f87a8129-401b-45dd-9ab2-82dd95e91017",
       "name": "Artboard 1",
       "x": 0.0,
       "y": 0.0,
@@ -168,6 +168,6 @@
       "height": 120.0
     }
   ],
-  "active_artboard": "59ac2cb3-a6a1-482c-a4f4-09bc7d307279",
+  "active_artboard": "f87a8129-401b-45dd-9ab2-82dd95e91017",
   "photon_format": 1
 }

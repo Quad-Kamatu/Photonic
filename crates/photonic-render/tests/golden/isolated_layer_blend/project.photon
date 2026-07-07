@@ -1,15 +1,16 @@
 {
   "format_version": 2,
-  "id": "47f3e005-02ed-40d0-9a8e-18651e8ccdbb",
-  "name": "boolean-groups",
+  "id": "4421ac1c-62b3-4bee-8e74-afdac19c14bf",
+  "name": "isolated-layer-blend",
   "width": 120.0,
   "height": 120.0,
   "layer_order": [
-    "a4378edf-da95-443f-bd75-318301dc4af9"
+    "1b923874-48cc-4140-bb17-e08bb176fb89",
+    "8bea77d6-af04-4b8a-8d22-588ae8e66e1c"
   ],
   "layers": {
-    "a4378edf-da95-443f-bd75-318301dc4af9": {
-      "id": "a4378edf-da95-443f-bd75-318301dc4af9",
+    "1b923874-48cc-4140-bb17-e08bb176fb89": {
+      "id": "1b923874-48cc-4140-bb17-e08bb176fb89",
       "name": "Layer 1",
       "visible": true,
       "locked": false,
@@ -22,39 +23,42 @@
       "lock_pixels": false,
       "lock_position": false,
       "node_ids": [
-        "d1794533-e5ed-476e-bf4b-fb5faf7a5508"
+        "fac4a4c3-e976-48c6-a446-8a46b107e9a6"
+      ]
+    },
+    "8bea77d6-af04-4b8a-8d22-588ae8e66e1c": {
+      "id": "8bea77d6-af04-4b8a-8d22-588ae8e66e1c",
+      "name": "Top (multiply)",
+      "visible": true,
+      "locked": false,
+      "opacity": 1.0,
+      "blend_mode": "multiply",
+      "color": null,
+      "is_template": false,
+      "print": true,
+      "lock_transparency": false,
+      "lock_pixels": false,
+      "lock_position": false,
+      "node_ids": [
+        "1a119faf-103c-4edc-abec-0c044748b271"
       ]
     }
   },
   "nodes": {
-    "d1794533-e5ed-476e-bf4b-fb5faf7a5508": {
-      "id": "d1794533-e5ed-476e-bf4b-fb5faf7a5508",
-      "name": "resolved",
-      "layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
-      "kind": {
-        "type": "group",
-        "children": [
-          "6df45e3e-1a66-4e2e-b7d1-7c0423eaea4b",
-          "d5071195-de74-41f9-929d-9d360e7e5792"
-        ],
-        "clip_children": false,
-        "live_boolean": "union"
-      }
-    },
-    "d5071195-de74-41f9-929d-9d360e7e5792": {
-      "id": "d5071195-de74-41f9-929d-9d360e7e5792",
-      "name": "operand-b",
-      "layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+    "fac4a4c3-e976-48c6-a446-8a46b107e9a6": {
+      "id": "fac4a4c3-e976-48c6-a446-8a46b107e9a6",
+      "name": "base",
+      "layer_id": "1b923874-48cc-4140-bb17-e08bb176fb89",
       "kind": {
         "type": "path",
         "path_data": {
-          "svg": "M50,50 L100,50 L100,100 L50,100 Z"
+          "svg": "M10,10 L70,10 L70,70 L10,70 Z"
         },
         "fill": {
           "kind": {
             "type": "solid",
             "r": 0.9,
-            "g": 0.5,
+            "g": 0.6,
             "b": 0.1,
             "a": 1.0
           },
@@ -86,21 +90,21 @@
         "is_compound": false
       }
     },
-    "6df45e3e-1a66-4e2e-b7d1-7c0423eaea4b": {
-      "id": "6df45e3e-1a66-4e2e-b7d1-7c0423eaea4b",
-      "name": "operand-a",
-      "layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+    "1a119faf-103c-4edc-abec-0c044748b271": {
+      "id": "1a119faf-103c-4edc-abec-0c044748b271",
+      "name": "top",
+      "layer_id": "8bea77d6-af04-4b8a-8d22-588ae8e66e1c",
       "kind": {
         "type": "path",
         "path_data": {
-          "svg": "M20,20 L70,20 L70,70 L20,70 Z"
+          "svg": "M50,50 L110,50 L110,110 L50,110 Z"
         },
         "fill": {
           "kind": {
             "type": "solid",
-            "r": 0.9,
-            "g": 0.5,
-            "b": 0.1,
+            "r": 0.1,
+            "g": 0.4,
+            "b": 0.9,
             "a": 1.0
           },
           "opacity": 1.0,
@@ -132,7 +136,7 @@
       }
     }
   },
-  "active_layer_id": "a4378edf-da95-443f-bd75-318301dc4af9",
+  "active_layer_id": "1b923874-48cc-4140-bb17-e08bb176fb89",
   "annotations": {},
   "guides": [],
   "recent_colors": [],
@@ -160,7 +164,7 @@
   "workspaces": [],
   "artboards": [
     {
-      "id": "59ac2cb3-a6a1-482c-a4f4-09bc7d307279",
+      "id": "ceb0c21f-eca2-4210-b24d-0d3a2c35ccce",
       "name": "Artboard 1",
       "x": 0.0,
       "y": 0.0,
@@ -168,6 +172,6 @@
       "height": 120.0
     }
   ],
-  "active_artboard": "59ac2cb3-a6a1-482c-a4f4-09bc7d307279",
+  "active_artboard": "ceb0c21f-eca2-4210-b24d-0d3a2c35ccce",
   "photon_format": 1
 }
