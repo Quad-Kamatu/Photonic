@@ -97,8 +97,11 @@ pub struct PhotonicRenderer {
     /// Read-only handle to the shared undo history, used purely as a change
     /// signal: `revision()` drives the per-frame skip and `changes_since` the
     /// cache-invalidation policy (03 §2.2). Polled with `try_lock` and never
-    /// blocked on — a contended lock falls back to a full rebuild.
-    history: Arc<Mutex<CommandHistory>>,
+    /// blocked on — a contended lock falls back to a full rebuild. `None` for
+    /// the offscreen/export renderers, which have no document history to poll
+    /// and therefore never take the frame-skip (the content-addressed
+    /// tessellation memo still applies, so this costs nothing but correctness).
+    history: Option<Arc<Mutex<CommandHistory>>>,
     pub(crate) capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
 
     pub(crate) width: u32,
@@ -328,6 +331,7 @@ impl PhotonicRenderer {
             width,
             height,
             document,
+            Some(history),
             capture_rx,
         )
     }
@@ -383,6 +387,7 @@ impl PhotonicRenderer {
             width,
             height,
             document,
+            None,
             capture_rx,
         ))
     }
@@ -430,6 +435,7 @@ impl PhotonicRenderer {
             width,
             height,
             document,
+            None,
             capture_rx,
         )
     }
@@ -462,6 +468,7 @@ impl PhotonicRenderer {
         width: u32,
         height: u32,
         document: Arc<Mutex<Document>>,
+        history: Option<Arc<Mutex<CommandHistory>>>,
         capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
     ) -> Self {
         // Camera bind group
@@ -741,8 +748,12 @@ impl PhotonicRenderer {
         // contended lock leaves `revision = None`, forcing a full rebuild — the
         // content-addressed tessellation memo keeps that correct and cheap
         // (unchanged geometry still hits), only the frame-skip is unavailable.
-        let (revision, overflowed) = match self.history.try_lock() {
-            Ok(h) => {
+        let (revision, overflowed) = match self
+            .history
+            .as_ref()
+            .and_then(|h| h.try_lock().ok())
+        {
+            Some(h) => {
                 let rev = h.revision();
                 let overflowed = match self.last_revision {
                     // A command ran: if the change ring can't attribute it to a
@@ -754,7 +765,9 @@ impl PhotonicRenderer {
                 };
                 (Some(rev), overflowed)
             }
-            Err(_) => (None, false),
+            // No history handle (offscreen/export) or a contended lock: skip the
+            // frame-skip entirely and rebuild, which is always correct.
+            None => (None, false),
         };
         // One integer + one tuple compare for the common idle case (§2.2 step 1):
         // nothing changed and the view is unchanged, so reuse every cached range.
