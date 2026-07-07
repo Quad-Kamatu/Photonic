@@ -31,7 +31,14 @@ impl PhotonicRenderer {
     /// Push camera uniforms and build vertex/index data for this frame.
     pub fn update(&mut self) -> (Vec<Vertex>, Vec<u32>) {
         self.push_camera();
-        self.build_geometry()
+        let (verts, idxs) = self.build_geometry();
+        // Size the persistent document buffers to this frame's geometry before
+        // the render pass (which only has `&self`) uploads into them (03 §2.3).
+        self.ensure_doc_buffers(
+            std::mem::size_of_val(verts.as_slice()) as u64,
+            std::mem::size_of_val(idxs.as_slice()) as u64,
+        );
+        (verts, idxs)
     }
 
     /// Acquire the swapchain frame and record the document render pass into
@@ -82,4 +89,3 @@ impl PhotonicRenderer {
         handle.surface_texture.present();
     }
 }
-

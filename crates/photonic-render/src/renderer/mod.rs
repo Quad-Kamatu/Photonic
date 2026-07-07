@@ -8,7 +8,7 @@ use crate::{
         draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, CompositeParams,
         DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
-    tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
+    tessellator::tessellate_fill,
 };
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -18,24 +18,29 @@ use glyphon::{
 use image::{ImageBuffer, Rgba};
 use photonic_core::{
     document::Document,
+    history::CommandHistory,
     layer::BlendMode,
-    node::SceneNodeKind,
+    node::{NodeId, SceneNodeKind},
     path::PathData,
     style::{FillKind, StrokeAlign},
 };
+use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-mod text_renderer;
-mod glow_renderer;
-mod effects_renderer;
-mod scene_renderer;
-mod frame_manager;
-mod capture;
 mod camera;
+mod capture;
+mod effects_renderer;
+mod frame_manager;
+mod glow_renderer;
+mod scene_renderer;
+mod tess_cache;
+mod text_renderer;
+
+use tess_cache::{hash_svg, TessCache};
 
 // ─── Background colour (deep violet-dark canvas surround) ─────────────────────
 // Linear values for sRGB target #0D0D14 (r:13 g:13 b:20).
@@ -89,6 +94,11 @@ pub struct PhotonicRenderer {
 
     pub view: CanvasView,
     document: Arc<Mutex<Document>>,
+    /// Read-only handle to the shared undo history, used purely as a change
+    /// signal: `revision()` drives the per-frame skip and `changes_since` the
+    /// cache-invalidation policy (03 §2.2). Polled with `try_lock` and never
+    /// blocked on — a contended lock falls back to a full rebuild.
+    history: Arc<Mutex<CommandHistory>>,
     pub(crate) capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
 
     pub(crate) width: u32,
@@ -101,6 +111,30 @@ pub struct PhotonicRenderer {
     /// `record_document_pass` to issue one draw call per contiguous run.
     pub(crate) draw_segments: Vec<DrawSegment>,
     cached_segments: Vec<DrawSegment>,
+
+    // ── Dirty tracking + persistent buffers (03 §2.2 / §2.3) ───────────────────
+    /// Content-addressed memo of the three `tessellate_*` functions, so an
+    /// unchanged path is triangulated at most once and reused across frames.
+    tess_cache: TessCache,
+    /// `CommandHistory::revision()` observed at the last geometry build. When it
+    /// and the view are unchanged, the whole build is skipped (§2.2 step 1).
+    last_revision: Option<u64>,
+    /// Bit pattern of `(view.zoom, view.pan_x, view.pan_y)` at the last build.
+    /// Vertices are document-space (pan/zoom live in the camera uniform), but
+    /// glyph screen positions and Gaussian-glow sigma are view-derived, so the
+    /// frame-skip is gated on the view being unchanged too.
+    last_view: Option<(u64, u64, u64)>,
+    /// Persistent, growable document vertex/index buffers (03 §2.3). Replace the
+    /// per-frame `create_buffer_init` in `record_document_pass`; grown by
+    /// doubling and re-uploaded in place with `queue.write_buffer`.
+    doc_vbuf: wgpu::Buffer,
+    doc_vbuf_cap: u64,
+    doc_ibuf: wgpu::Buffer,
+    doc_ibuf_cap: u64,
+    /// Instrumentation for the last `build_geometry`: (distinct nodes
+    /// re-tessellated, total `tessellate_*` calls). Zero on a frame-skip.
+    last_tess_nodes: u32,
+    last_tess_calls: u32,
 
     // ── Text rendering (glyphon) ───────────────────────────────────────────────
     pub(crate) font_system: FontSystem,
@@ -121,7 +155,7 @@ pub struct PhotonicRenderer {
     // ── Gaussian glow blur ────────────────────────────────────────────────────
     pub(crate) fill_pipeline_1spp: wgpu::RenderPipeline, // sample_count=1 for offscreen silhouette
     pub(crate) blur_pipeline_h: wgpu::RenderPipeline,    // H blur (alpha-blend output)
-    blur_pipeline_v: wgpu::RenderPipeline,    // V blur (additive composite to surface)
+    blur_pipeline_v: wgpu::RenderPipeline,               // V blur (additive composite to surface)
     pub(crate) blur_bgl: wgpu::BindGroupLayout,
     pub(crate) blur_sampler: wgpu::Sampler,
     pub(crate) glow_tex_a: wgpu::Texture, // silhouette & V-blur source
@@ -230,6 +264,7 @@ impl PhotonicRenderer {
     pub async fn new(
         window: Arc<Window>,
         document: Arc<Mutex<Document>>,
+        history: Arc<Mutex<CommandHistory>>,
         capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
     ) -> Self {
         let size = window.inner_size();
@@ -538,6 +573,22 @@ impl PhotonicRenderer {
             None,
         );
 
+        // Persistent document geometry buffers (03 §2.3). Start with a small
+        // non-zero capacity; the first `build_geometry` grows them to fit.
+        const INITIAL_BUF_CAP: u64 = 64 * 1024;
+        let doc_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doc_vbuf"),
+            size: INITIAL_BUF_CAP,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let doc_ibuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doc_ibuf"),
+            size: INITIAL_BUF_CAP,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             surface,
             device,
@@ -552,6 +603,7 @@ impl PhotonicRenderer {
             msaa_view,
             view,
             document,
+            history,
             capture_rx,
             width,
             height,
@@ -559,6 +611,15 @@ impl PhotonicRenderer {
             cached_indices: Vec::new(),
             draw_segments: Vec::new(),
             cached_segments: Vec::new(),
+            tess_cache: TessCache::default(),
+            last_revision: None,
+            last_view: None,
+            doc_vbuf,
+            doc_vbuf_cap: INITIAL_BUF_CAP,
+            doc_ibuf,
+            doc_ibuf_cap: INITIAL_BUF_CAP,
+            last_tess_nodes: 0,
+            last_tess_calls: 0,
             font_system,
             swash_cache,
             text_glyph_cache,
@@ -667,8 +728,51 @@ impl PhotonicRenderer {
     /// that outlived its session), we return the cached geometry from the previous
     /// frame instead of blocking indefinitely.
     fn build_geometry(&mut self) -> (Vec<Vertex>, Vec<u32>) {
+        // ── Dirty-tracking gate (03 §2.2) ─────────────────────────────────────
+        // Vertices are document-space (pan/zoom live in the camera uniform), but
+        // glyph screen positions and Gaussian-glow sigma are view-derived, so the
+        // whole-frame skip is gated on both the revision and the view.
+        let view_key = (
+            self.view.zoom.to_bits(),
+            self.view.pan_x.to_bits(),
+            self.view.pan_y.to_bits(),
+        );
+        // Poll the history revision without ever blocking the render loop. A
+        // contended lock leaves `revision = None`, forcing a full rebuild — the
+        // content-addressed tessellation memo keeps that correct and cheap
+        // (unchanged geometry still hits), only the frame-skip is unavailable.
+        let (revision, overflowed) = match self.history.try_lock() {
+            Ok(h) => {
+                let rev = h.revision();
+                let overflowed = match self.last_revision {
+                    // A command ran: if the change ring can't attribute it to a
+                    // node set, invalidate everything (§2.2 step 2).
+                    Some(last) if rev != last => h.changes_since(last).overflowed,
+                    // No baseline (first build / post-contention): rebuild all.
+                    None => true,
+                    _ => false,
+                };
+                (Some(rev), overflowed)
+            }
+            Err(_) => (None, false),
+        };
+        // One integer + one tuple compare for the common idle case (§2.2 step 1):
+        // nothing changed and the view is unchanged, so reuse every cached range.
+        if let (Some(rev), Some(last)) = (revision, self.last_revision) {
+            if rev == last && self.last_view == Some(view_key) {
+                self.draw_segments = self.cached_segments.clone();
+                self.last_tess_nodes = 0;
+                self.last_tess_calls = 0;
+                return (self.cached_vertices.clone(), self.cached_indices.clone());
+            }
+        }
+        let clear_cache = overflowed;
+
         // ── Read phase: clone what we need, release doc lock immediately ──────
         struct NodeSnapshot {
+            /// Document node id (pre-symbol-resolution), used only to attribute
+            /// tessellation work to a node for the perf instrumentation.
+            node_id: NodeId,
             matrix: [f64; 6],
             fill_enabled: bool,
             fill_kind: FillKind,
@@ -869,6 +973,7 @@ impl PhotonicRenderer {
                         let sc = &path_node.stroke;
                         let stroke_alpha = sc.color.a * sc.opacity * node.opacity;
                         nodes.push(NodeSnapshot {
+                            node_id: orig_id,
                             matrix: node.transform.matrix,
                             fill_enabled: path_node.fill.enabled,
                             fill_kind: path_node.fill.kind.clone(),
@@ -1057,8 +1162,7 @@ impl PhotonicRenderer {
             e: f64,
             f: f64,
         ) -> (f64, f64, f64, f64) {
-            let (mut minx, mut miny, mut maxx, mut maxy) =
-                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for p in verts {
                 let x = a * p[0] as f64 + c * p[1] as f64 + e;
                 let y = b * p[0] as f64 + d * p[1] as f64 + f;
@@ -1075,8 +1179,7 @@ impl PhotonicRenderer {
         }
         // Local (pre-transform) bounds of a mesh.
         fn local_bounds(verts: &[[f32; 2]]) -> (f64, f64, f64, f64) {
-            let (mut minx, mut miny, mut maxx, mut maxy) =
-                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for p in verts {
                 minx = minx.min(p[0] as f64);
                 miny = miny.min(p[1] as f64);
@@ -1090,31 +1193,53 @@ impl PhotonicRenderer {
             }
         }
 
+        // Take the tessellation memo out of `self` so the append_* closures can
+        // share it via interior mutability without each borrowing `&mut self`
+        // (03 §2.2). `clear_cache` (a ring overflow / lost baseline) drops the
+        // whole memo; otherwise content-addressing invalidates only what changed.
+        let mut tess_owned = std::mem::take(&mut self.tess_cache);
+        if clear_cache {
+            tess_owned = TessCache::default();
+        }
+        tess_owned.begin_frame();
+        let tess = RefCell::new(tess_owned);
+
         // Helpers for appending tessellated meshes to the vertex/index buffers.
-        // Defined as closures to keep the loop body readable.
-        let append_fill = |node: &NodeSnapshot, verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>| {
+        // Defined as closures to keep the loop body readable. Each fetches its
+        // mesh from the memo (`svg_hash` = the node's resolved-path hash, cached
+        // once per node) instead of tessellating inline.
+        let append_fill = |node: &NodeSnapshot,
+                           svg_hash: u64,
+                           verts: &mut Vec<Vertex>,
+                           idxs: &mut Vec<u32>| {
             if !node.fill_enabled || node.fill_is_none {
                 return;
             }
-            // Object-blur / feather replace the sharp fill with a blurred copy in
-            // the effects layer — suppress the crisp fill here.
+            // Object-blur / feather replace the sharp fill with a blurred copy
+            // in the effects layer — suppress the crisp fill here.
             if node.soft_edge.is_some() {
                 return;
             }
             let [a, b, c, d, e, f] = node.matrix;
             let opacity = node.fill_opacity * node.node_opacity;
-            let mesh = tessellate_fill(&node.path_data, node.is_compound);
-            if mesh.is_empty() {
+            let mesh_arc =
+                tess.borrow_mut()
+                    .fill(node.node_id, &node.path_data, svg_hash, node.is_compound);
+            if mesh_arc.is_empty() {
                 return;
             }
             // Non-linear fills (radial/fluid/mesh/pattern) sample per vertex, so
-            // refine the coarse fill triangulation for a smooth result.
-            let mesh = if node.fill_kind.is_nonlinear() {
-                let (lx, ly, lxx, lyy) = local_bounds(&mesh.vertices);
+            // refine the coarse fill triangulation for a smooth result. The
+            // coarse mesh is the cached one; refinement is per-frame (it depends
+            // on the fill kind, not just the path).
+            let refined;
+            let mesh: &crate::tessellator::Mesh = if node.fill_kind.is_nonlinear() {
+                let (lx, ly, lxx, lyy) = local_bounds(&mesh_arc.vertices);
                 let maxdim = ((lxx - lx).max(lyy - ly)) as f32;
-                crate::tessellator::refine_mesh(&mesh, (maxdim / 48.0).max(1.0))
+                refined = crate::tessellator::refine_mesh(&mesh_arc, (maxdim / 48.0).max(1.0));
+                &refined
             } else {
-                mesh
+                &mesh_arc
             };
             // Object-space gradients resolve against the fill's bbox so they
             // track the object. Rotation-following gradients resolve in the
@@ -1172,8 +1297,11 @@ impl PhotonicRenderer {
                     for p in tri {
                         // Nudge toward the centroid so boundary vertices sample
                         // inside their own cell (crisp edges at blend 0).
-                        let color =
-                            fill_kind.sample_at(p[0] + (cx - p[0]) * 0.02, p[1] + (cy - p[1]) * 0.02, opacity);
+                        let color = fill_kind.sample_at(
+                            p[0] + (cx - p[0]) * 0.02,
+                            p[1] + (cy - p[1]) * 0.02,
+                            opacity,
+                        );
                         let (wx, wy) = if rotated {
                             (a * p[0] + c * p[1] + e, b * p[0] + d * p[1] + f)
                         } else {
@@ -1212,7 +1340,9 @@ impl PhotonicRenderer {
         // Render N layered strokes to approximate a Gaussian glow.
         // Drawing order: largest (faintest) first so smaller brighter layers overwrite near the edge.
         const GLOW_STEPS: usize = 10;
-        let append_glow = |path_data: &photonic_core::path::PathData,
+        let append_glow = |node_id: NodeId,
+                           path_data: &photonic_core::path::PathData,
+                           svg_hash: u64,
                            matrix: &[f64; 6],
                            glow: &[f32; 6],
                            join: photonic_core::style::LineJoin,
@@ -1228,8 +1358,10 @@ impl PhotonicRenderer {
                 let gaussian = (-4.5 * t * t).exp();
                 let step_alpha = (go * gaussian * ga).min(1.0);
                 let color = [gr, gg, gb, step_alpha];
-                let mesh = tessellate_stroke(
+                let mesh = tess.borrow_mut().stroke(
+                    node_id,
                     path_data,
+                    svg_hash,
                     width,
                     photonic_core::style::LineCap::Round,
                     join,
@@ -1253,61 +1385,71 @@ impl PhotonicRenderer {
             }
         };
 
-        let append_stroke =
-            |node: &NodeSnapshot, width: f32, verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>| {
-                if !node.stroke_enabled {
-                    return;
-                }
-                let [a, b, c, d, e, f] = node.matrix;
-                // Non-scaling stroke: a stroke's width is an absolute property,
-                // not part of the geometry, so it must NOT grow/shrink when the
-                // object's transform is scaled (Illustrator with "Scale Strokes
-                // & Effects" off). The mesh is built in local space and then
-                // multiplied by `matrix`, so pre-divide the width by the
-                // transform's uniform scale `sqrt(|det|)` to cancel it. This is
-                // a no-op for unscaled or purely-rotated/translated objects
-                // (det == 1) and leaves view zoom untouched.
-                let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
-                let width = width / obj_scale as f32;
-                let mesh = match &node.stroke_widths {
-                    // Variable-width profile: scale samples by the same factor the
-                    // caller applies to the uniform width (stroke-align doubling),
-                    // then build a filled ribbon outline.
-                    Some(widths) if node.stroke_width > 0.0 => {
-                        let scale = (width / node.stroke_width) as f64;
-                        let scaled: Vec<f64> = widths.iter().map(|w| w * scale).collect();
-                        tessellate_stroke_variable(&node.path_data, &scaled)
-                    }
-                    _ => tessellate_stroke(
+        let append_stroke = |node: &NodeSnapshot,
+                             svg_hash: u64,
+                             width: f32,
+                             verts: &mut Vec<Vertex>,
+                             idxs: &mut Vec<u32>| {
+            if !node.stroke_enabled {
+                return;
+            }
+            let [a, b, c, d, e, f] = node.matrix;
+            // Non-scaling stroke: a stroke's width is an absolute property,
+            // not part of the geometry, so it must NOT grow/shrink when the
+            // object's transform is scaled (Illustrator with "Scale Strokes
+            // & Effects" off). The mesh is built in local space and then
+            // multiplied by `matrix`, so pre-divide the width by the
+            // transform's uniform scale `sqrt(|det|)` to cancel it. This is
+            // a no-op for unscaled or purely-rotated/translated objects
+            // (det == 1) and leaves view zoom untouched.
+            let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
+            let width = width / obj_scale as f32;
+            let mesh = match &node.stroke_widths {
+                // Variable-width profile: scale samples by the same factor the
+                // caller applies to the uniform width (stroke-align doubling),
+                // then build a filled ribbon outline.
+                Some(widths) if node.stroke_width > 0.0 => {
+                    let scale = (width / node.stroke_width) as f64;
+                    let scaled: Vec<f64> = widths.iter().map(|w| w * scale).collect();
+                    tess.borrow_mut().stroke_variable(
+                        node.node_id,
                         &node.path_data,
-                        width,
-                        node.stroke_cap,
-                        node.stroke_join,
-                        node.stroke_miter,
-                    ),
-                };
-                if mesh.is_empty() {
-                    return;
+                        svg_hash,
+                        &scaled,
+                    )
                 }
-                let base = verts.len() as u32;
-                for pos in &mesh.vertices {
-                    let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
-                    let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
-                    // Gradient/pattern stroke paint (#201): sample per vertex,
-                    // exactly like the fill path. `None` = flat stroke color.
-                    let color = match &node.stroke_paint {
-                        Some(kind) => kind.sample_at(x, y, node.stroke_paint_opacity),
-                        None => node.stroke_color,
-                    };
-                    verts.push(Vertex {
-                        position: [x as f32, y as f32],
-                        color,
-                    });
-                }
-                for &i in &mesh.indices {
-                    idxs.push(base + i);
-                }
+                _ => tess.borrow_mut().stroke(
+                    node.node_id,
+                    &node.path_data,
+                    svg_hash,
+                    width,
+                    node.stroke_cap,
+                    node.stroke_join,
+                    node.stroke_miter,
+                ),
             };
+            if mesh.is_empty() {
+                return;
+            }
+            let base = verts.len() as u32;
+            for pos in &mesh.vertices {
+                let x = a * pos[0] as f64 + c * pos[1] as f64 + e;
+                let y = b * pos[0] as f64 + d * pos[1] as f64 + f;
+                // Gradient/pattern stroke paint (#201): sample per vertex,
+                // exactly like the fill path. `None` = flat stroke color.
+                let color = match &node.stroke_paint {
+                    Some(kind) => kind.sample_at(x, y, node.stroke_paint_opacity),
+                    None => node.stroke_color,
+                };
+                verts.push(Vertex {
+                    position: [x as f32, y as f32],
+                    color,
+                });
+            }
+            for &i in &mesh.indices {
+                idxs.push(base + i);
+            }
+        };
 
         // ── Arrowhead helper ──────────────────────────────────────────────────
         // Appends a filled triangular or open-V arrowhead at the given world-space
@@ -1464,11 +1606,14 @@ impl PhotonicRenderer {
         // Build a blurred-silhouette effect job: tessellate the fill, transform
         // by the node matrix (+ offset), flat-colour it, tag with a blur radius.
         let make_blur_job = |node: &NodeSnapshot,
+                             svg_hash: u64,
                              offset: (f64, f64),
                              color: [f32; 4],
                              radius_doc: f64|
          -> Option<BlurJob> {
-            let mesh = tessellate_fill(&node.path_data, node.is_compound);
+            let mesh =
+                tess.borrow_mut()
+                    .fill(node.node_id, &node.path_data, svg_hash, node.is_compound);
             if mesh.is_empty() {
                 return None;
             }
@@ -1485,7 +1630,7 @@ impl PhotonicRenderer {
             }
             Some(BlurJob {
                 verts: jverts,
-                idxs: mesh.indices,
+                idxs: mesh.indices.clone(),
                 radius_doc,
                 layer_ordinal: node.layer_ordinal,
             })
@@ -1513,6 +1658,9 @@ impl PhotonicRenderer {
 
         for node in &nodes {
             let seg_start = idxs.len() as u32;
+            // Hash the resolved path once per node; every fill/stroke/glow fetch
+            // for this node reuses it as the cache-key prefix (03 §2.2).
+            let svg_hash = hash_svg(node.path_data.as_svg());
 
             // Close the previous layer's run at this layer boundary.
             if cur_ord != Some(node.layer_ordinal) {
@@ -1528,6 +1676,7 @@ impl PhotonicRenderer {
                 let alpha = (sa * opacity).min(1.0);
                 if let Some(job) = make_blur_job(
                     node,
+                    svg_hash,
                     (dx as f64, dy as f64),
                     [sr, sg, sb, alpha],
                     blur as f64,
@@ -1540,7 +1689,9 @@ impl PhotonicRenderer {
             // The sharp fill is suppressed in append_fill; this blurred copy
             // replaces it. (Gradient/image interior blur is a follow-up.)
             if let Some(([r, g, b, a], radius)) = node.soft_edge {
-                if let Some(job) = make_blur_job(node, (0.0, 0.0), [r, g, b, a], radius as f64) {
+                if let Some(job) =
+                    make_blur_job(node, svg_hash, (0.0, 0.0), [r, g, b, a], radius as f64)
+                {
                     blur_jobs.push(job);
                 }
             }
@@ -1548,7 +1699,9 @@ impl PhotonicRenderer {
             // ── Outer glow: behind fill so fill clips the inward half ─────────
             if let Some((ref og, og_join)) = node.outer_glow {
                 append_glow(
+                    node.node_id,
                     &node.path_data,
+                    svg_hash,
                     &node.matrix,
                     og,
                     og_join,
@@ -1562,59 +1715,77 @@ impl PhotonicRenderer {
                 // The fill paints over the inner half of the stroke, leaving only
                 // the outer half visible.
                 StrokeAlign::Outside => {
-                    append_stroke(node, node.stroke_width * 2.0, &mut verts, &mut idxs);
-                    append_fill(node, &mut verts, &mut idxs);
+                    append_stroke(
+                        node,
+                        svg_hash,
+                        node.stroke_width * 2.0,
+                        &mut verts,
+                        &mut idxs,
+                    );
+                    append_fill(node, svg_hash, &mut verts, &mut idxs);
                     // Inner glow: render after fill, then re-clip with fill
                     if let Some((ref ig, ig_join)) = node.inner_glow {
                         append_glow(
+                            node.node_id,
                             &node.path_data,
+                            svg_hash,
                             &node.matrix,
                             ig,
                             ig_join,
                             &mut verts,
                             &mut idxs,
                         );
-                        append_fill(node, &mut verts, &mut idxs);
+                        append_fill(node, svg_hash, &mut verts, &mut idxs);
                     }
                 }
                 // Center: fill first, then stroke centred on the path edge.
                 StrokeAlign::Center => {
-                    append_fill(node, &mut verts, &mut idxs);
+                    append_fill(node, svg_hash, &mut verts, &mut idxs);
                     // Inner glow: rendered over fill, re-clipped before stroke
                     if let Some((ref ig, ig_join)) = node.inner_glow {
                         append_glow(
+                            node.node_id,
                             &node.path_data,
+                            svg_hash,
                             &node.matrix,
                             ig,
                             ig_join,
                             &mut verts,
                             &mut idxs,
                         );
-                        append_fill(node, &mut verts, &mut idxs);
+                        append_fill(node, svg_hash, &mut verts, &mut idxs);
                     }
-                    append_stroke(node, node.stroke_width, &mut verts, &mut idxs);
+                    append_stroke(node, svg_hash, node.stroke_width, &mut verts, &mut idxs);
                 }
                 // Inside: fill, then doubled-width stroke, then fill again.
                 // The second fill paints over the outer half of the stroke, leaving
                 // only the inner half visible.
                 StrokeAlign::Inside => {
-                    append_fill(node, &mut verts, &mut idxs);
+                    append_fill(node, svg_hash, &mut verts, &mut idxs);
                     // Inner glow: before the inside stroke
                     if let Some((ref ig, ig_join)) = node.inner_glow {
                         append_glow(
+                            node.node_id,
                             &node.path_data,
+                            svg_hash,
                             &node.matrix,
                             ig,
                             ig_join,
                             &mut verts,
                             &mut idxs,
                         );
-                        append_fill(node, &mut verts, &mut idxs);
+                        append_fill(node, svg_hash, &mut verts, &mut idxs);
                     }
-                    append_stroke(node, node.stroke_width * 2.0, &mut verts, &mut idxs);
+                    append_stroke(
+                        node,
+                        svg_hash,
+                        node.stroke_width * 2.0,
+                        &mut verts,
+                        &mut idxs,
+                    );
                     // Re-draw fill to clip the outer half of the stroke.
                     if node.stroke_enabled {
-                        append_fill(node, &mut verts, &mut idxs);
+                        append_fill(node, svg_hash, &mut verts, &mut idxs);
                     }
                 }
             }
@@ -1628,7 +1799,12 @@ impl PhotonicRenderer {
                 if rgba[3] <= 0.0 {
                     continue;
                 }
-                let mesh = tessellate_fill(&node.path_data, node.is_compound);
+                let mesh = tess.borrow_mut().fill(
+                    node.node_id,
+                    &node.path_data,
+                    svg_hash,
+                    node.is_compound,
+                );
                 if mesh.is_empty() {
                     continue;
                 }
@@ -1654,8 +1830,10 @@ impl PhotonicRenderer {
                 }
                 let [a, b, c, d, e, f] = node.matrix;
                 let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
-                let mesh = tessellate_stroke(
+                let mesh = tess.borrow_mut().stroke(
+                    node.node_id,
                     &node.path_data,
+                    svg_hash,
                     (width as f64 / obj_scale) as f32,
                     photonic_core::style::LineCap::Butt,
                     photonic_core::style::LineJoin::Miter,
@@ -1735,7 +1913,12 @@ impl PhotonicRenderer {
             // ── Gaussian glow job ─────────────────────────────────────────────
             if let Some(([gr, gg, gb, ga], radius_doc)) = node.gaussian_glow {
                 let [a, b, c, d, e, f] = node.matrix;
-                let mesh = tessellate_fill(&node.path_data, node.is_compound);
+                let mesh = tess.borrow_mut().fill(
+                    node.node_id,
+                    &node.path_data,
+                    svg_hash,
+                    node.is_compound,
+                );
                 if !mesh.is_empty() {
                     let glow_color = [gr, gg, gb, ga];
                     let mut gverts = Vec::with_capacity(mesh.vertices.len());
@@ -1750,7 +1933,7 @@ impl PhotonicRenderer {
                     let sigma_px = (radius_doc as f64 * self.view.zoom) as f32;
                     self.pending_gaussian_glows.push(GaussianGlowJob {
                         verts: gverts,
-                        idxs: mesh.indices,
+                        idxs: mesh.indices.clone(),
                         sigma_px,
                     });
                 }
@@ -1812,6 +1995,21 @@ impl PhotonicRenderer {
         self.layer_runs = layer_runs;
         self.artboard_idx_end = artboard_idx_end;
 
+        // Reclaim the tessellation memo: evict entries not used this frame, record
+        // the perf instrumentation, and record the revision/view baseline so the
+        // next frame's skip check has something to compare against. No closure is
+        // executing here, so the runtime borrow is uncontended.
+        {
+            let mut cache = tess.borrow_mut();
+            cache.sweep();
+            let (nodes_retess, calls) = cache.stats();
+            self.last_tess_nodes = nodes_retess;
+            self.last_tess_calls = calls;
+            self.tess_cache = std::mem::take(&mut cache);
+        }
+        self.last_revision = revision;
+        self.last_view = Some(view_key);
+
         // Update cache for next frame (used when lock is contended).
         self.cached_vertices = verts.clone();
         self.cached_indices = idxs.clone();
@@ -1819,6 +2017,13 @@ impl PhotonicRenderer {
         self.cached_segments = segments;
 
         (verts, idxs)
+    }
+
+    /// `(distinct_nodes_re_tessellated, tessellate_calls)` for the most recent
+    /// `build_geometry` — zero on an idle frame-skip. Used by the render-perf
+    /// statement and tests (03 §2.2).
+    pub fn last_frame_tess_stats(&self) -> (u32, u32) {
+        (self.last_tess_nodes, self.last_tess_calls)
     }
 }
 

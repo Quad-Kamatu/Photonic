@@ -450,6 +450,7 @@ impl ApplicationHandler for PhotonicWinitApp {
         let renderer = pollster::block_on(PhotonicRenderer::new(
             Arc::clone(&window),
             Arc::clone(&self.document),
+            Arc::clone(&self.history),
             capture_rx,
         ));
 

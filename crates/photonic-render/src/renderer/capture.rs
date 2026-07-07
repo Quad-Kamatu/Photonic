@@ -52,6 +52,12 @@ impl PhotonicRenderer {
     pub(crate) fn capture_rgba(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
         let w = self.width;
         let h = self.height;
+        // Offscreen capture reuses the persistent document buffers; ensure they
+        // fit these vertices/indices before `record_document_pass` writes them.
+        self.ensure_doc_buffers(
+            std::mem::size_of_val(vertices) as u64,
+            std::mem::size_of_val(indices) as u64,
+        );
 
         // Offscreen resolve target (single-sample, read back as PNG)
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -813,4 +819,3 @@ mod offscreen_tests {
         );
     }
 }
-
