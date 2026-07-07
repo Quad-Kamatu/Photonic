@@ -139,6 +139,46 @@ impl PhotonicApp {
             "view.fit" => self.fit_pending = true,
             "view.toggle_audit" => self.audit.panel_open = !self.audit.panel_open,
             "palette.open" => self.command_palette_open = true,
+            // ── Mode switch (video-editor-module 04 §1.2) ────────────────────
+            // Real wiring for the toggle only — `enter_video`/`exit_video` and
+            // the toolbar/welcome/auto-enter entry points, the `doc.timeline`
+            // lazy-creation invariant (04 §1.3), and the exit-pauses-playback
+            // rule (04 §7) are the mode-switch story, not this skeleton PR.
+            "mode.toggle_video" => {
+                self.mode = match self.mode {
+                    AppMode::Video => AppMode::Vector,
+                    AppMode::Vector => AppMode::Video,
+                };
+                // A drawer open in the old mode is meaningless in the new one
+                // (04 §4).
+                self.open_drawer = None;
+            }
+            "mode.enter_video" | "mode.exit_video" => {
+                // P2 wave / mode-switch story fills this in.
+            }
+            // ── Video transport / timeline keys (04 §5.1) ─────────────────────
+            // Registered so they're palette-reachable and rebindable; actual
+            // engine/timeline dispatch is P2-wave work (02-engine.md,
+            // app/timeline/interact.rs + ops_bridge.rs don't exist yet).
+            "video.play_pause"
+            | "video.play_reverse"
+            | "video.pause"
+            | "video.play_forward"
+            | "video.step_back"
+            | "video.step_forward"
+            | "video.prev_edit_point"
+            | "video.next_edit_point"
+            | "video.set_in"
+            | "video.set_out"
+            | "video.split_at_playhead"
+            | "video.toggle_snap"
+            | "video.zoom_in"
+            | "video.zoom_out"
+            | "video.zoom_fit"
+            | "video.playhead_home"
+            | "video.playhead_end" => {
+                // P2 wave fills this.
+            }
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the

@@ -119,6 +119,12 @@ pub struct AppPreferences {
     #[serde(default)]
     pub reduced_motion: bool,
 
+    // VIDEO TIMELINE (video-editor-module 04-ui-mode-timeline.md §2.5/§6) —
+    /// Timeline magnet/snap toggle. Session state that persists like other UI
+    /// toggles, not document state.
+    #[serde(default = "default_true")]
+    pub timeline_snap_enabled: bool,
+
     // HOTBAR — the always-on adaptive second toolbar row (#154 Phase 4).
     /// Static (curated default order) or Adaptive (ranked by the user's usage).
     #[serde(default)]
@@ -230,6 +236,7 @@ impl Default for AppPreferences {
             open_right_drawer: Some(RightDrawerGroup::Layers),
             right_drawer_width: 280.0,
             reduced_motion: false,
+            timeline_snap_enabled: true,
             hotbar_mode: HotbarMode::default(),
             hotbar_usage: HashMap::new(),
             keymap: HashMap::new(),

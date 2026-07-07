@@ -310,8 +310,22 @@ pub struct NewDocumentSpec {
     pub history_max_mb: f64,
 }
 
+/// Minimal parameters for a new video timeline project (video-editor-module
+/// `04-ui-mode-timeline.md` §1.2 Welcome-action entry point) — the video-mode
+/// counterpart of [`NewDocumentSpec`].
+#[derive(Debug, Clone)]
+pub struct VideoProjectSpec {
+    pub name: String,
+    pub width: f64,
+    pub height: f64,
+    pub frame_rate: photonic_core::timeline::FrameRate,
+}
+
 pub enum WelcomeAction {
     CreateNew(NewDocumentSpec),
+    /// Video-mode counterpart of `CreateNew` (04 §1.2). No UI produces this
+    /// yet — the video-mode new-project flow is P2/mode-switch-story work.
+    CreateNewVideo(VideoProjectSpec),
     OpenFile(PathBuf),
     OpenBrowse,
     /// Prompt for a folder to add as a disk-search root.

@@ -9,6 +9,7 @@ use photonic_core::{
 };
 use uuid::Uuid;
 
+use crate::app::AppMode;
 use crate::color_popup::ColorPopup;
 use crate::radial_wheel::WheelAction;
 use crate::tools::Tool;
@@ -25,6 +26,7 @@ mod navigator;
 mod toolbar;
 mod tools_panel;
 mod vertex_panel;
+pub(crate) mod video_stubs;
 
 use arrange::*;
 use assets::*;
@@ -1099,13 +1101,30 @@ pub enum DrawerGroup {
     Document,
     /// Edit history and branches.
     History,
+    /// Video mode (04 §4.1): import, bins, asset list, probe metadata, proxy
+    /// status/toggle. Interior owned by 05-import-export.md.
+    MediaPool,
+    /// Video mode (04 §4.1): selected clip's transform/speed/effects-stack/
+    /// transition params — the `Clip`/`ClipEffect` analogue of `Inspector`.
+    /// This doc owns the panel shell; widgets source from `prop_registry`.
+    ClipInspector,
+    /// Video mode (04 §4.1): effect browser/catalog, drag-to-apply onto the
+    /// selected clip. Interior owned by 08-fusion-node-flows.md.
+    Effects,
+    /// Video mode (04 §4.1): caption track list, cue text/timing editor, style
+    /// panel. Interior owned by 06-captions-ai.md.
+    Captions,
+    /// Video mode (04 §4.1): node palette + node inspector — NOT the graph
+    /// canvas itself (that lives in the central panel's node-canvas content
+    /// state, 08 §6.1). Interior owned by 08-fusion-node-flows.md.
+    NodeEditor,
 }
 
 impl DrawerGroup {
-    /// All groups shown on the left rail, in order (top to bottom). History is
-    /// intentionally absent — it now lives on the right rail (see
-    /// [`RightDrawerGroup`]) — but the `History` variant is retained so
-    /// `draw_drawer` can still render it there.
+    /// All groups shown on the left rail in Vector mode, in order (top to
+    /// bottom). History is intentionally absent — it now lives on the right
+    /// rail (see [`RightDrawerGroup`]) — but the `History` variant is retained
+    /// so `draw_drawer` can still render it there.
     pub const ALL: [DrawerGroup; 6] = [
         DrawerGroup::Tools,
         DrawerGroup::Inspector,
@@ -1114,6 +1133,24 @@ impl DrawerGroup {
         DrawerGroup::Assets,
         DrawerGroup::Document,
     ];
+
+    /// Left-rail groups in Video mode (04 §4.1) — Media Pool first, matching
+    /// every reference NLE's left-most-panel convention.
+    pub const VIDEO_ALL: [DrawerGroup; 5] = [
+        DrawerGroup::MediaPool,
+        DrawerGroup::ClipInspector,
+        DrawerGroup::Effects,
+        DrawerGroup::Captions,
+        DrawerGroup::NodeEditor,
+    ];
+
+    /// Which group set the left rail offers for `mode` (04 §4).
+    pub fn all_for_mode(mode: AppMode) -> &'static [DrawerGroup] {
+        match mode {
+            AppMode::Vector => &Self::ALL,
+            AppMode::Video => &Self::VIDEO_ALL,
+        }
+    }
 
     /// Phosphor glyph shown on the rail button.
     pub fn icon(self) -> &'static str {
@@ -1125,6 +1162,11 @@ impl DrawerGroup {
             DrawerGroup::Assets => ph::SWATCHES,
             DrawerGroup::Document => ph::FILE_TEXT,
             DrawerGroup::History => ph::CLOCK_COUNTER_CLOCKWISE,
+            DrawerGroup::MediaPool => ph::FILM_STRIP,
+            DrawerGroup::ClipInspector => ph::FRAME_CORNERS,
+            DrawerGroup::Effects => ph::SPARKLE,
+            DrawerGroup::Captions => ph::CLOSED_CAPTIONING,
+            DrawerGroup::NodeEditor => ph::FLOW_ARROW,
         }
     }
 
@@ -1138,6 +1180,11 @@ impl DrawerGroup {
             DrawerGroup::Assets => "Assets",
             DrawerGroup::Document => "Document",
             DrawerGroup::History => "History",
+            DrawerGroup::MediaPool => "Media Pool",
+            DrawerGroup::ClipInspector => "Clip Inspector",
+            DrawerGroup::Effects => "Effects",
+            DrawerGroup::Captions => "Captions",
+            DrawerGroup::NodeEditor => "Node Editor",
         }
     }
 
@@ -1146,14 +1193,27 @@ impl DrawerGroup {
     /// that loses its content auto-collapses. Tools, Inspector (navigator + tool
     /// options), and the always-on library/document/history groups are always
     /// available; the operation drawers (Modify/Arrange) need a selection.
+    ///
+    /// Video-mode groups (04 §4.1): Media Pool/Effects/Captions/Node Editor are
+    /// always available; Clip Inspector needs a selection, same pattern as
+    /// Modify/Arrange. `selection_count` is the vector node-selection count at
+    /// every call site today — wiring it to the video clip selection is P2-wave
+    /// work (`timeline_selection`, 04 §6), so Clip Inspector's gating is a stub
+    /// approximation until then.
     pub fn has_content(self, selection_count: usize) -> bool {
         match self {
             DrawerGroup::Tools
             | DrawerGroup::Inspector
             | DrawerGroup::Assets
             | DrawerGroup::Document
-            | DrawerGroup::History => true,
-            DrawerGroup::Modify | DrawerGroup::Arrange => selection_count >= 1,
+            | DrawerGroup::History
+            | DrawerGroup::MediaPool
+            | DrawerGroup::Effects
+            | DrawerGroup::Captions
+            | DrawerGroup::NodeEditor => true,
+            DrawerGroup::Modify | DrawerGroup::Arrange | DrawerGroup::ClipInspector => {
+                selection_count >= 1
+            }
         }
     }
 }
@@ -1169,15 +1229,40 @@ pub enum RightDrawerGroup {
     Chat,
     /// Edit history and branches (moved here from the left rail).
     History,
+    /// Video mode (04 §4.1): wheels/curves/HSL qualifier/LUT browser for the
+    /// selected clip's grade. Interior owned by 07-color-grading.md.
+    ColorControls,
+    /// Video mode (04 §4.1): track fader strips, master bus meters, per-track
+    /// EQ/comp/automation entry points. Interior owned by 09-audio-mixer.md.
+    AudioMixer,
 }
 
 impl RightDrawerGroup {
-    /// All groups in rail order (top to bottom).
+    /// All groups in rail order (top to bottom), Vector mode.
     pub const ALL: [RightDrawerGroup; 3] = [
         RightDrawerGroup::Layers,
         RightDrawerGroup::Chat,
         RightDrawerGroup::History,
     ];
+
+    /// Right-rail groups in Video mode (04 §4.1). `Layers` stays (a flattened
+    /// clip list still helps keyboard-driven selection); `Chat`/`History` are
+    /// mode-agnostic already.
+    pub const VIDEO_ALL: [RightDrawerGroup; 5] = [
+        RightDrawerGroup::Layers,
+        RightDrawerGroup::ColorControls,
+        RightDrawerGroup::AudioMixer,
+        RightDrawerGroup::Chat,
+        RightDrawerGroup::History,
+    ];
+
+    /// Which group set the right rail offers for `mode` (04 §4).
+    pub fn all_for_mode(mode: AppMode) -> &'static [RightDrawerGroup] {
+        match mode {
+            AppMode::Vector => &Self::ALL,
+            AppMode::Video => &Self::VIDEO_ALL,
+        }
+    }
 
     /// Phosphor glyph shown on the rail button.
     pub fn icon(self) -> &'static str {
@@ -1185,6 +1270,8 @@ impl RightDrawerGroup {
             RightDrawerGroup::Layers => ph::STACK,
             RightDrawerGroup::Chat => ph::CHAT_CIRCLE_DOTS,
             RightDrawerGroup::History => ph::CLOCK_COUNTER_CLOCKWISE,
+            RightDrawerGroup::ColorControls => ph::PALETTE,
+            RightDrawerGroup::AudioMixer => ph::SLIDERS,
         }
     }
 
@@ -1194,6 +1281,8 @@ impl RightDrawerGroup {
             RightDrawerGroup::Layers => "Layers",
             RightDrawerGroup::Chat => "AI Chat",
             RightDrawerGroup::History => "History",
+            RightDrawerGroup::ColorControls => "Color Controls",
+            RightDrawerGroup::AudioMixer => "Audio Mixer",
         }
     }
 }
@@ -1319,6 +1408,11 @@ pub(crate) fn draw_drawer(
             // separate "Branches" accordion has been retired.
             draw_edit_history(ui, ctx);
         }
+        DrawerGroup::MediaPool => video_stubs::draw_media_pool(ui, ctx),
+        DrawerGroup::ClipInspector => video_stubs::draw_clip_inspector(ui, ctx),
+        DrawerGroup::Effects => video_stubs::draw_effects_browser(ui, ctx),
+        DrawerGroup::Captions => video_stubs::draw_captions_panel(ui, ctx),
+        DrawerGroup::NodeEditor => video_stubs::draw_node_editor_palette(ui, ctx),
         // Tools is rendered by the app layer (it needs tool state, not the
         // property ctx), so it is never routed through draw_drawer.
         DrawerGroup::Tools => {}

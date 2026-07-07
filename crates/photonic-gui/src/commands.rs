@@ -70,6 +70,16 @@ impl KeyBinding {
             command: false,
         }
     }
+    /// Shift + key, no primary modifier, e.g. Shift+Z.
+    pub const fn shift(key: egui::Key) -> Self {
+        Self {
+            key,
+            ctrl: false,
+            shift: true,
+            alt: false,
+            command: false,
+        }
+    }
 
     /// True if this binding fires for the given live modifier state. Ctrl and Cmd
     /// are interchangeable (primary). Shift/Alt must match exactly.
@@ -343,6 +353,108 @@ pub static REGISTRY: &[CommandDef] = &[
         id: "palette.open",
         label: "Open Command Palette",
         default: Some(KeyBinding::ctrl(Key::K)),
+    },
+    // ── Mode switch (video-editor-module 04-ui-mode-timeline.md §1.2) ───────
+    CommandDef {
+        id: "mode.toggle_video",
+        label: "Toggle Video Mode",
+        default: Some(KeyBinding::ctrl_shift(Key::V)),
+    },
+    CommandDef {
+        id: "mode.enter_video",
+        label: "Enter Video Mode",
+        default: None,
+    },
+    CommandDef {
+        id: "mode.exit_video",
+        label: "Exit Video Mode",
+        default: None,
+    },
+    // ── Video transport / timeline (04 §5.1) ─────────────────────────────────
+    CommandDef {
+        id: "video.play_pause",
+        label: "Play/Pause",
+        default: Some(KeyBinding::plain(Key::Space)),
+    },
+    CommandDef {
+        id: "video.play_reverse",
+        label: "Play Reverse",
+        default: Some(KeyBinding::plain(Key::J)),
+    },
+    CommandDef {
+        id: "video.pause",
+        label: "Pause",
+        default: Some(KeyBinding::plain(Key::K)),
+    },
+    CommandDef {
+        id: "video.play_forward",
+        label: "Play Forward",
+        default: Some(KeyBinding::plain(Key::L)),
+    },
+    CommandDef {
+        id: "video.step_back",
+        label: "Step Back One Frame",
+        default: Some(KeyBinding::plain(Key::ArrowLeft)),
+    },
+    CommandDef {
+        id: "video.step_forward",
+        label: "Step Forward One Frame",
+        default: Some(KeyBinding::plain(Key::ArrowRight)),
+    },
+    CommandDef {
+        id: "video.prev_edit_point",
+        label: "Previous Edit Point",
+        default: Some(KeyBinding::shift(Key::ArrowLeft)),
+    },
+    CommandDef {
+        id: "video.next_edit_point",
+        label: "Next Edit Point",
+        default: Some(KeyBinding::shift(Key::ArrowRight)),
+    },
+    CommandDef {
+        id: "video.set_in",
+        label: "Set In Point",
+        default: Some(KeyBinding::plain(Key::I)),
+    },
+    CommandDef {
+        id: "video.set_out",
+        label: "Set Out Point",
+        default: Some(KeyBinding::plain(Key::O)),
+    },
+    CommandDef {
+        id: "video.split_at_playhead",
+        label: "Split Clip at Playhead",
+        default: Some(KeyBinding::plain(Key::S)),
+    },
+    CommandDef {
+        id: "video.toggle_snap",
+        label: "Toggle Timeline Snapping",
+        default: Some(KeyBinding::plain(Key::N)),
+    },
+    CommandDef {
+        id: "video.zoom_in",
+        label: "Timeline Zoom In",
+        default: Some(KeyBinding::plain(Key::Plus)),
+    },
+    CommandDef {
+        id: "video.zoom_out",
+        label: "Timeline Zoom Out",
+        default: Some(KeyBinding::plain(Key::Minus)),
+    },
+    CommandDef {
+        id: "video.zoom_fit",
+        label: "Timeline Zoom to Fit",
+        default: Some(KeyBinding::shift(Key::Z)),
+    },
+    CommandDef {
+        id: "video.playhead_home",
+        label: "Playhead to Sequence Start",
+        default: Some(KeyBinding::plain(Key::Home)),
+    },
+    CommandDef {
+        id: "video.playhead_end",
+        label: "Playhead to Sequence End",
+        default: Some(KeyBinding::plain(Key::End)),
     },
 ];
 

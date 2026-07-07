@@ -23,20 +23,25 @@ mod rulers;
 mod tabs;
 mod tool_handlers;
 mod width_tool;
+pub(crate) mod mode;
+pub(crate) mod timeline;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
+pub use mode::AppMode;
 use photonic_core::{
     history::{Command, CommandHistory, HistoryGraphNode},
     layer::LayerId,
     node::{GroupNode, NodeId, PathNode},
     ops::artboard_ops,
+    timeline::{ClipId, Tick},
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
 pub(crate) use rulers::GuideEditPopup;
 use std::path::Path;
 use std::sync::Arc;
+use timeline::TimelineView;
 
 use crate::{
     hotbar::{self, HotbarAction, HotbarBucket, HotbarEffect, HotbarItem, HotbarMode},
@@ -726,6 +731,14 @@ pub struct DocTab {
     pub recovery_path: Option<std::path::PathBuf>,
     /// History node id matching the on-disk file — drives the "Last Save" marker.
     pub last_saved_node: Option<u64>,
+    /// Vector/Video mode this tab was in (04 §1). Restored in `switch_tab`.
+    pub mode: AppMode,
+    /// Timeline zoom/scroll for this tab (04 §2.1/§6).
+    pub timeline_view: TimelineView,
+    /// Playhead position for this tab's sequence (04 §6).
+    pub playhead: Tick,
+    /// Selected clip ids in this tab's timeline panel (04 §2.6/§6).
+    pub timeline_selection: Vec<ClipId>,
 }
 
 pub struct PhotonicApp {
@@ -770,6 +783,23 @@ pub struct PhotonicApp {
 
     /// Currently selected node (Select tool).
     pub selected_id: Option<NodeId>,
+
+    /// Vector/Video editor mode for the active tab (04 §1). Per-tab — swapped
+    /// with the parked tab's `DocTab::mode` in `switch_tab`, mirroring
+    /// `selected_id`.
+    pub mode: AppMode,
+    /// Timeline zoom/scroll for the active tab (04 §2.1/§6). Per-tab, same
+    /// swap discipline as `mode`.
+    pub timeline_view: TimelineView,
+    /// Playhead position for the active tab's sequence (04 §6). Per-tab.
+    pub playhead: Tick,
+    /// Selected clip ids in the timeline panel for the active tab (04 §2.6/§6).
+    /// Per-tab.
+    pub timeline_selection: Vec<ClipId>,
+    /// Timeline magnet/snap toggle (04 §2.5). NOT per-tab — persisted to
+    /// `AppPreferences` like other UI toggles (`prefs.save()` pattern), not to
+    /// the document (04 §6).
+    pub timeline_snap_enabled: bool,
 
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
@@ -1361,6 +1391,11 @@ impl Default for PhotonicApp {
             polar_grid_inner_ratio: 0.0,
             selected_layer_ids: Vec::new(),
             selected_id: None,
+            mode: AppMode::default(),
+            timeline_view: TimelineView::default(),
+            playhead: Tick::default(),
+            timeline_selection: Vec::new(),
+            timeline_snap_enabled: true,
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
@@ -1905,6 +1940,7 @@ impl PhotonicApp {
         s.prefs = prefs;
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
+        s.timeline_snap_enabled = s.prefs.timeline_snap_enabled;
         s.open_drawer = open_drawer;
         if let Some(g) = open_drawer {
             s.last_drawer_group = g;
@@ -1935,6 +1971,7 @@ impl PhotonicApp {
         s.prefs = prefs;
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
+        s.timeline_snap_enabled = s.prefs.timeline_snap_enabled;
         s.open_drawer = open_drawer;
         if let Some(g) = open_drawer {
             s.last_drawer_group = g;
@@ -2490,6 +2527,12 @@ impl PhotonicApp {
                         self.show_welcome = false;
                         doc_modified = true;
                     }
+                    WelcomeAction::CreateNewVideo(_spec) => {
+                        // P2 wave / mode-switch story fills this: call
+                        // create_document_from_spec-equivalent for a video
+                        // project, create the TimelineProject (04 §1.3), and
+                        // set self.mode = AppMode::Video (04 §1.2).
+                    }
                     WelcomeAction::OpenFile(path) => match load_document(&path) {
                         Ok((loaded, hist_snap)) => {
                             self.welcome.add_recent(path.clone(), loaded.name.clone());
@@ -2896,7 +2939,7 @@ impl PhotonicApp {
                 ui.add_space(6.0);
                 // Centre the icon column within the rail card.
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    for group in DrawerGroup::ALL {
+                    for group in DrawerGroup::all_for_mode(self.mode).iter().copied() {
                         let active = effective_open == Some(group);
                         let enabled = group.has_content(sel_count);
                         let resp = ui
@@ -3111,7 +3154,7 @@ impl PhotonicApp {
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    for group in RightDrawerGroup::ALL {
+                    for group in RightDrawerGroup::all_for_mode(self.mode).iter().copied() {
                         let active = self.open_right_drawer == Some(group);
                         let resp = ui
                             .add(
@@ -3199,6 +3242,12 @@ impl PhotonicApp {
                     RightDrawerGroup::Chat => {
                         self.draw_claude_tab(ui);
                     }
+                    RightDrawerGroup::ColorControls => {
+                        panels::video_stubs::draw_color_controls(ui);
+                    }
+                    RightDrawerGroup::AudioMixer => {
+                        panels::video_stubs::draw_audio_mixer(ui);
+                    }
                     RightDrawerGroup::History => {
                         egui::ScrollArea::vertical()
                             .id_salt("right_history_scroll")
@@ -3235,6 +3284,19 @@ impl PhotonicApp {
             .min_height(min_h)
             .show_animated(ctx, self.lua_console.visible, |ui| {
                 self.draw_console(ui);
+            });
+
+        // ── Timeline panel (video mode only, 04 §1.1/§2) ───────────────────────
+        // Docked below the console panel, above the (in video mode,
+        // program-monitor) CentralPanel — panel registration order is
+        // egui-stacking order, so this must land after the console panel's
+        // `show_animated` and before `CentralPanel::show`.
+        egui::TopBottomPanel::bottom("timeline")
+            .resizable(true)
+            .default_height(220.0)
+            .min_height(120.0)
+            .show_animated(ctx, self.mode == AppMode::Video, |ui| {
+                timeline::draw_timeline_panel(ui);
             });
 
         // ── Audit panel (floating window) ────────────────────────────────────
