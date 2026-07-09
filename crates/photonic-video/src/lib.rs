@@ -23,6 +23,8 @@ pub mod export;
 pub mod captions;
 /// Playback controller, clock, prefetch (02 §4).
 pub mod playback;
+/// `VideoEngine` facade + per-document `EngineSession` (02 §1).
+pub mod session;
 
 /// Pooled `Rgba16Float` working-texture allocator (03 §3.4). The P1 renderer /
 /// P3 evaluator request textures from here keyed by [`graph::ir::ContentHash`].
@@ -35,3 +37,10 @@ pub mod pool;
 /// (one import-path swap, no semantic change). Kept here so the P1 stub is
 /// self-contained and compile-checked without front-running P2's crate work.
 pub mod contract;
+
+// ── Facade re-exports (02 §1) — the names Wire-phase consumers import ────────
+pub use graph::eval::GpuContext;
+pub use session::{
+    coalesce_commands, colorimetry_for_probe, EngineCmd, EngineFrame, EngineSession,
+    EngineStatus, ExportJob, ProxyMode, VideoEngine,
+};
