@@ -21,6 +21,7 @@ pub mod grade;
 pub mod graph;
 pub mod graph_ops;
 pub mod ids;
+pub mod load;
 pub mod media;
 pub mod ops;
 pub mod prop_registry;

@@ -1719,6 +1719,13 @@ impl Document {
         let mut doc: Document = serde_json::from_value(value)?;
         // Legacy documents predate multi-artboard — synthesize the first one.
         doc.ensure_default_artboard();
+        // Finalize a loaded timeline: flag orphaned property paths (repair) and
+        // enforce the per-sequence invariants (reject a corrupt/overlapping
+        // timeline with a load error). Only runs when a timeline is present
+        // (01 §4, §6.2).
+        if let Some(timeline) = doc.timeline.as_mut() {
+            crate::timeline::load::finalize_load(timeline).map_err(serde::de::Error::custom)?;
+        }
         Ok(doc)
     }
 }

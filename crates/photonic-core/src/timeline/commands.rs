@@ -101,6 +101,13 @@ pub enum FormatOp {
     Add {
         format: SequenceFormat,
     },
+    /// Insert a format at a specific index (the position-preserving inverse of a
+    /// `Remove` from the middle of the list; a plain `Add` only appends, which
+    /// would reorder the list on undo).
+    Insert {
+        index: usize,
+        format: SequenceFormat,
+    },
     Update {
         index: usize,
         old: SequenceFormat,
@@ -726,6 +733,21 @@ fn reorder<T>(v: &mut Vec<T>, new_order: &[usize]) {
     }
 }
 
+/// The inverse of a gather-permutation: `reorder` sets `v'[k] = v[order[k]]`, so
+/// undoing it requires `order`'s inverse permutation (`inv[order[k]] = k`), NOT a
+/// swap of the stored `old_order`/`new_order` (which loses the permutation when
+/// `old_order` is the identity `[0,1,…]`). Malformed orders yield a best-effort
+/// result that `reorder`'s own bounds guard turns into a no-op.
+fn inverse_perm(order: &[usize]) -> Vec<usize> {
+    let mut inv = vec![0usize; order.len()];
+    for (k, &i) in order.iter().enumerate() {
+        if i < inv.len() {
+            inv[i] = k;
+        }
+    }
+    inv
+}
+
 /// Keep markers in a deterministic order (by tick, then id) so add/remove/set
 /// round-trip to an identical vector regardless of insertion order.
 fn sort_markers(markers: &mut [Marker]) {
@@ -760,7 +782,18 @@ fn invert_format_op(op: &FormatOp) -> FormatOp {
             index: usize::MAX,
             format: format.clone(),
         },
-        FormatOp::Remove { format, .. } => FormatOp::Add {
+        FormatOp::Insert { index, format } => FormatOp::Remove {
+            index: *index,
+            format: format.clone(),
+        },
+        // A `Remove` at the sentinel end-index (produced only as `Add`'s inverse)
+        // undoes by appending; a `Remove` at a real index restores that exact
+        // position so the format list order survives a round-trip.
+        FormatOp::Remove { index, format } if *index == usize::MAX => FormatOp::Add {
+            format: format.clone(),
+        },
+        FormatOp::Remove { index, format } => FormatOp::Insert {
+            index: *index,
             format: format.clone(),
         },
         FormatOp::Update { index, old, new } => FormatOp::Update {
@@ -1405,13 +1438,12 @@ impl AudioCmd {
                 unit: unit.clone(),
             },
             AudioCmd::ReorderAudioFx {
-                owner,
-                old_order,
-                new_order,
+                owner, new_order, ..
             } => AudioCmd::ReorderAudioFx {
                 owner: *owner,
+                // Inverse permutation, not an old_order swap — see `inverse_perm`.
                 old_order: new_order.clone(),
-                new_order: old_order.clone(),
+                new_order: inverse_perm(new_order),
             },
             AudioCmd::SetMasterBusProp { old, new } => AudioCmd::SetMasterBusProp {
                 old: *new,
@@ -1619,6 +1651,10 @@ impl TimelineCmd {
                 if let Some(s) = p.sequences.get_mut(seq) {
                     match op {
                         FormatOp::Add { format } => s.formats.push(format.clone()),
+                        FormatOp::Insert { index, format } => {
+                            let i = (*index).min(s.formats.len());
+                            s.formats.insert(i, format.clone());
+                        }
                         FormatOp::Update { index, new, .. } => {
                             if let Some(slot) = s.formats.get_mut(*index) {
                                 *slot = new.clone();
@@ -2186,14 +2222,16 @@ impl TimelineCmd {
                 seq,
                 track,
                 clip,
-                old_order,
                 new_order,
+                ..
             } => TimelineCmd::ReorderEffects {
                 seq: *seq,
                 track: *track,
                 clip: *clip,
+                // Undo a gather-permutation with its inverse, not by swapping the
+                // (identity) old_order — see `inverse_perm`.
                 old_order: new_order.clone(),
-                new_order: old_order.clone(),
+                new_order: inverse_perm(new_order),
             },
             TimelineCmd::SetGrade {
                 seq,
