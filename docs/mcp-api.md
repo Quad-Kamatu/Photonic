@@ -3,11 +3,11 @@
 <!-- GENERATED FILE — do not edit by hand. -->
 <!-- Regenerate with: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md -->
 
-This document lists all **358** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
+This document lists all **376** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
 
 ## Tools
 
-[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
+[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`cancel_job`](#cancel-job), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_export_preset`](#delete-export-preset), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_sequence`](#export-sequence), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`generate_proxies`](#generate-proxies), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_engine_status`](#get-engine-status), [`get_job_status`](#get-job-status), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_presets`](#list-export-presets), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pause`](#pause), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play`](#play), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`probe_media`](#probe-media), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_proxy`](#remove-proxy), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`render_frame_at`](#render-frame-at), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_export_preset`](#save-export-preset), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`seek`](#seek), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_loop_range`](#set-loop-range), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_proxy_mode`](#set-proxy-mode), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`step`](#step), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transcode_media`](#transcode-media), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
 
 ---
 
@@ -519,6 +519,14 @@ Place any number of [x,y] points and connect them in any order to build a filled
 | `name` | string | no |  |
 | `stroke` | object | no | Stroke outline. Fields: color (#RRGGBB), width (number), enabled (bool), opacity (0-1), line_cap (butt\|round\|square), line_join (miter\|round\|bevel), align (center\|inside\|outside), dash_array ([dash,gap,...] up to 6 values), dash_offset (number). Example: {"color":"#000000","width":2,"enabled":true,"dash_array":[8,4]} |
 | `tags` | array<string> | no |  |
+
+## `cancel_job`
+
+Request cancellation of an async job. Cooperative: the worker stops at its next check point (between frames for exports; partial output files are removed for transcodes). Cancelling an already-finished job is a no-op, not an error.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `job_id` | string | yes |  |
 
 ## `center_on_canvas`
 
@@ -1362,6 +1370,14 @@ Remove a named color swatch from the document palette. Does not alter existing n
 | --- | --- | --- | --- |
 | `name` | string | yes | Name of the swatch to delete. |
 
+## `delete_export_preset`
+
+Delete a custom export preset (app-level config — no document mutation, no undo step). Built-ins are read-only and refuse deletion with NotSupportedV1.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes |  |
+
 ## `delete_gradient_swatch`
 
 Delete a named gradient swatch from the document registry. Does not affect nodes that were already painted with this gradient.
@@ -1638,6 +1654,19 @@ Export specific nodes (or the current selection) as a clean, minimal SVG. Each n
 | `pad` | number | no | Padding as a fraction of the square side when normalize='square' (e.g. 0.1 = 10%). Default 0. |
 | `precision` | integer | no | Decimal places for coordinates and path data (default: 4). Prevents 15-decimal path bloat. |
 
+## `export_sequence`
+
+Start an export job (02 §7; async — poll get_job_status, cancellable between frames). Renders the timeline as snapshotted at call time through a dedicated engine session and encodes via the ffmpeg sidecar. Range defaults to the sequence work range, else [0, content end). VIDEO-ONLY in this build: the preset's audio spec is skipped (sequence-audio muxing is the linked-audio story). Upscaling beyond the format size returns NotSupportedV1.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `out_path` | string | yes | Destination file path. Extension should match the preset container. |
+| `sequence_id` | string | yes |  |
+| `format_index` | integer | no | Which SequenceFormat to export. Default: the active format. |
+| `overrides` | object | no | {width?, height?, frame_rate?:{num,den}} — width/height together; nearest-source-frame retiming for an explicit frame rate (05 §6.2). |
+| `preset` | string | no | Preset name (see list_export_presets). Default "Web H.264". |
+| `range` | object | no | {start_ticks\|start_tc\|start_seconds, end_ticks\|end_tc\|end_seconds} — ticks > tc > seconds precedence per bound. |
+
 ## `export_svg`
 
 Export the entire document as an SVG string. Returns the raw SVG markup that can be saved as a .svg file or pasted directly into any SVG-aware tool.
@@ -1774,6 +1803,15 @@ Flip/mirror nodes horizontally or vertically around their bounding box center. P
 | `axis` | enum (`horizontal`, `vertical`) | yes | Flip axis |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
 
+## `generate_proxies`
+
+Batch-generate editing proxies (02 §6). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1: the engine/proxy module has not landed and the evaluator decodes originals regardless of ProxyMode (proxies are never required for correctness, CAP-014).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_ids` | array<string> | yes |  |
+| `force` | boolean | no |  |
+
 ## `get_artboard_margins`
 
 Return the current artboard safe-area margin values (top, right, bottom, left in document units). Read-only.
@@ -1838,6 +1876,22 @@ Get the full document tree: layers, nodes, styles, transforms
 Capture the current document as a reusable template — preserving canvas size, layer structure, guides, and export profiles while stripping all node content. Use the returned template_json with apply_document_template to stamp these settings onto a different document.
 
 _No parameters._
+
+## `get_engine_status`
+
+Engine status snapshot (EngineStatus, 02 §1): playhead tick, playing flag, dropped-frame count, node-cache stats, audio xruns, snapshot doc revision, active sequence, and the most recent engine command error.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | no | Informational — the engine session is a per-process singleton (10 §2). |
+
+## `get_job_status`
+
+Poll an async job (export/probe/transcode — one registry, 10 §6). States: queued | running {progress, message} | done {result} | failed {error_code, message} | cancelled. Terminal jobs are retained 10 minutes, then evicted (JobNotFound).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `job_id` | string | yes |  |
 
 ## `get_keyframes`
 
@@ -2155,6 +2209,12 @@ _No parameters._
 ## `list_event_triggers`
 
 List all registered script event triggers in the document. Read-only.
+
+_No parameters._
+
+## `list_export_presets`
+
+List export presets: the built-in catalog (05 §3.5, read-only) plus user-saved custom presets. Each entry is the full ExportPreset serde shape plus a built_in flag — use it as the template for save_export_preset.
 
 _No parameters._
 
@@ -2513,6 +2573,12 @@ Remove hidden portions of each selected path node by subtracting all paths above
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | Two or more path node IDs to trim. |
 
+## `pause`
+
+Pause playback (EngineCmd::Pause). Session state only — no undo step. Returns the engine status snapshot including the paused playhead tick.
+
+_No parameters._
+
 ## `pin_object_guides`
 
 Create persistent ruler guides at the edges and/or center of selected nodes. Guides remain visible across editing sessions and serve as precision alignment references. Deduplicates — existing guides within 0.5 px are not duplicated.
@@ -2544,6 +2610,14 @@ Place an instance of a named symbol at the given position. The instance is a clo
 | `symbol_name` | string | yes | Symbol name to instantiate. |
 | `x` | number | no | X position (document units). Default: 0. |
 | `y` | number | no | Y position (document units). Default: 0. |
+
+## `play`
+
+Start playback on the video engine (EngineCmd::Play). Session state only — no undo step. Audio opens lazily; on machines with no audio device playback proceeds on a soft clock instead of failing. Returns the engine status snapshot.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | no | Sequence to activate before playing. Omit to keep the engine's current active sequence. |
 
 ## `play_action`
 
@@ -2578,6 +2652,14 @@ Render the selection (or given nodes) at target display sizes over light AND dar
 | `node_ids` | array<string> | no | Nodes to preview. If omitted or empty, uses the current selection. |
 | `pad` | number | no | Padding as a fraction of the icon's square size (default: 0.15). |
 | `sizes` | array<integer> | no | Target pixel sizes (default: [24, 32, 48]). |
+
+## `probe_media`
+
+Force (re-)probe an asset with ffprobe (async job — poll get_job_status). On completion refreshes MediaAsset.probe (duration/streams/colorimetry) and the xxh3 content_hash used for relinking. The probe field is engine-derived cache, not an undoable edit.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes |  |
 
 ## `proportional_move_anchor`
 
@@ -2804,6 +2886,14 @@ Remove a sequence marker by id. Supports undo.
 | --- | --- | --- | --- |
 | `marker_id` | string | yes |  |
 
+## `remove_proxy`
+
+Delete generated proxy files, reverting assets to original-only (05 §2.3). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1 (see generate_proxies).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_ids` | array<string> | yes |  |
+
 ## `remove_stroke`
 
 Remove the stroke from selected nodes (set to none).
@@ -2819,6 +2909,21 @@ Remove a track (and every clip on it) by id. Supports undo.
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `track_id` | string | yes |  |
+
+## `render_frame_at`
+
+Compile + evaluate the frame graph at one tick, headlessly, and return the image (10 §4 — the visual-feedback-loop tool). output_format `png` (default) is 8-bit sRGB for display; `raw_rgba16f` returns base64 linear premultiplied f16 pixels — byte-deterministic, the golden-frame comparison basis. COST WARNINGS: quality "full" on an uncached 4K composite can far exceed the preview eval budget — default to quality "preview" for iterative loops and "full" only for final verification frames; cold seeks pay a DECODE cost (up to ~150 ms per uncached GOP, more for originals) before any GPU work, so a loop scrubbing far-apart ticks is decode-dominated; repeated calls at nearby ticks mostly hit the node-result cache. Each call is independent (no held playback state).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `quality` | enum (`preview`, `full`) | yes | preview = proxy-eligible sources; full = originals. See cost warnings. |
+| `sequence_id` | string | yes |  |
+| `at_seconds` | number | no | Convenience; sub-tick rounding possible. |
+| `at_tc` | string | no | HH:MM:SS:FF or HH:MM:SS;FF. |
+| `at_ticks` | integer | no | Exact tick (highest precedence); snapped down to the frame start. |
+| `format_index` | integer | no | Which SequenceFormat (aspect variant). Default: the active format. Applied per-call only — the document's active format is untouched. |
+| `output_format` | enum (`png`, `raw_rgba16f`) | no | Default png. |
+| `scale` | number | no | 0 < scale <= 1 — deterministic box-downscale of the output. |
 
 ## `reorder_effects`
 
@@ -2981,6 +3086,15 @@ Sample the fill and stroke color of the topmost visible node at a canvas coordin
 | `x` | number | yes | Canvas X coordinate |
 | `y` | number | yes | Canvas Y coordinate |
 
+## `save_export_preset`
+
+Create or overwrite a custom export preset (app-level config, 05 §3.6 — no document mutation, no undo step). Built-in preset names are refused (NotSupportedV1). The preset object is validated (alpha allow-list etc.) before persisting.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes |  |
+| `preset` | object | yes | Full ExportPreset object in its serde shape — copy one from list_export_presets and edit. |
+
 ## `save_gradient_swatch`
 
 Save the gradient fill of a node as a named gradient swatch. Works with linear, radial, fluid, and mesh gradients. If a swatch with the same name already exists it is updated. Use apply_gradient_swatch to reuse it on other nodes.
@@ -3044,6 +3158,17 @@ Cut a path node at the point on it nearest to the specified canvas coordinates, 
 Capture the current canvas as a PNG for visual inspection
 
 _No parameters._
+
+## `seek`
+
+Move the engine playhead (EngineCmd::Seek). Session state only — no undo step. Time precedence: at_ticks > at_tc > at_seconds. The engine presents the exact frame-start tick at/before the target.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+| `at_seconds` | number | no | Convenience; sub-tick rounding possible, not authoritative. |
+| `at_tc` | string | no | HH:MM:SS:FF or HH:MM:SS;FF, resolved against the sequence frame rate. |
+| `at_ticks` | integer | no | Exact tick (highest precedence). |
 
 ## `select_all`
 
@@ -3269,6 +3394,15 @@ Lock or unlock nodes. Locked nodes cannot be selected or modified in the GUI. Om
 | `locked` | boolean | no | Set locked. Omit to toggle. |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
 
+## `set_loop_range`
+
+Set or clear the playback loop range (EngineCmd::SetLoop). Session state only — no undo step. Omit/null `range` to clear. Each bound follows the ticks > tc > seconds precedence.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+| `range` | object \| null | no | {start_ticks\|start_tc\|start_seconds, end_ticks\|end_tc\|end_seconds}; null clears the loop. |
+
 ## `set_node_prompt`
 
 Record an AI prompt on a node's prompt history for creative provenance tracking. Each entry is chronological — the full history shows which prompts shaped the node's appearance. This enables 'intent-preserving edit' workflows where an agent understands why a node looks the way it does.
@@ -3345,6 +3479,14 @@ Set paragraph-level text options on a text node: spacing before paragraphs, spac
 | `indent` | number | no | First-line indent in document units. Default: unchanged. |
 | `spacing_after` | number | no | Space after each paragraph in document units. Default: unchanged. |
 | `spacing_before` | number | no | Space before each paragraph in document units. Default: unchanged. |
+
+## `set_proxy_mode`
+
+Set the session proxy policy (02 §6): auto | force_proxy | force_original. Session state, not document state — no undo step. NOTE: proxy generation has not landed; all modes currently decode originals (the flag still selects preview/full compile quality for cache-hash purposes).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `mode` | enum (`auto`, `force_proxy`, `force_original`) | yes |  |
 
 ## `set_selection`
 
@@ -3554,6 +3696,14 @@ Spray multiple instances of a named symbol scattered around a center point using
 | `y` | number | yes | Center Y coordinate of the spray area. |
 | `spread` | number | no | Scatter radius in document units. Default: 100. |
 
+## `step`
+
+Single-frame step (CAP-004): pauses, then snaps the playhead exactly ±frames frame-starts and evaluates that tick. Session state only — no undo step.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `frames` | integer | yes | Signed frame count: +1 next frame, -1 previous. |
+
 ## `stipple_fill`
 
 Fill a path shape with randomly placed dots (stipple effect). Uses rejection sampling to place dots inside the path boundary.
@@ -3612,6 +3762,16 @@ Batch add or remove tags on nodes. Tags are arbitrary strings used for querying 
 | `add` | array<string> | no | Tags to add |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
 | `remove` | array<string> | no | Tags to remove |
+
+## `transcode_media`
+
+Transcode an asset to an editing-friendly intermediate via ffmpeg (async job — poll get_job_status; cancellable). Distinct from proxies: a user-picked codec, not the fixed proxy profile. The output file is NOT auto-imported; call import_media on the returned output_path if wanted.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes |  |
+| `preset` | enum (`prores_proxy`, `prores_lt`, `dnxhr_lb`, `h264_high`) | yes |  |
+| `out_path` | string | no | Default: <source stem>.<preset>.<mov\|mp4> next to the source. |
 
 ## `transform_copies`
 

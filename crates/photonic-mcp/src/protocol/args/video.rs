@@ -567,3 +567,204 @@ pub struct SetAssetBinArgs {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ListBinsArgs {}
+
+// ─── Playback (10 §3.13 — P3 engine slice) ──────────────────────────────────
+
+/// `sequence_id` optional on `play`/`pause`: omitted = the engine's current
+/// active sequence (document `active_sequence` fallback, 02 §1).
+#[derive(Debug, Deserialize, Default)]
+pub struct PlayArgs {
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PauseArgs {}
+
+#[derive(Debug, Deserialize)]
+pub struct SeekArgs {
+    pub sequence_id: SequenceId,
+    /// Precedence: at_ticks > at_tc > at_seconds (10 §1 rule 3).
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StepArgs {
+    /// Signed frame count (CAP-004): +1 = next frame, -1 = previous.
+    pub frames: i32,
+}
+
+/// `null`/omitted `range` clears the loop.
+#[derive(Debug, Deserialize)]
+pub struct SetLoopRangeArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub range: Option<WorkRangeArg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetProxyModeArgs {
+    /// `auto` | `force_proxy` | `force_original` (02 §6 — session state).
+    pub mode: ProxyModeArg,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyModeArg {
+    Auto,
+    ForceProxy,
+    ForceOriginal,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct GetEngineStatusArgs {
+    /// Accepted for §3.13 parity; the session is a singleton (10 §2), so this
+    /// is currently informational only.
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+}
+
+// ─── Render (10 §3.14 / §4) ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RenderFrameAtArgs {
+    pub sequence_id: SequenceId,
+    /// Precedence: at_ticks > at_tc > at_seconds (10 §1 rule 3).
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    /// Which `SequenceFormat` (aspect variant); default = the active format.
+    #[serde(default)]
+    pub format_index: Option<usize>,
+    /// `preview` (proxy-eligible) or `full` (originals). Required by 10 §4.
+    pub quality: RenderQualityArg,
+    /// 0 < scale <= 1 — CPU box-downscale of the output.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// `png` (default, 8-bit sRGB for display) or `raw_rgba16f` (linear
+    /// premultiplied f16, base64 — the deterministic golden-frame basis).
+    #[serde(default)]
+    pub output_format: Option<RenderOutputFormatArg>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderQualityArg {
+    Preview,
+    Full,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderOutputFormatArg {
+    #[default]
+    Png,
+    RawRgba16f,
+}
+
+// ─── Media engine ops (10 §3.1 — P3 slice) ──────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ProbeMediaArgs {
+    pub asset_id: AssetId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateProxiesArgs {
+    pub asset_ids: Vec<AssetId>,
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveProxyArgs {
+    pub asset_ids: Vec<AssetId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TranscodeMediaArgs {
+    pub asset_id: AssetId,
+    /// `prores_proxy` | `prores_lt` | `dnxhr_lb` | `h264_high` — the fixed
+    /// editing-intermediate menu (distinct from export presets, 10 §3.1).
+    pub preset: TranscodePresetArg,
+    /// Defaults to `<source stem>.<preset>.<ext>` next to the source file.
+    #[serde(default)]
+    pub out_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscodePresetArg {
+    ProresProxy,
+    ProresLt,
+    DnxhrLb,
+    H264High,
+}
+
+// ─── Export (10 §3.15) ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ExportSequenceArgs {
+    pub sequence_id: SequenceId,
+    pub out_path: String,
+    /// Preset name (built-in or custom); default `"Web H.264"`.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Which `SequenceFormat` to export; default = the active format.
+    #[serde(default)]
+    pub format_index: Option<usize>,
+    /// Defaults to the sequence work range, else `[0, content end)`.
+    #[serde(default)]
+    pub range: Option<WorkRangeArg>,
+    #[serde(default)]
+    pub overrides: Option<ExportOverridesArg>,
+}
+
+/// Inline overrides applied on top of the named preset (10 §3.15).
+#[derive(Debug, Deserialize, Default)]
+pub struct ExportOverridesArg {
+    /// Explicit output resolution (both required together). Must not upscale
+    /// beyond the format size in P3 (`NotSupportedV1`).
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// Explicit output frame rate; nearest-source-frame retiming (05 §6.2).
+    #[serde(default)]
+    pub frame_rate: Option<FrameRate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetJobStatusArgs {
+    pub job_id: uuid::Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CancelJobArgs {
+    pub job_id: uuid::Uuid,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListExportPresetsArgs {}
+
+/// `preset` is a full `ExportPreset` object in its serde shape (see
+/// `list_export_presets` output for examples); `name` overrides the object's
+/// own name field.
+#[derive(Debug, Deserialize)]
+pub struct SaveExportPresetArgs {
+    pub name: String,
+    pub preset: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteExportPresetArgs {
+    pub name: String,
+}

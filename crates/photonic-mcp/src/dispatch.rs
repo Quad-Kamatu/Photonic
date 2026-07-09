@@ -2334,6 +2334,95 @@ pub(crate) async fn dispatch_tool_inner(
             Ok(ToolOutput::readonly(handlers::video::list_bins(state, a).await))
         }
 
+        // ── Video domain (10-mcp-tools.md, P3: engine-backed tools) ─────────────
+        // Playback (10 §3.13): these mutate ENGINE/SESSION state, never the
+        // document — §3.13's `mutating*`. Classified readonly here so no
+        // checkpoint debounce is scheduled (design rule: playhead is session
+        // state, 01 §11 — no Command, no undo step).
+        "play" => {
+            let a: PlayArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(handlers::video::play(state, a).await))
+        }
+        "pause" => {
+            let a: PauseArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(handlers::video::pause(state, a).await))
+        }
+        "seek" => {
+            let a: SeekArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::seek(state, a).await))
+        }
+        "step" => {
+            let a: StepArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::step(state, a).await))
+        }
+        "set_loop_range" => {
+            let a: SetLoopRangeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::set_loop_range(state, a).await))
+        }
+        "set_proxy_mode" => {
+            let a: SetProxyModeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::set_proxy_mode(state, a).await))
+        }
+        "get_engine_status" => {
+            let a: GetEngineStatusArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(handlers::video::get_engine_status(state, a).await))
+        }
+
+        // Render (10 §3.14 / §4)
+        "render_frame_at" => {
+            let a: RenderFrameAtArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::render_frame_at(state, a).await))
+        }
+
+        // Media engine ops (10 §3.1). `probe_media` starts a job that commits
+        // its asset update from the worker (design rule 6 — the worker
+        // schedules its own checkpoint); the start call itself mutates nothing.
+        "probe_media" => {
+            let a: ProbeMediaArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::probe_media(state, a).await))
+        }
+        "generate_proxies" => {
+            let a: GenerateProxiesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::generate_proxies(state, a).await))
+        }
+        "remove_proxy" => {
+            let a: RemoveProxyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::remove_proxy(state, a).await))
+        }
+        "transcode_media" => {
+            let a: TranscodeMediaArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::transcode_media(state, a).await))
+        }
+
+        // Export + jobs (10 §3.15 / §6). `export_sequence` is readonly at call
+        // time (10 §6: "the export itself never mutates the timeline");
+        // preset save/delete are app-config side effects, not document
+        // mutations (10 §3.15).
+        "export_sequence" => {
+            let a: ExportSequenceArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::export_sequence(state, a).await))
+        }
+        "get_job_status" => {
+            let a: GetJobStatusArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::get_job_status(state, a).await))
+        }
+        "cancel_job" => {
+            let a: CancelJobArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::cancel_job(state, a).await))
+        }
+        "list_export_presets" => {
+            let a: ListExportPresetsArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(handlers::video::list_export_presets(state, a).await))
+        }
+        "save_export_preset" => {
+            let a: SaveExportPresetArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::save_export_preset(state, a).await))
+        }
+        "delete_export_preset" => {
+            let a: DeleteExportPresetArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::delete_export_preset(state, a).await))
+        }
+
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }

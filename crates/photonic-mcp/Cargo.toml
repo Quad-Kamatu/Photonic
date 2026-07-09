@@ -11,6 +11,7 @@ photonic-render = { path = "../photonic-render" }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 glyphon = { workspace = true }
+photonic-video = { path = "../photonic-video" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }

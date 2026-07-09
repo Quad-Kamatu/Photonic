@@ -8,8 +8,12 @@
 //! execute via `history.execute_discrete` (design rule 4: one command per
 //! call). Lock order is always document before history (design rule 7).
 //!
-//! Engine-backed tools (probe/proxy/playback/render/export/captions/tts/grade
-//! scopes) are P3+ and are not implemented here.
+//! ## P3 engine slice (this file, lower half)
+//! Playback transport (10 §3.13), `render_frame_at` (10 §4), real
+//! `probe_media`/`transcode_media`, and the export/job tools (10 §3.15, §6)
+//! are implemented against the `photonic_video::VideoEngine` facade via the
+//! lazy [`EngineBridge`] (`handlers/video_jobs.rs`). Captions/tts/grade
+//! scopes remain P4+.
 //!
 //! ## Resolved gaps (P2 top-up, photonic-core commit ab7557f)
 //! `set_work_range`/`add_marker`/`remove_marker`/`list_markers`,
@@ -19,12 +23,16 @@
 //! are implemented below.
 //!
 //! ## Remaining gap
-//! - `content_hash` uses a stopgap `DefaultHasher` (SipHash) digest over
-//!   head+tail+len, not the `xxh3` the core doc comment (media.rs:6)
-//!   describes as the eventual relink identity (that's P3 engine work).
+//! - `import_media`'s `content_hash` uses a stopgap `DefaultHasher` (SipHash)
+//!   digest over head+tail+len, not the `xxh3` the core doc comment
+//!   (media.rs:6) describes as the relink identity. `probe_media` (P3, below)
+//!   refreshes it with the real `photonic_video::media::probe::content_hash`
+//!   xxh3 digest.
 
+use crate::handlers::video_jobs::{set_job_status, EngineBridge, JobStatus};
 use crate::protocol::*;
 use crate::server::AppState;
+use base64::{engine::general_purpose, Engine as _};
 use photonic_core::history::Command;
 use photonic_core::timeline::{
     ops, AnimTarget, AssetId, AssetKind, Clip, ClipEffect, ClipId, ClipSource, ClipTiming,
@@ -33,7 +41,17 @@ use photonic_core::timeline::{
     TICKS_PER_SECOND,
 };
 use photonic_core::Color;
+use photonic_video::export::convert as export_convert;
+use photonic_video::export::presets as export_presets;
+use photonic_video::export::render_loop;
+use photonic_video::graph::eval::read_texture_rgba16f;
+use photonic_video::media::ffmpeg_locate;
+use photonic_video::media::probe as video_probe;
+use photonic_video::{EngineCmd, ProxyMode};
 use serde_json::json;
+use std::sync::atomic::Ordering;
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -1678,6 +1696,1410 @@ pub async fn list_bins(state: &AppState, _args: ListBinsArgs) -> ToolResult {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
+// ═════════════════════════════════════════════════════════════════════════════
+// P3 engine slice (10-mcp-tools.md): playback (§3.13), render_frame_at
+// (§3.14/§4), engine-backed media ops (§3.1 probe/proxy/transcode), export +
+// the async-job tools (§3.15, §6). All engine access goes through the lazy
+// [`EngineBridge`] in `handlers/video_jobs.rs` — see that module's docs for
+// the shadow-document snapshot bridge and the no-GPU degradation story.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The engine bridge, or the structured no-GPU degradation error (10 §7:
+/// "fails with a clear error rather than blocking the rest of the surface").
+/// `EngineUnavailable` extends the §8 taxonomy — §8 has no code for a missing
+/// GPU adapter because §2 assumed a GUI-shared `GpuContext`.
+fn engine_bridge(state: &AppState) -> Result<&EngineBridge, ToolResult> {
+    state.video_engine.bridge().ok_or_else(|| {
+        err_code(
+            "EngineUnavailable",
+            "no GPU adapter available — video-engine-backed tools \
+             (playback/render_frame_at/export_sequence) are unavailable on this machine",
+        )
+    })
+}
+
+/// Frame rate + formats + active-format index of a sequence, read from the
+/// REAL document (readonly borrow — design rule 5: never locks `history`).
+async fn sequence_render_info(
+    state: &AppState,
+    seq: SequenceId,
+) -> Result<
+    (
+        FrameRate,
+        Vec<photonic_core::timeline::SequenceFormat>,
+        usize,
+    ),
+    ToolResult,
+> {
+    let doc = state.document.lock().await;
+    let project = doc
+        .timeline
+        .as_ref()
+        .ok_or_else(|| ToolResult::error("no timeline project"))?;
+    let s = project
+        .sequences
+        .get(&seq)
+        .ok_or_else(|| ToolResult::error(format!("sequence {seq} not found")))?;
+    Ok((s.frame_rate, s.formats.clone(), s.active_format))
+}
+
+/// The status payload every transport tool returns (`EngineStatus`, 02 §1).
+fn engine_status_json(status: &photonic_video::EngineStatus) -> serde_json::Value {
+    json!({
+        "playhead_ticks": status.playhead.0,
+        "playing": status.playing,
+        "dropped_frames": status.dropped,
+        "cache": {
+            "hits": status.cache.hits,
+            "misses": status.cache.misses,
+            "resident_entries": status.cache.resident_entries,
+            "resident_bytes": status.cache.resident_bytes,
+        },
+        "audio_xruns": status.audio_xruns,
+        "doc_revision": status.doc_revision,
+        "active_sequence": status.active_sequence,
+        "last_error": status.last_error,
+    })
+}
+
+/// Poll the published status until `pred` holds or `timeout` elapses;
+/// returns the last observed status either way (confirmation is best-effort
+/// — the engine applies commands within one 2 ms loop tick, but a saturated
+/// box may lag; callers report the snapshot rather than fail).
+async fn wait_status(
+    bridge: &EngineBridge,
+    timeout: Duration,
+    pred: impl Fn(&photonic_video::EngineStatus) -> bool,
+) -> std::sync::Arc<photonic_video::EngineStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let s = bridge.session().status();
+        if pred(&s) || Instant::now() >= deadline {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+// ─── Playback (10 §3.13) ─────────────────────────────────────────────────────
+//
+// These mutate **engine/session state only** — never the document, never
+// `history` (01 §11: playhead is session state). Dispatch classifies them
+// `ToolOutput::readonly` so no checkpoint is scheduled; §3.13's `mutating*`
+// is about side-effect semantics, not the checkpoint machinery.
+
+pub async fn play(state: &AppState, args: PlayArgs) -> ToolResult {
+    tracing::debug!("tool: play");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    if let Some(seq) = args.sequence_id {
+        if let Err(e) = sequence_render_info(state, seq).await {
+            return e;
+        }
+    }
+    let _transport = bridge.lock_transport().await;
+    bridge.sync(state).await;
+    if let Some(seq) = args.sequence_id {
+        bridge.session().send(EngineCmd::SetActiveSequence(seq));
+    }
+    if !bridge.session().send(EngineCmd::Play) {
+        return ToolResult::error("engine session has shut down");
+    }
+    // Headless boxes with no audio device play on the soft clock (02 §4) —
+    // the engine's lazy cpal open falls back internally, so `play` succeeds
+    // rather than raising AudioDeviceUnavailable (10 §7's degraded row).
+    let status = wait_status(bridge, Duration::from_secs(2), |s| s.playing).await;
+    ToolResult::text(if status.playing {
+        "playback started"
+    } else {
+        "play sent (engine did not confirm within 2s)"
+    })
+    .with_data(engine_status_json(&status))
+}
+
+pub async fn pause(state: &AppState, _args: PauseArgs) -> ToolResult {
+    tracing::debug!("tool: pause");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let _transport = bridge.lock_transport().await;
+    if !bridge.session().send(EngineCmd::Pause) {
+        return ToolResult::error("engine session has shut down");
+    }
+    let status = wait_status(bridge, Duration::from_secs(2), |s| !s.playing).await;
+    ToolResult::text(format!("paused at tick {}", status.playhead.0))
+        .with_data(engine_status_json(&status))
+}
+
+pub async fn seek(state: &AppState, args: SeekArgs) -> ToolResult {
+    tracing::debug!("tool: seek");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let (fr, _, _) = match sequence_render_info(state, args.sequence_id).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let t = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if t.0 < 0 {
+        return err_code("TickOutOfRange", "seek target must be >= 0")
+            .with_data(json!({ "min_ticks": 0 }));
+    }
+    let _transport = bridge.lock_transport().await;
+    bridge.sync(state).await;
+    bridge
+        .session()
+        .send(EngineCmd::SetActiveSequence(args.sequence_id));
+    if !bridge.session().send(EngineCmd::Seek(t)) {
+        return ToolResult::error("engine session has shut down");
+    }
+    // Paused seek is a pure clock set — confirm the playhead landed. While
+    // playing, the clock keeps advancing, so accept any playhead at/after t.
+    let status = wait_status(bridge, Duration::from_secs(2), |s| s.playhead >= t).await;
+    ToolResult::text(format!("seeked to tick {}", t.0)).with_data(engine_status_json(&status))
+}
+
+pub async fn step(state: &AppState, args: StepArgs) -> ToolResult {
+    tracing::debug!("tool: step {}", args.frames);
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let _transport = bridge.lock_transport().await;
+    bridge.sync(state).await;
+    let before = bridge.session().status().playhead;
+    if !bridge.session().send(EngineCmd::Step(args.frames)) {
+        return ToolResult::error("engine session has shut down");
+    }
+    // Step always pauses (02 §4). Wait for the playhead to move off the
+    // pre-step sample so the returned snapshot reflects the step, not the
+    // stale status published before the command was processed. (A step
+    // clamped at frame 0 keeps the playhead in place and just rides out the
+    // timeout — still correct, merely slower.)
+    let status = wait_status(bridge, Duration::from_secs(2), |s| {
+        !s.playing && s.playhead != before
+    })
+    .await;
+    ToolResult::text(format!(
+        "stepped {} frame(s) — playhead at tick {} (paused)",
+        args.frames, status.playhead.0
+    ))
+    .with_data(engine_status_json(&status))
+}
+
+pub async fn set_loop_range(state: &AppState, args: SetLoopRangeArgs) -> ToolResult {
+    tracing::debug!("tool: set_loop_range");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let (fr, _, _) = match sequence_render_info(state, args.sequence_id).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let range = match &args.range {
+        None => None,
+        Some(r) => {
+            let start = match resolve_tick(
+                r.start_ticks,
+                r.start_tc.as_deref(),
+                r.start_seconds,
+                Some(fr),
+            ) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            let end = match resolve_tick(r.end_ticks, r.end_tc.as_deref(), r.end_seconds, Some(fr))
+            {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            if end <= start {
+                return err_code("TickOutOfRange", "loop end must be after loop start");
+            }
+            Some((start, end))
+        }
+    };
+    let _transport = bridge.lock_transport().await;
+    bridge.sync(state).await;
+    bridge
+        .session()
+        .send(EngineCmd::SetActiveSequence(args.sequence_id));
+    if !bridge.session().send(EngineCmd::SetLoop(range)) {
+        return ToolResult::error("engine session has shut down");
+    }
+    match range {
+        Some((s, e)) => ToolResult::text(format!("loop range set to [{}, {})", s.0, e.0))
+            .with_data(json!({ "start_ticks": s.0, "end_ticks": e.0 })),
+        None => ToolResult::text("loop range cleared"),
+    }
+}
+
+pub async fn set_proxy_mode(state: &AppState, args: SetProxyModeArgs) -> ToolResult {
+    tracing::debug!("tool: set_proxy_mode");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let mode = match args.mode {
+        ProxyModeArg::Auto => ProxyMode::Auto,
+        ProxyModeArg::ForceProxy => ProxyMode::ForceProxy,
+        ProxyModeArg::ForceOriginal => ProxyMode::ForceOriginal,
+    };
+    bridge.set_proxy_mode(mode);
+    ToolResult::text(format!("proxy mode set to {mode:?}")).with_data(json!({
+        "mode": format!("{mode:?}"),
+        "note": "proxy generation has not landed — Auto/ForceProxy currently decode originals \
+                 (proxies are never required for correctness, CAP-014)"
+    }))
+}
+
+pub async fn get_engine_status(state: &AppState, _args: GetEngineStatusArgs) -> ToolResult {
+    tracing::debug!("tool: get_engine_status");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    bridge.sync(state).await;
+    let synced = bridge.wait_engine_synced(Duration::from_secs(2)).await;
+    let status = bridge.session().status();
+    let mut data = engine_status_json(&status);
+    data["snapshot_synced"] = json!(synced);
+    ToolResult::text(format!(
+        "playhead {} — {}",
+        status.playhead.0,
+        if status.playing { "playing" } else { "paused" }
+    ))
+    .with_data(data)
+}
+
+// ─── render_frame_at (10 §3.14 / §4) ─────────────────────────────────────────
+
+pub async fn render_frame_at(state: &AppState, args: RenderFrameAtArgs) -> ToolResult {
+    tracing::debug!("tool: render_frame_at");
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let seq_id = args.sequence_id;
+    let (fr, formats, active_format) = match sequence_render_info(state, seq_id).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Some(fi) = args.format_index {
+        if fi >= formats.len() {
+            return ToolResult::error(format!(
+                "format_index {fi} out of range — sequence has {} format(s)",
+                formats.len()
+            ));
+        }
+    }
+    let format_index = args
+        .format_index
+        .unwrap_or(active_format)
+        .min(formats.len().saturating_sub(1));
+    let (w, h) = (
+        formats[format_index].width.max(1),
+        formats[format_index].height.max(1),
+    );
+    let t = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if t.0 < 0 {
+        return err_code("TickOutOfRange", "render tick must be >= 0")
+            .with_data(json!({ "min_ticks": 0 }));
+    }
+    // The engine presents exact frame-start ticks (02 §4) — snap down.
+    let snapped = fr.frame_start(fr.frame_at(t));
+    let scale = args.scale.unwrap_or(1.0);
+    if !(scale > 0.0 && scale <= 1.0) {
+        return ToolResult::error("scale must be in (0, 1]");
+    }
+    let output_format = args.output_format.unwrap_or_default();
+
+    let started = Instant::now();
+    let _transport = bridge.lock_transport().await;
+
+    // Per-call format override applied to the SHADOW timeline only — the real
+    // document's `active_format` is untouched (this tool is readonly).
+    {
+        let mut timeline = state.document.lock().await.timeline.clone();
+        if let Some(p) = timeline.as_mut() {
+            if let Some(s) = p.sequences.get_mut(&seq_id) {
+                s.active_format = format_index;
+            }
+        }
+        bridge.sync_timeline(timeline);
+    }
+    if !bridge.wait_engine_synced(Duration::from_secs(10)).await {
+        return ToolResult::error("engine did not pick up the document snapshot within 10s");
+    }
+
+    // Per-call quality via the session proxy-mode knob (the engine's only
+    // quality input, 02 §6) — restored to the sticky `set_proxy_mode` choice
+    // below. In P3 preview/full render identically (no proxies exist yet);
+    // the flag still flows into `Quality` so cache hashes stay honest.
+    let restore_mode = bridge.proxy_mode();
+    let call_mode = match args.quality {
+        RenderQualityArg::Preview => ProxyMode::ForceProxy,
+        RenderQualityArg::Full => ProxyMode::ForceOriginal,
+    };
+    bridge.session().send(EngineCmd::SetProxyMode(call_mode));
+    let prev = bridge.session().latest_frame();
+    bridge.session().send(EngineCmd::SetActiveSequence(seq_id));
+    if !bridge.session().send(EngineCmd::Seek(snapped)) {
+        bridge.session().send(EngineCmd::SetProxyMode(restore_mode));
+        return ToolResult::error("engine session has shut down");
+    }
+
+    let frame = bridge
+        .wait_fresh_frame(prev, Duration::from_secs(30), |f| {
+            f.time == snapped && f.sequence == seq_id
+        })
+        .await;
+    let result = match frame {
+        Some(frame) => {
+            // Read the LOGICAL region only — EngineFrame textures are padded
+            // to the texture pool's 64 px bucket (see photonic-video
+            // session.rs::pad_to_pool_bucket); content sits top-left at the
+            // sequence-format size.
+            let pixels = read_texture_rgba16f(bridge.engine().gpu(), &frame.texture, w, h);
+            build_render_result(
+                pixels,
+                w,
+                h,
+                scale,
+                output_format,
+                snapped,
+                started.elapsed(),
+            )
+        }
+        None => ToolResult::error(
+            "engine did not produce the requested frame within 30s — cold-seek decode \
+             cost can dominate (see tool description)",
+        ),
+    };
+    bridge.session().send(EngineCmd::SetProxyMode(restore_mode));
+    result
+}
+
+/// Deterministic box downscale on linear premultiplied f32 pixels (fixed
+/// iteration order ⇒ byte-stable output for the raw path).
+fn box_downscale(src: &[[f32; 4]], w: u32, h: u32, ow: u32, oh: u32) -> Vec<[f32; 4]> {
+    let mut out = Vec::with_capacity((ow * oh) as usize);
+    for oy in 0..oh {
+        let y0 = (oy as u64 * h as u64 / oh as u64) as u32;
+        let y1 = (((oy as u64 + 1) * h as u64).div_ceil(oh as u64) as u32).clamp(y0 + 1, h);
+        for ox in 0..ow {
+            let x0 = (ox as u64 * w as u64 / ow as u64) as u32;
+            let x1 = (((ox as u64 + 1) * w as u64).div_ceil(ow as u64) as u32).clamp(x0 + 1, w);
+            let mut acc = [0f64; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = src[(y * w + x) as usize];
+                    for (a, c) in acc.iter_mut().zip(p.iter()) {
+                        *a += *c as f64;
+                    }
+                }
+            }
+            let n = ((y1 - y0) as f64) * ((x1 - x0) as f64);
+            out.push([
+                (acc[0] / n) as f32,
+                (acc[1] / n) as f32,
+                (acc[2] / n) as f32,
+                (acc[3] / n) as f32,
+            ]);
+        }
+    }
+    out
+}
+
+/// IEEE 754 binary32 → binary16 bits, round-to-nearest-even. Values read back
+/// from an `Rgba16Float` texture are exactly representable, so the raw path
+/// round-trips the GPU's own bits.
+fn f32_to_f16_bits(f: f32) -> u16 {
+    let bits = f.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let frac = bits & 0x007f_ffff;
+    if exp == 0xff {
+        // Inf / NaN (quietened).
+        return sign | 0x7c00 | if frac != 0 { 0x0200 } else { 0 };
+    }
+    let exp = exp - 127 + 15;
+    if exp >= 0x1f {
+        return sign | 0x7c00; // overflow → inf
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign; // underflow → signed zero
+        }
+        // Subnormal half.
+        let frac = frac | 0x0080_0000;
+        let shift = (14 - exp) as u32;
+        let mut sub = (frac >> shift) as u16;
+        let rem = frac & ((1u32 << shift) - 1);
+        let half = 1u32 << (shift - 1);
+        if rem > half || (rem == half && (sub & 1) == 1) {
+            sub += 1;
+        }
+        return sign | sub;
+    }
+    let mut out = sign | ((exp as u16) << 10) | ((frac >> 13) as u16);
+    let rem = frac & 0x1fff;
+    if rem > 0x1000 || (rem == 0x1000 && (out & 1) == 1) {
+        out += 1; // carry may roll into the exponent — correct RNE behavior
+    }
+    out
+}
+
+fn build_render_result(
+    pixels: Vec<[f32; 4]>,
+    w: u32,
+    h: u32,
+    scale: f64,
+    output_format: RenderOutputFormatArg,
+    tick: Tick,
+    elapsed: Duration,
+) -> ToolResult {
+    let ow = ((w as f64 * scale).round() as u32).clamp(1, w);
+    let oh = ((h as f64 * scale).round() as u32).clamp(1, h);
+    let pixels = if (ow, oh) == (w, h) {
+        pixels
+    } else {
+        box_downscale(&pixels, w, h, ow, oh)
+    };
+    let render_ms = elapsed.as_millis() as u64;
+    match output_format {
+        RenderOutputFormatArg::Png => {
+            // Reuse the export path's color math (single source of truth):
+            // unpremultiply + linear→sRGB transfer + quantize.
+            let flat: Vec<f32> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
+            let rgba8 = match export_convert::working_frame_to_rgba8(&flat, ow, oh) {
+                export_convert::EncodePlanes::Rgba8 { rgba, .. } => rgba,
+                _ => return ToolResult::error("internal error: unexpected plane kind"),
+            };
+            let Some(img) = image::RgbaImage::from_raw(ow, oh, rgba8) else {
+                return ToolResult::error("internal error: pixel buffer size mismatch");
+            };
+            let mut png = Vec::new();
+            if let Err(e) =
+                img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            {
+                return ToolResult::error(format!("PNG encode failed: {e}"));
+            }
+            ToolResult::text(format!(
+                "rendered {ow}x{oh} frame at tick {} ({render_ms} ms)",
+                tick.0
+            ))
+            .with_image(general_purpose::STANDARD.encode(&png))
+            .with_data(json!({
+                "width": ow, "height": oh, "tick": tick.0,
+                "render_ms": render_ms, "output_format": "png",
+            }))
+        }
+        RenderOutputFormatArg::RawRgba16f => {
+            let mut bytes = Vec::with_capacity(pixels.len() * 8);
+            for px in &pixels {
+                for c in px {
+                    bytes.extend_from_slice(&f32_to_f16_bits(*c).to_le_bytes());
+                }
+            }
+            ToolResult::text(format!(
+                "rendered {ow}x{oh} raw frame at tick {} ({render_ms} ms)",
+                tick.0
+            ))
+            .with_data(json!({
+                "width": ow, "height": oh, "tick": tick.0,
+                "render_ms": render_ms, "output_format": "raw_rgba16f",
+                "encoding": "interleaved RGBA, f16 little-endian, row-major, linear premultiplied (D-09)",
+                "data_base64": general_purpose::STANDARD.encode(&bytes),
+            }))
+        }
+    }
+}
+
+// ─── Engine-backed media ops (10 §3.1: probe / proxy / transcode) ────────────
+
+/// Resolve an asset to its backing file path, with §8 error mapping.
+async fn asset_file_path(
+    state: &AppState,
+    asset: AssetId,
+) -> Result<std::path::PathBuf, ToolResult> {
+    let doc = state.document.lock().await;
+    let project = doc
+        .timeline
+        .as_ref()
+        .ok_or_else(|| ToolResult::error("no timeline project"))?;
+    let a = project
+        .media
+        .assets
+        .get(&asset)
+        .ok_or_else(|| ToolResult::error(format!("asset {asset} not found")))?;
+    match &a.source {
+        photonic_core::timeline::AssetSource::File { path, .. } => Ok(path.clone()),
+        _ => Err(ToolResult::error(
+            "asset is not file-backed — nothing to probe/transcode",
+        )),
+    }
+}
+
+pub async fn probe_media(state: &AppState, args: ProbeMediaArgs) -> ToolResult {
+    tracing::debug!("tool: probe_media {}", args.asset_id);
+    let path = match asset_file_path(state, args.asset_id).await {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.exists() {
+        return err_code(
+            "AssetOffline",
+            format!("file not found: {}", path.display()),
+        );
+    }
+    let tools = match ffmpeg_locate::locate() {
+        Ok(t) => t,
+        Err(e) => {
+            return err_code(
+                "FfmpegUnavailable",
+                format!("ffprobe not found ({e}) — set PHOTONIC_FFMPEG_DIR or install ffmpeg"),
+            )
+        }
+    };
+    let (job_id, cancel) = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .start("probe_media");
+    let jobs = std::sync::Arc::clone(&state.video_jobs);
+    let document = std::sync::Arc::clone(&state.document);
+    let history = std::sync::Arc::clone(&state.history);
+    let asset_id = args.asset_id;
+    std::thread::spawn(move || {
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Running {
+                progress: 0.0,
+                message: "probing".into(),
+            },
+        );
+        if cancel.load(Ordering::Relaxed) {
+            set_job_status(&jobs, job_id, JobStatus::Cancelled);
+            return;
+        }
+        let probe = match video_probe::probe_asset(&tools, &path) {
+            Ok(p) => p,
+            Err(e) => {
+                set_job_status(
+                    &jobs,
+                    job_id,
+                    JobStatus::Failed {
+                        error_code: "ProbeFailed".into(),
+                        message: e.to_string(),
+                    },
+                );
+                return;
+            }
+        };
+        // xxh3 head+tail+len — the real relink identity (replaces the P2
+        // SipHash stopgap noted at the top of this file).
+        let hash = video_probe::content_hash(&path).ok();
+        // Commit — design rule 7 lock order: document BEFORE history. This is
+        // the job-completion path that mutates outside dispatch_tool_inner's
+        // post-mutation hook (design rule 6), so the checkpoint is scheduled
+        // here explicitly. `MediaAsset::probe` is engine-derived cache
+        // ("Filled by the engine after ffprobe", core media.rs) with no
+        // TimelineCmd variant — written directly, not as an undo step; a
+        // `SetAssetProbe` command in core would let this use
+        // `execute_discrete` (noted seam).
+        let updated = {
+            let mut doc = document.blocking_lock();
+            let updated = match doc
+                .timeline
+                .as_mut()
+                .and_then(|p| p.media.assets.get_mut(&asset_id))
+            {
+                Some(asset) => {
+                    asset.probe = Some(probe.clone());
+                    if hash.is_some() {
+                        asset.content_hash = hash.clone();
+                    }
+                    true
+                }
+                None => false, // asset removed while probing — drop the result
+            };
+            let mut hist = history.blocking_lock();
+            hist.schedule_mcp_checkpoint("probe_media");
+            updated
+        };
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Done {
+                result: json!({
+                    "asset_id": asset_id,
+                    "updated": updated,
+                    "probe": probe,
+                    "content_hash": hash,
+                }),
+            },
+        );
+    });
+    ToolResult::text("probe job started — poll get_job_status")
+        .with_data(json!({ "job_id": job_id }))
+}
+
+pub async fn generate_proxies(_state: &AppState, args: GenerateProxiesArgs) -> ToolResult {
+    tracing::debug!("tool: generate_proxies ({} asset(s))", args.asset_ids.len());
+    err_code(
+        "NotSupportedV1",
+        format!(
+            "proxy generation is not built yet ({} asset(s) requested) — the engine/proxy \
+             module (02 §6, 05 §2.3) has not landed and the evaluator decodes originals \
+             regardless of ProxyMode (proxies are never required for correctness, CAP-014)",
+            args.asset_ids.len()
+        ),
+    )
+}
+
+pub async fn remove_proxy(_state: &AppState, args: RemoveProxyArgs) -> ToolResult {
+    tracing::debug!("tool: remove_proxy ({} asset(s))", args.asset_ids.len());
+    err_code(
+        "NotSupportedV1",
+        "proxy generation is not built yet, so there are no proxy files to remove \
+         (see generate_proxies)",
+    )
+}
+
+impl TranscodePresetArg {
+    /// ffmpeg encode args + output extension for each editing-intermediate
+    /// preset (10 §3.1: user-picked codec, distinct from the proxy profile).
+    fn ffmpeg_spec(self) -> (&'static [&'static str], &'static str, &'static str) {
+        match self {
+            TranscodePresetArg::ProresProxy => (
+                &[
+                    "-c:v",
+                    "prores_ks",
+                    "-profile:v",
+                    "0",
+                    "-vendor",
+                    "apl0",
+                    "-pix_fmt",
+                    "yuv422p10le",
+                    "-c:a",
+                    "pcm_s16le",
+                ],
+                "mov",
+                "prores_proxy",
+            ),
+            TranscodePresetArg::ProresLt => (
+                &[
+                    "-c:v",
+                    "prores_ks",
+                    "-profile:v",
+                    "1",
+                    "-vendor",
+                    "apl0",
+                    "-pix_fmt",
+                    "yuv422p10le",
+                    "-c:a",
+                    "pcm_s16le",
+                ],
+                "mov",
+                "prores_lt",
+            ),
+            TranscodePresetArg::DnxhrLb => (
+                &[
+                    "-c:v",
+                    "dnxhd",
+                    "-profile:v",
+                    "dnxhr_lb",
+                    "-pix_fmt",
+                    "yuv422p",
+                    "-c:a",
+                    "pcm_s16le",
+                ],
+                "mov",
+                "dnxhr_lb",
+            ),
+            TranscodePresetArg::H264High => (
+                &[
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                ],
+                "mp4",
+                "h264_high",
+            ),
+        }
+    }
+}
+
+pub async fn transcode_media(state: &AppState, args: TranscodeMediaArgs) -> ToolResult {
+    tracing::debug!("tool: transcode_media {}", args.asset_id);
+    let input = match asset_file_path(state, args.asset_id).await {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !input.exists() {
+        return err_code(
+            "AssetOffline",
+            format!("file not found: {}", input.display()),
+        );
+    }
+    let tools = match ffmpeg_locate::locate() {
+        Ok(t) => t,
+        Err(e) => {
+            return err_code(
+                "FfmpegUnavailable",
+                format!("ffmpeg not found ({e}) — set PHOTONIC_FFMPEG_DIR or install ffmpeg"),
+            )
+        }
+    };
+    let (enc_args, ext, preset_name) = args.preset.ffmpeg_spec();
+    let out_path = match &args.out_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => input.with_extension(format!("{preset_name}.{ext}")),
+    };
+    if out_path == input {
+        return ToolResult::error("out_path must differ from the source file");
+    }
+    let (job_id, cancel) = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .start("transcode_media");
+    let jobs = std::sync::Arc::clone(&state.video_jobs);
+    let out_clone = out_path.clone();
+    std::thread::spawn(move || {
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Running {
+                progress: 0.0,
+                message: format!("transcoding to {preset_name}"),
+            },
+        );
+        let mut cmd = std::process::Command::new(&tools.ffmpeg);
+        cmd.arg("-y")
+            .args(["-nostdin", "-loglevel", "error"])
+            .arg("-i")
+            .arg(&input)
+            .args(enc_args)
+            .arg(&out_clone)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                set_job_status(
+                    &jobs,
+                    job_id,
+                    JobStatus::Failed {
+                        error_code: "TranscodeFailed".into(),
+                        message: format!("spawn ffmpeg: {e}"),
+                    },
+                );
+                return;
+            }
+        };
+        // Poll for exit / cooperative cancel (kill + clean the partial file).
+        let status = loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&out_clone);
+                set_job_status(&jobs, job_id, JobStatus::Cancelled);
+                return;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => {
+                    set_job_status(
+                        &jobs,
+                        job_id,
+                        JobStatus::Failed {
+                            error_code: "TranscodeFailed".into(),
+                            message: format!("wait ffmpeg: {e}"),
+                        },
+                    );
+                    return;
+                }
+            }
+        };
+        if status.success() {
+            set_job_status(
+                &jobs,
+                job_id,
+                JobStatus::Done {
+                    result: json!({ "output_path": out_clone, "preset": preset_name }),
+                },
+            );
+        } else {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                use std::io::Read;
+                let _ = s.read_to_string(&mut stderr);
+            }
+            let tail: String = stderr
+                .chars()
+                .rev()
+                .take(500)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            set_job_status(
+                &jobs,
+                job_id,
+                JobStatus::Failed {
+                    error_code: "TranscodeFailed".into(),
+                    message: format!("ffmpeg exited with {status}: {tail}"),
+                },
+            );
+        }
+    });
+    ToolResult::text(format!(
+        "transcode job started → {} — poll get_job_status",
+        out_path.display()
+    ))
+    .with_data(json!({ "job_id": job_id, "output_path": out_path }))
+}
+
+// ─── Export (10 §3.15) + job tools (10 §6) ───────────────────────────────────
+
+fn find_export_preset(name: &str) -> Option<export_presets::ExportPreset> {
+    export_presets::built_in_presets()
+        .into_iter()
+        .chain(export_presets::load_custom_presets().unwrap_or_default())
+        .find(|p| p.name == name)
+}
+
+pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> ToolResult {
+    tracing::debug!("tool: export_sequence {}", args.sequence_id);
+    let bridge = match engine_bridge(state) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let tools = match ffmpeg_locate::locate() {
+        Ok(t) => t,
+        Err(e) => {
+            return err_code(
+                "FfmpegUnavailable",
+                format!("ffmpeg not found ({e}) — set PHOTONIC_FFMPEG_DIR or install ffmpeg"),
+            )
+        }
+    };
+    let seq_id = args.sequence_id;
+    // Snapshot the timeline NOW — the export renders this state even if the
+    // document keeps being edited (the worker gets a frozen clone).
+    let Some(project) = state.document.lock().await.timeline.clone() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&seq_id) else {
+        return ToolResult::error(format!("sequence {seq_id} not found"));
+    };
+    let seq_rate = seq.frame_rate;
+    if let Some(fi) = args.format_index {
+        if fi >= seq.formats.len() {
+            return ToolResult::error(format!(
+                "format_index {fi} out of range — sequence has {} format(s)",
+                seq.formats.len()
+            ));
+        }
+    }
+    let format_index = args
+        .format_index
+        .unwrap_or(seq.active_format)
+        .min(seq.formats.len().saturating_sub(1));
+    let (fw, fh) = (
+        seq.formats[format_index].width.max(1),
+        seq.formats[format_index].height.max(1),
+    );
+    let content_end = seq
+        .video_tracks
+        .iter()
+        .chain(seq.audio_tracks.iter())
+        .flat_map(|t| t.clips.iter())
+        .map(|c| c.end())
+        .max()
+        .unwrap_or(Tick(0));
+    let (start, end) = match &args.range {
+        Some(r) => {
+            let s = match resolve_tick(
+                r.start_ticks,
+                r.start_tc.as_deref(),
+                r.start_seconds,
+                Some(seq_rate),
+            ) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            let e2 = match resolve_tick(
+                r.end_ticks,
+                r.end_tc.as_deref(),
+                r.end_seconds,
+                Some(seq_rate),
+            ) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            (s, e2)
+        }
+        None => seq.work_range.unwrap_or((Tick(0), content_end)),
+    };
+    if end <= start {
+        return err_code(
+            "TickOutOfRange",
+            "export range is empty — sequence has no content and no explicit range was given",
+        );
+    }
+
+    let preset_name = args
+        .preset
+        .clone()
+        .unwrap_or_else(|| "Web H.264".to_string());
+    let Some(mut preset) = find_export_preset(&preset_name) else {
+        let names: Vec<String> = export_presets::built_in_presets()
+            .into_iter()
+            .chain(export_presets::load_custom_presets().unwrap_or_default())
+            .map(|p| p.name)
+            .collect();
+        return ToolResult::error(format!(
+            "no export preset named {preset_name:?} — available: {names:?}"
+        ));
+    };
+    if let Some(o) = &args.overrides {
+        match (o.width, o.height) {
+            (Some(w), Some(h)) => {
+                preset.resolution = export_presets::ResolutionSpec::Explicit { w, h }
+            }
+            (None, None) => {}
+            _ => {
+                return ToolResult::error(
+                    "overrides.width and overrides.height must be given together",
+                )
+            }
+        }
+        if let Some(fr) = o.frame_rate {
+            preset.frame_rate = export_presets::FrameRatePolicy::Explicit(fr);
+        }
+    }
+    let out_rate = match preset.frame_rate {
+        export_presets::FrameRatePolicy::Explicit(fr) => fr,
+        export_presets::FrameRatePolicy::MatchSequence => seq_rate,
+    };
+    let (out_w, out_h) = match preset.resolution {
+        export_presets::ResolutionSpec::SourceFormat => (fw, fh),
+        export_presets::ResolutionSpec::Explicit { w, h } => (w.max(1), h.max(1)),
+        export_presets::ResolutionSpec::Scale(s) => (
+            ((fw as f32 * s).round() as u32).max(1),
+            ((fh as f32 * s).round() as u32).max(1),
+        ),
+    };
+    if out_w > fw || out_h > fh {
+        return err_code(
+            "NotSupportedV1",
+            format!(
+                "export upscaling ({out_w}x{out_h} from a {fw}x{fh} format) is not supported \
+                 in P3 — the engine evaluates at format size and downscales only"
+            ),
+        );
+    }
+    // Sequence-audio muxing is the linked-audio story's seam: render
+    // video-only regardless of the preset's audio spec.
+    let audio_skipped = preset.audio.take().is_some();
+    if let Err(e) = export_presets::validate(&preset) {
+        return ToolResult::error(format!("preset invalid after overrides: {e}"));
+    }
+    let tpf_out = out_rate.ticks_per_frame().0.max(1);
+    let total_frames = ((end.0 - start.0 + tpf_out - 1) / tpf_out).max(1) as u64;
+    let out_path = std::path::PathBuf::from(&args.out_path);
+
+    // Frozen shadow project with the export format forced active.
+    let mut frozen = project;
+    if let Some(s) = frozen.sequences.get_mut(&seq_id) {
+        s.active_format = format_index;
+    }
+    let gpu = bridge.engine().gpu().clone();
+    let (job_id, cancel) = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .start("export_sequence");
+    let jobs = std::sync::Arc::clone(&state.video_jobs);
+    let params = ExportJobParams {
+        gpu,
+        frozen,
+        seq_id,
+        start,
+        seq_rate,
+        out_rate,
+        format_size: (fw, fh),
+        out_size: (out_w, out_h),
+        preset,
+        out_path: out_path.clone(),
+        total_frames,
+        tools,
+    };
+    std::thread::spawn(move || run_export_job(jobs, job_id, cancel, params));
+
+    ToolResult::text(format!(
+        "export job started — {total_frames} frame(s) at {out_w}x{out_h} to {} — poll get_job_status",
+        out_path.display()
+    ))
+    .with_data(json!({
+        "job_id": job_id,
+        "total_frames": total_frames,
+        "width": out_w,
+        "height": out_h,
+        "preset": preset_name,
+        "audio": if audio_skipped {
+            "skipped — sequence-audio muxing lands with the linked-audio story (video-only export in P3)"
+        } else {
+            "none in preset"
+        },
+    }))
+}
+
+struct ExportJobParams {
+    gpu: photonic_video::GpuContext,
+    frozen: TimelineProject,
+    seq_id: SequenceId,
+    start: Tick,
+    seq_rate: FrameRate,
+    out_rate: FrameRate,
+    format_size: (u32, u32),
+    out_size: (u32, u32),
+    preset: export_presets::ExportPreset,
+    out_path: std::path::PathBuf,
+    total_frames: u64,
+    tools: ffmpeg_locate::FfmpegTools,
+}
+
+/// Export worker (10 §6): a **dedicated** `EngineSession` over the frozen
+/// snapshot (isolated from the interactive session, so concurrent playback/
+/// render tool calls can't disturb the export's seek-then-wait loop), feeding
+/// `export::render_loop::export_frames` one readback frame per output tick.
+fn run_export_job(
+    jobs: std::sync::Arc<StdMutex<crate::handlers::video_jobs::JobRegistry>>,
+    job_id: crate::handlers::video_jobs::JobId,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    p: ExportJobParams,
+) {
+    set_job_status(
+        &jobs,
+        job_id,
+        JobStatus::Running {
+            progress: 0.0,
+            message: "starting engine session".into(),
+        },
+    );
+    let engine = photonic_video::VideoEngine::new(p.gpu.clone());
+    let shadow_doc = {
+        let mut d = photonic_core::Document::new("export-shadow", 1.0, 1.0);
+        d.timeline = Some(p.frozen);
+        std::sync::Arc::new(StdMutex::new(d))
+    };
+    let shadow_history = std::sync::Arc::new(StdMutex::new(
+        photonic_core::history::CommandHistory::new(1),
+    ));
+    let session = engine.open_session(shadow_doc, shadow_history);
+    session.send(EngineCmd::SetActiveSequence(p.seq_id));
+    // Export is always full quality (02 §7: identical headless path).
+    session.send(EngineCmd::SetProxyMode(ProxyMode::ForceOriginal));
+
+    let resolved = render_loop::ResolvedExport {
+        width: p.out_size.0,
+        height: p.out_size.1,
+        frame_rate: p.out_rate,
+        audio: None,
+        out_path: p.out_path.clone(),
+        colorimetry: photonic_render::color::Colorimetry::BT709_LIMITED,
+    };
+    let (fw, fh) = p.format_size;
+    let (ow, oh) = p.out_size;
+    let tpf_out = p.out_rate.ticks_per_frame().0.max(1);
+    let mut prev = session.latest_frame();
+    let mut frame_fail: Option<String> = None;
+    let cancel_inner = std::sync::Arc::clone(&cancel);
+    let frame_source = |i: u64| -> render_loop::Frame {
+        // Output tick → nearest sequence frame (05 §6.2 retiming: the engine
+        // presents exact sequence-grid ticks, so snap the output-grid tick).
+        let t = Tick(p.start.0 + i as i64 * tpf_out);
+        let snapped = p.seq_rate.frame_start(p.seq_rate.frame_at(t));
+        session.send(EngineCmd::Seek(snapped));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let frame = loop {
+            if let Some(f) = session.latest_frame() {
+                let fresh = prev
+                    .as_ref()
+                    .map(|q| !std::sync::Arc::ptr_eq(q, &f))
+                    .unwrap_or(true);
+                if fresh && f.time == snapped && f.sequence == p.seq_id {
+                    break Some(f);
+                }
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        match frame {
+            Some(f) => {
+                prev = Some(std::sync::Arc::clone(&f));
+                // Logical region only (bucket-padded texture, see render_frame_at).
+                let px = read_texture_rgba16f(&p.gpu, &f.texture, fw, fh);
+                let px = if (ow, oh) == (fw, fh) {
+                    px
+                } else {
+                    box_downscale(&px, fw, fh, ow, oh)
+                };
+                render_loop::Frame {
+                    width: ow,
+                    height: oh,
+                    rgba_premult: px.iter().flat_map(|q| q.iter().copied()).collect(),
+                }
+            }
+            None => {
+                // Poison the run: flag the failure, cancel between frames
+                // (export_frames checks the flag before the next frame), and
+                // hand back a black filler so the closure contract holds.
+                frame_fail = Some(format!(
+                    "frame {i} (tick {}) was not produced within 30s",
+                    snapped.0
+                ));
+                cancel_inner.store(true, Ordering::Relaxed);
+                render_loop::Frame {
+                    width: ow,
+                    height: oh,
+                    rgba_premult: vec![0.0; (ow * oh * 4) as usize],
+                }
+            }
+        }
+    };
+    let jobs_ev = std::sync::Arc::clone(&jobs);
+    let on_event = |event: render_loop::ExportEvent| {
+        if let render_loop::ExportEvent::Progress(pr) = event {
+            set_job_status(
+                &jobs_ev,
+                job_id,
+                JobStatus::Running {
+                    progress: if pr.total > 0 {
+                        pr.frame as f32 / pr.total as f32
+                    } else {
+                        0.0
+                    },
+                    message: format!(
+                        "{}/{} frames ({:.1} fps, eta {:.0}s)",
+                        pr.frame,
+                        pr.total,
+                        pr.fps,
+                        pr.eta.as_secs_f32()
+                    ),
+                },
+            );
+        }
+    };
+    let result = render_loop::export_frames(
+        &p.tools,
+        &p.preset,
+        &resolved,
+        p.total_frames,
+        frame_source,
+        None,
+        &cancel,
+        on_event,
+    );
+    session.shutdown();
+    match (result, frame_fail) {
+        (_, Some(msg)) => set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Failed {
+                error_code: "RenderTimeout".into(),
+                message: msg,
+            },
+        ),
+        (Err(e), None) => set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Failed {
+                error_code: "ExportFailed".into(),
+                message: e.to_string(),
+            },
+        ),
+        (Ok(()), None) => {
+            if cancel.load(Ordering::Relaxed) {
+                set_job_status(&jobs, job_id, JobStatus::Cancelled);
+            } else {
+                set_job_status(
+                    &jobs,
+                    job_id,
+                    JobStatus::Done {
+                        result: json!({
+                            "output_path": p.out_path,
+                            "total_frames": p.total_frames,
+                        }),
+                    },
+                );
+            }
+        }
+    }
+}
+
+pub async fn get_job_status(state: &AppState, args: GetJobStatusArgs) -> ToolResult {
+    tracing::debug!("tool: get_job_status {}", args.job_id);
+    let payload = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .status_json(args.job_id);
+    match payload {
+        Some(v) => {
+            let s = v["status"]["state"].as_str().unwrap_or("?").to_string();
+            ToolResult::text(format!("job {} — {s}", args.job_id)).with_data(v)
+        }
+        None => err_code(
+            "JobNotFound",
+            format!(
+                "job {} unknown or evicted (terminal jobs are retained 10 minutes)",
+                args.job_id
+            ),
+        ),
+    }
+}
+
+pub async fn cancel_job(state: &AppState, args: CancelJobArgs) -> ToolResult {
+    tracing::debug!("tool: cancel_job {}", args.job_id);
+    let outcome = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .request_cancel(args.job_id);
+    match outcome {
+        None => err_code(
+            "JobNotFound",
+            format!(
+                "job {} unknown or evicted (terminal jobs are retained 10 minutes)",
+                args.job_id
+            ),
+        ),
+        Some(true) => ToolResult::text(
+            "cancellation requested — the worker stops at its next check point \
+             (between frames for exports)",
+        ),
+        Some(false) => ToolResult::text("job already finished — nothing to cancel"),
+    }
+}
+
+pub async fn list_export_presets(_state: &AppState, _args: ListExportPresetsArgs) -> ToolResult {
+    tracing::debug!("tool: list_export_presets");
+    let mut out = Vec::new();
+    for p in export_presets::built_in_presets() {
+        let mut v = serde_json::to_value(&p).unwrap_or_default();
+        v["built_in"] = json!(true);
+        out.push(v);
+    }
+    let customs = export_presets::load_custom_presets().unwrap_or_default();
+    for p in customs {
+        let mut v = serde_json::to_value(&p).unwrap_or_default();
+        v["built_in"] = json!(false);
+        out.push(v);
+    }
+    ToolResult::text(format!("{} export preset(s)", out.len())).with_data(json!({ "presets": out }))
+}
+
+pub async fn save_export_preset(_state: &AppState, args: SaveExportPresetArgs) -> ToolResult {
+    tracing::debug!("tool: save_export_preset {}", args.name);
+    let mut preset: export_presets::ExportPreset = match serde_json::from_value(args.preset) {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolResult::error(format!(
+                "invalid preset object: {e} — see list_export_presets output for the serde shape"
+            ))
+        }
+    };
+    preset.name = args.name.clone();
+    if export_presets::built_in_presets()
+        .iter()
+        .any(|b| b.name == preset.name)
+    {
+        return err_code(
+            "NotSupportedV1",
+            format!(
+                "{:?} is a built-in preset (read-only) — choose another name",
+                preset.name
+            ),
+        );
+    }
+    if let Err(e) = export_presets::validate(&preset) {
+        return ToolResult::error(format!("preset failed validation: {e}"));
+    }
+    let mut customs = match export_presets::load_custom_presets() {
+        Ok(c) => c,
+        Err(e) => return ToolResult::error(format!("could not read custom presets: {e}")),
+    };
+    let replaced = customs.iter().any(|p| p.name == preset.name);
+    customs.retain(|p| p.name != preset.name);
+    customs.push(preset);
+    if let Err(e) = export_presets::save_custom_presets(&customs) {
+        return ToolResult::error(format!("could not persist custom presets: {e}"));
+    }
+    ToolResult::text(format!(
+        "{} custom preset {:?}",
+        if replaced { "updated" } else { "saved" },
+        args.name
+    ))
+}
+
+pub async fn delete_export_preset(_state: &AppState, args: DeleteExportPresetArgs) -> ToolResult {
+    tracing::debug!("tool: delete_export_preset {}", args.name);
+    if export_presets::built_in_presets()
+        .iter()
+        .any(|b| b.name == args.name)
+    {
+        return err_code(
+            "NotSupportedV1",
+            format!(
+                "{:?} is a built-in preset (read-only) — it cannot be deleted",
+                args.name
+            ),
+        );
+    }
+    let mut customs = match export_presets::load_custom_presets() {
+        Ok(c) => c,
+        Err(e) => return ToolResult::error(format!("could not read custom presets: {e}")),
+    };
+    let before = customs.len();
+    customs.retain(|p| p.name != args.name);
+    if customs.len() == before {
+        return ToolResult::error(format!("no custom preset named {:?}", args.name));
+    }
+    if let Err(e) = export_presets::save_custom_presets(&customs) {
+        return ToolResult::error(format!("could not persist custom presets: {e}"));
+    }
+    ToolResult::text(format!("deleted custom preset {:?}", args.name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1696,6 +3118,10 @@ mod tests {
             config: McpServerConfig::default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+            video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),
+            video_jobs: Arc::new(StdMutex::new(
+                crate::handlers::video_jobs::JobRegistry::new(),
+            )),
         }
     }
 
@@ -2606,6 +4032,25 @@ mod tests {
         "remove_bin",
         "set_asset_bin",
         "list_bins",
+        // P3 engine slice
+        "play",
+        "pause",
+        "seek",
+        "step",
+        "set_loop_range",
+        "set_proxy_mode",
+        "get_engine_status",
+        "render_frame_at",
+        "probe_media",
+        "generate_proxies",
+        "remove_proxy",
+        "transcode_media",
+        "export_sequence",
+        "get_job_status",
+        "cancel_job",
+        "list_export_presets",
+        "save_export_preset",
+        "delete_export_preset",
     ];
 
     #[test]
@@ -2637,5 +4082,353 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─── P3 engine slice tests (10 §9 hooks 4/5 + §7 headless matrix) ────────
+
+    /// GPU-gate: engine-backed tests skip (adapter-skip convention) when the
+    /// lazy bridge can't get an adapter. Detected via the structured
+    /// `EngineUnavailable` error the tools themselves return.
+    async fn engine_available(state: &AppState) -> bool {
+        let r = call(state, "get_engine_status", json!({})).await;
+        if r.is_error == Some(true) {
+            eprintln!("no GPU adapter — skipping engine-backed MCP test");
+            return false;
+        }
+        true
+    }
+
+    /// 10 §9 hook 4: registry/cancel/GC wiring through the REAL tool
+    /// dispatch, against a fake job — no ffmpeg, no engine, no GPU.
+    #[tokio::test]
+    async fn job_tools_lifecycle_with_a_fake_job() {
+        use crate::handlers::video_jobs::JobStatus;
+        let state = test_state();
+
+        // Unknown id → JobNotFound (structured, 10 §8).
+        let r = call(
+            &state,
+            "get_job_status",
+            json!({ "job_id": "00000000-0000-0000-0000-000000000000" }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(data(&r)["error_code"], "JobNotFound");
+
+        let (job_id, cancel) = state.video_jobs.lock().unwrap().start("fake");
+        let jid = json!({ "job_id": job_id });
+
+        let r = call(&state, "get_job_status", jid.clone()).await;
+        assert_ne!(r.is_error, Some(true));
+        assert_eq!(data(&r)["status"]["state"], "queued");
+
+        state.video_jobs.lock().unwrap().set_status(
+            job_id,
+            JobStatus::Running {
+                progress: 0.25,
+                message: "working".into(),
+            },
+        );
+        let r = call(&state, "get_job_status", jid.clone()).await;
+        assert_eq!(data(&r)["status"]["state"], "running");
+        assert_eq!(data(&r)["status"]["progress"], 0.25);
+
+        // cancel_job flags the worker's AtomicBool cooperatively.
+        let r = call(&state, "cancel_job", jid.clone()).await;
+        assert_ne!(r.is_error, Some(true));
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+
+        state.video_jobs.lock().unwrap().set_status(
+            job_id,
+            JobStatus::Done {
+                result: json!({ "ok": true }),
+            },
+        );
+        let r = call(&state, "get_job_status", jid.clone()).await;
+        assert_eq!(data(&r)["status"]["state"], "done");
+        assert_eq!(data(&r)["status"]["result"]["ok"], true);
+
+        // Cancelling a finished job is a no-op, not an error.
+        let r = call(&state, "cancel_job", jid.clone()).await;
+        assert_ne!(r.is_error, Some(true));
+
+        // GC with zero retention evicts the terminal job → JobNotFound.
+        state
+            .video_jobs
+            .lock()
+            .unwrap()
+            .gc(std::time::Duration::from_secs(0));
+        let r = call(&state, "get_job_status", jid).await;
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(data(&r)["error_code"], "JobNotFound");
+    }
+
+    /// 10 §7: the playback surface works headless — on a box with no audio
+    /// device the engine plays on the soft clock; none of the transport tools
+    /// error. (GPU-gated; on a no-GPU box the gate itself asserts the clean
+    /// `EngineUnavailable` degradation.)
+    #[tokio::test]
+    async fn playback_tools_degrade_cleanly_headless() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "video").await;
+        insert_solid_clip(&state, &track_id, 0, TICKS_PER_SECOND * 2).await;
+        if !engine_available(&state).await {
+            return;
+        }
+
+        let r = call(&state, "play", json!({ "sequence_id": seq_id })).await;
+        assert_ne!(r.is_error, Some(true), "play: {r:?}");
+        assert_eq!(
+            data(&r)["playing"],
+            true,
+            "headless play must run on the soft clock, not fail: {r:?}"
+        );
+
+        let r = call(&state, "pause", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "pause: {r:?}");
+        assert_eq!(data(&r)["playing"], false);
+
+        // Paused seek is a pure clock set — playhead confirms exactly. The
+        // target sits far past any soft-clock drift the play/pause window
+        // above could have accumulated (seeking past content is legal).
+        let tpf = TICKS_PER_SECOND / 30;
+        let target = 300 * tpf;
+        let r = call(
+            &state,
+            "seek",
+            json!({ "sequence_id": seq_id, "at_ticks": target }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "seek: {r:?}");
+        assert_eq!(data(&r)["playhead_ticks"], target);
+
+        // Step +1 pauses (already paused) and lands on the next frame start.
+        let r = call(&state, "step", json!({ "frames": 1 })).await;
+        assert_ne!(r.is_error, Some(true), "step: {r:?}");
+        assert_eq!(data(&r)["playing"], false);
+        assert_eq!(data(&r)["playhead_ticks"], target + tpf);
+
+        let r = call(
+            &state,
+            "set_loop_range",
+            json!({
+                "sequence_id": seq_id,
+                "range": { "start_ticks": 0, "end_ticks": TICKS_PER_SECOND }
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_loop_range: {r:?}");
+
+        let r = call(
+            &state,
+            "set_proxy_mode",
+            json!({ "mode": "force_original" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_proxy_mode: {r:?}");
+
+        let r = call(&state, "get_engine_status", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "get_engine_status: {r:?}");
+        assert_eq!(data(&r)["active_sequence"], seq_id);
+        assert_eq!(data(&r)["snapshot_synced"], true);
+    }
+
+    /// 10 §9 hook 5: two `render_frame_at` calls with the same args and
+    /// `output_format: raw_rgba16f` are byte-identical (the evaluator's pure-
+    /// function property) — plus a pixel probe and the png/scale smoke.
+    #[tokio::test]
+    async fn render_frame_at_is_deterministic() {
+        let state = test_state();
+        // Small format keeps the raw payload cheap (320*180*8 ≈ 460 KB).
+        let r = call(
+            &state,
+            "create_sequence",
+            json!({
+                "name": "Render Seq", "frame_rate": {"num": 30, "den": 1},
+                "formats": [{"name": "16:9", "width": 320, "height": 180}]
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "create_sequence: {r:?}");
+        let seq_id = data(&r)["sequence_id"].clone();
+        let track_id = create_track(&state, &seq_id, "video").await;
+        insert_solid_clip(&state, &track_id, 0, TICKS_PER_SECOND * 2).await;
+        if !engine_available(&state).await {
+            return;
+        }
+
+        let args = json!({
+            "sequence_id": seq_id,
+            "at_seconds": 0.5,
+            "quality": "full",
+            "output_format": "raw_rgba16f",
+        });
+        let r1 = call(&state, "render_frame_at", args.clone()).await;
+        assert_ne!(r1.is_error, Some(true), "render 1: {r1:?}");
+        let r2 = call(&state, "render_frame_at", args).await;
+        assert_ne!(r2.is_error, Some(true), "render 2: {r2:?}");
+        let (d1, d2) = (data(&r1), data(&r2));
+        assert_eq!(d1["width"], 320);
+        assert_eq!(d1["height"], 180);
+        // Exact frame tick: 0.5s @30fps = frame 15.
+        assert_eq!(d1["tick"], 15 * (TICKS_PER_SECOND / 30));
+        let b1 = d1["data_base64"].as_str().expect("raw payload");
+        let b2 = d2["data_base64"].as_str().expect("raw payload");
+        assert!(!b1.is_empty());
+        assert_eq!(b1, b2, "raw_rgba16f output must be byte-deterministic");
+
+        // Pixel probe: the solid #00ff00 clip must read back green
+        // (linear premultiplied f16, interleaved RGBA little-endian).
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b1)
+            .expect("base64");
+        assert_eq!(bytes.len(), 320 * 180 * 8);
+        let px = ((180 / 2) * 320 + 320 / 2) * 8;
+        let f16 = |o: usize| {
+            let bits = u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+            // Positive-normal decode is enough for a 0..1 color probe.
+            let exp = ((bits >> 10) & 0x1f) as i32;
+            let frac = (bits & 0x3ff) as f32;
+            if exp == 0 {
+                frac * 2f32.powi(-24)
+            } else {
+                (1.0 + frac / 1024.0) * 2f32.powi(exp - 15)
+            }
+        };
+        let (r, g, a) = (f16(px), f16(px + 2), f16(px + 6));
+        assert!(r < 0.05, "red channel should be ~0, got {r}");
+        assert!(g > 0.9, "green channel should be ~1, got {g}");
+        assert!(a > 0.99, "alpha should be 1, got {a}");
+
+        // PNG + scale smoke: returns an image content item at scaled dims.
+        let r = call(
+            &state,
+            "render_frame_at",
+            json!({
+                "sequence_id": seq_id,
+                "at_ticks": 0,
+                "quality": "preview",
+                "scale": 0.25,
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "png render: {r:?}");
+        assert!(
+            r.content
+                .iter()
+                .any(|c| matches!(c, ContentItem::Image { .. })),
+            "png output must include an image content item"
+        );
+        // The data payload sits after the image item here (text, image, json).
+        let d = match r.content.last() {
+            Some(ContentItem::Text { text }) => serde_json::from_str::<Value>(text).unwrap(),
+            other => panic!("expected trailing json payload, got {other:?}"),
+        };
+        assert_eq!(d["width"], 80);
+        assert_eq!(d["height"], 45);
+    }
+
+    /// Export E2E (GPU + ffmpeg): a 1-second solid-color sequence through
+    /// `export_sequence` → poll `get_job_status` to done → ffprobe the output
+    /// (dims + duration). Skips without a GPU adapter or ffmpeg toolchain.
+    #[tokio::test]
+    async fn export_sequence_e2e_solid_color() {
+        let state = test_state();
+        let r = call(
+            &state,
+            "create_sequence",
+            json!({
+                "name": "Export Seq", "frame_rate": {"num": 30, "den": 1},
+                "formats": [{"name": "1:1", "width": 128, "height": 128}]
+            }),
+        )
+        .await;
+        let seq_id = data(&r)["sequence_id"].clone();
+        let track_id = create_track(&state, &seq_id, "video").await;
+        insert_solid_clip(&state, &track_id, 0, TICKS_PER_SECOND).await;
+        if !engine_available(&state).await {
+            return;
+        }
+        let Some(tools) = photonic_video::media::ffmpeg_locate::locate_for_test() else {
+            eprintln!("ffmpeg/ffprobe not found — skipping export E2E test");
+            return;
+        };
+
+        let out = std::env::temp_dir().join(format!(
+            "photonic-mcp-export-e2e-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let r = call(
+            &state,
+            "export_sequence",
+            json!({
+                "sequence_id": seq_id,
+                "out_path": out.to_string_lossy(),
+                "preset": "Web H.264",
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "export_sequence: {r:?}");
+        let d = data(&r);
+        assert_eq!(d["total_frames"], 30);
+        let job_id = d["job_id"].clone();
+
+        // Poll to terminal state (cold engine spin-up + encode ≪ 120 s).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let final_state = loop {
+            let r = call(&state, "get_job_status", json!({ "job_id": job_id })).await;
+            assert_ne!(r.is_error, Some(true), "get_job_status: {r:?}");
+            let d = data(&r);
+            let s = d["status"]["state"].as_str().unwrap().to_string();
+            if s != "queued" && s != "running" {
+                break d;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "export did not finish in time (last: {d})"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        assert_eq!(
+            final_state["status"]["state"], "done",
+            "export failed: {final_state}"
+        );
+        assert!(out.exists(), "output file missing: {}", out.display());
+
+        // ffprobe the result: 128x128, ~1 s of video.
+        let probe = std::process::Command::new(&tools.ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+            ])
+            .arg(&out)
+            .output()
+            .expect("run ffprobe");
+        assert!(probe.status.success());
+        let meta: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+        let stream = meta["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["codec_type"] == "video")
+            .expect("video stream");
+        assert_eq!(stream["width"], 128);
+        assert_eq!(stream["height"], 128);
+        let duration: f64 = meta["format"]["duration"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (duration - 1.0).abs() < 0.2,
+            "expected ~1s of video, got {duration}s"
+        );
+        let _ = std::fs::remove_file(&out);
     }
 }

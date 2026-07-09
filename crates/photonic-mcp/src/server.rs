@@ -74,6 +74,16 @@ pub struct AppState {
     /// Session-scoped clipboard ring — stores up to 20 copied node snapshots.
     /// Uses StdMutex so the GUI thread can also read it without async.
     pub clipboard_ring: Arc<StdMutex<ClipboardRing>>,
+    /// Video engine slot (10-mcp-tools.md §2, lazy-headless variant): the
+    /// engine + session are created on the first engine-backed tool call via
+    /// an own headless adapter, so both run modes work with no `main.rs`
+    /// wiring (sharing the GUI's winit `GpuContext` is the app-integration
+    /// story's seam — see `handlers/video_jobs.rs` module docs).
+    pub video_engine: Arc<handlers::video_jobs::VideoEngineHandle>,
+    /// Async-job registry (10 §6): export/probe/transcode workers publish
+    /// status here; `get_job_status`/`cancel_job` poll it; the background
+    /// checkpoint-flush task GCs terminal entries after 10 minutes.
+    pub video_jobs: Arc<StdMutex<handlers::video_jobs::JobRegistry>>,
 }
 
 /// The MCP server — wraps axum and owns shared state.
@@ -101,6 +111,8 @@ impl McpServer {
                 config,
                 audit_log,
                 clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
+                video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
+                video_jobs: Arc::new(StdMutex::new(handlers::video_jobs::JobRegistry::new())),
             },
             running,
         }
@@ -125,9 +137,16 @@ impl McpServer {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
-                let doc = bg_state.document.lock().await;
-                let mut history = bg_state.history.lock().await;
-                history.tick_mcp_checkpoint(&doc);
+                {
+                    let doc = bg_state.document.lock().await;
+                    let mut history = bg_state.history.lock().await;
+                    history.tick_mcp_checkpoint(&doc);
+                }
+                // Second timer arm (10 §6): evict terminal video jobs after
+                // the 10-minute retention window.
+                if let Ok(mut jobs) = bg_state.video_jobs.lock() {
+                    jobs.gc(handlers::video_jobs::JOB_RETENTION);
+                }
             }
         });
 

@@ -5487,6 +5487,211 @@ pub fn tool_list() -> Value {
             "name": "list_bins",
             "description": "List every media bin (folder) in the pool.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+
+        // ── Video domain, P3 engine slice (10-mcp-tools.md §3.13/§3.14/§3.15,
+        // §3.1 engine-backed media ops, §6 async jobs). Playback tools mutate
+        // engine/session state only — no undo step, no document change. All
+        // engine-backed tools require a GPU adapter; on a machine without one
+        // they fail with error_code "EngineUnavailable".
+        {
+            "name": "play",
+            "description": "Start playback on the video engine (EngineCmd::Play). Session state only — no undo step. Audio opens lazily; on machines with no audio device playback proceeds on a soft clock instead of failing. Returns the engine status snapshot.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string", "description": "Sequence to activate before playing. Omit to keep the engine's current active sequence." }
+                }
+            }
+        },
+        {
+            "name": "pause",
+            "description": "Pause playback (EngineCmd::Pause). Session state only — no undo step. Returns the engine status snapshot including the paused playhead tick.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "seek",
+            "description": "Move the engine playhead (EngineCmd::Seek). Session state only — no undo step. Time precedence: at_ticks > at_tc > at_seconds. The engine presents the exact frame-start tick at/before the target.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer", "description": "Exact tick (highest precedence)." },
+                    "at_tc": { "type": "string", "description": "HH:MM:SS:FF or HH:MM:SS;FF, resolved against the sequence frame rate." },
+                    "at_seconds": { "type": "number", "description": "Convenience; sub-tick rounding possible, not authoritative." }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "step",
+            "description": "Single-frame step (CAP-004): pauses, then snaps the playhead exactly ±frames frame-starts and evaluates that tick. Session state only — no undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "frames": { "type": "integer", "description": "Signed frame count: +1 next frame, -1 previous." }
+                },
+                "required": ["frames"]
+            }
+        },
+        {
+            "name": "set_loop_range",
+            "description": "Set or clear the playback loop range (EngineCmd::SetLoop). Session state only — no undo step. Omit/null `range` to clear. Each bound follows the ticks > tc > seconds precedence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "range": {
+                        "type": ["object","null"],
+                        "description": "{start_ticks|start_tc|start_seconds, end_ticks|end_tc|end_seconds}; null clears the loop."
+                    }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "set_proxy_mode",
+            "description": "Set the session proxy policy (02 §6): auto | force_proxy | force_original. Session state, not document state — no undo step. NOTE: proxy generation has not landed; all modes currently decode originals (the flag still selects preview/full compile quality for cache-hash purposes).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["auto","force_proxy","force_original"] }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "get_engine_status",
+            "description": "Engine status snapshot (EngineStatus, 02 §1): playhead tick, playing flag, dropped-frame count, node-cache stats, audio xruns, snapshot doc revision, active sequence, and the most recent engine command error.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string", "description": "Informational — the engine session is a per-process singleton (10 §2)." }
+                }
+            }
+        },
+        {
+            "name": "render_frame_at",
+            "description": "Compile + evaluate the frame graph at one tick, headlessly, and return the image (10 §4 — the visual-feedback-loop tool). output_format `png` (default) is 8-bit sRGB for display; `raw_rgba16f` returns base64 linear premultiplied f16 pixels — byte-deterministic, the golden-frame comparison basis. COST WARNINGS: quality \"full\" on an uncached 4K composite can far exceed the preview eval budget — default to quality \"preview\" for iterative loops and \"full\" only for final verification frames; cold seeks pay a DECODE cost (up to ~150 ms per uncached GOP, more for originals) before any GPU work, so a loop scrubbing far-apart ticks is decode-dominated; repeated calls at nearby ticks mostly hit the node-result cache. Each call is independent (no held playback state).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer", "description": "Exact tick (highest precedence); snapped down to the frame start." },
+                    "at_tc": { "type": "string", "description": "HH:MM:SS:FF or HH:MM:SS;FF." },
+                    "at_seconds": { "type": "number", "description": "Convenience; sub-tick rounding possible." },
+                    "format_index": { "type": "integer", "description": "Which SequenceFormat (aspect variant). Default: the active format. Applied per-call only — the document's active format is untouched." },
+                    "quality": { "type": "string", "enum": ["preview","full"], "description": "preview = proxy-eligible sources; full = originals. See cost warnings." },
+                    "scale": { "type": "number", "description": "0 < scale <= 1 — deterministic box-downscale of the output." },
+                    "output_format": { "type": "string", "enum": ["png","raw_rgba16f"], "description": "Default png." }
+                },
+                "required": ["sequence_id","quality"]
+            }
+        },
+        {
+            "name": "probe_media",
+            "description": "Force (re-)probe an asset with ffprobe (async job — poll get_job_status). On completion refreshes MediaAsset.probe (duration/streams/colorimetry) and the xxh3 content_hash used for relinking. The probe field is engine-derived cache, not an undoable edit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "asset_id": { "type": "string" } },
+                "required": ["asset_id"]
+            }
+        },
+        {
+            "name": "generate_proxies",
+            "description": "Batch-generate editing proxies (02 §6). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1: the engine/proxy module has not landed and the evaluator decodes originals regardless of ProxyMode (proxies are never required for correctness, CAP-014).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_ids": { "type": "array", "items": { "type": "string" } },
+                    "force": { "type": "boolean" }
+                },
+                "required": ["asset_ids"]
+            }
+        },
+        {
+            "name": "remove_proxy",
+            "description": "Delete generated proxy files, reverting assets to original-only (05 §2.3). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1 (see generate_proxies).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_ids": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["asset_ids"]
+            }
+        },
+        {
+            "name": "transcode_media",
+            "description": "Transcode an asset to an editing-friendly intermediate via ffmpeg (async job — poll get_job_status; cancellable). Distinct from proxies: a user-picked codec, not the fixed proxy profile. The output file is NOT auto-imported; call import_media on the returned output_path if wanted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_id": { "type": "string" },
+                    "preset": { "type": "string", "enum": ["prores_proxy","prores_lt","dnxhr_lb","h264_high"] },
+                    "out_path": { "type": "string", "description": "Default: <source stem>.<preset>.<mov|mp4> next to the source." }
+                },
+                "required": ["asset_id","preset"]
+            }
+        },
+        {
+            "name": "export_sequence",
+            "description": "Start an export job (02 §7; async — poll get_job_status, cancellable between frames). Renders the timeline as snapshotted at call time through a dedicated engine session and encodes via the ffmpeg sidecar. Range defaults to the sequence work range, else [0, content end). VIDEO-ONLY in this build: the preset's audio spec is skipped (sequence-audio muxing is the linked-audio story). Upscaling beyond the format size returns NotSupportedV1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "out_path": { "type": "string", "description": "Destination file path. Extension should match the preset container." },
+                    "preset": { "type": "string", "description": "Preset name (see list_export_presets). Default \"Web H.264\"." },
+                    "format_index": { "type": "integer", "description": "Which SequenceFormat to export. Default: the active format." },
+                    "range": { "type": "object", "description": "{start_ticks|start_tc|start_seconds, end_ticks|end_tc|end_seconds} — ticks > tc > seconds precedence per bound." },
+                    "overrides": { "type": "object", "description": "{width?, height?, frame_rate?:{num,den}} — width/height together; nearest-source-frame retiming for an explicit frame rate (05 §6.2)." }
+                },
+                "required": ["sequence_id","out_path"]
+            }
+        },
+        {
+            "name": "get_job_status",
+            "description": "Poll an async job (export/probe/transcode — one registry, 10 §6). States: queued | running {progress, message} | done {result} | failed {error_code, message} | cancelled. Terminal jobs are retained 10 minutes, then evicted (JobNotFound).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "job_id": { "type": "string" } },
+                "required": ["job_id"]
+            }
+        },
+        {
+            "name": "cancel_job",
+            "description": "Request cancellation of an async job. Cooperative: the worker stops at its next check point (between frames for exports; partial output files are removed for transcodes). Cancelling an already-finished job is a no-op, not an error.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "job_id": { "type": "string" } },
+                "required": ["job_id"]
+            }
+        },
+        {
+            "name": "list_export_presets",
+            "description": "List export presets: the built-in catalog (05 §3.5, read-only) plus user-saved custom presets. Each entry is the full ExportPreset serde shape plus a built_in flag — use it as the template for save_export_preset.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "save_export_preset",
+            "description": "Create or overwrite a custom export preset (app-level config, 05 §3.6 — no document mutation, no undo step). Built-in preset names are refused (NotSupportedV1). The preset object is validated (alpha allow-list etc.) before persisting.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "preset": { "type": "object", "description": "Full ExportPreset object in its serde shape — copy one from list_export_presets and edit." }
+                },
+                "required": ["name","preset"]
+            }
+        },
+        {
+            "name": "delete_export_preset",
+            "description": "Delete a custom export preset (app-level config — no document mutation, no undo step). Built-ins are read-only and refuse deletion with NotSupportedV1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }
         }
     ])
 }

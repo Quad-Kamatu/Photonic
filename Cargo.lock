@@ -4107,6 +4107,7 @@ dependencies = [
  "photonic-core",
  "photonic-matte",
  "photonic-render",
+ "photonic-video",
  "pollster 0.3.0",
  "regex",
  "serde",
