@@ -1477,14 +1477,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "quarantined: builder died mid-story (session limit); repair story queued"]
     fn composition_with_merge_over_program() {
-        // Composition: SolidColor(a) merged over ClipIn(b) → Output.
+        // Composition: SolidColor(a) merged over ClipIn(b) → Output. The comp's
+        // SolidColor is WHITE and the host clip's source is BLACK, so the two
+        // sources stay distinct (identical colors would content-hash dedup to a
+        // single node — see `identical_solid_colors_dedup_to_one_node`; that is
+        // correct behaviour, so this fixture keeps them distinct on purpose to
+        // prove the Merge really pulls a *second* source).
         let (mut project, seq_id) = base_project();
         let tk = add_video_track(&mut project, seq_id);
 
         let clip_in = GraphNode::new(GraphOp::ClipIn);
-        let solid = GraphNode::new(GraphOp::SolidColor);
+        let mut solid = GraphNode::new(GraphOp::SolidColor);
+        solid.params.base.0.set(
+            "params.color",
+            PropValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+        );
         let merge = GraphNode::new(GraphOp::Merge { mode: BlendMode::Normal });
         let output = GraphNode::new(GraphOp::Output);
         let (ci, so, mg, ou) = (clip_in.id, solid.id, merge.id, output.id);
@@ -1514,16 +1522,56 @@ mod tests {
 
         let out = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        // The composition's Merge is present, with two SolidColor ancestors
-        // (the comp's SolidColor and the clip's own SolidColor via ClipIn).
-        assert!(out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Merge { .. })));
+
+        // Exactly one Merge — the composition's. A single fully-opaque clip folds
+        // without a track-fold Merge, so this is unambiguously the comp's node.
+        let merge_idx = out
+            .graph
+            .nodes
+            .iter()
+            .position(|n| matches!(n.op, IrOp::Merge { .. }))
+            .expect("composition Merge present");
+        assert_eq!(
+            out.graph.nodes.iter().filter(|n| matches!(n.op, IrOp::Merge { .. })).count(),
+            1,
+            "only the composition's Merge — no spurious track-fold Merge"
+        );
+
+        // The Merge pulls two DISTINCT sources: the comp's white SolidColor and
+        // the clip's black source bound via ClipIn (02 §2 step 3 — ClipIn binds
+        // to the host clip's source op).
+        let merge = &out.graph.nodes[merge_idx];
+        assert_eq!(merge.inputs.len(), 2, "binary Merge has both inputs wired");
+        for (input, _) in &merge.inputs {
+            assert!(
+                matches!(out.graph.nodes[input.0 as usize].op, IrOp::SolidColor { .. }),
+                "each Merge input is a SolidColor source"
+            );
+        }
         let solids = out
             .graph
             .nodes
             .iter()
             .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
             .count();
-        assert_eq!(solids, 2);
+        assert_eq!(solids, 2, "comp SolidColor + clip source via ClipIn stay distinct");
+
+        // Source-substitution (08 §4): the composition replaces ONLY the source
+        // op; the still-applied default chain rides on top. So the IR Output's
+        // input is the clip's default Transform2D, and that Transform2D's input
+        // is the composition's Merge — the comp's Output feeds the default chain,
+        // it does not become the terminal output itself.
+        let ir_out = out.graph.output.expect("compiled Output present");
+        let xf = out.graph.nodes[ir_out.0 as usize].inputs[0].0;
+        assert!(
+            matches!(out.graph.nodes[xf.0 as usize].op, IrOp::Transform2D { .. }),
+            "default Transform2D rides on top of the composition Output"
+        );
+        let xf_in = out.graph.nodes[xf.0 as usize].inputs[0].0;
+        assert_eq!(
+            xf_in.0 as usize, merge_idx,
+            "the still-applied default chain sits directly on the composition's Merge"
+        );
     }
 
     #[test]
