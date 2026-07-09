@@ -214,13 +214,18 @@ fn merge_short_cues(cues: Vec<CaptionCue>, params: &GroupingParams) -> Vec<Capti
             result.push(cue);
             continue;
         }
+        // `cue` is short: merge it into the *following* cue if one exists and
+        // the merge stays within the char budget. When the forward merge would
+        // overflow, leave `cue` short but DO NOT consume the next cue — it gets
+        // its own turn on the next loop iteration so it can still merge into
+        // *its* follower. (06 §3.5: every short cue is offered a forward merge;
+        // single left-to-right pass.)
         if iter.peek().is_some() {
-            let next = iter.next().unwrap();
-            if merged_char_len(&cue, &next) <= max_chars {
+            if merged_char_len(&cue, iter.peek().unwrap()) <= max_chars {
+                let next = iter.next().unwrap();
                 result.push(merge_cues(cue, next));
             } else {
                 result.push(cue);
-                result.push(next);
             }
         } else if let Some(prev) = result.pop() {
             if merged_char_len(&prev, &cue) <= max_chars {
@@ -289,12 +294,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "quarantined: builder died mid-story (session limit); repair story queued"]
     fn long_pause_forces_a_break() {
+        // Words are each >= min_cue_duration (800ms) so the Pass-1 gap break is
+        // NOT undone by the Pass-2 short-cue merge — this test isolates the
+        // forced-break behavior, not the merge behavior (06 §3.5).
         let words = vec![
-            w("hello", 0, 300),
+            w("hello", 0, 900),
             // Gap of 500ms > 250ms default threshold => forced break.
-            w("world", 800, 1100),
+            w("world", 1400, 2300),
         ];
         let cues = group_words_into_cues(&words, &GroupingParams::default());
         assert_eq!(cues.len(), 2);
@@ -310,12 +317,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "quarantined: builder died mid-story (session limit); repair story queued"]
     fn punctuation_heavy_input_breaks_on_sentence_end() {
+        // Durations chosen so both resulting cues clear min_cue_duration
+        // (800ms) and survive the Pass-2 merge; the ONLY break trigger here is
+        // the sentence-ending "Stop." (gaps are zero), isolating the
+        // sentence-end rule (06 §3.5).
         let words = vec![
-            w("Stop.", 0, 300),
-            w("Go", 300, 500), // no gap, but previous word ends a sentence
-            w("now", 500, 700),
+            w("Stop.", 0, 900),
+            w("Go", 900, 1400), // no gap, but previous word ends a sentence
+            w("now", 1400, 2000),
         ];
         let cues = group_words_into_cues(&words, &GroupingParams::default());
         assert_eq!(cues.len(), 2);
@@ -388,17 +398,43 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "quarantined: builder died mid-story (session limit); repair story queued"]
+    fn short_cue_still_merges_forward_after_a_prior_overflow() {
+        // Three cues after Pass 1: A (short, 60 chars), B (short, 30 chars),
+        // C (long, 10 chars), each forced apart by >250ms gaps. A+B = 91 chars
+        // > 84 budget, so A cannot merge into B and is left short. B, however,
+        // is itself short and B+C = 41 chars <= 84, so B MUST still merge
+        // forward into C (06 §3.5: every short cue is offered a forward merge).
+        // Regression guard: a naive pass that consumes B while rejecting the
+        // A+B merge would strand B and wrongly yield three cues.
+        let a = "a".repeat(60);
+        let b = "b".repeat(30);
+        let c = "c".repeat(10);
+        let words = vec![
+            w(&a, 0, 300),        // short (300ms)
+            w(&b, 1000, 1300),    // short (300ms), gap 700ms => break
+            w(&c, 2000, 3000),    // long (1000ms), gap 700ms => break
+        ];
+        let params = GroupingParams::default();
+        let cues = group_words_into_cues(&words, &params);
+        assert_eq!(cues.len(), 2, "B must merge forward into C");
+        assert_eq!(cues[0].text(), a);
+        assert_eq!(cues[1].text(), format!("{b} {c}"));
+    }
+
+    #[test]
     fn short_cue_left_short_when_merge_would_overflow_char_budget() {
-        let long_word = "x".repeat(80); // already over max_chars_per_cue (84) on its own with anything appended meaningfully
+        // "Hi." (3) + space (1) + 82 = 86 chars, which *exceeds* the
+        // max_chars_per_cue budget of 42*2=84. Merging is therefore disallowed
+        // ("provided the merge doesn't exceed ..." — 06 §3.5), so the short
+        // "Hi." cue is left short rather than losing text. (At exactly 84 the
+        // merge would be permitted — the budget is an inclusive ceiling.)
+        let long_word = "x".repeat(82);
         let words = vec![
             w("Hi.", 0, 300),
             w(&long_word, 3000, 3800),
         ];
         let params = GroupingParams::default();
         let cues = group_words_into_cues(&words, &params);
-        // Can't merge without exceeding max_chars_per_cue (42*2=84): left as
-        // two separate cues, the first one short.
         assert_eq!(cues.len(), 2);
         assert_eq!(cues[0].text(), "Hi.");
     }
