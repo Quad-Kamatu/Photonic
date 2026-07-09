@@ -32,6 +32,51 @@ cpal = "0.18"
 # shape (chunked, wait-free read/write, no allocation on the hot path) rather
 # than hand-rolling atomics. Dual MIT/Apache-2.0.
 rtrb = "0.3"
+# Provider job progress/cancellation channel (06 §2.1: `ProgressSink =
+# crossbeam_channel::Sender<ProviderProgress>`). Already resolved elsewhere in
+# the workspace (transitively) at 0.5.15; MIT/Apache-2.0, zero-cost MPMC/SPSC
+# channel, matches the thread-based (not async) job model the whole engine uses.
+crossbeam-channel = "0.5"
+# Lock-free single-value publish/read for the engine→GUI frame + status
+# handoff (02 §1: "publishes EngineFrame + EngineStatus via triple_buffer/watch
+# — GUI never blocks on engine"). arc-swap is the minimal fit: an atomic
+# `Arc` cell the engine stores into and the GUI loads from, wait-free on both
+# sides, no Mutex on the present path. MIT/Apache-2.0, zero transitive deps →
+# cargo-deny clean.
+arc-swap = "1"
+# Blocking HTTP client for the hosted AI provider adapter (06 §2.4
+# `hosted.rs`). Matches 06 §2.1's "blocking trait method on a provider worker"
+# model — no second (async) concurrency model introduced. Already a resolved,
+# vetted dependency of `photonic-matte` in this workspace (same "2.12" line),
+# so reusing it here adds no new dependency footprint. MIT/Apache-2.0. The
+# `json` feature (send_json/into_json) is required explicitly here because
+# per-package feature unification is scoped to this crate's own build graph
+# when building `-p photonic-video` alone.
+ureq = { version = "2.12", features = ["json"] }
+# The hosted adapter's generic-JSON contract carries WAV bytes as base64
+# (06 §2.4 `hosted.rs`); already a workspace dependency (screenshot encoding),
+# reused rather than hand-rolled.
+base64 = { workspace = true }
+# Block-on for the headless `GpuContext::request_blocking` (CLI/headless/MCP
+# entry that requests its own adapter, 02 §1) and export readback. Already a
+# workspace dependency; MIT/Apache-2.0.
+pollster = { workspace = true }
+# Uniform-buffer packing for the evaluator's fill/merge passes (graph/eval.rs).
+# Already the render crate's uniform-packing crate; MIT/Apache/Zlib.
+bytemuck = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Named pipe (FIFO) for the export encoder's second (audio) piped ffmpeg
+# input (export/encoder.rs) — a direct `libc::mkfifo` call rather than
+# shelling out to the `mkfifo` binary. Already resolved elsewhere in the
+# workspace transitively (cpal → libc) at a compatible version; MIT/Apache-2.0,
+# cargo-deny clean.
+libc = "0.2"
 
 [dev-dependencies]
 pollster = { workspace = true }
+# Local loopback HTTP stub for hosted-adapter request-shape tests (06 §2.4,
+# §8): asserts the exact request the adapter sends for both endpoint shapes
+# without any live network dependency. Dev-only, dual MIT/Apache-2.0, minimal
+# transitive footprint (ascii, chunked_transfer, httpdate, log).
+tiny_http = "0.12"

@@ -21,11 +21,9 @@ pub struct ResolvedParams {
 }
 
 /// Keyframe-resolved grade operator (07 §2's `ResolvedGradeOp`, the IR-side
-/// sibling of the authoring `GradeOp`). Payload finalized in P2/P7.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResolvedGradeOp {
-    _pinned_in_p7: (),
-}
+/// sibling of the authoring `GradeOp`). Finalized in P7 as the resolved grade
+/// stack payload — re-exported from `photonic-render` (GPU/CPU color math).
+pub use photonic_render::grade::ResolvedGradeOp;
 
 /// Batch of caption cues covering the compiled tick (06 §4). Glyph-run batching
 /// shape finalized in P5.

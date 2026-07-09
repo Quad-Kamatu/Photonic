@@ -1,10 +1,14 @@
 pub mod canvas;
 pub mod color;
 pub mod compositor;
+pub mod grade;
+pub mod grade_gpu;
 pub mod headless;
 mod headless_text;
+pub mod lut;
 pub mod pipeline;
 pub mod renderer;
+pub mod scopes;
 pub mod tessellator;
 pub mod text_outline;
 pub mod text_path;
@@ -12,8 +16,17 @@ pub mod video;
 
 pub use canvas::CanvasView;
 pub use color::{Colorimetry, Matrix, Range};
+pub use grade::{
+    apply_grade_cpu, resolve, ResolvedCdl, ResolvedCurves, ResolvedGradeOp, ResolvedGradePayload,
+    ResolvedHslQualifier, ResolvedLut3d, ResolvedMask,
+};
+pub use grade_gpu::{apply_grade_op_gpu, apply_grade_stack_gpu};
 pub use headless::{
     document_needs_cpu_compositor, ExportBackground, ExportOptions, HeadlessRenderer,
 };
+pub use lut::{parse_cube, CubeError, Lut3d};
 pub use renderer::PhotonicRenderer;
 pub use text_outline::{layout_text_flat, outline_document_text, resolve_document_font, ResolvedFace};
+pub use scopes::{
+    scopes_from_pixels_cpu, scopes_from_texture_gpu, Histogram, Scopes, Vectorscope, Waveform,
+};

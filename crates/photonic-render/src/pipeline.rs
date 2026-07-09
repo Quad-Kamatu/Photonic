@@ -1063,6 +1063,14 @@ mod tests {
     /// compile of the composite/blend math with no GPU device required.
     #[test]
     fn wgsl_shaders_parse_and_validate() {
+        // Grade + scope shaders splice a shared prelude at build time, so
+        // validate the expanded form the pipeline actually compiles.
+        let grade_math = crate::grade_gpu::expanded_math_shader();
+        let grade_curves = crate::grade_gpu::expanded_curves_shader();
+        let grade_lut3d = crate::grade_gpu::expanded_lut3d_shader();
+        let scope_hist = crate::scopes::expanded_histogram_shader();
+        let scope_wave = crate::scopes::expanded_waveform_shader();
+        let scope_vector = crate::scopes::expanded_vectorscope_shader();
         for (name, src) in [
             ("fill", FILL_SHADER),
             ("blur", BLUR_SHADER),
@@ -1070,6 +1078,12 @@ mod tests {
             ("convert", CONVERT_SHADER),
             ("yuv_convert", crate::video::YUV_CONVERT_SHADER),
             ("present", crate::video::PRESENT_SHADER),
+            ("grade_math", grade_math.as_str()),
+            ("grade_curves", grade_curves.as_str()),
+            ("grade_lut3d", grade_lut3d.as_str()),
+            ("scope_histogram", scope_hist.as_str()),
+            ("scope_waveform", scope_wave.as_str()),
+            ("scope_vectorscope", scope_vector.as_str()),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name} shader failed to parse: {e:?}"));
