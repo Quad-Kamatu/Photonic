@@ -77,6 +77,17 @@ fn resolve_tick(
 /// `HH:MM:SS:FF` or `HH:MM:SS;FF` (the `;` denotes NTSC drop-frame by
 /// convention only — drop-frame frame-count compensation is NOT applied in
 /// v1; documented simplification, not a hidden bug).
+///
+/// The `HH:MM:SS` field counts **frames**, not wall-clock seconds: a timecode
+/// addresses a position on the frame grid, so `SS` is `nominal_fps` frames
+/// (spec 10 §1.3, 01 §1). Resolving via wall-clock seconds would land a
+/// 1001-denominator rate (29.97 = 30000/1001) off its own frame boundaries —
+/// e.g. `00:01:00:00` @ 29.97 would fall ~1.8 frames early. Instead we count
+/// `total_frames = (h*3600 + m*60 + s) * nominal_fps + ff` and multiply by
+/// `FrameRate::ticks_per_frame`, so the result is always frame-aligned.
+///
+/// Returns `None` for malformed input or out-of-range components (negative
+/// values, `MM`/`SS >= 60`, or `FF >= nominal_fps`).
 fn parse_timecode(tc: &str, fr: FrameRate) -> Option<Tick> {
     let sep_pos = tc.rfind([':', ';'])?;
     let hms = &tc[..sep_pos];
@@ -89,9 +100,25 @@ fn parse_timecode(tc: &str, fr: FrameRate) -> Option<Tick> {
     let m: i64 = parts[1].parse().ok()?;
     let s: i64 = parts[2].parse().ok()?;
     let ff: i64 = ff_str.parse().ok()?;
-    let base = Tick::from_seconds(h * 3600 + m * 60 + s);
-    let frame = Tick(ff * fr.ticks_per_frame().0);
-    Some(base + frame)
+    // Nominal integer frame rate: round(num/den) (30000/1001 → 30). This is the
+    // number of frame slots a `SS` second occupies on the timecode grid.
+    let den = fr.den.max(1) as i64;
+    let nominal_fps = ((fr.num as i64) + den / 2) / den;
+    // Reject impossible components (spec 10 §1.3): no negatives, MM/SS < 60,
+    // and the frame field must be within one nominal second.
+    if h < 0
+        || m < 0
+        || s < 0
+        || ff < 0
+        || m >= 60
+        || s >= 60
+        || nominal_fps < 1
+        || ff >= nominal_fps
+    {
+        return None;
+    }
+    let total_frames = (h * 3600 + m * 60 + s) * nominal_fps + ff;
+    Some(Tick(total_frames * fr.ticks_per_frame().0))
 }
 
 /// Which `(SequenceId, TrackId)` owns a clip — a plain project scan, not edit
@@ -1756,6 +1783,94 @@ mod tests {
         assert_eq!(data(&err)["error_code"], json!("MissingSequenceContext"));
         // nothing supplied -> plain error.
         assert!(resolve_tick(None, None, None, Some(fr)).is_err());
+    }
+
+    // ── Unit test: parse_timecode is frame-grid exact for NTSC (spec 10 §1.3) ──
+
+    #[test]
+    fn parse_timecode_ntsc_lands_on_frame_grid() {
+        let fr = FrameRate::FPS_29_97; // 30000/1001
+        let tpf = fr.ticks_per_frame().0;
+        // 00:01:00:00 @ 29.97 is frame 1800 (60 s * 30 nominal fps), NOT 60
+        // wall-clock seconds. The old wall-clock parse landed ~1.8 frames early.
+        let t = parse_timecode("00:01:00:00", fr).unwrap();
+        assert_eq!(t, Tick(1800 * tpf), "00:01:00:00 must be frame 1800");
+        assert_eq!(t, Tick(42_378_336_000), "spec-mandated exact tick value");
+        assert_eq!(fr.frame_at(t), 1800);
+        // A wall-clock-seconds parse would have given 60 * TICKS_PER_SECOND,
+        // which is a different (off-grid) value.
+        assert_ne!(t, Tick::from_seconds(60));
+
+        // Frame field carries within the nominal second: 00:00:00:29 = frame 29.
+        assert_eq!(parse_timecode("00:00:00:29", fr).unwrap(), Tick(29 * tpf));
+        // ';' (drop-frame marker) is accepted but not compensated — same value.
+        assert_eq!(parse_timecode("00:01:00;00", fr).unwrap(), Tick(1800 * tpf));
+    }
+
+    #[test]
+    fn parse_timecode_integer_rate_matches_wall_clock() {
+        // For exact integer rates a whole-second timecode coincides with
+        // wall-clock seconds (1 s = 30 frames @ 30 fps).
+        let fr = FrameRate::FPS_30;
+        assert_eq!(
+            parse_timecode("00:00:01:00", fr).unwrap(),
+            Tick::from_seconds(1)
+        );
+        assert_eq!(
+            parse_timecode("01:00:00:00", fr).unwrap(),
+            Tick::from_seconds(3600)
+        );
+    }
+
+    #[test]
+    fn parse_timecode_rejects_out_of_range_and_malformed() {
+        let fr = FrameRate::FPS_30;
+        // Frame field must be < nominal_fps (30).
+        assert!(parse_timecode("00:00:00:30", fr).is_none());
+        // Minutes / seconds must be < 60.
+        assert!(parse_timecode("00:60:00:00", fr).is_none());
+        assert!(parse_timecode("00:00:60:00", fr).is_none());
+        // Negative components are rejected.
+        assert!(parse_timecode("-1:00:00:00", fr).is_none());
+        assert!(parse_timecode("00:-1:00:00", fr).is_none());
+        assert!(parse_timecode("00:00:00:-1", fr).is_none());
+        // Structurally malformed: missing frame field / wrong part count.
+        assert!(parse_timecode("00:01:00", fr).is_none());
+        assert!(parse_timecode("00:00:00:00:00", fr).is_none());
+        assert!(parse_timecode("garbage", fr).is_none());
+        assert!(parse_timecode("aa:bb:cc:dd", fr).is_none());
+        // Boundary that IS valid: last frame of the second.
+        assert!(parse_timecode("00:00:00:29", fr).is_some());
+    }
+
+    #[test]
+    fn parse_timecode_every_valid_tc_is_frame_aligned() {
+        // Property: for a spread of rates and components, any timecode the parser
+        // accepts lands exactly on a frame boundary (snap is a no-op).
+        for fr in [
+            FrameRate::FPS_24,
+            FrameRate::FPS_25,
+            FrameRate::FPS_30,
+            FrameRate::FPS_60,
+            FrameRate::FPS_29_97,
+            FrameRate::FPS_23_976,
+        ] {
+            let den = fr.den.max(1) as i64;
+            let nominal = ((fr.num as i64) + den / 2) / den;
+            for &(h, m, s) in &[(0, 0, 0), (0, 1, 0), (1, 23, 45), (2, 59, 59), (10, 0, 30)] {
+                for ff in [0, 1, nominal / 2, nominal - 1] {
+                    let tc = format!("{h:02}:{m:02}:{s:02}:{ff:02}");
+                    let t = parse_timecode(&tc, fr)
+                        .unwrap_or_else(|| panic!("{tc} @ {fr:?} should parse"));
+                    assert_eq!(fr.snap(t), t, "{tc} @ {fr:?} not frame-aligned");
+                    assert_eq!(
+                        fr.frame_start(fr.frame_at(t)),
+                        t,
+                        "{tc} @ {fr:?} not on its own frame boundary"
+                    );
+                }
+            }
+        }
     }
 
     // ── Tool family: sequence → track → clip → split → list (per work order) ─
