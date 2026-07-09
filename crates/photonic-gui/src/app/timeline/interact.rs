@@ -150,6 +150,83 @@ pub(crate) fn build_snap_candidates(
     out
 }
 
+/// Resolve a drag-start into its gesture kind and the *primary* clip the gesture
+/// operates on (04 §2.4 modifier/hit-test scheme). Pure: the caller supplies the
+/// dragged clip plus, for edge drags, the id of the neighbour that shares the
+/// exact boundary on that side (`None` when there is no flush neighbour, so a
+/// Roll is impossible).
+///
+/// Rules:
+/// - Body: Alt+Shift ⇒ Slide, Alt ⇒ Slip, plain ⇒ Move (primary = `clip`).
+/// - LeftEdge with a flush left neighbour and no Shift ⇒ Roll (primary = the LEFT
+///   clip, `Roll.right` = `clip`); Shift ⇒ RippleTrimStart; plain ⇒ TrimStart.
+/// - RightEdge with a flush right neighbour and no Shift ⇒ Roll (primary = `clip`,
+///   `Roll.right` = the right neighbour); Shift ⇒ RippleTrimEnd; plain ⇒ TrimEnd.
+///
+/// Shift always suppresses Roll in favour of a ripple trim, matching the drag
+/// commit logic in `mod.rs`.
+pub(crate) fn resolve_drag_kind(
+    zone: ClipZone,
+    alt: bool,
+    shift: bool,
+    clip: ClipId,
+    left_shared: Option<ClipId>,
+    right_shared: Option<ClipId>,
+) -> (DragKind, ClipId) {
+    match zone {
+        ClipZone::Body => {
+            let k = if alt && shift {
+                DragKind::Slide
+            } else if alt {
+                DragKind::Slip
+            } else {
+                DragKind::Move
+            };
+            (k, clip)
+        }
+        ClipZone::LeftEdge => {
+            if let (Some(prev), false) = (left_shared, shift) {
+                (DragKind::Roll { right: clip }, prev)
+            } else if shift {
+                (DragKind::RippleTrimStart, clip)
+            } else {
+                (DragKind::TrimStart, clip)
+            }
+        }
+        ClipZone::RightEdge => {
+            if let (Some(next), false) = (right_shared, shift) {
+                (DragKind::Roll { right: next }, clip)
+            } else if shift {
+                (DragKind::RippleTrimEnd, clip)
+            } else {
+                (DragKind::TrimEnd, clip)
+            }
+        }
+    }
+}
+
+/// Apply a marquee (rubber-band) rect over the visible clip rects, mutating
+/// `selection` (04 §2.6). Replace semantics (`additive == false`) clears the
+/// selection first; additive (Ctrl/Shift held) keeps it. A clip joins the
+/// selection when its rect *intersects* the marquee — touching or partial
+/// overlap counts, full containment is not required — and a clip already in the
+/// selection is never pushed twice.
+pub(crate) fn apply_marquee(
+    marquee: egui::Rect,
+    hits: impl IntoIterator<Item = (egui::Rect, ClipId)>,
+    additive: bool,
+    selection: &mut Vec<ClipId>,
+) {
+    if !additive {
+        selection.clear();
+    }
+    for (rect, clip) in hits {
+        if rect.intersects(marquee) && !selection.contains(&clip) {
+            selection.push(clip);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +309,120 @@ mod tests {
         let play_idx = cands.iter().position(|t| *t == Tick(42)).unwrap();
         let edge_idx = cands.iter().position(|t| *t == Tick(150)).unwrap();
         assert!(edge_idx < play_idx);
+    }
+
+    #[test]
+    fn resolve_drag_kind_body_modifiers() {
+        let clip = ClipId::new();
+        // Plain body ⇒ Move.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::Body, false, false, clip, None, None),
+            (DragKind::Move, clip)
+        );
+        // Alt+body ⇒ Slip.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::Body, true, false, clip, None, None),
+            (DragKind::Slip, clip)
+        );
+        // Alt+Shift+body ⇒ Slide.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::Body, true, true, clip, None, None),
+            (DragKind::Slide, clip)
+        );
+        // Shift alone on the body is not a slide — still Move.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::Body, false, true, clip, None, None),
+            (DragKind::Move, clip)
+        );
+    }
+
+    #[test]
+    fn resolve_drag_kind_left_edge() {
+        let clip = ClipId::new();
+        let prev = ClipId::new();
+        // Flush left neighbour, no Shift ⇒ Roll with the LEFT clip as primary and
+        // `clip` as the right side of the shared boundary.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::LeftEdge, false, false, clip, Some(prev), None),
+            (DragKind::Roll { right: clip }, prev)
+        );
+        // Shift suppresses Roll even with a flush neighbour ⇒ RippleTrimStart.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::LeftEdge, false, true, clip, Some(prev), None),
+            (DragKind::RippleTrimStart, clip)
+        );
+        // No flush neighbour, no Shift ⇒ plain TrimStart.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::LeftEdge, false, false, clip, None, None),
+            (DragKind::TrimStart, clip)
+        );
+        // No neighbour + Shift ⇒ RippleTrimStart.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::LeftEdge, false, true, clip, None, None),
+            (DragKind::RippleTrimStart, clip)
+        );
+    }
+
+    #[test]
+    fn resolve_drag_kind_right_edge() {
+        let clip = ClipId::new();
+        let next = ClipId::new();
+        // Flush right neighbour, no Shift ⇒ Roll with `clip` as primary (left of
+        // the boundary) and the neighbour as the right side.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::RightEdge, false, false, clip, None, Some(next)),
+            (DragKind::Roll { right: next }, clip)
+        );
+        // Shift suppresses Roll ⇒ RippleTrimEnd.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::RightEdge, false, true, clip, None, Some(next)),
+            (DragKind::RippleTrimEnd, clip)
+        );
+        // No flush neighbour, no Shift ⇒ plain TrimEnd.
+        assert_eq!(
+            resolve_drag_kind(ClipZone::RightEdge, false, false, clip, None, None),
+            (DragKind::TrimEnd, clip)
+        );
+    }
+
+    #[test]
+    fn apply_marquee_intersect_not_contains() {
+        let clip = ClipId::new();
+        let marquee = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(50.0, 50.0));
+        // Partial overlap (not fully contained) still selects — intersect, not
+        // contains, is the rule.
+        let partial = egui::Rect::from_min_max(egui::pos2(40.0, 40.0), egui::pos2(100.0, 100.0));
+        let mut sel = Vec::new();
+        apply_marquee(marquee, [(partial, clip)], false, &mut sel);
+        assert_eq!(sel, vec![clip]);
+
+        // A rect entirely outside the marquee is not selected.
+        let outside = egui::Rect::from_min_max(egui::pos2(60.0, 60.0), egui::pos2(80.0, 80.0));
+        let mut sel = Vec::new();
+        apply_marquee(marquee, [(outside, clip)], false, &mut sel);
+        assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn apply_marquee_replace_vs_additive() {
+        let existing = ClipId::new();
+        let hit = ClipId::new();
+        let inside = egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(20.0, 20.0));
+        let marquee = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(50.0, 50.0));
+
+        // Replace: prior selection is cleared, only the hit survives.
+        let mut sel = vec![existing];
+        apply_marquee(marquee, [(inside, hit)], false, &mut sel);
+        assert_eq!(sel, vec![hit]);
+
+        // Additive: prior selection is retained and the hit appended.
+        let mut sel = vec![existing];
+        apply_marquee(marquee, [(inside, hit)], true, &mut sel);
+        assert_eq!(sel, vec![existing, hit]);
+
+        // Additive never duplicates an already-selected clip.
+        let mut sel = vec![hit];
+        apply_marquee(marquee, [(inside, hit)], true, &mut sel);
+        assert_eq!(sel, vec![hit]);
     }
 }

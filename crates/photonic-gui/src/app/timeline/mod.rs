@@ -656,14 +656,12 @@ fn self_interact(
                     egui::Color32::TRANSPARENT,
                     egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
                 );
-                if !m.additive {
-                    selection.clear();
-                }
-                for h in hits {
-                    if h.rect.intersects(rect) && !selection.contains(&h.clip) {
-                        selection.push(h.clip);
-                    }
-                }
+                interact::apply_marquee(
+                    rect,
+                    hits.iter().map(|h| (h.rect, h.clip)),
+                    m.additive,
+                    selection,
+                );
             }
         }
     }
@@ -747,42 +745,20 @@ fn start_clip_drag(
 
     // Resolve (kind, primary clip). For a roll, `primary` is always the LEFT
     // clip and `Roll.right` its right neighbour, so the shared boundary is
-    // `primary.end()` (04 §2.4: roll is hit-test-based, not a modifier).
-    let (kind, primary): (DragKind, ClipId) = match zone {
-        interact::ClipZone::Body => {
-            let k = if mods.alt && mods.shift {
-                DragKind::Slide
-            } else if mods.alt {
-                DragKind::Slip
-            } else {
-                DragKind::Move
-            };
-            (k, clip)
-        }
-        interact::ClipZone::LeftEdge => {
-            let prev_shared = idx
-                .checked_sub(1)
-                .and_then(|i| t.clips.get(i))
-                .filter(|prev| prev.end() == c.start);
-            if let (Some(prev), false) = (prev_shared, mods.shift) {
-                (DragKind::Roll { right: clip }, prev.id)
-            } else if mods.shift {
-                (DragKind::RippleTrimStart, clip)
-            } else {
-                (DragKind::TrimStart, clip)
-            }
-        }
-        interact::ClipZone::RightEdge => {
-            let next_shared = t.clips.get(idx + 1).filter(|next| next.start == c.end());
-            if let (Some(next), false) = (next_shared, mods.shift) {
-                (DragKind::Roll { right: next.id }, clip)
-            } else if mods.shift {
-                (DragKind::RippleTrimEnd, clip)
-            } else {
-                (DragKind::TrimEnd, clip)
-            }
-        }
-    };
+    // `primary.end()` (04 §2.4: roll is hit-test-based, not a modifier). The
+    // neighbour ids for a flush boundary drive the (pure) resolution below.
+    let left_shared = idx
+        .checked_sub(1)
+        .and_then(|i| t.clips.get(i))
+        .filter(|prev| prev.end() == c.start)
+        .map(|prev| prev.id);
+    let right_shared = t
+        .clips
+        .get(idx + 1)
+        .filter(|next| next.start == c.end())
+        .map(|next| next.id);
+    let (kind, primary) =
+        interact::resolve_drag_kind(zone, mods.alt, mods.shift, clip, left_shared, right_shared);
 
     let candidates = interact::build_snap_candidates(seq, track, primary, playhead);
     let orig = ClipTiming::of(t.clips.iter().find(|c| c.id == primary)?);
