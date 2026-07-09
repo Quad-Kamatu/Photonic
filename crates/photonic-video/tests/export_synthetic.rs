@@ -28,7 +28,7 @@ use photonic_core::timeline::FrameRate;
 use photonic_render::color::Colorimetry;
 use photonic_video::export::convert::{working_frame_to_rgba8, working_frame_to_yuv_planes};
 use photonic_video::export::encoder::{plane_kind_for, AudioStreamSpec, PlaneKind};
-use photonic_video::export::presets::{built_in_presets, Container, VideoCodec};
+use photonic_video::export::presets::built_in_presets;
 use photonic_video::export::render_loop::{export_frames, ExportEvent, Frame, ResolvedExport};
 use photonic_video::media::ffmpeg_locate::{locate_for_test, FfmpegTools};
 
@@ -194,9 +194,32 @@ fn psnr_against_reference(
     ));
     std::fs::write(&ref_path, raw_ref).expect("write raw reference");
 
+    // The raw reference carries the *same* signal the encoder was fed:
+    // BT.709-matrixed, limited-range Y'CbCr (convert.rs range-compresses to
+    // `Range::Limited` for every built-in preset, and the encoder tags its
+    // output `bt709`/`color_range tv`). A rawvideo input has no color metadata
+    // of its own, so ffmpeg would assume a *different* default and auto-insert
+    // a range/matrix conversion inside the `psnr` graph — a systematic
+    // limited↔full luma shift (~10 code levels, ~28 dB Y) that swamps the real
+    // codec loss and has nothing to do with the encode. Tagging the reference
+    // to match the encoded stream makes `psnr` compare like-for-like signal, so
+    // the number reflects only encoder quality. (convert.rs's own math is
+    // verified against `photonic_render::color` by its `working_pixel_round_
+    // trips_through_decodes_yuv_to_working` unit test, <1e-3 linear-light — the
+    // >35 dB floor stays put; this fixes the measurement, not a conversion bug.)
     let out = Command::new(&tools.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "info"])
         .args(["-f", "rawvideo", "-pix_fmt", ref_pix_fmt])
+        .args([
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+        ])
         .args([
             "-s",
             &format!("{w}x{h}"),
@@ -275,13 +298,24 @@ fn run_export(
     )
     .unwrap_or_else(|e| panic!("export of {:?} failed: {e}", preset.name));
     assert!(saw_done, "export did not emit ExportEvent::Done");
-    assert!(out_path.exists(), "{:?} was not written", out_path);
+    // Image-sequence exports write to a printf pattern (`frame_%06d.png`); that
+    // literal path is never a real file — the per-frame expansions land in the
+    // parent directory instead. Assert *those* exist rather than the pattern.
+    if out_path.to_string_lossy().contains('%') {
+        let parent = out_path.parent().expect("pattern path has a parent dir");
+        let n = std::fs::read_dir(parent)
+            .unwrap_or_else(|e| panic!("read_dir {parent:?}: {e}"))
+            .filter_map(|e| e.ok())
+            .count();
+        assert!(n > 0, "no image-sequence frames written under {:?}", parent);
+    } else {
+        assert!(out_path.exists(), "{:?} was not written", out_path);
+    }
 }
 
 // ── H.264 (Social family, representative of all three) ──────────────────────
 
 #[test]
-#[ignore = "quarantined: builder died before first run (session limit); repair story queued"]
 fn export_h264_social_e2e_ffprobe_and_psnr() {
     let tools = tools_or_skip!();
     let preset = preset_by_name("Social 16:9");
@@ -314,7 +348,6 @@ fn export_h264_social_e2e_ffprobe_and_psnr() {
 // ── AV1 (SVT-AV1 on this workstation) ────────────────────────────────────────
 
 #[test]
-#[ignore = "quarantined: builder died before first run (session limit); repair story queued"]
 fn export_master_av1_high_e2e_ffprobe_and_psnr() {
     let tools = tools_or_skip!();
     let preset = preset_by_name("Master AV1 High");
@@ -370,7 +403,6 @@ fn export_web_h264_bitrate_mode_e2e_ffprobe() {
 // ── VP9 + alpha (WebM), CAP-021 alpha round-trip ─────────────────────────────
 
 #[test]
-#[ignore = "quarantined: builder died before first run (session limit); repair story queued"]
 fn export_webm_vp9_alpha_e2e_ffprobe_and_alpha_roundtrip() {
     let tools = tools_or_skip!();
     let preset = preset_by_name("WebM VP9 Alpha");
@@ -392,8 +424,14 @@ fn export_webm_vp9_alpha_e2e_ffprobe_and_alpha_roundtrip() {
     // (x=0) / opaque (x=w-1) columns (05 §8's "sample known
     // transparent/opaque regions, assert exact channel values").
     let raw_out = tmp_path("vp9_alpha_decoded.raw");
+    // The alpha channel of a VP9/WebM file is carried as a *side-data* stream
+    // (the `alpha_mode=1` tag above). ffmpeg's default/native VP9 decoder
+    // silently drops it and returns opaque (alpha=255); only the `libvpx-vp9`
+    // decoder exposes the alpha plane. Force it so the round-trip actually
+    // sees the encoded alpha (the encoder side is unchanged/correct).
     let status = Command::new(&tools.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+        .args(["-c:v", "libvpx-vp9"])
         .arg("-i")
         .arg(&out)
         .args(["-vframes", "1", "-f", "rawvideo", "-pix_fmt", "yuva420p"])
@@ -454,7 +492,6 @@ fn export_prores_mezzanine_e2e_ffprobe() {
 // ── GIF (paletted) ────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "quarantined: builder died before first run (session limit); repair story queued"]
 fn export_gif_e2e_ffprobe() {
     let tools = tools_or_skip!();
     let preset = preset_by_name("GIF");
@@ -474,7 +511,6 @@ fn export_gif_e2e_ffprobe() {
 // ── PNG Sequence (always-on alpha, straight, lossless round-trip) ───────────
 
 #[test]
-#[ignore = "quarantined: builder died before first run (session limit); repair story queued"]
 fn export_png_sequence_e2e_alpha_roundtrip() {
     let tools = tools_or_skip!();
     let preset = preset_by_name("PNG Sequence");

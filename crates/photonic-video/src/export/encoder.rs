@@ -367,9 +367,17 @@ fn push_video_codec_args(
             // the color-tagging `-vf` entirely for GIF outputs (mutually
             // exclusive with `setparams` on the same output stream) — the
             // caller skips the color-tag block for `VideoCodec::Gif`.
+            //
+            // The graph's first pad is labeled `[0:v]` (not left unlabeled): an
+            // unlabeled `filter_complex` input pad is auto-fed from an *unused*
+            // input stream, which the caller's explicit `-map 0:v` would have
+            // already consumed ("Cannot find an unused video input stream to
+            // feed the unlabeled input pad split"). The caller therefore also
+            // omits `-map 0:v` for GIF and lets `paletteuse`'s unlabeled output
+            // auto-map to the output file.
             args.extend([
                 "-filter_complex".into(),
-                "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse=dither=bayer".into(),
+                "[0:v]split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse=dither=bayer".into(),
             ]);
         }
         VideoCodec::Png => {
@@ -458,7 +466,17 @@ pub fn build_ffmpeg_args(
         }
     }
 
-    args.extend(["-map".into(), "0:v".into()]);
+    // GIF drives its video through a `filter_complex` whose `paletteuse`
+    // output auto-maps; an explicit `-map 0:v` there would both double-map and
+    // starve the filtergraph's `[0:v]` input pad (see the `VideoCodec::Gif`
+    // arm). Every other codec maps the raw video stream directly.
+    let is_gif = matches!(
+        spec.preset.video.as_ref().map(|v| v.codec),
+        Some(VideoCodec::Gif)
+    );
+    if !is_gif {
+        args.extend(["-map".into(), "0:v".into()]);
+    }
     if has_audio {
         args.extend(["-map".into(), "1:a".into()]);
     }
@@ -484,10 +502,6 @@ pub fn build_ffmpeg_args(
         args.push("-an".into());
     }
 
-    let is_gif = matches!(
-        spec.preset.video.as_ref().map(|v| v.codec),
-        Some(VideoCodec::Gif)
-    );
     if container_supports_color_tags(spec.preset.container) && !is_gif {
         args.extend([
             "-vf".into(),
