@@ -154,7 +154,11 @@ fn pretty_label(leaf: &str) -> String {
 // ── Reading current animated values (pure) ───────────────────────────────────
 
 /// The keyframe lane for `(target, path)` on `clip`, if one exists.
-fn track_for<'a>(clip: &'a Clip, target: &AnimTarget, path: &PropPath) -> Option<&'a PropertyTrack> {
+fn track_for<'a>(
+    clip: &'a Clip,
+    target: &AnimTarget,
+    path: &PropPath,
+) -> Option<&'a PropertyTrack> {
     match target {
         AnimTarget::ClipTransform { .. } => clip.transform.track(path),
         AnimTarget::ClipEffect { effect_index, .. } => {
@@ -309,7 +313,10 @@ fn handle_positions(
         lerp(k0.0, k1.0, out_handle[0]),
         lerp(k0.1, k1.1, out_handle[1]),
     );
-    let inp = Pos2::new(lerp(k0.0, k1.0, in_handle[0]), lerp(k0.1, k1.1, in_handle[1]));
+    let inp = Pos2::new(
+        lerp(k0.0, k1.0, in_handle[0]),
+        lerp(k0.1, k1.1, in_handle[1]),
+    );
     (out, inp)
 }
 
@@ -405,7 +412,11 @@ enum KfAction {
     },
 }
 
-fn commit(history: &mut CommandHistory, doc: &mut Document, cmd: photonic_core::timeline::TimelineCmd) {
+fn commit(
+    history: &mut CommandHistory,
+    doc: &mut Document,
+    cmd: photonic_core::timeline::TimelineCmd,
+) {
     history.execute_discrete(Command::Timeline(cmd), doc);
 }
 
@@ -535,10 +546,11 @@ pub(crate) fn draw_window(
 
     // Clone the targeted clip + its frame rate so rendering holds no borrow of
     // `doc` while we later mutate it through history.
-    let resolved = doc
-        .timeline
-        .as_ref()
-        .and_then(|p| find_clip(p, clip_id).cloned().zip(find_clip_fps(p, clip_id)));
+    let resolved = doc.timeline.as_ref().and_then(|p| {
+        find_clip(p, clip_id)
+            .cloned()
+            .zip(find_clip_fps(p, clip_id))
+    });
     let Some((clip, fps)) = resolved else {
         *target = None;
         save_state(ctx, st);
@@ -593,7 +605,11 @@ fn render_editor(
 ) {
     // Header: clip name + local playhead readout.
     ui.horizontal(|ui| {
-        let name = if clip.name.is_empty() { "Clip" } else { &clip.name };
+        let name = if clip.name.is_empty() {
+            "Clip"
+        } else {
+            &clip.name
+        };
         ui.label(egui::RichText::new(name).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             match playhead_local(playhead, clip) {
@@ -665,8 +681,7 @@ fn draw_prop_picker(
 
                 ui.horizontal(|ui| {
                     // Keyframe diamond toggle (add/remove at playhead).
-                    let (drect, dresp) =
-                        ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
+                    let (drect, dresp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
                     paint_diamond(
                         ui.painter(),
                         drect.center(),
@@ -691,9 +706,7 @@ fn draw_prop_picker(
                                     path: row.path.clone(),
                                     at,
                                 });
-                            } else if let Some(v) =
-                                value_at(clip, &row.target, &row.path, dt)
-                            {
+                            } else if let Some(v) = value_at(clip, &row.target, &row.path, dt) {
                                 actions.push(KfAction::Set {
                                     target: row.target.clone(),
                                     path: row.path.clone(),
@@ -705,10 +718,7 @@ fn draw_prop_picker(
 
                     // Selectable property label.
                     let selected = st.sel_row == i;
-                    if ui
-                        .selectable_label(selected, &row.label)
-                        .clicked()
-                    {
+                    if ui.selectable_label(selected, &row.label).clicked() {
                         st.sel_row = i;
                         st.sel_kf_at = None;
                     }
@@ -1124,7 +1134,15 @@ fn draw_float_curve(
             continue;
         }
         let selected = st.sel_kf_at == Some(kfs[i].at.0);
-        paint_diamond(&painter, *p, if selected { 6.0 } else { 4.5 }, true, selected, accent, muted);
+        paint_diamond(
+            &painter,
+            *p,
+            if selected { 6.0 } else { 4.5 },
+            true,
+            selected,
+            accent,
+            muted,
+        );
     }
     if active_drag.is_none() {
         if let Some((i, (out_p, in_p))) = handles {
@@ -1141,7 +1159,11 @@ fn draw_float_curve(
     if resp.double_clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
             if hit_index(&points, pos, 8.0).is_none() {
-                let at = Tick(snap_frame(x_to_tick(pos.x, dur, rect), fps).0.clamp(0, dur.0));
+                let at = Tick(
+                    snap_frame(x_to_tick(pos.x, dur, rect), fps)
+                        .0
+                        .clamp(0, dur.0),
+                );
                 let val = y_to_value(pos.y, vmin, vmax, rect);
                 actions.push(KfAction::Set {
                     target: row.target.clone(),
@@ -1181,7 +1203,10 @@ fn draw_float_curve(
                 }
             }
             ui.separator();
-            if ui.button(format!("{}  Delete keyframe", ph::TRASH)).clicked() {
+            if ui
+                .button(format!("{}  Delete keyframe", ph::TRASH))
+                .clicked()
+            {
                 actions.push(KfAction::Remove {
                     target: row.target.clone(),
                     path: row.path.clone(),
@@ -1194,7 +1219,9 @@ fn draw_float_curve(
     }
 
     // Delete key removes the selected keyframe (keyboard path, 13 §16).
-    if resp.hovered() && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+    if resp.hovered()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+    {
         if let Some(at) = st.sel_kf_at {
             actions.push(KfAction::Remove {
                 target: row.target.clone(),
@@ -1320,8 +1347,16 @@ mod tests {
     #[test]
     fn value_range_autofits_unbounded_props() {
         let mut tr = PropertyTrack::new("transform.x");
-        tr.keyframes.push(Keyframe::new(Tick(0), PropValue::Float(-10.0), Interp::Linear));
-        tr.keyframes.push(Keyframe::new(Tick(100), PropValue::Float(30.0), Interp::Linear));
+        tr.keyframes.push(Keyframe::new(
+            Tick(0),
+            PropValue::Float(-10.0),
+            Interp::Linear,
+        ));
+        tr.keyframes.push(Keyframe::new(
+            Tick(100),
+            PropValue::Float(30.0),
+            Interp::Linear,
+        ));
         let (lo, hi) = value_range(None, Some(&tr), 0.0);
         assert!(lo < -10.0 && hi > 30.0, "range=({lo},{hi})");
     }
@@ -1330,12 +1365,19 @@ mod tests {
     fn value_range_flat_curve_pads_symmetrically() {
         let (lo, hi) = value_range(None, None, 5.0);
         assert!(lo < 5.0 && hi > 5.0);
-        assert!((5.0 - lo - (hi - 5.0)).abs() < 1e-6, "symmetric around base");
+        assert!(
+            (5.0 - lo - (hi - 5.0)).abs() < 1e-6,
+            "symmetric around base"
+        );
     }
 
     #[test]
     fn hit_index_picks_nearest_within_radius() {
-        let pts = [Pos2::new(0.0, 0.0), Pos2::new(50.0, 0.0), Pos2::new(100.0, 0.0)];
+        let pts = [
+            Pos2::new(0.0, 0.0),
+            Pos2::new(50.0, 0.0),
+            Pos2::new(100.0, 0.0),
+        ];
         assert_eq!(hit_index(&pts, Pos2::new(48.0, 2.0), 8.0), Some(1));
         assert_eq!(hit_index(&pts, Pos2::new(25.0, 0.0), 8.0), None);
     }
@@ -1371,16 +1413,26 @@ mod tests {
 
     #[test]
     fn build_rows_covers_transform_and_effects() {
-        let mut clip = Clip::new(ClipSource::Vector { asset: photonic_core::timeline::AssetId::new() }, Tick(0), Tick(1000));
-        clip.effects.push(photonic_core::timeline::ClipEffect::new(EffectKind::Blur));
+        let mut clip = Clip::new(
+            ClipSource::Vector {
+                asset: photonic_core::timeline::AssetId::new(),
+            },
+            Tick(0),
+            Tick(1000),
+        );
+        clip.effects
+            .push(photonic_core::timeline::ClipEffect::new(EffectKind::Blur));
         let rows = build_rows(&clip);
         // 8 transform props + Blur's radius.
         assert!(rows.iter().any(|r| r.path.as_str() == "transform.x"));
         assert!(rows.iter().any(|r| r.path.as_str() == "transform.opacity"));
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r.target, AnimTarget::ClipEffect { effect_index: 0, .. })
-                && r.path.as_str() == "params.radius"));
+        assert!(rows.iter().any(|r| matches!(
+            r.target,
+            AnimTarget::ClipEffect {
+                effect_index: 0,
+                ..
+            }
+        ) && r.path.as_str() == "params.radius"));
     }
 
     #[test]
@@ -1388,8 +1440,16 @@ mod tests {
         let mut clip = Clip::new(ClipSource::Adjustment, Tick(0), Tick(1000));
         let path = PropPath::new("transform.x");
         let tr = clip.transform.track_mut(&path);
-        tr.insert_keyframe(Keyframe::new(Tick(0), PropValue::Float(0.0), Interp::Linear));
-        tr.insert_keyframe(Keyframe::new(Tick(1000), PropValue::Float(100.0), Interp::Linear));
+        tr.insert_keyframe(Keyframe::new(
+            Tick(0),
+            PropValue::Float(0.0),
+            Interp::Linear,
+        ));
+        tr.insert_keyframe(Keyframe::new(
+            Tick(1000),
+            PropValue::Float(100.0),
+            Interp::Linear,
+        ));
         let target = AnimTarget::ClipTransform { clip: clip.id };
         let v = value_at(&clip, &target, &path, Tick(500)).unwrap();
         assert_eq!(as_f64(&v), Some(50.0));
