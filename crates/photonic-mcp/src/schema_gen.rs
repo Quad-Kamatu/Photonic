@@ -5599,7 +5599,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "generate_proxies",
-            "description": "Batch-generate editing proxies (02 §6). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1: the engine/proxy module has not landed and the evaluator decodes originals regardless of ProxyMode (proxies are never required for correctness, CAP-014).",
+            "description": "Batch-generate editing proxies (02 §6; async job — poll get_job_status, cancellable). Transcodes each file-backed video asset to a half-res, all-intra H.264/MP4 proxy via the ffmpeg sidecar, stored in the sidecar cache dir keyed by content hash and attached to MediaAsset.proxy (status pending→ready). ForceProxy then decodes the proxy where present. Reuses a cached proxy unless force=true. Proxies are never required for correctness (CAP-014).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5611,7 +5611,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "remove_proxy",
-            "description": "Delete generated proxy files, reverting assets to original-only (05 §2.3). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1 (see generate_proxies).",
+            "description": "Detach the proxy from each asset and delete its cached proxy file, reverting assets to original-only (05 §2.3). Assets then decode originals regardless of ProxyMode until regenerated (see generate_proxies).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

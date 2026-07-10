@@ -651,19 +651,28 @@ impl MediaSources {
         if self.sources.contains_key(&(asset, proxy)) {
             return;
         }
-        let entry = self.build_source(asset);
+        let entry = self.build_source(asset, proxy);
         self.sources.insert((asset, proxy), entry);
     }
 
-    fn build_source(&self, asset: AssetId) -> Option<VideoSourceEntry> {
+    fn build_source(&self, asset: AssetId, proxy: bool) -> Option<VideoSourceEntry> {
         let tools = self.tools.clone()?;
         let project = self.project.as_ref()?;
         let media_asset = project.media.assets.get(&asset)?;
-        let path = match &media_asset.source {
+        let original = match &media_asset.source {
             AssetSource::File { path, .. } => path.clone(),
             // Embedded vectors go through RasterVector, never DecodeVideo.
             _ => return None,
         };
+        // Proxy selection (02 §6): decode the generated proxy input when it was
+        // requested (Quality::PREVIEW / ProxyMode::ForceProxy) and a Ready proxy
+        // is present; otherwise the original. Probe/keyframe/pts below then run
+        // against the *selected* file, so the whole source (dims, GOP structure,
+        // pts model) matches whichever media it decodes. Proxies are never
+        // required for correctness — a missing/pending proxy falls back to the
+        // original (CAP-014).
+        let path =
+            crate::media::proxy::resolve_decode_input(&original, media_asset.proxy.as_ref(), proxy);
         let details = probe_details(&tools, &path).ok()?;
         let video = details.probe.video.clone()?;
         let keyframes = KeyframeIndex::build(&tools, &path).ok()?;
@@ -672,9 +681,6 @@ impl MediaSources {
         } else {
             PtsKind::Cfr(video.frame_rate)
         };
-        // NOTE: `proxy` currently selects the same original media — proxy
-        // generation (02 §6, proxy/ module) hasn't landed; proxies are never
-        // required for correctness (CAP-014).
         let params = SourceParams {
             input: path,
             width: video.width,

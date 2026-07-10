@@ -78,6 +78,13 @@ impl DecodeSource {
         &self.ring
     }
 
+    /// The backing file this source decodes — original or proxy, per the
+    /// proxy-selection made at construction (02 §6). Exposed for the
+    /// proxy-selection integration test and diagnostics.
+    pub fn input_path(&self) -> &std::path::Path {
+        &self.params.input
+    }
+
     /// Source frame ordinal of the keyframe at `kf_tick`, for the pts model.
     fn start_frame(&self, kf_tick: Tick) -> i64 {
         match &self.params.pts_kind {

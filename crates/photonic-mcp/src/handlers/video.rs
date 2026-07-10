@@ -36,9 +36,9 @@ use base64::{engine::general_purpose, Engine as _};
 use photonic_core::history::Command;
 use photonic_core::timeline::{
     ops, AnimTarget, AssetId, AssetKind, Clip, ClipEffect, ClipId, ClipSource, ClipTiming,
-    EditError, FormatOp, FrameRate, Keyframe, Marker, MarkerId, PropPath, Ratio, SequenceId,
-    SpeedMap, Tick, TimelineCmd, TimelineProject, Track, TrackId, TrackSettings, Transition,
-    TICKS_PER_SECOND,
+    EditError, FormatOp, FrameRate, Keyframe, Marker, MarkerId, PropPath, ProxyRef, ProxyStatus,
+    Ratio, SequenceId, SpeedMap, Tick, TimelineCmd, TimelineProject, Track, TrackId, TrackSettings,
+    Transition, TICKS_PER_SECOND,
 };
 use photonic_core::Color;
 use photonic_video::export::convert as export_convert;
@@ -47,6 +47,7 @@ use photonic_video::export::render_loop;
 use photonic_video::graph::eval::read_texture_rgba16f;
 use photonic_video::media::ffmpeg_locate;
 use photonic_video::media::probe as video_probe;
+use photonic_video::media::proxy as video_proxy;
 use photonic_video::{EngineCmd, ProxyMode};
 use serde_json::json;
 use std::sync::atomic::Ordering;
@@ -2038,8 +2039,9 @@ pub async fn set_proxy_mode(state: &AppState, args: SetProxyModeArgs) -> ToolRes
     bridge.set_proxy_mode(mode);
     ToolResult::text(format!("proxy mode set to {mode:?}")).with_data(json!({
         "mode": format!("{mode:?}"),
-        "note": "proxy generation has not landed — Auto/ForceProxy currently decode originals \
-                 (proxies are never required for correctness, CAP-014)"
+        "note": "ForceProxy decodes generated proxies where present (see generate_proxies), \
+                 falling back to originals otherwise; Auto/ForceOriginal decode originals. \
+                 Proxies are never required for correctness (CAP-014)."
     }))
 }
 
@@ -2444,26 +2446,276 @@ pub async fn probe_media(state: &AppState, args: ProbeMediaArgs) -> ToolResult {
         .with_data(json!({ "job_id": job_id }))
 }
 
-pub async fn generate_proxies(_state: &AppState, args: GenerateProxiesArgs) -> ToolResult {
-    tracing::debug!("tool: generate_proxies ({} asset(s))", args.asset_ids.len());
-    err_code(
-        "NotSupportedV1",
-        format!(
-            "proxy generation is not built yet ({} asset(s) requested) — the engine/proxy \
-             module (02 §6, 05 §2.3) has not landed and the evaluator decodes originals \
-             regardless of ProxyMode (proxies are never required for correctness, CAP-014)",
-            args.asset_ids.len()
-        ),
-    )
+/// Write (or clear) an asset's `MediaAsset::proxy` and schedule an MCP
+/// checkpoint. `MediaAsset::proxy` is engine-managed cache (like `probe`) with
+/// no `TimelineCmd` variant, so it is written directly — mirroring
+/// `probe_media`'s commit (design rule 7 lock order: document before history).
+/// Returns whether the asset still existed.
+fn set_asset_proxy(
+    document: &std::sync::Arc<tokio::sync::Mutex<photonic_core::Document>>,
+    history: &std::sync::Arc<tokio::sync::Mutex<photonic_core::history::CommandHistory>>,
+    asset_id: AssetId,
+    proxy: Option<ProxyRef>,
+    checkpoint: &str,
+) -> bool {
+    let mut doc = document.blocking_lock();
+    let updated = match doc
+        .timeline
+        .as_mut()
+        .and_then(|p| p.media.assets.get_mut(&asset_id))
+    {
+        Some(asset) => {
+            asset.proxy = proxy;
+            true
+        }
+        None => false, // asset removed while generating — drop the result
+    };
+    let mut hist = history.blocking_lock();
+    hist.schedule_mcp_checkpoint(checkpoint.to_string());
+    updated
 }
 
-pub async fn remove_proxy(_state: &AppState, args: RemoveProxyArgs) -> ToolResult {
+pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> ToolResult {
+    tracing::debug!("tool: generate_proxies ({} asset(s))", args.asset_ids.len());
+    if args.asset_ids.is_empty() {
+        return ToolResult::error("no asset_ids given");
+    }
+    let tools = match ffmpeg_locate::locate() {
+        Ok(t) => t,
+        Err(e) => {
+            return err_code(
+                "FfmpegUnavailable",
+                format!("ffmpeg not found ({e}) — set PHOTONIC_FFMPEG_DIR or install ffmpeg"),
+            )
+        }
+    };
+    let force = args.force.unwrap_or(false);
+
+    // Resolve each asset to a file-backed video path under the doc lock; carry
+    // any already-computed content hash so we can reuse it. Non-video, embedded,
+    // and unknown assets are skipped with a reason (never an error — a batch
+    // proxies what it can).
+    let mut work: Vec<(AssetId, std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    {
+        let doc = state.document.lock().await;
+        let Some(project) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        for id in &args.asset_ids {
+            match project.media.assets.get(id) {
+                None => skipped.push(json!({ "asset_id": id, "reason": "not found" })),
+                Some(a) if a.kind != AssetKind::Video => {
+                    skipped.push(json!({ "asset_id": id, "reason": "not a video asset" }))
+                }
+                Some(a) => match &a.source {
+                    photonic_core::timeline::AssetSource::File { path, .. } => {
+                        work.push((*id, path.clone(), a.content_hash.clone()))
+                    }
+                    _ => skipped.push(json!({ "asset_id": id, "reason": "not file-backed" })),
+                },
+            }
+        }
+    }
+    if work.is_empty() {
+        return err_code("NoWorkableAssets", "no file-backed video assets to proxy")
+            .with_data(json!({ "skipped": skipped }));
+    }
+
+    let (job_id, cancel) = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .start("generate_proxies");
+    let jobs = std::sync::Arc::clone(&state.video_jobs);
+    let document = std::sync::Arc::clone(&state.document);
+    let history = std::sync::Arc::clone(&state.history);
+    let skipped_ret = skipped.clone();
+    let total = work.len();
+
+    std::thread::spawn(move || {
+        let cancel_fn = || cancel.load(Ordering::Relaxed);
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for (i, (asset_id, input, existing_hash)) in work.into_iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                set_job_status(&jobs, job_id, JobStatus::Cancelled);
+                return;
+            }
+            set_job_status(
+                &jobs,
+                job_id,
+                JobStatus::Running {
+                    progress: i as f32 / total as f32,
+                    message: format!("proxy {}/{}", i + 1, total),
+                },
+            );
+
+            if !input.exists() {
+                results.push(json!({
+                    "asset_id": asset_id, "status": "failed", "error": "source offline"
+                }));
+                continue;
+            }
+            // Content hash keys the cache file (survives project moves,
+            // rebuildable). Compute it now if import/probe never did.
+            let hash = match existing_hash {
+                Some(h) => h,
+                None => match video_probe::content_hash(&input) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        results.push(json!({
+                            "asset_id": asset_id, "status": "failed",
+                            "error": format!("content hash: {e}")
+                        }));
+                        continue;
+                    }
+                },
+            };
+            let cache_dir = video_proxy::proxy_cache_dir(None);
+            let out = video_proxy::proxy_cache_path(&cache_dir, &hash);
+
+            // Reuse an existing cached proxy unless the caller forces a rebuild.
+            if out.is_file() && !force {
+                set_asset_proxy(
+                    &document,
+                    &history,
+                    asset_id,
+                    Some(ProxyRef {
+                        path: out.clone(),
+                        status: ProxyStatus::Ready,
+                    }),
+                    "generate_proxies",
+                );
+                results.push(json!({
+                    "asset_id": asset_id, "status": "ready", "reused": true, "path": out
+                }));
+                continue;
+            }
+
+            // Mark Pending so proxy_status reflects reality mid-flight, then
+            // transcode → Ready / Failed.
+            set_asset_proxy(
+                &document,
+                &history,
+                asset_id,
+                Some(ProxyRef {
+                    path: out.clone(),
+                    status: ProxyStatus::Pending,
+                }),
+                "generate_proxies",
+            );
+            match video_proxy::generate_proxy(&tools, &input, &out, &cancel_fn) {
+                Ok(()) => {
+                    set_asset_proxy(
+                        &document,
+                        &history,
+                        asset_id,
+                        Some(ProxyRef {
+                            path: out.clone(),
+                            status: ProxyStatus::Ready,
+                        }),
+                        "generate_proxies",
+                    );
+                    results.push(json!({
+                        "asset_id": asset_id, "status": "ready", "path": out
+                    }));
+                }
+                Err(video_proxy::ProxyError::Cancelled) => {
+                    set_asset_proxy(
+                        &document,
+                        &history,
+                        asset_id,
+                        Some(ProxyRef {
+                            path: out.clone(),
+                            status: ProxyStatus::Failed,
+                        }),
+                        "generate_proxies",
+                    );
+                    set_job_status(&jobs, job_id, JobStatus::Cancelled);
+                    return;
+                }
+                Err(e) => {
+                    set_asset_proxy(
+                        &document,
+                        &history,
+                        asset_id,
+                        Some(ProxyRef {
+                            path: out.clone(),
+                            status: ProxyStatus::Failed,
+                        }),
+                        "generate_proxies",
+                    );
+                    results.push(json!({
+                        "asset_id": asset_id, "status": "failed", "error": e.to_string()
+                    }));
+                }
+            }
+        }
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Done {
+                result: json!({ "proxies": results, "skipped": skipped }),
+            },
+        );
+    });
+
+    ToolResult::text(format!(
+        "proxy generation started for {total} asset(s) — poll get_job_status"
+    ))
+    .with_data(json!({ "job_id": job_id, "skipped": skipped_ret }))
+}
+
+pub async fn remove_proxy(state: &AppState, args: RemoveProxyArgs) -> ToolResult {
     tracing::debug!("tool: remove_proxy ({} asset(s))", args.asset_ids.len());
-    err_code(
-        "NotSupportedV1",
-        "proxy generation is not built yet, so there are no proxy files to remove \
-         (see generate_proxies)",
-    )
+    if args.asset_ids.is_empty() {
+        return ToolResult::error("no asset_ids given");
+    }
+    // Detach the ProxyRef from each asset under the doc lock, collecting the
+    // file paths to delete afterward.
+    let mut assets: Vec<serde_json::Value> = Vec::new();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut mutated = false;
+    {
+        let mut doc = state.document.lock().await;
+        let Some(project) = doc.timeline.as_mut() else {
+            return ToolResult::error("no timeline project");
+        };
+        for id in &args.asset_ids {
+            match project.media.assets.get_mut(id) {
+                Some(a) => match a.proxy.take() {
+                    Some(p) => {
+                        mutated = true;
+                        files.push(p.path.clone());
+                        assets.push(json!({ "asset_id": id, "removed": true, "path": p.path }));
+                    }
+                    None => assets
+                        .push(json!({ "asset_id": id, "removed": false, "reason": "no proxy" })),
+                },
+                None => {
+                    assets.push(json!({ "asset_id": id, "removed": false, "reason": "not found" }))
+                }
+            }
+        }
+    }
+    // Best-effort delete the cache files (a missing file is fine — proxies are
+    // rebuildable and may be shared by content hash).
+    let mut files_deleted = 0usize;
+    for f in &files {
+        if std::fs::remove_file(f).is_ok() {
+            files_deleted += 1;
+        }
+    }
+    if mutated {
+        let mut hist = state.history.lock().await;
+        hist.schedule_mcp_checkpoint("remove_proxy");
+    }
+    ToolResult::text(format!(
+        "detached {} proxy ref(s), deleted {} file(s)",
+        files.len(),
+        files_deleted
+    ))
+    .with_data(json!({ "assets": assets, "files_deleted": files_deleted }))
 }
 
 impl TranscodePresetArg {
@@ -4560,5 +4812,70 @@ mod tests {
             "expected ~1s of video, got {duration}s"
         );
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// `remove_proxy` detaches the ProxyRef and deletes the cache file, and
+    /// `proxy_status` (via `list_media`) reflects that reality — ready → null.
+    /// No ffmpeg needed: proxy *generation* is covered by the engine
+    /// integration test in `photonic-video::media::proxy`.
+    #[tokio::test]
+    async fn remove_proxy_detaches_and_reflects_reality() {
+        let state = test_state();
+        let src = std::env::temp_dir().join(format!(
+            "photonic_mcp_proxy_src_{}.mp4",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&src, b"src bytes").unwrap();
+        let proxy_file =
+            std::env::temp_dir().join(format!("photonic_mcp_{}.proxy.mp4", uuid::Uuid::new_v4()));
+        std::fs::write(&proxy_file, b"proxy bytes").unwrap();
+
+        let r = call(
+            &state,
+            "import_media",
+            json!({ "paths": [src.to_string_lossy()] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "import_media: {r:?}");
+        let asset_id = data(&r)["assets"][0]["asset_id"].clone();
+
+        // Attach a Ready proxy directly (engine-managed cache field, like probe).
+        {
+            let mut doc = state.document.lock().await;
+            let a = doc
+                .timeline
+                .as_mut()
+                .unwrap()
+                .media
+                .assets
+                .values_mut()
+                .next()
+                .unwrap();
+            a.proxy = Some(photonic_core::timeline::ProxyRef {
+                path: proxy_file.clone(),
+                status: photonic_core::timeline::ProxyStatus::Ready,
+            });
+        }
+
+        // proxy_status reflects reality: ready.
+        let r = call(&state, "list_media", json!({})).await;
+        let assets = data(&r)["assets"].as_array().cloned().unwrap_or_default();
+        assert_eq!(assets[0]["proxy_status"], json!("ready"));
+
+        // remove_proxy detaches the ref and deletes the file.
+        let r = call(&state, "remove_proxy", json!({ "asset_ids": [asset_id] })).await;
+        assert_ne!(r.is_error, Some(true), "remove_proxy: {r:?}");
+        assert_eq!(data(&r)["files_deleted"], json!(1));
+        assert!(!proxy_file.exists(), "proxy file should be deleted");
+
+        // proxy_status now null.
+        let r = call(&state, "list_media", json!({})).await;
+        let assets = data(&r)["assets"].as_array().cloned().unwrap_or_default();
+        assert!(
+            assets[0]["proxy_status"].is_null(),
+            "proxy_status should be null after removal"
+        );
+
+        let _ = std::fs::remove_file(&src);
     }
 }
