@@ -122,6 +122,14 @@ impl PhotonicApp {
                         doc_modified = true;
                     }
                 }
+                // ── Captions (video mode) ─────────────────────────────────────
+                PanelAction::CaptionEditBatch(cmds) => {
+                    if !cmds.is_empty() {
+                        let batch = cmds.into_iter().map(Command::Timeline).collect();
+                        history.execute_discrete(Command::Batch(batch), doc);
+                        doc_modified = true;
+                    }
+                }
                 // ── Clip inspector / effects browser (video mode) ────────────
                 PanelAction::ClipEditDiscrete(cmd) => {
                     history.execute_discrete(Command::Timeline(cmd), doc);

@@ -865,6 +865,18 @@ pub enum PanelAction {
         asset: photonic_core::timeline::AssetId,
     },
 
+    // ── Captions (video mode, 04 §4.1 / 06) ──────────────────────────────────
+    // The caption-editor drawer is `PropPanelCtx`-based (carries `doc: &
+    // Document` for reads, no `&mut CommandHistory`) — same shape as `Media*`
+    // above. It builds already-validated `TimelineCmd`s itself (via
+    // `photonic_core::timeline::ops`/`CaptionCmd`, reading `ctx.doc`) and
+    // hands them up here as one undo step.
+    /// Several `TimelineCmd`s committed as ONE undo step (`Command::Batch`,
+    /// via `CommandHistory::execute_discrete`) — every caption/TTS mutation
+    /// (cue text/timing, split/merge, style cascade, auto-caption, voiceover
+    /// placement) routes through this single carrier.
+    CaptionEditBatch(Vec<photonic_core::timeline::TimelineCmd>),
+
     // ── Clip inspector / effects browser (video mode, 04 §4.1) ───────────────
     // These video panels are `PropPanelCtx`-based (like every left-rail
     // drawer) so they carry `doc: &Document` for reads but no `&mut
