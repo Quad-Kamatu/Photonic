@@ -80,3 +80,13 @@ pollster = { workspace = true }
 # without any live network dependency. Dev-only, dual MIT/Apache-2.0, minimal
 # transitive footprint (ascii, chunked_transfer, httpdate, log).
 tiny_http = "0.12"
+# Perf-budget benches (02 §8, gated by 11 §6 P3: `benches/engine.rs`). Dual
+# MIT/Apache-2.0, cargo-deny clean. `default-features = false` drops the
+# `plotters`/`rayon` defaults (HTML report generation, parallel sampling) —
+# not needed for the console pass/fail this crate's benches print; only
+# `cargo_bench_support` is required for the standard `cargo bench` harness.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "engine"
+harness = false
