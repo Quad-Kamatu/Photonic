@@ -1747,6 +1747,43 @@ mod blend_tests {
         );
     }
 
+    /// P4 (headless): a Gradient Overlay recolours the shape with a gradient.
+    /// A RED 20×20 rect with the default black→white overlay at angle 90°
+    /// (top→bottom) → the top is dark and the bottom is light, and neither is red.
+    #[test]
+    fn gradient_overlay_recolours_with_gradient() {
+        use photonic_core::effects::{GradientOverlay, LayerEffect};
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping gradient-overlay test");
+            return;
+        };
+        let mut doc = Document::new("go", 20.0, 20.0);
+        let mut node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        node.effects
+            .push(LayerEffect::GradientOverlay(GradientOverlay::default()));
+        doc.add_node(node, None);
+
+        let png = r.render_png_at_size(&doc, 20, 20);
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        let top = img.get_pixel(10, 3).0;
+        let bottom = img.get_pixel(10, 17).0;
+        assert!(
+            top[0] < 90 && top[1] < 90 && top[2] < 90,
+            "top of a top→bottom black→white overlay should be dark, got {top:?}"
+        );
+        assert!(
+            bottom[0] > 170 && bottom[1] > 170 && bottom[2] > 170,
+            "bottom should be light, got {bottom:?}"
+        );
+    }
+
     /// P7 (headless): a non-print layer stays off exports. A full-canvas BLUE
     /// non-print layer over a RED print layer → export shows RED.
     #[test]

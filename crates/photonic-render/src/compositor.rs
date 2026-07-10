@@ -161,6 +161,18 @@ fn composite_node(
                         pn,
                         co,
                     ),
+                    LayerEffect::GradientOverlay(go) if go.enabled => render_gradient_overlay(
+                        target,
+                        w,
+                        h,
+                        view,
+                        cov,
+                        &node.transform,
+                        node.opacity,
+                        gop,
+                        pn,
+                        go,
+                    ),
                     LayerEffect::Stroke(st) if st.enabled => render_stroke_effect(
                         target,
                         w,
@@ -275,6 +287,94 @@ fn render_color_overlay(
     if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
         let rgb = [overlay.color.r, overlay.color.g, overlay.color.b];
         composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |_, _| (rgb, a));
+    }
+}
+
+/// Build a user-space [`Gradient`] whose geometry is derived from a Gradient
+/// Overlay's `angle` + `scale` over the shape's document-space bbox, so it can
+/// be sampled directly at canvas coordinates. Photoshop semantics: the source
+/// gradient supplies the stops/kind, while angle + scale drive the geometry.
+///
+/// - Linear: the axis runs through the bbox centre along `angle` (0° = →,
+///   90° = ↓), its half-length the bbox extent projected onto that axis and
+///   multiplied by `scale` (1.0 = fit the bbox).
+/// - Radial: centred on the bbox, radius `= scale · ½·diagonal` (1.0 reaches
+///   the corners).
+fn build_overlay_gradient(
+    src: &photonic_core::style::Gradient,
+    angle_deg: f32,
+    scale: f32,
+    cx: f64,
+    cy: f64,
+    bw: f64,
+    bh: f64,
+) -> photonic_core::style::Gradient {
+    use photonic_core::style::{GradientKind, GradientUnits};
+    let scale = (scale as f64).max(1e-4);
+    let mut g = src.clone();
+    g.units = GradientUnits::UserSpaceOnUse;
+    match src.kind {
+        GradientKind::Linear => {
+            let theta = (angle_deg as f64).to_radians();
+            let (dx, dy) = (theta.cos(), theta.sin());
+            let half = 0.5 * scale * ((bw * dx).abs() + (bh * dy).abs());
+            g.coords = vec![cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half];
+        }
+        GradientKind::Radial => {
+            let r = 0.5 * scale * bw.hypot(bh);
+            g.coords = vec![cx, cy, cx, cy, r];
+        }
+    }
+    g
+}
+
+/// P4 layer style: a Gradient Overlay fills the node's shape with a gradient,
+/// composited with its own opacity + blend mode over the fill (mirrors
+/// [`render_color_overlay`], but samples a gradient per pixel).
+#[allow(clippy::too_many_arguments)]
+fn render_gradient_overlay(
+    base: &mut [u8],
+    w: u32,
+    h: u32,
+    view: &CanvasView,
+    cov: &mut [f32],
+    transform: &Transform,
+    node_opacity: f32,
+    gop: f32,
+    pn: &photonic_core::node::PathNode,
+    overlay: &photonic_core::effects::GradientOverlay,
+) {
+    let alpha = overlay.opacity * node_opacity * gop;
+    if alpha <= 0.0 || overlay.gradient.stops.is_empty() {
+        return;
+    }
+    let mesh = tessellate_fill(&pn.path_data, false);
+    // Document-space bbox of the shape (post-transform), like the fill path.
+    let m = &transform.matrix;
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in &mesh.vertices {
+        let x = m[0] * p[0] as f64 + m[2] * p[1] as f64 + m[4];
+        let y = m[1] * p[0] as f64 + m[3] * p[1] as f64 + m[5];
+        minx = minx.min(x);
+        miny = miny.min(y);
+        maxx = maxx.max(x);
+        maxy = maxy.max(y);
+    }
+    if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
+        let (bw, bh) = (maxx - minx, maxy - miny);
+        let g = build_overlay_gradient(
+            &overlay.gradient,
+            overlay.angle,
+            overlay.scale,
+            minx + bw * 0.5,
+            miny + bh * 0.5,
+            bw,
+            bh,
+        );
+        composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |cx, cy| {
+            let c = g.sample_at(cx, cy);
+            ([c[0], c[1], c[2]], c[3] * alpha)
+        });
     }
 }
 

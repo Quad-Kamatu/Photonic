@@ -495,7 +495,7 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             .open(forced_open)
                             .show(ui, |ui| {
                                 use photonic_core::effects::{
-                                    ColorOverlay, LayerEffect, StrokeEffect,
+                                    ColorOverlay, GradientOverlay, LayerEffect, StrokeEffect,
                                 };
                                 let mut effects = node.effects.clone();
                                 let mut changed = false;
@@ -571,6 +571,44 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                                 changed = true;
                                             }
                                         }
+                                        LayerEffect::GradientOverlay(go) => {
+                                            ui.horizontal(|ui| {
+                                                if ui.checkbox(&mut go.enabled, "").changed() {
+                                                    changed = true;
+                                                }
+                                                ui.label("Gradient Overlay");
+                                                if ui.small_button("Remove").clicked() {
+                                                    remove = Some(i);
+                                                }
+                                            });
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(&mut go.opacity, 0.0..=1.0)
+                                                        .text("opacity"),
+                                                )
+                                                .changed()
+                                            {
+                                                changed = true;
+                                            }
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(&mut go.angle, -180.0..=180.0)
+                                                        .text("angle"),
+                                                )
+                                                .changed()
+                                            {
+                                                changed = true;
+                                            }
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(&mut go.scale, 0.1..=3.0)
+                                                        .text("scale"),
+                                                )
+                                                .changed()
+                                            {
+                                                changed = true;
+                                            }
+                                        }
                                         other => {
                                             ui.horizontal(|ui| {
                                                 ui.label(other.kind());
@@ -589,6 +627,12 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                     if ui.button("+ Color Overlay").clicked() {
                                         effects.push(LayerEffect::ColorOverlay(
                                             ColorOverlay::default(),
+                                        ));
+                                        changed = true;
+                                    }
+                                    if ui.button("+ Gradient Overlay").clicked() {
+                                        effects.push(LayerEffect::GradientOverlay(
+                                            GradientOverlay::default(),
                                         ));
                                         changed = true;
                                     }

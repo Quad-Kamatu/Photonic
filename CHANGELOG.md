@@ -13,6 +13,15 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- **Gradient Overlay layer style (P4, #222).** The gradient-overlay effect now
+  renders: a shape's Layer Styles stack can hold a Gradient Overlay that fills it
+  with a gradient, composited with its own opacity + blend mode. Photoshop
+  semantics — the gradient supplies the stops/kind while `angle` (0° = →, 90° = ↓)
+  and `scale` (1.0 = fit the bbox) drive the geometry. Add it and tune
+  opacity/angle/scale from the Layer Styles panel. Full fidelity in the export
+  (PDF/raster/headless) compositor; live on-canvas GPU preview is a follow-up
+  (as with gradient strokes, the live path currently shows only solid effects).
+
 - **Artboard management over MCP.** Five new tools — `list_artboards`,
   `add_artboard`, `update_artboard`, `remove_artboard`, `set_active_artboard` —
   give agents the same artboard CRUD the GUI already had. All geometry edits go
