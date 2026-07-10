@@ -18,9 +18,9 @@
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
-    ops, AssetId, AssetKind, Clip, ClipSource, ClipTiming, FrameRate, Marker, MarkerId,
-    MediaAsset, Sequence, SequenceFormat, SequenceId, Tick, TimelineCmd, Track, TrackId, TrackKind,
-    TrackSettings, TICKS_PER_SECOND,
+    ops, AssetId, AssetKind, Clip, ClipSource, ClipTiming, FrameRate, Marker, MarkerId, MediaAsset,
+    Sequence, SequenceFormat, SequenceId, Tick, TimelineCmd, TimelineProject, Track, TrackId,
+    TrackKind, TrackSettings, TICKS_PER_SECOND,
 };
 
 /// Push one timeline command as a single, non-folding undo step.
@@ -247,6 +247,132 @@ pub(crate) fn set_track_height(doc: &mut Document, seq: SequenceId, track: Track
     }
 }
 
+// ── Linked clip expansion (14 §M-2, gap #8's UI half) ───────────────────────
+//
+// Core's `link_group` (`photonic_core::timeline::clip::LinkGroupId`) marks
+// clips that should move as a unit (e.g. an A/V pair split from one media
+// import). The functions below are the ONLY place the GUI expands a
+// single-clip edit intent into "also edit every linked partner" — always as
+// extra commands appended to the primary command, committed through
+// `commit_group` so the whole thing is exactly one undo step.
+//
+// Scope for this story is deliberately MOVE (+ cross-track move) and plain
+// delete (`remove_clip`, a "lift" — leaves a gap):
+// - Trim/ripple-trim/roll intentionally do NOT propagate — this matches the
+//   reference-NLE convention 14 §M-2 already calls out ("Pr: trim is
+//   independent, move is linked"), so a linked partner's own in/out points
+//   stay put when the other half gets trimmed.
+// - `ripple_delete` intentionally does NOT expand to partners either:
+//   ripple-closing the gap on a partner's own track would require shifting
+//   THAT track too, which is the not-yet-built Sync Lock concept (14 §M-9).
+//   Ripple-deleting a linked clip today only removes+ripples its own track;
+//   a linked partner is left in place until §M-9 lands.
+// - No "detach audio from video" UI path exists yet (grep confirms) to seed
+//   a link group from an edit — `ops::link_clips` is there on the core side
+//   for whenever that story lands; until then link groups can only be
+//   established directly against `TimelineProject` (e.g. by a test, or by
+//   import-time wiring outside this story's territory).
+
+/// Every OTHER clip in `clip`'s link group within `seq`, paired with the
+/// track that currently owns it. Empty when `clip` isn't linked or has no
+/// partners. Reuses `ops::clips_in_link_group` (a whole-project scan) rather
+/// than re-deriving group membership, then resolves each id back to a track
+/// within THIS sequence — link groups are a within-sequence concept, so a
+/// member id that doesn't resolve to a track here is simply skipped (can't
+/// happen in practice).
+fn link_partners(
+    p: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+) -> Vec<(TrackId, photonic_core::timeline::ClipId)> {
+    let Some(s) = p.sequences.get(&seq) else {
+        return Vec::new();
+    };
+    let Some(group) = s
+        .track(track)
+        .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+        .and_then(|c| c.link_group)
+    else {
+        return Vec::new();
+    };
+    ops::clips_in_link_group(p, group)
+        .into_iter()
+        .filter(|id| *id != clip)
+        .filter_map(|id| {
+            s.tracks()
+                .find(|t| t.clips.iter().any(|c| c.id == id))
+                .map(|t| (t.id, id))
+        })
+        .collect()
+}
+
+/// Expand a move-by-`delta` edit on `clip` to every linked partner (14 §M-2,
+/// gap #8's UI half — "linked A/V clips move as a unit"). Each partner
+/// shifts by the IDENTICAL tick delta on ITS OWN track: this never
+/// reassigns a partner to a different track, only the dragged clip's own
+/// track can change (see `move_clip_cross_track`). A partner that can't take
+/// the shift (would go negative, or collides with a neighbour on its own
+/// track) is silently dropped from the batch rather than blocking the
+/// primary move — the same per-member guard `ripple_trim` uses above.
+///
+/// This is the reusable "expand a single-clip edit to the whole link group"
+/// helper: the caller builds its own primary-clip command, `extend`s the
+/// `Vec` with this, then commits through `commit_group`.
+pub(crate) fn expand_link_group_move(
+    p: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+    delta: Tick,
+) -> Vec<TimelineCmd> {
+    if delta.0 == 0 {
+        return Vec::new();
+    }
+    let Some(s) = p.sequences.get(&seq) else {
+        return Vec::new();
+    };
+    link_partners(p, seq, track, clip)
+        .into_iter()
+        .filter_map(|(ptrack, pclip)| {
+            let start = s.track(ptrack)?.clips.iter().find(|c| c.id == pclip)?.start;
+            let new_start = start + delta;
+            if new_start.0 < 0 {
+                return None;
+            }
+            ops::move_clip(p, seq, ptrack, pclip, new_start).ok()
+        })
+        .collect()
+}
+
+/// Expand a delete (`remove_clip`'s "lift" semantics — leaves a gap, no
+/// ripple) to every linked partner of `clip` within `seq`, so deleting one
+/// half of a linked pair takes the other half with it. See the module note
+/// above for why `ripple_delete` deliberately does NOT use this.
+pub(crate) fn expand_link_group_delete(
+    p: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+) -> Vec<TimelineCmd> {
+    link_partners(p, seq, track, clip)
+        .into_iter()
+        .filter_map(|(ptrack, pclip)| ops::remove_clip(p, seq, ptrack, pclip).ok())
+        .collect()
+}
+
+/// Commit `cmds` as a single command when there's exactly one — preserving
+/// the exact undo shape a caller with no linked partners already relies on
+/// (`Command::Timeline`, not a one-element `Batch`) — or as one
+/// `Command::Batch` undo step when linked partners rode along.
+fn commit_group(history: &mut CommandHistory, doc: &mut Document, mut cmds: Vec<TimelineCmd>) {
+    match cmds.len() {
+        0 => {}
+        1 => commit(history, doc, cmds.pop().expect("len == 1 checked above")),
+        _ => commit_batch(history, doc, cmds),
+    }
+}
+
 // ── Clip edits ──────────────────────────────────────────────────────────────
 
 pub(crate) fn move_clip(
@@ -260,14 +386,29 @@ pub(crate) fn move_clip(
     let Some(p) = doc.timeline.as_ref() else {
         return;
     };
-    if let Ok(cmd) = ops::move_clip(p, seq, track, clip, new_start) {
-        commit(history, doc, cmd);
-    }
+    let Ok(cmd) = ops::move_clip(p, seq, track, clip, new_start) else {
+        return;
+    };
+    let old_start = match &cmd {
+        TimelineCmd::MoveClip { old_start, .. } => *old_start,
+        _ => unreachable!("ops::move_clip always returns MoveClip"),
+    };
+    let mut cmds = vec![cmd];
+    cmds.extend(expand_link_group_move(
+        p,
+        seq,
+        track,
+        clip,
+        new_start - old_start,
+    ));
+    commit_group(history, doc, cmds);
 }
 
 /// Move a clip to a different track via `ops::move_clip_to_track` — a single
 /// lossless `MoveClip` command (its inverse restores the clip to its original
-/// track + position), rather than composing remove+insert.
+/// track + position), rather than composing remove+insert. A linked partner
+/// rides along on ITS OWN track by the same delta (it is never itself
+/// reassigned to `to_track`).
 pub(crate) fn move_clip_cross_track(
     doc: &mut Document,
     history: &mut CommandHistory,
@@ -280,9 +421,23 @@ pub(crate) fn move_clip_cross_track(
     let Some(p) = doc.timeline.as_ref() else {
         return;
     };
-    if let Ok(cmd) = ops::move_clip_to_track(p, seq, from_track, clip, new_start, Some(to_track)) {
-        commit(history, doc, cmd);
-    }
+    let Ok(cmd) = ops::move_clip_to_track(p, seq, from_track, clip, new_start, Some(to_track))
+    else {
+        return;
+    };
+    let old_start = match &cmd {
+        TimelineCmd::MoveClip { old_start, .. } => *old_start,
+        _ => unreachable!("ops::move_clip_to_track always returns MoveClip"),
+    };
+    let mut cmds = vec![cmd];
+    cmds.extend(expand_link_group_move(
+        p,
+        seq,
+        from_track,
+        clip,
+        new_start - old_start,
+    ));
+    commit_group(history, doc, cmds);
 }
 
 pub(crate) fn trim(
@@ -427,6 +582,10 @@ pub(crate) fn split(
     }
 }
 
+/// Remove a clip. A linked partner (14 §M-2) is removed in the SAME undo
+/// step — deleting one half of a linked pair takes the other half with it,
+/// matching the "linked A/V clips move [and delete] as a unit" behavior a
+/// reference NLE gives a linked selection.
 pub(crate) fn remove_clip(
     doc: &mut Document,
     history: &mut CommandHistory,
@@ -437,9 +596,12 @@ pub(crate) fn remove_clip(
     let Some(p) = doc.timeline.as_ref() else {
         return;
     };
-    if let Ok(cmd) = ops::remove_clip(p, seq, track, clip) {
-        commit(history, doc, cmd);
-    }
+    let Ok(cmd) = ops::remove_clip(p, seq, track, clip) else {
+        return;
+    };
+    let mut cmds = vec![cmd];
+    cmds.extend(expand_link_group_delete(p, seq, track, clip));
+    commit_group(history, doc, cmds);
 }
 
 pub(crate) fn ripple_delete(
@@ -480,6 +642,27 @@ pub(crate) fn set_clip_enabled(
     let mut new = existing;
     new.enabled = enabled;
     if let Ok(cmd) = ops::set_clip_prop(p, seq, track, new) {
+        commit(history, doc, cmd);
+    }
+}
+
+/// Set (or clear, with `None`) a clip's organizational color label
+/// (14-nle-parity §M-1, gap #7's UI half) — the clip context menu's "Label"
+/// submenu routes through here; the swatch palette itself lives in
+/// `clips::CLIP_LABEL_SWATCHES` (a GUI concern, per `Clip::color_label`'s
+/// doc comment).
+pub(crate) fn set_clip_color_label(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+    label: Option<u8>,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmd) = ops::set_clip_color_label(p, seq, track, clip, label) {
         commit(history, doc, cmd);
     }
 }
@@ -729,5 +912,180 @@ mod format_tests {
         h.undo(&mut doc);
         assert_eq!(active(&doc, seq), (0, 1920, 1080));
         assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod link_group_tests {
+    use super::*;
+    use photonic_core::timeline::{ClipId, Sequence, TimelineProject};
+
+    /// A project with one active sequence and an empty V1 + A1 track pair,
+    /// ready for clips to be inserted and linked.
+    fn doc_with_two_tracks() -> (Document, CommandHistory, SequenceId, TrackId, TrackId) {
+        let mut project = TimelineProject::new();
+        let seq = Sequence::new("s", FrameRate::new(30, 1), 1920, 1080);
+        let seq_id = project.insert_sequence(seq);
+        project.active_sequence = Some(seq_id);
+        let mut doc = Document::new("t", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+        let mut history = CommandHistory::new(64);
+
+        let v = Track::new(TrackKind::Video, "V1");
+        let v_id = v.id;
+        let a = Track::new(TrackKind::Audio, "A1");
+        let a_id = a.id;
+        let p = doc.timeline.as_ref().unwrap();
+        let add_v = ops::add_track(p, seq_id, v, None).unwrap();
+        history.execute_discrete(Command::Timeline(add_v), &mut doc);
+        let p = doc.timeline.as_ref().unwrap();
+        let add_a = ops::add_track(p, seq_id, a, None).unwrap();
+        history.execute_discrete(Command::Timeline(add_a), &mut doc);
+
+        (doc, history, seq_id, v_id, a_id)
+    }
+
+    /// Insert an `Adjustment`-source clip `[start, start+duration)` on
+    /// `track`, returning its id.
+    fn insert(
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        seq: SequenceId,
+        track: TrackId,
+        start: Tick,
+        duration: Tick,
+    ) -> ClipId {
+        let clip = Clip::new(ClipSource::Adjustment, start, duration);
+        let id = clip.id;
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = ops::insert_clip(p, seq, track, clip).unwrap();
+        history.execute_discrete(Command::Timeline(cmd), doc);
+        id
+    }
+
+    /// Link two clips into the same group (mirrors what a future "detach
+    /// audio from video" path would establish at import/split time).
+    fn link(
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        seq: SequenceId,
+        track_a: TrackId,
+        clip_a: ClipId,
+        track_b: TrackId,
+        clip_b: ClipId,
+    ) {
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = ops::link_clips(p, seq, track_a, clip_a, track_b, clip_b).unwrap();
+        let batch = cmds.into_iter().map(Command::Timeline).collect();
+        history.execute_discrete(Command::Batch(batch), doc);
+    }
+
+    fn start_of(doc: &Document, seq: SequenceId, track: TrackId, clip: ClipId) -> Tick {
+        doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(track)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == clip)
+            .unwrap()
+            .start
+    }
+
+    fn clip_exists(doc: &Document, seq: SequenceId, track: TrackId, clip: ClipId) -> bool {
+        doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(track)
+            .unwrap()
+            .clips
+            .iter()
+            .any(|c| c.id == clip)
+    }
+
+    #[test]
+    fn move_carries_the_linked_partner_by_the_same_delta_in_one_undo_step() {
+        let (mut doc, mut history, seq, v_track, a_track) = doc_with_two_tracks();
+        let vclip = insert(&mut doc, &mut history, seq, v_track, Tick(0), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(0), Tick(100));
+        link(&mut doc, &mut history, seq, v_track, vclip, a_track, aclip);
+
+        // Move the VIDEO clip by +50 ticks — the linked audio clip on its
+        // own track must ride along by the identical delta.
+        move_clip(&mut doc, &mut history, seq, v_track, vclip, Tick(50));
+        assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(50));
+        assert_eq!(start_of(&doc, seq, a_track, aclip), Tick(50));
+
+        // A single undo restores BOTH — proves it landed as one undo step,
+        // not two.
+        history.undo(&mut doc);
+        assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(0));
+        assert_eq!(start_of(&doc, seq, a_track, aclip), Tick(0));
+    }
+
+    #[test]
+    fn move_of_an_unlinked_clip_leaves_other_clips_untouched() {
+        let (mut doc, mut history, seq, v_track, a_track) = doc_with_two_tracks();
+        let vclip = insert(&mut doc, &mut history, seq, v_track, Tick(0), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(0), Tick(100));
+        // No link this time.
+
+        move_clip(&mut doc, &mut history, seq, v_track, vclip, Tick(30));
+        assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(30));
+        assert_eq!(start_of(&doc, seq, a_track, aclip), Tick(0));
+    }
+
+    #[test]
+    fn cross_track_move_carries_the_linked_partner_on_its_own_track() {
+        let (mut doc, mut history, seq, v_track, a_track) = doc_with_two_tracks();
+        // A second video track so the primary clip has somewhere to move
+        // cross-track to, without touching the audio track's own position.
+        let p = doc.timeline.as_ref().unwrap();
+        let v2 = Track::new(TrackKind::Video, "V2");
+        let v2_id = v2.id;
+        let add_v2 = ops::add_track(p, seq, v2, None).unwrap();
+        history.execute_discrete(Command::Timeline(add_v2), &mut doc);
+
+        let vclip = insert(&mut doc, &mut history, seq, v_track, Tick(0), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(0), Tick(100));
+        link(&mut doc, &mut history, seq, v_track, vclip, a_track, aclip);
+
+        move_clip_cross_track(&mut doc, &mut history, seq, v_track, v2_id, vclip, Tick(20));
+
+        // Primary clip moved to V2 at the new start.
+        assert_eq!(start_of(&doc, seq, v2_id, vclip), Tick(20));
+        assert!(!clip_exists(&doc, seq, v_track, vclip));
+        // Linked audio clip stayed on A1 (never reassigned) but shifted by
+        // the same +20 delta.
+        assert_eq!(start_of(&doc, seq, a_track, aclip), Tick(20));
+
+        history.undo(&mut doc);
+        assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(0));
+        assert_eq!(start_of(&doc, seq, a_track, aclip), Tick(0));
+    }
+
+    #[test]
+    fn delete_carries_the_linked_partner_in_one_undo_step() {
+        let (mut doc, mut history, seq, v_track, a_track) = doc_with_two_tracks();
+        let vclip = insert(&mut doc, &mut history, seq, v_track, Tick(0), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(0), Tick(100));
+        link(&mut doc, &mut history, seq, v_track, vclip, a_track, aclip);
+
+        remove_clip(&mut doc, &mut history, seq, v_track, vclip);
+        assert!(!clip_exists(&doc, seq, v_track, vclip));
+        assert!(!clip_exists(&doc, seq, a_track, aclip));
+
+        // One undo restores BOTH.
+        history.undo(&mut doc);
+        assert!(clip_exists(&doc, seq, v_track, vclip));
+        assert!(clip_exists(&doc, seq, a_track, aclip));
+    }
+
+    #[test]
+    fn delete_of_an_unlinked_clip_leaves_other_clips_untouched() {
+        let (mut doc, mut history, seq, v_track, a_track) = doc_with_two_tracks();
+        let vclip = insert(&mut doc, &mut history, seq, v_track, Tick(0), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(0), Tick(100));
+
+        remove_clip(&mut doc, &mut history, seq, v_track, vclip);
+        assert!(!clip_exists(&doc, seq, v_track, vclip));
+        assert!(clip_exists(&doc, seq, a_track, aclip));
     }
 }
