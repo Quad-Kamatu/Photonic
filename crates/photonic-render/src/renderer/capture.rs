@@ -22,6 +22,7 @@ impl PhotonicRenderer {
     /// Build this frame's geometry and render it to an offscreen texture, returning
     /// the RGBA8 PNG bytes. Drives the real windowed pipeline (`render_scene`) with
     /// no surface — used by headless captures and tests.
+    #[allow(dead_code)] // test/headless helper — unused in a plain release build
     pub(crate) fn render_capture(&mut self) -> Vec<u8> {
         let (verts, idxs) = self.update();
         self.capture_png(&verts, &idxs)

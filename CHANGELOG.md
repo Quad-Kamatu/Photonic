@@ -21,7 +21,9 @@ embeds this file to show a "What's New" popup after an update.
   and blends over the canvas through the composite shader; opaque/Normal-only
   documents keep the single-pass fast path. A layer's per-node blur effects (drop
   shadow / object blur / feather) are rendered inside its isolated unit, so they
-  composite at the layer's opacity + blend too.
+  composite at the layer's opacity + blend too. Text on a non-trivial layer dims
+  with the layer (its opacity is folded into the text), and vector text-on-path
+  now renders correctly under the isolated path as a top overlay.
 
 - **Gradient Overlay layer style (P4, #222).** The gradient-overlay effect now
   renders: a shape's Layer Styles stack can hold a Gradient Overlay that fills it

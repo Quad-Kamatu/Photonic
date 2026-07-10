@@ -679,9 +679,15 @@ impl PhotonicRenderer {
                 // edits and per-instance overrides take effect live.
                 let orig_id = node.id;
                 let node_layer_ord = node_ordinal.get(&orig_id).copied().unwrap_or(0);
+                // Shapes get layer opacity/blend from the isolated composite path,
+                // so they keep their own values. Text (glyphon flat text + vector
+                // text-on-path) is drawn as an on-top overlay outside per-layer
+                // isolation, so its layer's opacity is folded into its colour.
+                let layer_opacity = layer_meta
+                    .get(node_layer_ord as usize)
+                    .map(|m| m.0)
+                    .unwrap_or(1.0);
                 let resolved = doc.resolve_render_node(node);
-                // Layer opacity/blend is applied by the isolated composite path,
-                // not folded onto the node — so nodes keep their own values.
                 let node = resolved.as_ref();
                 match &node.kind {
                     SceneNodeKind::Text(text_node) => {
@@ -695,7 +701,7 @@ impl PhotonicRenderer {
                                 bez.apply_affine(kurbo::Affine::new(spine_node.transform.matrix));
                                 let spine_doc = PathData::from_bez_path(&bez);
 
-                                let opacity = text_node.fill.opacity * node.opacity;
+                                let opacity = text_node.fill.opacity * node.opacity * layer_opacity;
                                 let rgba = match &text_node.fill.kind {
                                     FillKind::Solid(c) => [c.r, c.g, c.b, c.a * opacity],
                                     _ => [0.0, 0.0, 0.0, opacity],
@@ -725,7 +731,7 @@ impl PhotonicRenderer {
                         let (doc_x, doc_y) = node.transform.apply(0.0, 0.0);
                         let screen_x = (doc_x * zoom + pan_x) as f32;
                         let screen_y = (doc_y * zoom + pan_y) as f32;
-                        let opacity = text_node.fill.opacity * node.opacity;
+                        let opacity = text_node.fill.opacity * node.opacity * layer_opacity;
                         let color = match &text_node.fill.kind {
                             FillKind::Solid(c) => [
                                 (c.r * 255.0) as u8,
@@ -1687,6 +1693,17 @@ impl PhotonicRenderer {
         // index ranges are skipped). Glyphs blend Normal, on top of everything.
         if (idxs.len() as u32) > text_seg_start {
             raw_segments.push((BlendMode::Normal, text_seg_start, idxs.len() as u32));
+            // These glyphs sit *after* every layer run, so the isolated render
+            // path (which draws only artboard + layer runs) would drop them.
+            // Add them as a trailing Normal overlay "layer" that composites on
+            // top (their per-layer opacity is already folded into the colour).
+            layer_runs.push(LayerRun {
+                opacity: 1.0,
+                blend: BlendMode::Normal,
+                idx_start: text_seg_start,
+                idx_end: idxs.len() as u32,
+                ordinal: u32::MAX, // sentinel: matches no blur-effect jobs
+            });
         }
 
         let segments = coalesce_segments(raw_segments);
