@@ -353,5 +353,61 @@ mod offscreen_tests {
             "blue-only region must be blue@50% over white, got {blue_only:?}"
         );
     }
+
+    /// Stage 2 (#226): a non-trivial layer that *also* carries a per-node blur
+    /// effect still composites as an isolated unit. Same doc as the isolation test
+    /// but the blue rect has a drop shadow. Under Stage 1 this doc fell back to the
+    /// flat effects path (no layer isolation) and the overlap would be opaque blue;
+    /// with Stage 2 the layer (shadow + shapes) composites at 50%, so the overlap
+    /// is still blue@50% over white ≈ (128,128,255).
+    #[test]
+    fn nontrivial_layer_with_drop_shadow_stays_isolated() {
+        use photonic_core::node::DropShadow;
+        let mut doc = Document::new("iso_fx", 20.0, 20.0);
+        let lid = doc.active_layer_id.unwrap();
+        let red = SceneNode::new(
+            "red",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 14.0, 14.0))
+                    .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        let mut blue = SceneNode::new(
+            "blue",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(6.0, 6.0, 14.0, 14.0))
+                    .with_fill(Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0))),
+            ),
+        );
+        blue.drop_shadow = DropShadow {
+            color: Color::new(0.0, 0.0, 0.0, 1.0),
+            opacity: 1.0,
+            dx: 3.0,
+            dy: 3.0,
+            blur: 2.0,
+            enabled: true,
+        };
+        doc.add_node(red, None);
+        doc.add_node(blue, None);
+        doc.layers.get_mut(&lid).unwrap().opacity = 0.5;
+
+        let Some(mut r) = offscreen(doc, 20, 20) else {
+            eprintln!("no GPU adapter — skipping isolation+effects test");
+            return;
+        };
+        let img = image::load_from_memory(&r.render_capture())
+            .expect("png")
+            .to_rgba8();
+        let overlap = img.get_pixel(10, 10).0; // opaque blue over its own shadow
+        assert!(
+            (overlap[0] as i32 - 128).abs() < 16
+                && (overlap[1] as i32 - 128).abs() < 16
+                && (overlap[2] as i32 - 255).abs() < 16,
+            "layer with a drop shadow must still composite at 50% (isolated), \
+             got {overlap:?}"
+        );
+    }
 }
 

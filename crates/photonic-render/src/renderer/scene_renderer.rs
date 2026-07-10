@@ -87,12 +87,10 @@ impl PhotonicRenderer {
     ) {
         // Per-layer isolated compositing (#226): when a layer carries opacity < 1
         // or a non-Normal blend, composite each layer as its own unit through the
-        // composite shader. Gated on no per-node blur effects (those still use the
-        // effects path below; integrating the two is Stage 2). Opaque-Normal-only
-        // documents skip this entirely and take the single-pass fast path.
-        if self.pending_blur_jobs.is_empty()
-            && self.layer_runs.iter().any(LayerRun::is_nontrivial)
-        {
+        // composite shader — including that layer's blur effects (Stage 2). Opaque-
+        // Normal-only documents skip this and take the single-pass fast path (or
+        // the flat effects path when only per-node effects are present).
+        if self.layer_runs.iter().any(LayerRun::is_nontrivial) {
             self.render_scene_isolated(enc, msaa_view, target_view, w, h, vertices, indices);
             return;
         }
@@ -116,7 +114,7 @@ impl PhotonicRenderer {
             wgpu::Color::TRANSPARENT,
         );
 
-        let (fx_tex, fx_view) = self.render_effects_layer(enc, w, h);
+        let (fx_tex, fx_view) = self.render_effects_layer(enc, w, h, None);
 
         // Composite onto the target: background → artboard → effects → shapes.
         self.composite_effects(
@@ -183,17 +181,36 @@ impl PhotonicRenderer {
             // Draw this layer's nodes in isolation (transparent background), with
             // each node's own blend mode clipped to the layer's index range.
             let segs = clip_segments(&self.draw_segments, run.idx_start, run.idx_end);
-            let layer_tex = self.make_fx_tex(w, h);
-            let layer_view = layer_tex.create_view(&Default::default());
+            let shapes_tex = self.make_fx_tex(w, h);
+            let shapes_view = shapes_tex.create_view(&Default::default());
             self.record_range_pass(
                 enc,
                 msaa_view,
-                &layer_view,
+                &shapes_view,
                 &vbuf,
                 &ibuf,
                 &segs,
                 wgpu::Color::TRANSPARENT,
             );
+
+            // If this layer owns blur effects (drop shadow / object blur / feather),
+            // blur them and place them *under* the shapes inside the layer's own
+            // texture, so the effects composite at the layer's opacity + blend too.
+            let has_fx = self
+                .pending_blur_jobs
+                .iter()
+                .any(|j| j.layer_ordinal == run.ordinal && !j.idxs.is_empty());
+            let combined_tex;
+            let layer_view = if has_fx {
+                let (_fx_tex, fx_view) =
+                    self.render_effects_layer(enc, w, h, Some(run.ordinal));
+                combined_tex = self.make_fx_tex(w, h);
+                let combined_view = combined_tex.create_view(&Default::default());
+                self.stack_effects_under_shapes(enc, &combined_view, &fx_view, &shapes_view);
+                combined_view
+            } else {
+                shapes_view
+            };
 
             // Composite the isolated layer over the accumulator with the layer's
             // opacity + blend. The last layer writes straight to the target.

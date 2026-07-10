@@ -59,13 +59,56 @@ impl PhotonicRenderer {
         })
     }
 
+    /// Clear `dst` transparent, then straight-alpha composite the (blurred)
+    /// effects texture and then the sharp shapes texture on top of it — the
+    /// per-layer analogue of `composite_effects`' effect+shape passes, without the
+    /// artboard/background. Builds one layer's isolated content (#226 Stage 2).
+    pub(crate) fn stack_effects_under_shapes(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        fx_view: &wgpu::TextureView,
+        shapes_view: &wgpu::TextureView,
+    ) {
+        let mut first = true;
+        for layer in [fx_view, shapes_view] {
+            let bg = self.effects_blur_bg(layer, 0.0, true);
+            let load = if first {
+                first = false;
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("iso_layer_stack"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blur_pipeline_alpha);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..6, 0..1);
+        }
+    }
+
     /// Render each pending blur job (silhouette → H-blur → V-blur) and
     /// accumulate them into a single straight-alpha effects texture.
+    /// `layer_ord`: `None` blurs every pending job (the flat effects path);
+    /// `Some(ord)` blurs only jobs owned by that layer (per-layer isolation).
     pub(crate) fn render_effects_layer(
         &self,
         enc: &mut wgpu::CommandEncoder,
         w: u32,
         h: u32,
+        layer_ord: Option<u32>,
     ) -> (wgpu::Texture, wgpu::TextureView) {
         let fx_a = self.make_fx_tex(w, h);
         let fx_b = self.make_fx_tex(w, h);
@@ -80,6 +123,11 @@ impl PhotonicRenderer {
         for job in &self.pending_blur_jobs {
             if job.idxs.is_empty() {
                 continue;
+            }
+            if let Some(ord) = layer_ord {
+                if job.layer_ordinal != ord {
+                    continue;
+                }
             }
             let sigma = (job.radius_doc * self.view.zoom).max(0.0) as f32;
             let vbuf = self

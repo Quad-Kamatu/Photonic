@@ -160,6 +160,8 @@ pub(crate) struct LayerRun {
     pub(crate) blend: BlendMode,
     pub(crate) idx_start: u32,
     pub(crate) idx_end: u32,
+    /// Dense ordinal of this layer — used to gather its blur-effect jobs.
+    pub(crate) ordinal: u32,
 }
 
 impl LayerRun {
@@ -176,6 +178,9 @@ pub(crate) struct BlurJob {
     pub(crate) verts: Vec<Vertex>,
     pub(crate) idxs: Vec<u32>,
     pub(crate) radius_doc: f64,
+    /// Owning layer's dense ordinal (matches `NodeSnapshot::layer_ordinal`), so
+    /// effects render inside their layer's isolated unit (#226 Stage 2).
+    pub(crate) layer_ordinal: u32,
 }
 
 /// Screen-space snapshot of one text node, ready for glyphon.
@@ -1375,6 +1380,7 @@ impl PhotonicRenderer {
                 verts: jverts,
                 idxs: mesh.indices,
                 radius_doc,
+                layer_ordinal: node.layer_ordinal,
             })
         };
 
@@ -1394,6 +1400,7 @@ impl PhotonicRenderer {
                 blend,
                 idx_start: start,
                 idx_end: end,
+                ordinal: ord,
             });
         };
 
