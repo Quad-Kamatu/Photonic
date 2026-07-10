@@ -42,7 +42,7 @@ use photonic_core::{
     layer::LayerId,
     node::{GroupNode, NodeId, PathNode},
     ops::artboard_ops,
-    timeline::{ClipId, CueId, GradeOpId, GraphId, GraphNodeId, Tick, TrackId},
+    timeline::{ClipId, CueId, GradeOpId, GraphId, GraphNodeId, SequenceId, Tick, TrackId},
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
@@ -749,6 +749,32 @@ pub struct DocTab {
     pub timeline_selection: Vec<ClipId>,
 }
 
+/// Modal timeline tool armed from the timeline mini-toolbar's segmented
+/// control (17-nle-parity-round2.md §G-13 — Premiere's V/A/N/Y/U row).
+/// Additive over today's hover-zone + modifier drag-kind inference
+/// (`timeline::interact::resolve_drag_kind`): once the G-13 story wires it
+/// in, an armed non-`Select` tool biases which edit a lane drag performs.
+/// Session-only, like `timeline_razor_active` below (which this will
+/// eventually fold `Razor` into — untouched here, existing razor behavior
+/// is unchanged by adding this enum).
+#[allow(dead_code)] // variants beyond the default are constructed by the G-13 story.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TimelineTool {
+    /// Standard pointer: select/move/trim by hover zone (today's default).
+    #[default]
+    Select,
+    /// Blade: click a lane to split the clip under the cursor (spec 16 §4).
+    Razor,
+    /// Pan the timeline view by dragging anywhere in the lane area.
+    Hand,
+    /// Slip: drag shifts a clip's source in/out without moving its timeline
+    /// position or duration.
+    Slip,
+    /// Slide: drag moves a clip while trimming its neighbours to fill the
+    /// gap; its own in/out is unchanged.
+    Slide,
+}
+
 pub struct PhotonicApp {
     pub active_tool: Tool,
     /// The tool that was active on the previous frame. Used to edge-detect
@@ -900,6 +926,43 @@ pub struct PhotonicApp {
     /// [export_dialog, 05 §3] Name of the last-used export preset, seed for the
     /// dialog. Session-only for now; the export story persists it to prefs.
     pub(crate) last_export_preset: String,
+
+    // ── 17-nle-parity-round2.md choke-point session state ───────────────────
+    // Session fields for the round-2 deferred features (source monitor,
+    // multicam, transcript, the modal timeline-tool palette, sequence tabs,
+    // nested-sequence breadcrumbs). Same discipline as the block above:
+    // session-only (not serde), each field tagged with its owning story. The
+    // four panel-facing fields are threaded through `VideoPanelUi` alongside
+    // the P1 fields above (see `video_panel_ui()`); `timeline_tool` is read
+    // directly off `self` by the (out-of-territory) timeline-panel story, so
+    // it stays `#[allow(dead_code)]` here until that story lands.
+    /// [source_monitor, 17 G-10] Scrub-bar playhead within the armed
+    /// source's own media. The armed source and its in/out trim marks
+    /// already live on `pending_source` above (spec 16 §1).
+    pub(crate) source_monitor_scrub: Option<Tick>,
+    /// [multicam, 17 G-20] Angle currently cut to in the open multicam clip.
+    pub(crate) multicam_active_angle: Option<u8>,
+    /// [multicam, 17 G-20] Whether the central panel shows the multicam
+    /// angle grid instead of the program monitor.
+    pub(crate) multicam_view_open: bool,
+    /// [transcript, 17 G-18] Whether the transcript editing panel is open.
+    pub(crate) transcript_panel_open: bool,
+    /// [transcript, 17 G-18] Scroll offset (px) of the transcript word list.
+    pub(crate) transcript_scroll: f32,
+    /// [timeline-panel, 17 G-13] Armed modal timeline tool (see
+    /// `TimelineTool`'s doc comment). Read directly off `self` by
+    /// `app/timeline/mod.rs`'s mini-toolbar once that story lands.
+    #[allow(dead_code)]
+    pub(crate) timeline_tool: TimelineTool,
+    /// [seq_tabs, 17 G-17] Sequence ids pinned open as tabs, in display
+    /// order. `TimelineProject::active_sequence` (document state) decides
+    /// which tab is highlighted. Flat like `pending_source`/
+    /// `target_video_track` above rather than per-`DocTab` — per-document-tab
+    /// swap-on-switch is future work in `tabs.rs`, out of this skeleton.
+    pub(crate) open_sequence_tabs: Vec<SequenceId>,
+    /// [seq_tabs, 17 G-16/G-17] Breadcrumb stack of sequence ids drilled
+    /// into via nested-sequence navigation — empty at the top level.
+    pub(crate) nested_sequence_breadcrumbs: Vec<SequenceId>,
 
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
@@ -1528,6 +1591,14 @@ impl Default for PhotonicApp {
             caption_edit_cue: None,
             export_dialog_open: false,
             last_export_preset: String::new(),
+            source_monitor_scrub: None,
+            multicam_active_angle: None,
+            multicam_view_open: false,
+            transcript_panel_open: false,
+            transcript_scroll: 0.0,
+            timeline_tool: TimelineTool::default(),
+            open_sequence_tabs: Vec::new(),
+            nested_sequence_breadcrumbs: Vec::new(),
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
@@ -2145,6 +2216,13 @@ impl PhotonicApp {
             export_dialog_open: &mut self.export_dialog_open,
             last_export_preset: &mut self.last_export_preset,
             playhead: self.playhead,
+            source_monitor_scrub: &mut self.source_monitor_scrub,
+            multicam_active_angle: &mut self.multicam_active_angle,
+            multicam_view_open: &mut self.multicam_view_open,
+            transcript_panel_open: &mut self.transcript_panel_open,
+            transcript_scroll: &mut self.transcript_scroll,
+            open_sequence_tabs: &mut self.open_sequence_tabs,
+            nested_sequence_breadcrumbs: &mut self.nested_sequence_breadcrumbs,
         }
     }
 
@@ -2269,6 +2347,13 @@ impl PhotonicApp {
                 export_dialog_open: &mut self.export_dialog_open,
                 last_export_preset: &mut self.last_export_preset,
                 playhead: self.playhead,
+                source_monitor_scrub: &mut self.source_monitor_scrub,
+                multicam_active_angle: &mut self.multicam_active_angle,
+                multicam_view_open: &mut self.multicam_view_open,
+                transcript_panel_open: &mut self.transcript_panel_open,
+                transcript_scroll: &mut self.transcript_scroll,
+                open_sequence_tabs: &mut self.open_sequence_tabs,
+                nested_sequence_breadcrumbs: &mut self.nested_sequence_breadcrumbs,
             },
             action: None,
             q: String::new(),

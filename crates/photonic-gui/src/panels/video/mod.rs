@@ -16,10 +16,23 @@
 //! - [`titles`]          — 05-import-export.md §4b / 17 G-12 (minimal: starter
 //!   presets + `ClipSource::Text` insert/edit; not the full VectorDoc template
 //!   system — see [`titles`]'s module doc for the scope cut)
+//!
+//! 17-nle-parity-round2.md choke-point additions (stub — filled by each
+//! named story; the real surface for `source_monitor`/`multicam` is mostly
+//! `app/monitor.rs`, out of this crate-relative module's territory, so these
+//! two stay deliberately thin):
+//! - [`source_monitor`]  — 17 G-10 (dual-monitor + true source in/out marks)
+//! - [`multicam`]        — 17 G-20 (multicam angle grid + live cutting)
+//! - [`transcript`]      — 17 G-18 (text-based/transcript editing)
+//! - [`seq_tabs`]        — 17 G-17 (sequence tab strip). Not a `DrawerGroup`
+//!   panel — no rail icon owns it; the timeline-panel story embeds it in the
+//!   timeline panel header (`app/timeline/mod.rs`, out of this territory).
 
 use std::collections::HashSet;
 
-use photonic_core::timeline::{ClipId, CueId, GradeOpId, GraphId, GraphNodeId, Tick, TrackId};
+use photonic_core::timeline::{
+    ClipId, CueId, GradeOpId, GraphId, GraphNodeId, SequenceId, Tick, TrackId,
+};
 
 pub(crate) mod audio_mixer;
 pub(crate) mod caption_editor;
@@ -28,8 +41,12 @@ pub(crate) mod color_page;
 pub(crate) mod effects_browser;
 pub(crate) mod export_dialog;
 pub(crate) mod keyframe_editor;
+pub(crate) mod multicam;
 pub(crate) mod node_editor;
+pub(crate) mod seq_tabs;
+pub(crate) mod source_monitor;
 pub(crate) mod titles;
+pub(crate) mod transcript;
 
 /// Which sub-section of the right-drawer Color Controls group is active
 /// (07 §6). Owned by the color page story; defined here so the shared
@@ -114,4 +131,37 @@ pub(crate) struct VideoPanelUi<'a> {
     /// insert a starter title at the playhead, so it's threaded through here
     /// rather than faked.
     pub(crate) playhead: Tick,
+
+    // ── 17-nle-parity-round2.md choke-point additions ───────────────────────
+    // Session state for the four round-2 stub panels above. Each field names
+    // its owning story, same discipline as the block above.
+    /// [source_monitor, 17 G-10] Scrub-bar playhead within the armed
+    /// source's own media, independent of the program-monitor/timeline
+    /// `playhead` above. The armed source and its in/out trim marks already
+    /// live on `PhotonicApp::pending_source` (spec 16 §1) — this is the one
+    /// new piece a source-monitor UI needs. `None` = nothing scrubbed yet.
+    pub(crate) source_monitor_scrub: &'a mut Option<Tick>,
+    /// [multicam, 17 G-20] Angle currently cut to in the open multicam clip
+    /// (Premiere's live 1-9 number-key cutting). `None` = no angle chosen.
+    pub(crate) multicam_active_angle: &'a mut Option<u8>,
+    /// [multicam, 17 G-20] Whether the central panel is showing the
+    /// multicam angle grid instead of the program monitor — the multicam
+    /// analogue of `node_canvas_active` above.
+    pub(crate) multicam_view_open: &'a mut bool,
+    /// [transcript, 17 G-18] Whether the text-based transcript editing
+    /// panel is open.
+    pub(crate) transcript_panel_open: &'a mut bool,
+    /// [transcript, 17 G-18] Scroll offset (px) of the transcript panel's
+    /// word list, preserved across frames like other scroll-position state.
+    pub(crate) transcript_scroll: &'a mut f32,
+    /// [seq_tabs, 17 G-17] Sequence ids pinned open as tabs in the timeline
+    /// panel's tab strip, in display order. `TimelineProject::active_sequence`
+    /// (document state) decides which tab is highlighted; this just tracks
+    /// which stay open rather than closing whenever they lose focus.
+    pub(crate) open_sequence_tabs: &'a mut Vec<SequenceId>,
+    /// [seq_tabs, 17 G-16/G-17] Breadcrumb stack of sequence ids drilled
+    /// into via nested-sequence navigation — empty when viewing a top-level
+    /// sequence directly; each entry is the sequence the next one down was
+    /// opened from (`ClipSource::NestedSequence`, 01 §1).
+    pub(crate) nested_sequence_breadcrumbs: &'a mut Vec<SequenceId>,
 }

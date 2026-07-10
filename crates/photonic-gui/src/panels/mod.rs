@@ -1223,6 +1223,22 @@ pub enum DrawerGroup {
     /// 17 G-12 minimal — not the full VectorDoc title-template system).
     /// Interior owned by `panels/video/titles.rs`.
     Titles,
+    /// Video mode (04 §4.1): second preview surface for the raw armed
+    /// source asset, its own scrub bar, and true source in/out marks
+    /// (17-nle-parity-round2.md §G-10 — Larger, needs its own mini-spec).
+    /// Interior owned by `panels/video/source_monitor.rs`; the real
+    /// dual-monitor surface is mostly `app/monitor.rs` (out of this crate
+    /// module's territory).
+    SourceMonitor,
+    /// Video mode (04 §4.1): multicam angle picker + sync controls (17 G-20
+    /// — Larger). Interior owned by `panels/video/multicam.rs`; the real
+    /// multi-camera source sequence + live angle cutting is
+    /// `photonic-video-engine` + `app/monitor.rs` territory.
+    Multicam,
+    /// Video mode (04 §4.1): text-based (transcript) editing — select a
+    /// word range, ripple the matching timeline clip range (17 G-18 —
+    /// Larger, nice-to-have). Interior owned by `panels/video/transcript.rs`.
+    Transcript,
 }
 
 impl DrawerGroup {
@@ -1240,14 +1256,20 @@ impl DrawerGroup {
     ];
 
     /// Left-rail groups in Video mode (04 §4.1) — Media Pool first, matching
-    /// every reference NLE's left-most-panel convention.
-    pub const VIDEO_ALL: [DrawerGroup; 6] = [
+    /// every reference NLE's left-most-panel convention. The three round-2
+    /// (17-nle-parity-round2.md) choke-point additions — SourceMonitor,
+    /// Multicam, Transcript — trail the P1 set; each is a compile-clean stub
+    /// until its named story fills it in.
+    pub const VIDEO_ALL: [DrawerGroup; 9] = [
         DrawerGroup::MediaPool,
         DrawerGroup::ClipInspector,
         DrawerGroup::Effects,
         DrawerGroup::Captions,
         DrawerGroup::NodeEditor,
         DrawerGroup::Titles,
+        DrawerGroup::SourceMonitor,
+        DrawerGroup::Multicam,
+        DrawerGroup::Transcript,
     ];
 
     /// Which group set the left rail offers for `mode` (04 §4).
@@ -1274,6 +1296,9 @@ impl DrawerGroup {
             DrawerGroup::Captions => ph::CLOSED_CAPTIONING,
             DrawerGroup::NodeEditor => ph::FLOW_ARROW,
             DrawerGroup::Titles => ph::TEXT_T,
+            DrawerGroup::SourceMonitor => ph::MONITOR_PLAY,
+            DrawerGroup::Multicam => ph::SQUARES_FOUR,
+            DrawerGroup::Transcript => ph::ARTICLE,
         }
     }
 
@@ -1293,6 +1318,9 @@ impl DrawerGroup {
             DrawerGroup::Captions => "Captions",
             DrawerGroup::NodeEditor => "Node Editor",
             DrawerGroup::Titles => "Titles",
+            DrawerGroup::SourceMonitor => "Source Monitor",
+            DrawerGroup::Multicam => "Multicam",
+            DrawerGroup::Transcript => "Transcript",
         }
     }
 
@@ -1319,7 +1347,15 @@ impl DrawerGroup {
             | DrawerGroup::Effects
             | DrawerGroup::Captions
             | DrawerGroup::NodeEditor
-            | DrawerGroup::Titles => true,
+            | DrawerGroup::Titles
+            // Round-2 (17) additions are always reachable, like the P1 video
+            // groups above — none of them gate on the vector node-selection
+            // count (SourceMonitor/Multicam gate on an armed source/multicam
+            // clip once their stories land; Transcript gates on the sequence
+            // having captions; both are stub-empty until then).
+            | DrawerGroup::SourceMonitor
+            | DrawerGroup::Multicam
+            | DrawerGroup::Transcript => true,
             DrawerGroup::Modify | DrawerGroup::Arrange | DrawerGroup::ClipInspector => {
                 selection_count >= 1
             }
@@ -1523,6 +1559,9 @@ pub(crate) fn draw_drawer(
         DrawerGroup::Captions => video::caption_editor::draw_caption_editor(ui, ctx),
         DrawerGroup::NodeEditor => video::node_editor::draw_node_editor_palette(ui, ctx),
         DrawerGroup::Titles => video::titles::draw_titles(ui, ctx),
+        DrawerGroup::SourceMonitor => video::source_monitor::draw_source_monitor(ui, ctx),
+        DrawerGroup::Multicam => video::multicam::draw_multicam(ui, ctx),
+        DrawerGroup::Transcript => video::transcript::draw_transcript(ui, ctx),
         // Tools is rendered by the app layer (it needs tool state, not the
         // property ctx), so it is never routed through draw_drawer.
         DrawerGroup::Tools => {}
