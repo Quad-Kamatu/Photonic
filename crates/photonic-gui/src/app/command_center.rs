@@ -69,12 +69,8 @@ impl PhotonicApp {
                 }
             }
             "edit.copy" => {
-                self.gui_clipboard.clear();
-                for nid in doc.selection.ids() {
-                    if let Some(node) = doc.nodes.get(nid) {
-                        self.gui_clipboard.push(node.clone());
-                    }
-                }
+                let ids: Vec<NodeId> = doc.selection.ids().copied().collect();
+                self.gui_clipboard.capture(doc, ids.iter());
             }
             "edit.paste" => modified = self.paste_clipboard(doc, history, 10.0),
             "edit.paste_in_place" => modified = self.paste_clipboard(doc, history, 0.0),
@@ -114,6 +110,11 @@ impl PhotonicApp {
             }
             "object.group" => self.do_group_selected(doc, history, &mut modified),
             "object.ungroup" => modified = self.ungroup_selection(doc, history),
+            "object.ungroup_all" => {
+                if let Some(id) = self.selected_id {
+                    modified = self.ungroup_all_node(id, doc, history);
+                }
+            }
             "object.bring_forward" => {
                 modified = self.reorder_selected(doc, history, ZMove::Forward)
             }
@@ -264,50 +265,49 @@ impl PhotonicApp {
         else {
             return false;
         };
-        let mut cmds: Vec<Command> = Vec::new();
-        let mut new_ids: Vec<NodeId> = Vec::new();
-        for src in &self.gui_clipboard {
-            let mut new_node = src.clone();
-            new_node.id = uuid::Uuid::new_v4();
-            new_node.layer_id = target_layer;
-            if offset.abs() > 1e-9 {
-                new_node.transform.matrix[4] += offset;
-                new_node.transform.matrix[5] += offset;
-            }
-            new_ids.push(new_node.id);
-            cmds.push(Command::AddNode {
-                node: new_node,
-                layer_id: Some(target_layer),
-            });
-        }
-        if cmds.is_empty() {
+        let Some((cmd, new_ids)) = self.gui_clipboard.paste_command(target_layer, offset, offset)
+        else {
             return false;
-        }
-        history.execute(Command::Batch(cmds), doc);
+        };
+        history.execute(cmd, doc);
         doc.selection = Selection::from_ids(new_ids.iter().copied());
         self.selected_id = new_ids.first().copied();
         true
     }
 
     /// Duplicate every selected node in place (+10px), selecting the copies.
+    /// Groups are duplicated as whole subtrees (descendants get fresh ids and
+    /// remapped references), and each copy lands in its source layer.
     fn duplicate_selection(&mut self, doc: &mut Document, history: &mut CommandHistory) -> bool {
+        use std::collections::HashMap;
         let sel: Vec<NodeId> = doc.selection.ids().copied().collect();
-        let mut cmds: Vec<Command> = Vec::new();
-        let mut new_ids: Vec<NodeId> = Vec::new();
+        // Bucket the selected roots by their layer so each copy stays put.
+        let mut by_layer: HashMap<LayerId, Vec<NodeId>> = HashMap::new();
         for nid in &sel {
             if let Some(node) = doc.nodes.get(nid) {
-                let mut copy = node.clone();
-                copy.id = uuid::Uuid::new_v4();
-                copy.name = format!("{} copy", copy.name);
-                copy.transform.matrix[4] += 10.0;
-                copy.transform.matrix[5] += 10.0;
-                let lid = copy.layer_id;
-                new_ids.push(copy.id);
-                cmds.push(Command::AddNode {
-                    node: copy,
-                    layer_id: Some(lid),
-                });
+                by_layer.entry(node.layer_id).or_default().push(*nid);
             }
+        }
+        let mut cmds: Vec<Command> = Vec::new();
+        let mut new_ids: Vec<NodeId> = Vec::new();
+        for (layer_id, roots) in by_layer {
+            let (r, mut nodes) = photonic_core::ops::cloning::clone_subtrees(
+                &doc.nodes, &roots, layer_id, 10.0, 10.0,
+            );
+            if r.is_empty() {
+                continue;
+            }
+            for n in nodes.iter_mut() {
+                if r.contains(&n.id) {
+                    n.name = format!("{} copy", n.name);
+                }
+            }
+            new_ids.extend(r.iter().copied());
+            cmds.push(Command::AddSubtree {
+                layer_id,
+                roots: r,
+                nodes,
+            });
         }
         if cmds.is_empty() {
             return false;
@@ -348,6 +348,33 @@ impl PhotonicApp {
         match first_child {
             Some(fc) => doc.selection = Selection::single(fc),
             None => doc.selection.clear(),
+        }
+        true
+    }
+
+    /// Ungroup the selected group recursively — flatten it and every nested
+    /// group into their leaf nodes in one undoable step. Uses the same
+    /// `UngroupNodes` primitive as single-level ungroup (so transform/z-order
+    /// semantics match), applied breadth-first: each ungroup is simulated on a
+    /// scratch document so every command carries the correct layer index for a
+    /// clean undo.
+    pub(crate) fn ungroup_all_node(
+        &mut self,
+        root: NodeId,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        let (cmds, leaves) = plan_ungroup_all(doc, root);
+        if cmds.is_empty() {
+            return false;
+        }
+        history.execute(Command::Batch(cmds), doc);
+        if leaves.is_empty() {
+            doc.selection.clear();
+            self.selected_id = None;
+        } else {
+            doc.selection = Selection::from_ids(leaves.iter().copied());
+            self.selected_id = leaves.first().copied();
         }
         true
     }
@@ -599,5 +626,146 @@ impl PhotonicApp {
             return self.dispatch_command(id, doc, history);
         }
         false
+    }
+}
+
+/// Plan a recursive ungroup of the group `root`: return the ordered list of
+/// `UngroupNodes` commands that flatten it and every nested group, plus the leaf
+/// node ids that remain. Pure — simulates each ungroup on a scratch clone so
+/// each command's `group_index` is correct for a clean, single-step undo.
+/// Returns empty when `root` is not a group.
+pub(crate) fn plan_ungroup_all(doc: &Document, root: NodeId) -> (Vec<Command>, Vec<NodeId>) {
+    use std::collections::VecDeque;
+    if !matches!(
+        doc.nodes.get(&root).map(|n| &n.kind),
+        Some(SceneNodeKind::Group(_))
+    ) {
+        return (Vec::new(), Vec::new());
+    }
+    let mut work = doc.clone();
+    let mut cmds: Vec<Command> = Vec::new();
+    let mut leaves: Vec<NodeId> = Vec::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    queue.push_back(root);
+    while let Some(gid) = queue.pop_front() {
+        let Some(node) = work.nodes.get(&gid) else {
+            continue;
+        };
+        let SceneNodeKind::Group(g) = &node.kind else {
+            continue;
+        };
+        let children = g.children.clone();
+        let node_clone = node.clone();
+        let Some((layer_id, group_index)) = work.node_layer_and_index(&gid) else {
+            continue;
+        };
+        let cmd = Command::UngroupNodes {
+            group: node_clone,
+            layer_id,
+            group_index,
+            children: children.clone(),
+        };
+        cmd.apply(&mut work);
+        cmds.push(cmd);
+        for c in &children {
+            match work.nodes.get(c).map(|n| &n.kind) {
+                Some(SceneNodeKind::Group(_)) => queue.push_back(*c),
+                Some(_) => leaves.push(*c),
+                None => {}
+            }
+        }
+    }
+    (cmds, leaves)
+}
+
+#[cfg(test)]
+mod ungroup_all_tests {
+    use super::plan_ungroup_all;
+    use photonic_core::history::{Command, CommandHistory};
+    use photonic_core::node::{GroupNode, NodeId, PathNode, SceneNode, SceneNodeKind};
+    use photonic_core::{Document, PathData};
+
+    fn leaf(doc: &Document) -> SceneNode {
+        SceneNode::new(
+            "p",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        )
+    }
+
+    fn group(doc: &Document, children: Vec<NodeId>) -> SceneNode {
+        SceneNode::new(
+            "g",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Group(GroupNode {
+                children,
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        )
+    }
+
+    /// Build a doc with a nested group tree: outer { a, mid { b, c } } plus a
+    /// standalone leaf `z` at top level. Returns (doc, outer_id, [a,b,c], z).
+    fn nested_doc() -> (Document, NodeId, Vec<NodeId>, NodeId) {
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let layer = doc.active_layer_id.unwrap();
+        let a = leaf(&doc);
+        let b = leaf(&doc);
+        let c = leaf(&doc);
+        let z = leaf(&doc);
+        let (ai, bi, ci, zi) = (a.id, b.id, c.id, z.id);
+        for n in [a, b, c, z] {
+            doc.nodes.insert(n.id, n);
+        }
+        let mid = group(&doc, vec![bi, ci]);
+        let mid_id = mid.id;
+        doc.nodes.insert(mid_id, mid);
+        let outer = group(&doc, vec![ai, mid_id]);
+        let outer_id = outer.id;
+        doc.nodes.insert(outer_id, outer);
+        // Layer top-level: [outer, z] (mid/a/b/c are nested, not top-level).
+        doc.layers.get_mut(&layer).unwrap().node_ids = vec![outer_id, zi];
+        (doc, outer_id, vec![ai, bi, ci], zi)
+    }
+
+    #[test]
+    fn flattens_nested_groups_to_leaves_in_one_step() {
+        let (mut doc, outer, leaves, z) = nested_doc();
+        let layer = doc.active_layer_id.unwrap();
+        let (cmds, planned_leaves) = plan_ungroup_all(&doc, outer);
+        assert_eq!(cmds.len(), 2, "outer + mid = two ungroup commands");
+        assert_eq!(planned_leaves.len(), 3);
+
+        let mut history = CommandHistory::new(100);
+        history.execute(Command::Batch(cmds), &mut doc);
+
+        // No group nodes remain anywhere.
+        assert!(
+            !doc.nodes.values().any(|n| matches!(n.kind, SceneNodeKind::Group(_))),
+            "all groups dissolved"
+        );
+        // All three leaves + z are now top-level in the layer, no dangling ids.
+        let top = &doc.layers.get(&layer).unwrap().node_ids;
+        for l in &leaves {
+            assert!(top.contains(l), "leaf promoted to top level");
+        }
+        assert!(top.contains(&z));
+        assert_eq!(top.len(), 4);
+
+        // Single undo restores the whole nested structure.
+        assert!(history.undo(&mut doc));
+        let top = &doc.layers.get(&layer).unwrap().node_ids;
+        assert_eq!(top, &vec![outer, z], "undo restored original top level");
+        assert!(matches!(doc.nodes.get(&outer).map(|n| &n.kind), Some(SceneNodeKind::Group(_))));
+    }
+
+    #[test]
+    fn non_group_root_is_noop() {
+        let (doc, _outer, leaves, _z) = nested_doc();
+        let (cmds, planned) = plan_ungroup_all(&doc, leaves[0]);
+        assert!(cmds.is_empty() && planned.is_empty());
     }
 }

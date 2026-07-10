@@ -98,6 +98,8 @@ pub(crate) fn draw_import_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 .on_hover_text("Crop to the bounding box of all content");
                 ui.selectable_value(&mut ctx.doc_export.area, ExportArea::Selection, "Selection")
                     .on_hover_text("Export just the current selection's bounds");
+                ui.selectable_value(&mut ctx.doc_export.area, ExportArea::Artboard, "Artboard")
+                    .on_hover_text("Export the active artboard's rectangle");
             });
             ui.add_space(6.0);
             if ui
@@ -106,6 +108,18 @@ pub(crate) fn draw_import_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 .clicked()
             {
                 action = Some(PanelAction::OpenExportDialog);
+            }
+            // Batch export: one file per artboard, over a chosen range.
+            if ctx.doc.artboards.len() > 1 {
+                if ui
+                    .button(format!("{}  Export Artboards…", ph::EXPORT))
+                    .on_hover_text(
+                        "Export each artboard (all, or a range) to its own image file",
+                    )
+                    .clicked()
+                {
+                    action = Some(PanelAction::OpenArtboardExportDialog);
+                }
             }
         });
     ui.add_space(4.0);

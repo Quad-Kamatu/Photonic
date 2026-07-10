@@ -715,6 +715,61 @@ pub struct SetArtboardMarginsArgs {
     pub left: Option<f64>,
 }
 
+// ─── Artboard Args ───────────────────────────────────────────────────────────
+
+/// Arguments for `list_artboards` (no parameters).
+#[derive(Debug, Deserialize, Default)]
+pub struct ListArtboardsArgs {}
+
+/// Arguments for the `add_artboard` tool.
+#[derive(Debug, Deserialize)]
+pub struct AddArtboardArgs {
+    /// Optional name. Defaults to "Artboard N".
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Top-left X in document units.
+    pub x: f64,
+    /// Top-left Y in document units.
+    pub y: f64,
+    /// Width in document units (must be > 0).
+    pub width: f64,
+    /// Height in document units (must be > 0).
+    pub height: f64,
+}
+
+/// Arguments for the `update_artboard` tool. Only provided fields change.
+#[derive(Debug, Deserialize)]
+pub struct UpdateArtboardArgs {
+    /// UUID of the artboard to edit (from `list_artboards`).
+    pub artboard_id: Uuid,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    /// New width in document units (must be > 0 when provided).
+    #[serde(default)]
+    pub width: Option<f64>,
+    /// New height in document units (must be > 0 when provided).
+    #[serde(default)]
+    pub height: Option<f64>,
+}
+
+/// Arguments for the `remove_artboard` tool.
+#[derive(Debug, Deserialize)]
+pub struct RemoveArtboardArgs {
+    /// UUID of the artboard to remove (from `list_artboards`).
+    pub artboard_id: Uuid,
+}
+
+/// Arguments for the `set_active_artboard` tool.
+#[derive(Debug, Deserialize)]
+pub struct SetActiveArtboardArgs {
+    /// UUID of the artboard to make active (from `list_artboards`).
+    pub artboard_id: Uuid,
+}
+
 // ─── Text Frame Threading Args ───────────────────────────────────────────────
 
 /// Arguments for `link_text_frames` tool.

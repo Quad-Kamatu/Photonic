@@ -89,6 +89,7 @@ pub enum HotbarAction {
     Delete,
     Group,
     Ungroup,
+    UngroupAll,
     BringToFront,
     SendToBack,
     BoolUnion,
@@ -208,12 +209,19 @@ const FILL_ITEMS: &[HotbarItem] = &[
     ),
 ];
 
-/// The single-group extra: Ungroup is only appended for a single group node.
+/// The single-group extras: Ungroup (one level) and Ungroup All (recursive),
+/// appended only for a single group node.
 const UNGROUP_ITEM: HotbarItem = action(
     "act.ungroup",
     ph::CORNERS_OUT,
     "Ungroup",
     HotbarAction::Ungroup,
+);
+const UNGROUP_ALL_ITEM: HotbarItem = action(
+    "act.ungroup_all",
+    ph::CORNERS_OUT,
+    "Ungroup All",
+    HotbarAction::UngroupAll,
 );
 
 /// Multi-selection actions. First two (Group, Duplicate) are pinned.
@@ -304,6 +312,7 @@ pub fn default_items(
             }
             if single_is_group {
                 v.push(UNGROUP_ITEM);
+                v.push(UNGROUP_ALL_ITEM);
             }
             v
         }

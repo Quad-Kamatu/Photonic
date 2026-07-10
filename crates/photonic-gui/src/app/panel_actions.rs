@@ -2346,6 +2346,12 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::UngroupAllNode { node_id } => {
+                    if self.ungroup_all_node(node_id, doc, history) {
+                        doc_modified = true;
+                    }
+                }
+
                 PanelAction::DeleteSelected => {
                     let ids: Vec<_> = doc.selection.ids().copied().collect();
                     if !ids.is_empty() {
@@ -2579,6 +2585,19 @@ impl PhotonicApp {
                             dlg.crop_to_content = true;
                             (doc.width, doc.height)
                         }
+                        super::ExportArea::Artboard => match doc.active_artboard() {
+                            Some(a) => {
+                                dlg.region_override = Some((a.x, a.y, a.width, a.height));
+                                dlg.artboard_target = Some(a.id);
+                                (a.width, a.height)
+                            }
+                            None => {
+                                self.file_status = Some(
+                                    "No artboard to export — exporting the whole document.".into(),
+                                );
+                                (doc.width, doc.height)
+                            }
+                        },
                         super::ExportArea::Selection => {
                             let ids: Vec<_> = doc.selection.node_ids.iter().copied().collect();
                             let mut bbox: Option<(f64, f64, f64, f64)> = None;
@@ -2614,6 +2633,23 @@ impl PhotonicApp {
                     };
                     dlg.png_width = ((base_w as f32) * scale).round().max(1.0) as u32;
                     dlg.png_height = ((base_h as f32) * scale).round().max(1.0) as u32;
+                    self.export_dialog = Some(dlg);
+                }
+
+                PanelAction::OpenArtboardExportDialog => {
+                    // Batch export: one file per artboard, defaulting to all.
+                    let s = self.doc_export;
+                    let n = doc.artboards.len().max(1);
+                    let mut dlg = super::ExportDialog::new(doc);
+                    dlg.format = match s.format {
+                        // SVG/ICO have no batch form; fall back to PNG.
+                        super::ExportFormat::Svg | super::ExportFormat::Ico => {
+                            super::ExportFormat::Png
+                        }
+                        other => other,
+                    };
+                    dlg.artboard_export = super::ArtboardExport::Range { start: 1, end: n };
+                    dlg.artboard_scale = s.scale.max(0.05);
                     self.export_dialog = Some(dlg);
                 }
 

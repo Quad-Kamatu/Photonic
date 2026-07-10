@@ -173,17 +173,37 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
 
     let total = path_count + text_count + group_count;
 
+    let artboard_summaries: Vec<serde_json::Value> = doc
+        .artboards
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "name": a.name,
+                "x": a.x,
+                "y": a.y,
+                "width": a.width,
+                "height": a.height,
+                "active": Some(a.id) == doc.active_artboard,
+            })
+        })
+        .collect();
+
     ToolResult::text(format!(
-        "Document '{}': {}×{} canvas, {} node(s) in {} layer(s) — {} path(s), {} text(s), {} group(s)",
+        "Document '{}': {}×{} canvas, {} node(s) in {} layer(s) — {} path(s), {} text(s), {} group(s); {} artboard(s)",
         doc.name, doc.width as u32, doc.height as u32,
         total, layer_summaries.len(),
         path_count, text_count, group_count,
+        artboard_summaries.len(),
     ))
     .with_data(json!({
         "name": doc.name,
         "canvas": { "width": doc.width, "height": doc.height },
         "layer_count": layer_summaries.len(),
         "layers": layer_summaries,
+        "artboard_count": artboard_summaries.len(),
+        "artboards": artboard_summaries,
+        "active_artboard": doc.active_artboard,
         "nodes": {
             "total": total,
             "path": path_count,

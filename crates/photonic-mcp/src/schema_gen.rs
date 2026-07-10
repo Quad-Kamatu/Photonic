@@ -1859,6 +1859,45 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "export_artboards",
+            "description": "Export one or more artboards to raster images — one image per artboard — returned as base64. Unlike export_raster (which snapshots the live editor viewport), each artboard's rectangle is rendered off-screen at its own aspect ratio, so results are exact regardless of the current zoom/scroll. Select artboards by (precedence): all=true → every artboard; range=[start,end] → 1-based inclusive index range; artboards=[...] → a list of UUIDs, exact names, or 1-based index strings; otherwise the active artboard. Get ids/names/indices from list_artboards. Max 24 artboards per call; each side capped at 8192 px.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artboards": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Specific artboards to export, each a UUID, an exact name, or a 1-based index string (\"1\", \"2\", …). Exported in the given order."
+                    },
+                    "range": {
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "Inclusive 1-based index range [start, end] (e.g. [2, 5] exports artboards 2–5)."
+                    },
+                    "all": { "type": "boolean", "description": "Export every artboard in document order. Overrides range/artboards." },
+                    "format": {
+                        "type": "string",
+                        "enum": ["png", "jpeg", "webp", "gif", "tiff"],
+                        "description": "Output format (default: png)."
+                    },
+                    "scale": {
+                        "type": "number",
+                        "description": "Output pixels per document unit (default 1.0). A 400×300 artboard at scale 2 exports 800×600 px. Clamped to 0.05–8.0."
+                    },
+                    "transparent": {
+                        "type": "boolean",
+                        "description": "Transparent background instead of the artboard fill (default false). Ignored by JPEG (always opaque)."
+                    },
+                    "quality": {
+                        "type": "integer",
+                        "description": "JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG."
+                    }
+                }
+            }
+        },
+        {
             "name": "duplicate_layer",
             "description": "Duplicate a layer with all its nodes. Creates a copy of the layer and deep-clones every node with new IDs. Single undoable batch.",
             "inputSchema": {
@@ -4105,6 +4144,64 @@ pub fn tool_list() -> Value {
             "name": "get_artboard_margins",
             "description": "Return the current artboard safe-area margin values (top, right, bottom, left in document units). Read-only.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "list_artboards",
+            "description": "List every artboard (named crop/export rectangle) in the document, with id, name, position (x, y = top-left), size (width, height), and which one is active. Artboards live in the shared document coordinate space; a fresh document has one 'Artboard 1' at the origin. Read-only. Use before update_artboard / remove_artboard / set_active_artboard to get ids. Distinct from the document canvas size (get_document_info) and from artboard safe-area margins (get_artboard_margins).",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "add_artboard",
+            "description": "Create a new artboard (a named crop/export rectangle) at the given top-left (x, y) with width×height in document units, and make it the active artboard. Returns the new artboard_id. Use for multi-artboard layouts (e.g. responsive frames, icon sizes, print pages side by side).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":   { "type": "string", "description": "Optional name. Default: 'Artboard N'." },
+                    "x":      { "type": "number", "description": "Top-left X in document units." },
+                    "y":      { "type": "number", "description": "Top-left Y in document units." },
+                    "width":  { "type": "number", "exclusiveMinimum": 0, "description": "Width in document units (> 0)." },
+                    "height": { "type": "number", "exclusiveMinimum": 0, "description": "Height in document units (> 0)." }
+                },
+                "required": ["x", "y", "width", "height"]
+            }
+        },
+        {
+            "name": "update_artboard",
+            "description": "Edit an existing artboard's name, position (x, y = top-left) and/or size (width, height). Only the fields you pass change; others are left as-is. One undoable step. Get the artboard_id from list_artboards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artboard_id": { "type": "string", "description": "UUID of the artboard to edit (from list_artboards)." },
+                    "name":   { "type": "string", "description": "New name. Default: unchanged." },
+                    "x":      { "type": "number", "description": "New top-left X in document units. Default: unchanged." },
+                    "y":      { "type": "number", "description": "New top-left Y in document units. Default: unchanged." },
+                    "width":  { "type": "number", "exclusiveMinimum": 0, "description": "New width in document units (> 0). Default: unchanged." },
+                    "height": { "type": "number", "exclusiveMinimum": 0, "description": "New height in document units (> 0). Default: unchanged." }
+                },
+                "required": ["artboard_id"]
+            }
+        },
+        {
+            "name": "remove_artboard",
+            "description": "Delete an artboard by id. Refuses to remove the last remaining artboard (a document must keep at least one). If the removed artboard was active, the first remaining one becomes active. Get the artboard_id from list_artboards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artboard_id": { "type": "string", "description": "UUID of the artboard to remove (from list_artboards)." }
+                },
+                "required": ["artboard_id"]
+            }
+        },
+        {
+            "name": "set_active_artboard",
+            "description": "Make an artboard the active one. The active artboard is the default target for artboard-relative operations and export. Soft view state — not an undo step. Get the artboard_id from list_artboards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artboard_id": { "type": "string", "description": "UUID of the artboard to activate (from list_artboards)." }
+                },
+                "required": ["artboard_id"]
+            }
         },
         {
             "name": "list_history",

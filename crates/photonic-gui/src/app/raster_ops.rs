@@ -548,4 +548,94 @@ impl PhotonicApp {
             "Downloading the background-removal model (~5 MB), then removing background…".into()
         });
     }
+
+    /// Isolation Mode visual: when a group is isolated (entered via double-click),
+    /// dim everything outside its bounds and draw an accent border around it, so
+    /// it reads as a real isolation mode rather than just a restricted selection.
+    /// No-op when not isolated. Dims the whole canvas if the group has no
+    /// measurable bounds.
+    pub(crate) fn paint_isolation_scrim(
+        &self,
+        ui: &egui::Ui,
+        doc: &Document,
+        view: &CanvasView,
+        rect: egui::Rect,
+    ) {
+        let Some(gid) = self.isolated_group else {
+            return;
+        };
+        let painter = ui.painter_at(rect);
+        let scrim = if self.prefs.dark_mode {
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 120)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+        };
+        let accent = egui::Color32::from_rgb(80, 160, 255);
+
+        // Union world-space AABB of the group's leaf members.
+        let mut bbox: Option<(f64, f64, f64, f64)> = None;
+        for id in doc.group_member_ids(&gid) {
+            if let Some(node) = doc.nodes.get(&id) {
+                if let Some((x0, y0, x1, y1)) = node_world_aabb_opt(node) {
+                    bbox = Some(match bbox {
+                        None => (x0, y0, x1, y1),
+                        Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
+                    });
+                }
+            }
+        }
+
+        let Some((x0, y0, x1, y1)) = bbox else {
+            // No measurable bounds (e.g. text-only group): dim the whole canvas.
+            painter.rect_filled(rect, 0.0, scrim);
+            return;
+        };
+
+        let pad = 6.0_f32;
+        let (sx0, sy0) = view.canvas_to_screen(x0, y0);
+        let (sx1, sy1) = view.canvas_to_screen(x1, y1);
+        let hole = egui::Rect::from_min_max(
+            egui::pos2(sx0 as f32 - pad, sy0 as f32 - pad),
+            egui::pos2(sx1 as f32 + pad, sy1 as f32 + pad),
+        )
+        .intersect(rect);
+
+        // Four scrim bands around the clear hole (egui has no "punch-out" fill).
+        if hole.min.y > rect.min.y {
+            painter.rect_filled(
+                egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, hole.min.y)),
+                0.0,
+                scrim,
+            );
+        }
+        if hole.max.y < rect.max.y {
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(rect.min.x, hole.max.y), rect.max),
+                0.0,
+                scrim,
+            );
+        }
+        if hole.min.x > rect.min.x {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, hole.min.y),
+                    egui::pos2(hole.min.x, hole.max.y),
+                ),
+                0.0,
+                scrim,
+            );
+        }
+        if hole.max.x < rect.max.x {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(hole.max.x, hole.min.y),
+                    egui::pos2(rect.max.x, hole.max.y),
+                ),
+                0.0,
+                scrim,
+            );
+        }
+
+        painter.rect_stroke(hole, 2.0, egui::Stroke::new(1.5, accent));
+    }
 }

@@ -1,4 +1,5 @@
 pub mod annotations;
+pub mod artboards;
 pub mod audit;
 pub mod canvas;
 pub mod charts;

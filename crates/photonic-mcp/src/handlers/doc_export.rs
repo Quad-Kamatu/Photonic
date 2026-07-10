@@ -2,6 +2,7 @@ use crate::protocol::{
     AddExportProfileArgs,
     DeleteLayerArgs,
     DuplicateLayerArgs,
+    ExportArtboardsArgs,
     ExportDesignTokensArgs,
     ExportIconSetArgs,
     ExportPdfArgs,
@@ -400,6 +401,220 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
             "data_base64": b64,
         }),
     )
+}
+
+/// Resolve which artboards `export_artboards` should render, applying the
+/// selection precedence (all > range > list > active) and bounds/cap checks.
+/// Pure (no I/O) so it is unit-tested directly. `max_boards` caps the result.
+fn select_artboards_for_export(
+    all: &[photonic_core::Artboard],
+    active: Option<uuid::Uuid>,
+    all_flag: bool,
+    range: Option<[usize; 2]>,
+    list: Option<&[String]>,
+    max_boards: usize,
+) -> Result<Vec<photonic_core::Artboard>, String> {
+    if all.is_empty() {
+        return Err("Document has no artboards".to_string());
+    }
+
+    let selected: Vec<photonic_core::Artboard> = if all_flag {
+        all.to_vec()
+    } else if let Some([start, end]) = range {
+        if start < 1 || end < start || end > all.len() {
+            return Err(format!(
+                "range [{start}, {end}] out of bounds — document has {} artboard(s) (1-based, inclusive)",
+                all.len()
+            ));
+        }
+        all[start - 1..end].to_vec()
+    } else if let Some(list) = list {
+        if list.is_empty() {
+            return Err("`artboards` was empty — omit it to export the active artboard".to_string());
+        }
+        let mut out = Vec::new();
+        for sel in list {
+            let found = if let Ok(id) = uuid::Uuid::parse_str(sel) {
+                all.iter().find(|a| a.id == id).cloned()
+            } else if let Ok(idx) = sel.parse::<usize>() {
+                (idx >= 1 && idx <= all.len()).then(|| all[idx - 1].clone())
+            } else {
+                all.iter().find(|a| a.name == *sel).cloned()
+            };
+            match found {
+                Some(a) => out.push(a),
+                None => {
+                    return Err(format!(
+                        "Artboard '{sel}' not found (use a UUID, exact name, or 1-based index)"
+                    ))
+                }
+            }
+        }
+        out
+    } else {
+        // Default: the active artboard (falls back to the first).
+        active
+            .and_then(|id| all.iter().find(|a| a.id == id).cloned())
+            .or_else(|| all.first().cloned())
+            .into_iter()
+            .collect()
+    };
+
+    if selected.is_empty() {
+        return Err("No artboards matched the request".to_string());
+    }
+    if selected.len() > max_boards {
+        return Err(format!(
+            "Requested {} artboards; max {max_boards} per call. Narrow the range or split into multiple calls.",
+            selected.len()
+        ));
+    }
+    Ok(selected)
+}
+
+/// Export one or more artboards to raster images, one image per artboard.
+///
+/// Unlike `export_raster` (which snapshots the live editor viewport), this
+/// renders each artboard's rectangle off-screen via the headless renderer, so
+/// the result is exact regardless of what the editor is currently showing.
+/// Selection precedence: `all` > `range` > `artboards` list > the active artboard.
+pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> ToolResult {
+    tracing::debug!("tool: export_artboards");
+    use photonic_core::Artboard;
+
+    // Caps that bound the response payload.
+    const MAX_BOARDS: usize = 24;
+    const MAX_DIM: u32 = 8192;
+
+    let format = args.format.as_deref().unwrap_or("png").to_lowercase();
+    if !matches!(
+        format.as_str(),
+        "png" | "jpeg" | "jpg" | "webp" | "gif" | "tiff" | "tif"
+    ) {
+        return ToolResult::error(format!(
+            "Unsupported format: '{format}'. Use 'png', 'jpeg', 'webp', 'gif', or 'tiff'."
+        ));
+    }
+    let scale = args.scale.unwrap_or(1.0).clamp(0.05, 8.0);
+    let transparent = args.transparent.unwrap_or(false);
+
+    // Resolve the target artboards and snapshot the document under one lock.
+    let (render_doc, targets) = {
+        let doc = state.document.lock().await;
+        let selected = match select_artboards_for_export(
+            &doc.artboards,
+            doc.active_artboard,
+            args.all.unwrap_or(false),
+            args.range,
+            args.artboards.as_deref(),
+            MAX_BOARDS,
+        ) {
+            Ok(v) => v,
+            Err(e) => return ToolResult::error(e),
+        };
+        (doc.clone(), selected)
+    };
+
+    // Render every target off-thread (creating GPU work off the async runtime).
+    let renderer = preview_renderer().await;
+    let jobs = targets.clone();
+    let rendered: Vec<(Artboard, Vec<u8>, u32, u32)> = tokio::task::spawn_blocking(move || {
+        use photonic_render::{ExportBackground, ExportOptions};
+        let background = if transparent {
+            ExportBackground::Transparent
+        } else {
+            ExportBackground::Artboard
+        };
+        jobs.into_iter()
+            .map(|a| {
+                let pw = ((a.width * scale).round() as i64).clamp(1, MAX_DIM as i64) as u32;
+                let ph = ((a.height * scale).round() as i64).clamp(1, MAX_DIM as i64) as u32;
+                let opts = ExportOptions {
+                    background,
+                    region: Some((a.x, a.y, a.width, a.height)),
+                    ..Default::default()
+                };
+                let (px, w, h) = renderer.render_rgba_with_opts(&render_doc, pw, ph, &opts);
+                (a, px, w, h)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+
+    if rendered.is_empty() || rendered.iter().all(|(_, px, _, _)| px.is_empty()) {
+        return ToolResult::error("Renderer returned no pixels (GPU readback failed)");
+    }
+
+    // Encode each artboard to the requested format.
+    use base64::Engine;
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut total_bytes = 0usize;
+    for (a, px, w, h) in rendered {
+        if px.is_empty() {
+            continue;
+        }
+        let Some(img) = image::RgbaImage::from_raw(w, h, px) else {
+            continue;
+        };
+        let mut png = Vec::new();
+        if image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_err()
+        {
+            continue;
+        }
+        let (bytes, mime, fmt_label) = match format.as_str() {
+            "jpeg" | "jpg" => {
+                let q = args.quality.unwrap_or(90).clamp(1, 100);
+                match png_to_jpeg(&png, q) {
+                    Some(b) => (b, "image/jpeg", "jpeg"),
+                    None => return ToolResult::error("Failed to encode JPEG"),
+                }
+            }
+            "webp" => {
+                let q = args.quality.unwrap_or(80).clamp(1, 100);
+                match png_to_webp(&png, q) {
+                    Some(b) => (b, "image/webp", "webp"),
+                    None => return ToolResult::error("Failed to encode WebP"),
+                }
+            }
+            "gif" => match png_to_gif(&png) {
+                Some(b) => (b, "image/gif", "gif"),
+                None => return ToolResult::error("Failed to encode GIF"),
+            },
+            "tiff" | "tif" => match png_to_tiff(&png) {
+                Some(b) => (b, "image/tiff", "tiff"),
+                None => return ToolResult::error("Failed to encode TIFF"),
+            },
+            _ => (png, "image/png", "png"),
+        };
+        total_bytes += bytes.len();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        items.push(serde_json::json!({
+            "artboard_id": a.id,
+            "name": a.name,
+            "width": w,
+            "height": h,
+            "format": fmt_label,
+            "bytes": bytes.len(),
+            "mime": mime,
+            "data_base64": b64,
+        }));
+    }
+
+    if items.is_empty() {
+        return ToolResult::error("No artboards could be encoded");
+    }
+
+    let n = items.len();
+    ToolResult::text(format!(
+        "Exported {n} artboard{} as {} — {} bytes total",
+        if n == 1 { "" } else { "s" },
+        format.to_uppercase(),
+        total_bytes
+    ))
+    .with_data(serde_json::json!({ "count": n, "format": format, "artboards": items }))
 }
 
 /// Lazily-initialized offscreen renderer shared by `preview_selection`. Created
@@ -1384,3 +1599,87 @@ pub async fn import_design_tokens(state: &AppState, args: ImportDesignTokensArgs
 }
 
 // ─── Graphic Styles ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod export_artboards_tests {
+    use super::select_artboards_for_export;
+    use photonic_core::Artboard;
+
+    fn boards() -> Vec<Artboard> {
+        vec![
+            Artboard::new("Cover", 0.0, 0.0, 100.0, 100.0),
+            Artboard::new("Body", 120.0, 0.0, 100.0, 100.0),
+            Artboard::new("Back", 240.0, 0.0, 100.0, 100.0),
+        ]
+    }
+
+    #[test]
+    fn all_flag_returns_every_board_in_order() {
+        let b = boards();
+        let out = select_artboards_for_export(&b, None, true, None, None, 24).unwrap();
+        assert_eq!(out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Cover", "Body", "Back"]);
+    }
+
+    #[test]
+    fn range_is_one_based_inclusive() {
+        let b = boards();
+        let out = select_artboards_for_export(&b, None, false, Some([2, 3]), None, 24).unwrap();
+        assert_eq!(out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Body", "Back"]);
+    }
+
+    #[test]
+    fn range_out_of_bounds_errors() {
+        let b = boards();
+        assert!(select_artboards_for_export(&b, None, false, Some([0, 2]), None, 24).is_err());
+        assert!(select_artboards_for_export(&b, None, false, Some([2, 9]), None, 24).is_err());
+        assert!(select_artboards_for_export(&b, None, false, Some([3, 2]), None, 24).is_err());
+    }
+
+    #[test]
+    fn list_resolves_by_name_index_and_id_in_given_order() {
+        let b = boards();
+        let id2 = b[1].id.to_string();
+        let sel = vec!["Back".to_string(), "1".to_string(), id2];
+        let out = select_artboards_for_export(&b, None, false, None, Some(&sel), 24).unwrap();
+        assert_eq!(out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Back", "Cover", "Body"]);
+    }
+
+    #[test]
+    fn unknown_selector_errors() {
+        let b = boards();
+        let sel = vec!["Nope".to_string()];
+        assert!(select_artboards_for_export(&b, None, false, None, Some(&sel), 24).is_err());
+    }
+
+    #[test]
+    fn default_is_active_then_first() {
+        let b = boards();
+        // active set → that one
+        let out = select_artboards_for_export(&b, Some(b[2].id), false, None, None, 24).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "Back");
+        // no active → first
+        let out = select_artboards_for_export(&b, None, false, None, None, 24).unwrap();
+        assert_eq!(out[0].name, "Cover");
+    }
+
+    #[test]
+    fn precedence_all_over_range_over_list() {
+        let b = boards();
+        let sel = vec!["Cover".to_string()];
+        // all wins even when range + list provided
+        let out = select_artboards_for_export(&b, None, true, Some([1, 1]), Some(&sel), 24).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn cap_is_enforced() {
+        let b = boards();
+        assert!(select_artboards_for_export(&b, None, true, None, None, 2).is_err());
+    }
+
+    #[test]
+    fn empty_document_errors() {
+        assert!(select_artboards_for_export(&[], None, true, None, None, 24).is_err());
+    }
+}

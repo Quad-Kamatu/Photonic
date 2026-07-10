@@ -9,7 +9,7 @@ pub use crate::handlers::doc_state::{
     get_document_state, get_document_info, undo, redo, list_checkpoints, restore_checkpoint, diff_checkpoints, list_history, jump_to_history, get_canvas_overview, resize_canvas, get_document_template, apply_document_template, set_document_bleed, get_document_bleed, set_artboard_margins, get_artboard_margins, add_construction_line, add_dimension, list_dimensions, remove_dimension, fit_to_margins,
 };
 pub use crate::handlers::doc_export::{
-    export_svg, export_pdf, export_raster, preview_selection, export_selection_as_svg, export_icon_set, export_design_tokens, add_export_profile, list_export_profiles, remove_export_profile, run_export_profile, import_design_tokens, set_active_layer, delete_layer, reorder_layers, duplicate_layer,
+    export_svg, export_pdf, export_raster, export_artboards, preview_selection, export_selection_as_svg, export_icon_set, export_design_tokens, add_export_profile, list_export_profiles, remove_export_profile, run_export_profile, import_design_tokens, set_active_layer, delete_layer, reorder_layers, duplicate_layer,
 };
 pub use crate::handlers::doc_swatches::{
     add_color_swatch, list_color_swatches, apply_color_swatch, update_color_swatch, delete_color_swatch, load_swatch_library, save_gradient_swatch, list_gradient_swatches, apply_gradient_swatch, delete_gradient_swatch, define_spot_color, list_spot_colors, apply_spot_color, delete_spot_color, define_pattern, list_patterns, apply_pattern_fill, delete_pattern,

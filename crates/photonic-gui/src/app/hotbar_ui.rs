@@ -177,6 +177,9 @@ impl PhotonicApp {
             HotbarAction::Ungroup => single_id
                 .map(|id| vec![PanelAction::UngroupNode { node_id: id }])
                 .unwrap_or_default(),
+            HotbarAction::UngroupAll => single_id
+                .map(|id| vec![PanelAction::UngroupAllNode { node_id: id }])
+                .unwrap_or_default(),
             HotbarAction::BringToFront => {
                 if is_multi {
                     sel.iter()

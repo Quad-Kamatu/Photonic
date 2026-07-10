@@ -86,6 +86,7 @@ pub enum WheelAction {
     ConvertToGrayscale(NodeId),   // single-node context
     ConvertToGrayscaleSelected,   // multi-node context
     UngroupNode(NodeId),          // group context only
+    UngroupAllNode(NodeId),       // group context only — recursive flatten
     EditFillColor(NodeId),        // path nodes only — open a fill-color picker
     EditStrokeColor(NodeId),      // path nodes only — open a stroke-color picker
 }
@@ -173,6 +174,10 @@ pub fn build_wheel_categories(ctx: &WheelContext) -> Vec<WheelCategory> {
                 object.push(RadialMenuItem {
                     label: "Ungroup",
                     action: WheelAction::UngroupNode(id),
+                });
+                object.push(RadialMenuItem {
+                    label: "Ungroup All",
+                    action: WheelAction::UngroupAllNode(id),
                 });
             }
             object.push(RadialMenuItem {

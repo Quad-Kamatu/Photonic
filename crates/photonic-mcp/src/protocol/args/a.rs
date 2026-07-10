@@ -1156,6 +1156,33 @@ pub struct ExportRasterArgs {
     pub quality: Option<u8>,
 }
 
+/// Arguments for the `export_artboards` tool.
+#[derive(Debug, Deserialize, Default)]
+pub struct ExportArtboardsArgs {
+    /// Specific artboards to export — each a UUID, an exact name, or a 1-based
+    /// index string ("1", "2", …). Exported in the order given.
+    #[serde(default)]
+    pub artboards: Option<Vec<String>>,
+    /// Inclusive 1-based index range `[start, end]` (e.g. `[2, 5]` = artboards 2–5).
+    #[serde(default)]
+    pub range: Option<[usize; 2]>,
+    /// Export every artboard in document order.
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// Output format: "png" (default), "jpeg", "webp", "gif", or "tiff".
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Output pixels per document unit (default 1.0). Clamped to 0.05–8.0.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// Transparent background instead of the artboard fill (default false).
+    #[serde(default)]
+    pub transparent: Option<bool>,
+    /// JPEG/WebP quality 1–100.
+    #[serde(default)]
+    pub quality: Option<u8>,
+}
+
 /// Arguments for `create_shape` tool
 #[derive(Debug, Deserialize)]
 pub struct CreateShapeArgs {

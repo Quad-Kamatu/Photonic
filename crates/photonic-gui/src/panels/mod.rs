@@ -180,6 +180,8 @@ pub enum PanelAction {
     OpenFindReplaceTextDialog,
     /// Dissolve a group node, re-inserting its children in place.
     UngroupNode { node_id: NodeId },
+    /// Recursively dissolve a group and every nested group into leaf nodes.
+    UngroupAllNode { node_id: NodeId },
     /// Close every open subpath in a path node (single-node) or merge two path
     /// nodes into one by connecting their nearest endpoints (two-node).
     JoinPaths { node_ids: Vec<NodeId> },
@@ -315,6 +317,8 @@ pub enum PanelAction {
     PlaceImageDialog,
     /// Open the Export dialog seeded from the Document-tab export settings (#176).
     OpenExportDialog,
+    /// Open the Export dialog in batch mode: one file per artboard over a range.
+    OpenArtboardExportDialog,
     /// Set the color tag of a layer (None = clear).
     SetLayerColor {
         layer_id: LayerId,
@@ -927,6 +931,7 @@ impl PanelAction {
                 Self::ConvertToGrayscale { node_ids: vec![] }
             }
             WheelAction::UngroupNode(id) => Self::UngroupNode { node_id: id },
+            WheelAction::UngroupAllNode(id) => Self::UngroupAllNode { node_id: id },
             WheelAction::EditFillColor(id) => Self::OpenColorPopup {
                 node_id: id,
                 stroke: false,

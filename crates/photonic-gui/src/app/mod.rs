@@ -28,6 +28,7 @@ use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
 use photonic_core::{
     history::{Command, CommandHistory, HistoryGraphNode},
+    layer::LayerId,
     node::{GroupNode, NodeId, PathNode},
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
@@ -46,6 +47,82 @@ use crate::{
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
 };
+
+/// In-process copy/paste buffer for scene objects (Ctrl+C / Ctrl+V).
+///
+/// Stores a *detached* snapshot of each copied object as a full subtree — a
+/// group carries all of its descendants — keyed by the object's original ids.
+/// Because it holds cloned node data (not references into a document), it
+/// survives switching between open documents, so paste works both within one
+/// document and across files. Pasting remaps every id to fresh ones via
+/// [`photonic_core::ops::cloning::clone_subtrees`], so the same buffer can be
+/// pasted repeatedly without collisions.
+#[derive(Default, Clone)]
+pub struct GuiClipboard {
+    /// Top-level object ids that were copied, in selection order.
+    roots: Vec<NodeId>,
+    /// Every node in the copied subtrees (roots + descendants), by original id.
+    nodes: std::collections::HashMap<NodeId, SceneNode>,
+}
+
+impl GuiClipboard {
+    /// True when nothing has been copied yet.
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// Capture the given top-level objects (and every descendant) from `doc`.
+    /// Replaces any previous contents. Ignores ids not present in `doc`.
+    pub fn capture<'a>(&mut self, doc: &Document, ids: impl IntoIterator<Item = &'a NodeId>) {
+        self.roots.clear();
+        self.nodes.clear();
+        for id in ids {
+            if !doc.nodes.contains_key(id) || self.roots.contains(id) {
+                continue;
+            }
+            self.roots.push(*id);
+            let mut stack = vec![*id];
+            while let Some(nid) = stack.pop() {
+                if let Some(node) = doc.nodes.get(&nid) {
+                    if let SceneNodeKind::Group(g) = &node.kind {
+                        stack.extend(g.children.iter().copied());
+                    }
+                    self.nodes.insert(nid, node.clone());
+                }
+            }
+        }
+    }
+
+    /// Build a paste command for the current contents targeting `target_layer`,
+    /// offset by `(dx, dy)`. Returns the command plus the fresh root ids to
+    /// select, or `None` if the clipboard is empty.
+    pub fn paste_command(
+        &self,
+        target_layer: LayerId,
+        dx: f64,
+        dy: f64,
+    ) -> Option<(Command, Vec<NodeId>)> {
+        if self.roots.is_empty() {
+            return None;
+        }
+        let (roots, nodes) = photonic_core::ops::cloning::clone_subtrees(
+            &self.nodes,
+            &self.roots,
+            target_layer,
+            dx,
+            dy,
+        );
+        if roots.is_empty() {
+            return None;
+        }
+        let cmd = Command::AddSubtree {
+            layer_id: target_layer,
+            roots: roots.clone(),
+            nodes,
+        };
+        Some((cmd, roots))
+    }
+}
 
 /// A floating fill/stroke color picker raised from the radial menu.
 #[derive(Clone, Copy)]
@@ -220,6 +297,8 @@ pub enum ExportArea {
     ContentBounds,
     /// The bounding box of the current selection.
     Selection,
+    /// The active artboard's rectangle.
+    Artboard,
 }
 
 /// Persistent Document-tab import/export settings (#176). Seeds the export
@@ -242,12 +321,28 @@ impl Default for DocExportSettings {
     }
 }
 
+/// Multi-artboard batch export mode for the Export dialog.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ArtboardExport {
+    /// Single image (whole document or one region). No batch.
+    Off,
+    /// One file per artboard for the 1-based inclusive index range [start, end].
+    Range { start: usize, end: usize },
+}
+
 pub struct ExportDialog {
     pub format: ExportFormat,
     pub background: ExportBackground,
     pub crop_to_content: bool,
     pub png_width: u32,
     pub png_height: u32,
+    /// When `Range`, export one file per artboard instead of a single image.
+    pub artboard_export: ArtboardExport,
+    /// Output pixels-per-document-unit for batch artboard export.
+    pub artboard_scale: f32,
+    /// Single-image export target: `Some(id)` crops to that artboard, `None`
+    /// exports the whole document (or the selection/content region).
+    pub artboard_target: Option<photonic_core::ArtboardId>,
     pub ico_size_16: bool,
     pub ico_size_32: bool,
     pub ico_size_48: bool,
@@ -269,6 +364,9 @@ impl ExportDialog {
             crop_to_content: true,
             png_width: doc.width as u32,
             png_height: doc.height as u32,
+            artboard_export: ArtboardExport::Off,
+            artboard_scale: 1.0,
+            artboard_target: None,
             ico_size_16: true,
             ico_size_32: true,
             ico_size_48: true,
@@ -1038,9 +1136,11 @@ pub struct PhotonicApp {
     pub magic_wand_tolerance: f64,
 
     // ── GUI Clipboard ─────────────────────────────────────────────────────────
-    /// Nodes copied with Ctrl+C, stored in-process for Ctrl+V / Ctrl+Shift+V.
-    /// Each entry is a deep-clone of the node at copy time with its original transform.
-    pub gui_clipboard: Vec<SceneNode>,
+    /// Objects copied with Ctrl+C, stored in-process for Ctrl+V / Ctrl+Shift+V.
+    /// Captures each selected object as a full subtree (a group's descendants
+    /// too), so a group of paths or images pastes intact — within the document
+    /// and across open documents (the snapshot is detached from the source doc).
+    pub gui_clipboard: GuiClipboard,
 
     // ── Composition Analysis ──────────────────────────────────────────────────
     /// Latest findings from the composition analyzer (shown in the GUI panel).
@@ -1452,7 +1552,7 @@ impl Default for PhotonicApp {
             knife_points: Vec::new(),
             magic_wand_attribute: SelectSameAttr::FillColor,
             magic_wand_tolerance: 0.05,
-            gui_clipboard: Vec::new(),
+            gui_clipboard: GuiClipboard::default(),
         }
     }
 }
@@ -3176,6 +3276,9 @@ impl PhotonicApp {
                     self.paint_raster_nodes(ctx, &raster_painter, doc, view);
                 }
 
+                // ── Isolation Mode: dim everything outside the isolated group ──
+                self.paint_isolation_scrim(ui, doc, view, rect);
+
                 // ── Pixel / Overprint Preview overlay (#22) ────────────────────
                 // Overlay the active artboard with a nearest-sampled export-
                 // resolution render so true aliasing/pixel snapping (Pixel
@@ -4433,7 +4536,19 @@ impl PhotonicApp {
                             Tool::DirectSelect | Tool::ProportionalMove
                         ) && self.ds_anchor_at(cx, cy, doc, view).is_some();
                         if !ds_anchor_menu {
-                            let hit = hit_test(doc, cx, cy, renderer);
+                            // `hit_test` returns the leaf under the cursor; groups are
+                            // flattened in draw order. Resolve that leaf to the group
+                            // the user perceives as the object (matching click-select),
+                            // so a right-click on a group yields group actions
+                            // (Ungroup / Ungroup All). Inside an isolated group we act
+                            // on the raw leaf instead.
+                            let hit = hit_test(doc, cx, cy, renderer).map(|id| {
+                                if self.isolated_group.is_some() {
+                                    id
+                                } else {
+                                    doc.outermost_group_of(&id).unwrap_or(id)
+                                }
+                            });
                             let wheel_ctx = match hit {
                                 Some(id)
                                     if doc.selection.contains(&id) && doc.selection.count() > 1 =>

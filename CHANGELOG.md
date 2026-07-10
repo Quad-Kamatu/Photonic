@@ -13,6 +13,22 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- **Artboard management over MCP.** Five new tools — `list_artboards`,
+  `add_artboard`, `update_artboard`, `remove_artboard`, `set_active_artboard` —
+  give agents the same artboard CRUD the GUI already had. All geometry edits go
+  through a single `SetArtboards` command, so every change is one undoable step.
+  A new `export_artboards` tool (and a matching GUI export picker) renders each
+  board at its own size × scale.
+- **Copy / paste of object subtrees.** Copying a group now deep-clones the whole
+  subtree via `clone_subtree`: every node gets a fresh id and all intra-subtree
+  references (group children, clip/blend-spine, threaded/area/path text) are
+  remapped, so pasting no longer shares or corrupts the source's children.
+  Backed by new `AddSubtree`/`RemoveSubtree` commands and an in-process
+  `GuiClipboard` that survives switching between open documents (cross-document
+  paste works).
+- **Ungroup All.** A hotbar action and `plan_ungroup_all` recursively flatten a
+  group and all nested groups down to leaves in a single undoable step.
+
 - **Proportional editing over MCP.** A new `proportional_move_anchor` tool lets
   AI and scripted callers do the same Blender-style proportional edit as the
   interactive Proportional Move tool: name a path, the anchor index(es) to move,

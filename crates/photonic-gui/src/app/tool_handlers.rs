@@ -214,48 +214,47 @@ impl PhotonicApp {
             self.guides_visible = !self.guides_visible;
         }
 
-        // Ctrl+C: copy selected nodes to in-process clipboard.
-        if ctx.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::C)) {
-            self.gui_clipboard.clear();
-            for nid in doc.selection.ids() {
-                if let Some(node) = doc.nodes.get(nid) {
-                    self.gui_clipboard.push(node.clone());
-                }
+        // Copy / paste are driven by egui's clipboard **events**, not raw key
+        // presses. egui-winit intercepts Ctrl+C / Ctrl+V (and Ctrl+Shift+V) and
+        // emits `Event::Copy` / `Event::Paste`, swallowing the underlying key
+        // event — so `key_pressed(Key::C / Key::V)` never fires for them. It
+        // also only emits `Event::Paste` when the OS clipboard is non-empty, so
+        // on copy we push a marker onto the OS clipboard to guarantee that a
+        // later Ctrl+V produces a paste event. `Event::Paste` does not carry the
+        // modifier state, so we read `shift` from the same frame to distinguish
+        // paste-in-place (Ctrl+Shift+V) from offset paste (Ctrl+V).
+        let (want_copy, want_paste, paste_in_place) = ctx.input(|i| {
+            (
+                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+                i.modifiers.shift,
+            )
+        });
+
+        // Ctrl+C: copy the selected objects (each as a full subtree) to the
+        // in-process clipboard, so a group of paths/images pastes intact and
+        // survives switching to another open document.
+        if want_copy {
+            let ids: Vec<NodeId> = doc.selection.ids().copied().collect();
+            if !ids.is_empty() {
+                self.gui_clipboard.capture(doc, ids.iter());
+                // Keep the OS clipboard non-empty so future Ctrl+V emits a paste
+                // event (see note above). The text is an internal marker only.
+                ctx.copy_text("photonic:objects".to_string());
             }
         }
 
-        // Ctrl+V: paste from clipboard with +10px offset.
-        // Ctrl+Shift+V: paste in place (exact original coordinates).
-        let (paste, paste_in_place) = ctx.input(|i| {
-            (
-                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V),
-                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::V),
-            )
-        });
-        if (paste || paste_in_place) && !self.gui_clipboard.is_empty() {
-            let offset = if paste { 10.0_f64 } else { 0.0 };
+        // Ctrl+V: paste with +10px offset. Ctrl+Shift+V: paste in place.
+        if want_paste && !self.gui_clipboard.is_empty() {
+            let offset = if paste_in_place { 0.0_f64 } else { 10.0 };
             if let Some(target_layer) = doc
                 .active_layer_id
                 .or_else(|| doc.layer_order.first().copied())
             {
-                let mut cmds: Vec<Command> = Vec::new();
-                let mut new_ids: Vec<NodeId> = Vec::new();
-                for src in &self.gui_clipboard {
-                    let mut new_node = src.clone();
-                    new_node.id = uuid::Uuid::new_v4();
-                    new_node.layer_id = target_layer;
-                    if offset.abs() > 1e-9 {
-                        new_node.transform.matrix[4] += offset;
-                        new_node.transform.matrix[5] += offset;
-                    }
-                    new_ids.push(new_node.id);
-                    cmds.push(Command::AddNode {
-                        node: new_node,
-                        layer_id: Some(target_layer),
-                    });
-                }
-                if !cmds.is_empty() {
-                    history.execute(Command::Batch(cmds), doc);
+                if let Some((cmd, new_ids)) =
+                    self.gui_clipboard.paste_command(target_layer, offset, offset)
+                {
+                    history.execute(cmd, doc);
                     doc.selection = Selection::from_ids(new_ids.iter().copied());
                     if let Some(first) = new_ids.first() {
                         self.selected_id = Some(*first);
@@ -389,32 +388,69 @@ impl PhotonicApp {
         }
 
         // ── Double-click: enter Isolation Mode on a group ─────────────────────
+        // `hit_test` returns the LEAF under the cursor (groups are flattened in
+        // draw order), so resolve that leaf up to the group it belongs to. Each
+        // double-click drills one level deeper (Illustrator-style): first into
+        // the outermost group, then into nested subgroups.
         if response.double_clicked_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                let hit = hit_test(doc, cx, cy, renderer);
-                if let Some(id) = hit {
-                    if let Some(node) = doc.nodes.get(&id) {
-                        if matches!(node.kind, SceneNodeKind::Group(_)) {
-                            self.isolated_group = Some(id);
-                            // Select children of the group.
-                            if let SceneNodeKind::Group(g) = &node.kind {
-                                doc.selection.clear();
-                                for cid in &g.children {
-                                    doc.selection.add(*cid);
-                                }
-                                self.selected_id = g.children.first().copied();
+                match hit_test(doc, cx, cy, renderer) {
+                    Some(leaf) => {
+                        // Ancestor group chain, outermost first.
+                        let mut chain: Vec<NodeId> = Vec::new();
+                        let mut cur = doc.parent_group_of(&leaf);
+                        while let Some(g) = cur {
+                            chain.push(g);
+                            if chain.len() > 64 {
+                                break;
                             }
-                            *doc_modified = true;
+                            cur = doc.parent_group_of(&g);
+                        }
+                        chain.reverse();
+
+                        if chain.is_empty() {
+                            // Ungrouped object: leave isolation (if any).
+                            if self.isolated_group.take().is_some() {
+                                doc.selection.clear();
+                                self.selected_id = None;
+                                *doc_modified = true;
+                            }
                             return;
                         }
+
+                        // Drill one level past the current isolation.
+                        let target = match self.isolated_group {
+                            None => chain[0],
+                            Some(iso) => match chain.iter().position(|g| *g == iso) {
+                                Some(i) if i + 1 < chain.len() => chain[i + 1],
+                                Some(_) => iso, // already deepest for this leaf
+                                None => chain[0], // isolated elsewhere → reset
+                            },
+                        };
+
+                        self.isolated_group = Some(target);
+                        if let Some(SceneNodeKind::Group(g)) =
+                            doc.nodes.get(&target).map(|n| &n.kind)
+                        {
+                            let children = g.children.clone();
+                            doc.selection.clear();
+                            for cid in &children {
+                                doc.selection.add(*cid);
+                            }
+                            self.selected_id = children.first().copied();
+                        }
+                        *doc_modified = true;
+                        return;
                     }
-                }
-                // Double-click on non-group or empty: exit isolation if active
-                if self.isolated_group.is_some() {
-                    self.isolated_group = None;
-                    doc.selection.clear();
-                    self.selected_id = None;
+                    None => {
+                        // Double-click on empty canvas: exit isolation if active.
+                        if self.isolated_group.take().is_some() {
+                            doc.selection.clear();
+                            self.selected_id = None;
+                            *doc_modified = true;
+                        }
+                    }
                 }
             }
         }
@@ -1967,5 +2003,96 @@ mod move_fallback_tests {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod clipboard_shortcut_tests {
+    use super::*;
+    use photonic_core::history::CommandHistory;
+    use photonic_core::node::{GroupNode, PathNode};
+    use photonic_core::{Document, PathData, SceneNode, SceneNodeKind};
+
+    /// egui delivers Ctrl+C / Ctrl+V as `Event::Copy` / `Event::Paste` (the raw
+    /// `Key::C` / `Key::V` events are swallowed), so the handler keys off those
+    /// events. This proves they are visible in `i.events` for the frame — the
+    /// mechanism the copy/paste shortcut depends on.
+    #[test]
+    fn egui_exposes_clipboard_events() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Copy);
+        input.events.push(egui::Event::Paste("ignored".to_string()));
+        let mut seen = (false, false);
+        ctx.run(input, |ctx| {
+            seen = ctx.input(|i| {
+                (
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+                )
+            });
+        });
+        assert!(seen.0, "Event::Copy must be visible in i.events");
+        assert!(seen.1, "Event::Paste must be visible in i.events");
+    }
+
+    fn path(layer: photonic_core::layer::LayerId) -> SceneNode {
+        SceneNode::new(
+            "p",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        )
+    }
+
+    /// Copying a group and pasting reproduces the whole subtree (fresh ids) and
+    /// does not double-list its children in draw order.
+    #[test]
+    fn gui_clipboard_pastes_group_as_subtree() {
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let layer = doc.active_layer_id.unwrap();
+        let c1 = path(layer);
+        let c2 = path(layer);
+        let (id1, id2) = (c1.id, c2.id);
+        doc.nodes.insert(id1, c1);
+        doc.nodes.insert(id2, c2);
+        let group = SceneNode::new(
+            "g",
+            layer,
+            SceneNodeKind::Group(GroupNode {
+                children: vec![id1, id2],
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        );
+        let group_id = group.id;
+        doc.nodes.insert(group_id, group);
+        doc.layers.get_mut(&layer).unwrap().node_ids.push(group_id);
+
+        let before = doc.nodes_in_draw_order().len(); // two leaves
+
+        let mut clip = GuiClipboard::default();
+        clip.capture(&doc, [group_id].iter());
+        assert!(!clip.is_empty(), "capture stored the group");
+
+        let (cmd, roots) = clip
+            .paste_command(layer, 10.0, 10.0)
+            .expect("paste command built");
+        assert_eq!(roots.len(), 1, "one fresh root");
+        assert_ne!(roots[0], group_id, "root id is fresh, not the original");
+
+        let mut history = CommandHistory::new(100);
+        history.execute(cmd, &mut doc);
+        assert_eq!(
+            doc.nodes_in_draw_order().len(),
+            before * 2,
+            "pasted group must not double-list a child"
+        );
+        // Pasting again from the same buffer yields yet another distinct root.
+        let (cmd2, roots2) = clip.paste_command(layer, 20.0, 20.0).unwrap();
+        assert_ne!(roots2[0], roots[0], "repeat paste gets fresh ids");
+        history.execute(cmd2, &mut doc);
+        assert_eq!(doc.nodes_in_draw_order().len(), before * 3);
     }
 }

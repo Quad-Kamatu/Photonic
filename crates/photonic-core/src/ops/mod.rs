@@ -1,4 +1,5 @@
 pub mod boolean;
+pub mod cloning;
 pub mod constraints;
 pub mod fit_curves;
 pub mod join;

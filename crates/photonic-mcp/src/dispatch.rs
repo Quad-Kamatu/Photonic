@@ -935,6 +935,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::document::export_raster(state, a).await,
             ))
         }
+        "export_artboards" => {
+            let a: ExportArtboardsArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::document::export_artboards(state, a).await,
+            ))
+        }
         "add_export_profile" => {
             let a: AddExportProfileArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -1689,6 +1695,37 @@ pub(crate) async fn dispatch_tool_inner(
         "get_artboard_margins" => Ok(ToolOutput::readonly(
             handlers::document::get_artboard_margins(state).await,
         )),
+        "list_artboards" => {
+            let a: ListArtboardsArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::artboards::list_artboards(state, a).await,
+            ))
+        }
+        "add_artboard" => {
+            let a: AddArtboardArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::artboards::add_artboard(state, a).await,
+            ))
+        }
+        "update_artboard" => {
+            let a: UpdateArtboardArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::artboards::update_artboard(state, a).await,
+            ))
+        }
+        "remove_artboard" => {
+            let a: RemoveArtboardArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::artboards::remove_artboard(state, a).await,
+            ))
+        }
+        "set_active_artboard" => {
+            let a: SetActiveArtboardArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::artboards::set_active_artboard(state, a).await,
+            ))
+        }
         "define_spot_color" => {
             let a: DefineSpotColorArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(

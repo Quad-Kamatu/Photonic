@@ -68,6 +68,70 @@ mod tests {
     }
 
     #[test]
+    fn add_subtree_pastes_group_without_double_listing() {
+        use crate::node::GroupNode;
+        use crate::ops::cloning::clone_subtree;
+
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let layer_id = doc.active_layer_id.unwrap();
+
+        // Build a real group of two paths in the document.
+        let c1 = make_node(&doc);
+        let c2 = make_node(&doc);
+        let (id1, id2) = (c1.id, c2.id);
+        doc.nodes.insert(id1, c1);
+        doc.nodes.insert(id2, c2);
+        let group = SceneNode::new(
+            "grp",
+            layer_id,
+            SceneNodeKind::Group(GroupNode {
+                children: vec![id1, id2],
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        );
+        let group_id = group.id;
+        doc.nodes.insert(group_id, group);
+        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(group_id);
+
+        let before = doc.nodes_in_draw_order().len(); // two leaves
+
+        // Paste a clone of the group via AddSubtree.
+        let cloned = clone_subtree(&doc.nodes, group_id, layer_id, 10.0, 10.0);
+        let new_root = cloned[0].id;
+        history.execute(
+            Command::AddSubtree {
+                layer_id,
+                roots: vec![new_root],
+                nodes: cloned,
+            },
+            &mut doc,
+        );
+
+        // Draw order doubled (two groups × two leaves), NOT tripled by a
+        // double-listed child.
+        let after = doc.nodes_in_draw_order().len();
+        assert_eq!(after, before * 2, "pasted group double-listed a child");
+        // The pasted children are not top-level entries of the layer.
+        assert_eq!(
+            doc.layers.get(&layer_id).unwrap().node_ids.len(),
+            2,
+            "only the two group roots are top-level"
+        );
+
+        // Undo removes the whole pasted subtree cleanly.
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.nodes_in_draw_order().len(), before);
+        assert_eq!(doc.layers.get(&layer_id).unwrap().node_ids.len(), 1);
+        // Redo restores it.
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.nodes_in_draw_order().len(), after);
+    }
+
+    #[test]
     fn undo_removes_node() {
         let mut doc = make_doc();
         let mut history = CommandHistory::new(200);
@@ -1797,6 +1861,30 @@ pub enum Command {
     },
     /// Remove an existing node.
     RemoveNode { node_id: NodeId },
+
+    /// Insert a fully-formed node subtree (paste / duplicate of a group).
+    ///
+    /// `nodes` holds every node in the subtree(s) — roots *and* descendants —
+    /// already carrying fresh ids (see [`crate::ops::cloning::clone_subtree`]).
+    /// Only `roots` are registered in `layer_id`'s top-level node list;
+    /// descendants live in `doc.nodes` and are reached through their parent
+    /// group's `children`, exactly like ordinary grouped nodes. Registering a
+    /// descendant at top level too would draw and select it twice. Self-contained
+    /// (carries full node data), so its inverse [`Command::RemoveSubtree`] can
+    /// restore it without reading a document.
+    AddSubtree {
+        layer_id: LayerId,
+        roots: Vec<NodeId>,
+        nodes: Vec<SceneNode>,
+    },
+    /// Inverse of [`Command::AddSubtree`]: remove the roots from the layer and
+    /// every node in the subtree(s) from the document.
+    RemoveSubtree {
+        layer_id: LayerId,
+        roots: Vec<NodeId>,
+        nodes: Vec<SceneNode>,
+    },
+
     /// Replace a node (used for any property update — stores old node for undo).
     UpdateNode { old: SceneNode, new: SceneNode },
 
@@ -2087,6 +2175,9 @@ impl Command {
         match self {
             Command::AddNode { node, .. } => BASE + node.mem_estimate(),
             Command::RemoveNodeFull { node } => BASE + node.mem_estimate(),
+            Command::AddSubtree { nodes, .. } | Command::RemoveSubtree { nodes, .. } => {
+                BASE + nodes.iter().map(|n| n.mem_estimate()).sum::<u64>()
+            }
             Command::UpdateNode { old, new } => BASE + old.mem_estimate() + new.mem_estimate(),
             Command::UpdateRasterRegion { old, new, .. } => {
                 BASE + old.len() as u64 + new.len() as u64
@@ -2142,6 +2233,12 @@ impl Command {
         match self {
             Command::AddNode { node, .. } => format!("Add {}", node.name),
             Command::RemoveNode { .. } => "Remove node".to_string(),
+            Command::AddSubtree { roots, .. } => {
+                format!("Paste {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
+            }
+            Command::RemoveSubtree { roots, .. } => {
+                format!("Remove {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
+            }
             Command::UpdateNode { old, new } => describe_node_update(old, new),
             Command::UpdateRasterRegion { .. } => "Edit raster".to_string(),
             Command::AddLayer { layer } => format!("Add layer \"{}\"", layer.name),
@@ -2235,6 +2332,34 @@ impl Command {
             }
             Command::RemoveNode { node_id } => {
                 doc.remove_node(node_id);
+            }
+            Command::AddSubtree {
+                layer_id,
+                roots,
+                nodes,
+            } => {
+                for node in nodes {
+                    doc.nodes.insert(node.id, node.clone());
+                }
+                if let Some(layer) = doc.layers.get_mut(layer_id) {
+                    for r in roots {
+                        if !layer.node_ids.contains(r) {
+                            layer.node_ids.push(*r);
+                        }
+                    }
+                }
+            }
+            Command::RemoveSubtree {
+                layer_id,
+                roots,
+                nodes,
+            } => {
+                for node in nodes {
+                    doc.nodes.remove(&node.id);
+                }
+                if let Some(layer) = doc.layers.get_mut(layer_id) {
+                    layer.node_ids.retain(|id| !roots.contains(id));
+                }
             }
             Command::UpdateNode { new, .. } => {
                 if let Some(n) = doc.nodes.get_mut(&new.id) {
@@ -2535,6 +2660,24 @@ impl Command {
                     layer_id: None,
                 })
             }
+            Command::AddSubtree {
+                layer_id,
+                roots,
+                nodes,
+            } => Some(Command::RemoveSubtree {
+                layer_id: *layer_id,
+                roots: roots.clone(),
+                nodes: nodes.clone(),
+            }),
+            Command::RemoveSubtree {
+                layer_id,
+                roots,
+                nodes,
+            } => Some(Command::AddSubtree {
+                layer_id: *layer_id,
+                roots: roots.clone(),
+                nodes: nodes.clone(),
+            }),
             Command::UpdateNode { old, new } => Some(Command::UpdateNode {
                 old: new.clone(),
                 new: old.clone(),

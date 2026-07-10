@@ -174,6 +174,62 @@ impl PhotonicApp {
                         ui.checkbox(&mut dlg.crop_to_content, "Crop to artwork");
                     });
                 }
+
+                // ── Artboard picker (single-image export) ─────────────────
+                // Lets the user export a specific artboard from the standard
+                // Export dialog (whichever entry point opened it). Hidden in
+                // batch mode (that path exports one file per artboard).
+                if !doc.artboards.is_empty()
+                    && dlg.artboard_export == crate::app::ArtboardExport::Off
+                {
+                    ui.horizontal(|ui| {
+                        ui.label("Artboard");
+                        let current = dlg
+                            .artboard_target
+                            .and_then(|id| doc.artboards.iter().find(|a| a.id == id))
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| "Whole document".to_string());
+                        egui::ComboBox::from_id_source("export_artboard_pick")
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                // Whole document (no crop to a board).
+                                if ui
+                                    .selectable_label(
+                                        dlg.artboard_target.is_none(),
+                                        "Whole document",
+                                    )
+                                    .clicked()
+                                {
+                                    dlg.artboard_target = None;
+                                    dlg.region_override = None;
+                                    dlg.png_width = doc.width as u32;
+                                    dlg.png_height = doc.height as u32;
+                                    if doc.height > 0.0 {
+                                        dlg.aspect = doc.width / doc.height;
+                                    }
+                                }
+                                for ab in &doc.artboards {
+                                    if ui
+                                        .selectable_label(
+                                            dlg.artboard_target == Some(ab.id),
+                                            &ab.name,
+                                        )
+                                        .clicked()
+                                    {
+                                        dlg.artboard_target = Some(ab.id);
+                                        dlg.region_override =
+                                            Some((ab.x, ab.y, ab.width, ab.height));
+                                        dlg.png_width = ab.width.round().max(1.0) as u32;
+                                        dlg.png_height = ab.height.round().max(1.0) as u32;
+                                        if ab.height > 0.0 {
+                                            dlg.aspect = ab.width / ab.height;
+                                        }
+                                    }
+                                }
+                            });
+                    });
+                }
+
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -185,30 +241,34 @@ impl PhotonicApp {
                     | ExportFormat::WebP
                     | ExportFormat::Gif
                     | ExportFormat::Tiff => {
-                        ui.horizontal(|ui| {
-                            ui.label("Width ");
-                            let prev_w = dlg.png_width;
-                            let r = ui.add(
-                                egui::DragValue::new(&mut dlg.png_width)
-                                    .range(1..=8192)
-                                    .suffix(" px"),
-                            );
-                            if r.changed() && dlg.aspect > 0.0 {
-                                dlg.png_height =
-                                    ((dlg.png_width as f64 / dlg.aspect) as u32).max(1);
-                            }
-                            let _ = prev_w;
-                            ui.label("  Height ");
-                            let r = ui.add(
-                                egui::DragValue::new(&mut dlg.png_height)
-                                    .range(1..=8192)
-                                    .suffix(" px"),
-                            );
-                            if r.changed() && dlg.aspect > 0.0 {
-                                dlg.png_width =
-                                    ((dlg.png_height as f64 * dlg.aspect) as u32).max(1);
-                            }
-                        });
+                        // In batch mode each artboard sizes itself (native × scale),
+                        // so the single width/height picker is hidden.
+                        if dlg.artboard_export == crate::app::ArtboardExport::Off {
+                            ui.horizontal(|ui| {
+                                ui.label("Width ");
+                                let prev_w = dlg.png_width;
+                                let r = ui.add(
+                                    egui::DragValue::new(&mut dlg.png_width)
+                                        .range(1..=8192)
+                                        .suffix(" px"),
+                                );
+                                if r.changed() && dlg.aspect > 0.0 {
+                                    dlg.png_height =
+                                        ((dlg.png_width as f64 / dlg.aspect) as u32).max(1);
+                                }
+                                let _ = prev_w;
+                                ui.label("  Height ");
+                                let r = ui.add(
+                                    egui::DragValue::new(&mut dlg.png_height)
+                                        .range(1..=8192)
+                                        .suffix(" px"),
+                                );
+                                if r.changed() && dlg.aspect > 0.0 {
+                                    dlg.png_width =
+                                        ((dlg.png_height as f64 * dlg.aspect) as u32).max(1);
+                                }
+                            });
+                        }
                         if dlg.format == ExportFormat::Jpeg || dlg.format == ExportFormat::WebP {
                             ui.horizontal(|ui| {
                                 ui.label("Quality");
@@ -228,6 +288,48 @@ impl PhotonicApp {
                         });
                     }
                     ExportFormat::Svg => {}
+                }
+
+                // ── Batch artboard export ─────────────────────────────────
+                if let crate::app::ArtboardExport::Range { start, end } = &mut dlg.artboard_export {
+                    let n = doc.artboards.len().max(1);
+                    *start = (*start).clamp(1, n);
+                    *end = (*end).clamp(*start, n);
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    let is_svg_or_ico =
+                        matches!(dlg.format, ExportFormat::Svg | ExportFormat::Ico);
+                    if is_svg_or_ico {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(210, 150, 60),
+                            "Batch export needs a raster format (PNG/JPEG/WebP/GIF/TIFF).",
+                        );
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Artboards");
+                            let all = *start <= 1 && *end >= n;
+                            if ui.selectable_label(all, "All").clicked() {
+                                *start = 1;
+                                *end = n;
+                            }
+                            ui.label("from");
+                            ui.add(egui::DragValue::new(start).range(1..=n));
+                            ui.label("to");
+                            ui.add(egui::DragValue::new(end).range(*start..=n));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Scale");
+                            ui.add(
+                                egui::DragValue::new(&mut dlg.artboard_scale)
+                                    .range(0.05..=8.0)
+                                    .speed(0.05)
+                                    .suffix("×"),
+                            );
+                            let count = end.saturating_sub(start.saturating_sub(1));
+                            ui.label(format!("· {count} file(s), one per artboard"));
+                        });
+                    }
                 }
 
                 ui.add_space(8.0);
@@ -1448,6 +1550,8 @@ impl PhotonicApp {
         let opts = dlg.export_opts();
         let png_w = dlg.png_width;
         let png_h = dlg.png_height;
+        let artboard_export = dlg.artboard_export;
+        let artboard_scale = dlg.artboard_scale;
 
         let (filter_name, ext) = match format {
             ExportFormat::Png => ("PNG image", "png"),
@@ -1479,57 +1583,65 @@ impl PhotonicApp {
             path
         };
 
-        // ── Multi-artboard raster export: one file per artboard ──────────────
-        // Each board exports at its own pixel size into `<stem>_<name>.<ext>`.
-        // SVG/ICO keep whole-document behaviour.
-        if matches!(
-            format,
-            ExportFormat::Png
-                | ExportFormat::Jpeg
-                | ExportFormat::WebP
-                | ExportFormat::Gif
-                | ExportFormat::Tiff
-        ) && doc.artboards.len() > 1
-        {
-            let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
-            let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| doc.name.clone());
-            let mut err: Option<String> = None;
-            let mut count = 0usize;
-            for ab in &doc.artboards {
-                let mut o = opts.clone();
-                o.region = Some((ab.x, ab.y, ab.width, ab.height));
-                let aw = ab.width.round().max(1.0) as u32;
-                let ah = ab.height.round().max(1.0) as u32;
-                let bytes = match format {
-                    ExportFormat::Png => renderer.render_png_with_opts(doc, aw, ah, &o),
-                    ExportFormat::Jpeg => renderer.render_jpeg_with_opts(doc, aw, ah, &o),
-                    ExportFormat::WebP => renderer.render_webp_with_opts(doc, aw, ah, &o),
-                    ExportFormat::Gif => renderer.render_gif_with_opts(doc, aw, ah, &o),
-                    ExportFormat::Tiff => renderer.render_tiff_with_opts(doc, aw, ah, &o),
-                    _ => unreachable!(),
-                };
-                let safe: String = ab
-                    .name
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                    .collect();
-                let p = parent.join(format!("{stem}_{safe}.{ext}"));
-                if let Err(e) = std::fs::write(&p, bytes) {
-                    err = Some(e.to_string());
-                    break;
+        // ── Batch artboard export: one raster file per artboard ──────────────
+        // Driven explicitly by the dialog's `artboard_export` range (opened via
+        // "Export Artboards…"). Each board renders at its own size × scale into
+        // `<stem>_<name>.<ext>`. SVG/ICO have no batch form → fall through to a
+        // single-file export.
+        if let crate::app::ArtboardExport::Range { start, end } = artboard_export {
+            let is_raster = matches!(
+                format,
+                ExportFormat::Png
+                    | ExportFormat::Jpeg
+                    | ExportFormat::WebP
+                    | ExportFormat::Gif
+                    | ExportFormat::Tiff
+            );
+            let n = doc.artboards.len();
+            if is_raster && n > 0 {
+                let s = start.clamp(1, n);
+                let e = end.clamp(s, n);
+                let scale = (artboard_scale.max(0.05)) as f64;
+                let renderer = pollster::block_on(photonic_render::HeadlessRenderer::new());
+                let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| doc.name.clone());
+                let mut err: Option<String> = None;
+                let mut count = 0usize;
+                for ab in &doc.artboards[s - 1..e] {
+                    let mut o = opts.clone();
+                    o.region = Some((ab.x, ab.y, ab.width, ab.height));
+                    let aw = ((ab.width * scale).round() as i64).clamp(1, 8192) as u32;
+                    let ah = ((ab.height * scale).round() as i64).clamp(1, 8192) as u32;
+                    let bytes = match format {
+                        ExportFormat::Png => renderer.render_png_with_opts(doc, aw, ah, &o),
+                        ExportFormat::Jpeg => renderer.render_jpeg_with_opts(doc, aw, ah, &o),
+                        ExportFormat::WebP => renderer.render_webp_with_opts(doc, aw, ah, &o),
+                        ExportFormat::Gif => renderer.render_gif_with_opts(doc, aw, ah, &o),
+                        ExportFormat::Tiff => renderer.render_tiff_with_opts(doc, aw, ah, &o),
+                        _ => unreachable!(),
+                    };
+                    let safe: String = ab
+                        .name
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                        .collect();
+                    let p = parent.join(format!("{stem}_{safe}.{ext}"));
+                    if let Err(e) = std::fs::write(&p, bytes) {
+                        err = Some(e.to_string());
+                        break;
+                    }
+                    count += 1;
                 }
-                count += 1;
+                self.export_dialog = None;
+                self.file_status = Some(match err {
+                    None => format!("Exported {count} artboard(s) → {stem}_*.{ext}"),
+                    Some(e) => format!("Export failed: {e}"),
+                });
+                return;
             }
-            self.export_dialog = None;
-            self.file_status = Some(match err {
-                None => format!("Exported {count} artboards → {stem}_*.{ext}"),
-                Some(e) => format!("Export failed: {e}"),
-            });
-            return;
         }
 
         let result = match format {

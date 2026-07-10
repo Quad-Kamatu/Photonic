@@ -248,6 +248,11 @@ pub static REGISTRY: &[CommandDef] = &[
         default: Some(KeyBinding::ctrl_shift(Key::G)),
     },
     CommandDef {
+        id: "object.ungroup_all",
+        label: "Ungroup All",
+        default: None,
+    },
+    CommandDef {
         id: "object.bring_forward",
         label: "Bring Forward",
         default: Some(KeyBinding::ctrl(Key::CloseBracket)),
