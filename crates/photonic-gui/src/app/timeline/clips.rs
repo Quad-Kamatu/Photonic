@@ -31,6 +31,32 @@ pub(crate) struct PaintedClip {
     pub rect: egui::Rect,
 }
 
+/// Fixed swatch palette for `Clip::color_label` (14-nle-parity §M-1, gap #7's
+/// UI half) — `(display name, color)` indexed by the label's `u8`. This is
+/// deliberately a *separate* set of hues from the `DESIGN.md` theme tokens,
+/// not derived from the active egui visuals: the label is organizational
+/// data the user assigns, not chrome, the same "functional data-coding, not
+/// chrome accent" precedent `DESIGN.md` documents for the node-editor port
+/// sockets. `primary`'s violet is deliberately excluded so a label swatch
+/// never reads as the selection cue.
+pub(crate) const CLIP_LABEL_SWATCHES: &[(&str, egui::Color32)] = &[
+    ("Red", egui::Color32::from_rgb(0xE5, 0x48, 0x4D)),
+    ("Orange", egui::Color32::from_rgb(0xF5, 0xA5, 0x24)),
+    ("Yellow", egui::Color32::from_rgb(0xE8, 0xD7, 0x4A)),
+    ("Green", egui::Color32::from_rgb(0x4C, 0xC3, 0x8A)),
+    ("Cyan", egui::Color32::from_rgb(0x14, 0xB8, 0xA6)),
+    ("Blue", egui::Color32::from_rgb(0x3B, 0x82, 0xF6)),
+    ("Pink", egui::Color32::from_rgb(0xEC, 0x48, 0x99)),
+    ("Gray", egui::Color32::from_rgb(0x8B, 0x8F, 0xA3)),
+];
+
+/// Resolve a `color_label` index to its swatch color; tolerant of an
+/// out-of-range index (e.g. a doc saved against a larger future palette)
+/// rather than panicking on it.
+pub(crate) fn label_color(label: u8) -> Option<egui::Color32> {
+    CLIP_LABEL_SWATCHES.get(label as usize).map(|(_, c)| *c)
+}
+
 /// The visible slice of a track's clips for `[first, last]` lane ticks, via the
 /// binary-search cull 04 §2.2 mandates (the `Vec<Clip>` is sorted + non-overlapping).
 pub(crate) fn visible_clips(track: &Track, first: Tick, last: Tick) -> &[Clip] {
@@ -117,6 +143,35 @@ pub(crate) fn paint_lane(
             egui::Stroke::new(1.0, colors.clip_stroke)
         };
         shapes.push(egui::Shape::rect_stroke(rect, rounding, stroke));
+
+        // Organizational color label (14-nle-parity §M-1): a thin cap along
+        // the clip's top edge, rounded to match the clip's own `sm` corners.
+        // Additive over the selected/disabled fill above — it never replaces
+        // those states, only decorates them (13 §1's "shape+color, not
+        // color-only" spirit extended to a genuinely-colored affordance).
+        if let Some(label) = c.color_label {
+            if let Some(mut swatch) = label_color(label) {
+                if !c.enabled {
+                    swatch = swatch.gamma_multiply(0.5);
+                }
+                let stripe_h = 3.0_f32.min(rect.height());
+                let stripe_rect = egui::Rect::from_min_max(
+                    rect.left_top(),
+                    egui::pos2(rect.right(), rect.top() + stripe_h),
+                );
+                let stripe_rounding = egui::Rounding {
+                    nw: rounding.nw,
+                    ne: rounding.ne,
+                    sw: 0.0,
+                    se: 0.0,
+                };
+                shapes.push(egui::Shape::rect_filled(
+                    stripe_rect,
+                    stripe_rounding,
+                    swatch,
+                ));
+            }
+        }
 
         // Transition badges: small triangles at the edge(s) with a transition
         // (drawn shape-only so they read without color, 13 §1.6).
@@ -292,5 +347,27 @@ mod tests {
             clip_label(&s.video_tracks[0], id).as_deref(),
             Some("Adjustment")
         );
+    }
+
+    #[test]
+    fn color_label_resolves_every_swatch_in_range() {
+        for i in 0..CLIP_LABEL_SWATCHES.len() {
+            assert_eq!(label_color(i as u8), Some(CLIP_LABEL_SWATCHES[i].1));
+        }
+    }
+
+    #[test]
+    fn color_label_out_of_range_is_none() {
+        assert_eq!(label_color(CLIP_LABEL_SWATCHES.len() as u8), None);
+        assert_eq!(label_color(u8::MAX), None);
+    }
+
+    #[test]
+    fn color_label_palette_excludes_the_selection_accent_violet() {
+        // DESIGN.md reserves `primary` (#6E56CF) for the selection cue; a
+        // label swatch must not collide with it (see the module doc comment
+        // on `CLIP_LABEL_SWATCHES`).
+        let primary = egui::Color32::from_rgb(0x6E, 0x56, 0xCF);
+        assert!(!CLIP_LABEL_SWATCHES.iter().any(|(_, c)| *c == primary));
     }
 }

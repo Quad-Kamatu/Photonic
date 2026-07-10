@@ -1076,14 +1076,20 @@ fn clip_context_menu(
         ui.label("No clip");
         return;
     };
-    let (inside, enabled) = doc
+    let (inside, enabled, current_label) = doc
         .timeline
         .as_ref()
         .and_then(|p| p.sequences.get(&seq_id))
         .and_then(|s| s.track(track))
         .and_then(|t| t.clips.iter().find(|c| c.id == clip))
-        .map(|c| (playhead > c.start && playhead < c.end(), c.enabled))
-        .unwrap_or((false, true));
+        .map(|c| {
+            (
+                playhead > c.start && playhead < c.end(),
+                c.enabled,
+                c.color_label,
+            )
+        })
+        .unwrap_or((false, true, None));
 
     if ui
         .add_enabled(inside, egui::Button::new("Split at playhead"))
@@ -1100,11 +1106,45 @@ fn clip_context_menu(
         ops_bridge::ripple_delete(doc, history, seq_id, track, clip);
         ui.close_menu();
     }
-    let label = if enabled { "Disable" } else { "Enable" };
-    if ui.button(label).clicked() {
+    let toggle_label = if enabled { "Disable" } else { "Enable" };
+    if ui.button(toggle_label).clicked() {
         ops_bridge::set_clip_enabled(doc, history, seq_id, track, clip, !enabled);
         ui.close_menu();
     }
+    // Organizational color label (14-nle-parity §M-1, gap #7's UI half) —
+    // sets `Clip::color_label` via `ops_bridge::set_clip_color_label`, never
+    // mutating `doc.timeline` directly (module-doc rule at the top of this
+    // file). Swatches painted by `clips::paint_lane` from the same palette.
+    ui.menu_button("Label", |ui| {
+        if ui
+            .selectable_label(current_label.is_none(), "No label")
+            .clicked()
+        {
+            ops_bridge::set_clip_color_label(doc, history, seq_id, track, clip, None);
+            ui.close_menu();
+        }
+        ui.separator();
+        for (idx, (name, color)) in clips::CLIP_LABEL_SWATCHES.iter().enumerate() {
+            let selected = current_label == Some(idx as u8);
+            ui.horizontal(|ui| {
+                let (swatch_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(swatch_rect, egui::Rounding::same(2.0), *color);
+                if ui.selectable_label(selected, *name).clicked() {
+                    ops_bridge::set_clip_color_label(
+                        doc,
+                        history,
+                        seq_id,
+                        track,
+                        clip,
+                        Some(idx as u8),
+                    );
+                    ui.close_menu();
+                }
+            });
+        }
+    });
     ui.separator();
     ui.add_enabled(false, egui::Button::new("Add transition in"))
         .on_disabled_hover_text("P6");
