@@ -15,6 +15,107 @@ use crate::app::engine;
 use crate::app::timeline::ops_bridge;
 use crate::commands;
 use photonic_core::timeline::{FrameRate, Sequence, SequenceFormat, TICKS_PER_SECOND};
+use photonic_video::ProxyMode;
+
+// ── Monitor toolbar polish: playback resolution + image zoom (14 §M-5) ─────
+//
+// Both selectors are GUI-only state — there is no `PhotonicApp` field for
+// either (this story's territory is this file alone), so they live in egui's
+// per-`Id` temp storage (`Context::data`/`data_mut`), the same mechanism
+// already used for other widget-local state in this crate (e.g.
+// `color_popup.rs`, `panels/modify.rs`). Written and read every frame, so it
+// persists for the life of the session like a normal field would.
+
+/// GUI-only playback-preview resolution levels for the monitor toolbar. The
+/// engine exposes only a binary proxy-media switch today
+/// (`photonic_video::ProxyMode` — `Auto`/`ForceProxy`/`ForceOriginal`, see
+/// `session.rs`), not a graduated preview-scale command, so `Half` and
+/// `Quarter` both collapse onto `ForceProxy` (documented seam: a real
+/// half/quarter preview-scale primitive is the engine-side follow-up). The
+/// three-way GUI selection is still tracked distinctly so the user's choice
+/// reads back correctly and the collapse is the only compromise.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PlaybackResolution {
+    Full,
+    Half,
+    Quarter,
+}
+
+impl PlaybackResolution {
+    const ALL: [PlaybackResolution; 3] = [
+        PlaybackResolution::Full,
+        PlaybackResolution::Half,
+        PlaybackResolution::Quarter,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            PlaybackResolution::Full => "Full",
+            PlaybackResolution::Half => "1/2",
+            PlaybackResolution::Quarter => "1/4",
+        }
+    }
+
+    /// Map to the engine's actual proxy-mode knob (documented collapse, see
+    /// the type doc above).
+    fn to_proxy_mode(self) -> ProxyMode {
+        match self {
+            PlaybackResolution::Full => ProxyMode::ForceOriginal,
+            PlaybackResolution::Half | PlaybackResolution::Quarter => ProxyMode::ForceProxy,
+        }
+    }
+}
+
+/// GUI-only monitor image zoom. `Fit` (default) letterboxes the frame into
+/// the available content area — the pre-existing behavior. `Actual` shows it
+/// at native pixels and is draggable (`pan`) when it overflows the content
+/// area.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+struct MonitorZoom {
+    mode: ImageZoomMode,
+    /// Drag offset from center. Only meaningful in `Actual` mode; reset to
+    /// zero whenever the mode switches back to `Fit`.
+    pan: egui::Vec2,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+enum ImageZoomMode {
+    #[default]
+    Fit,
+    Actual,
+}
+
+const MONITOR_ZOOM_STATE_ID: &str = "photonic.video_monitor.zoom_state";
+const MONITOR_RESOLUTION_STATE_ID: &str = "photonic.video_monitor.playback_resolution";
+
+impl PhotonicApp {
+    fn monitor_zoom_state(&self, ctx: &egui::Context) -> MonitorZoom {
+        ctx.data(|d| d.get_temp(egui::Id::new(MONITOR_ZOOM_STATE_ID)))
+            .unwrap_or_default()
+    }
+
+    fn set_monitor_zoom_state(&self, ctx: &egui::Context, zoom: MonitorZoom) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(MONITOR_ZOOM_STATE_ID), zoom));
+    }
+
+    fn monitor_playback_resolution(&self, ctx: &egui::Context) -> PlaybackResolution {
+        ctx.data(|d| d.get_temp(egui::Id::new(MONITOR_RESOLUTION_STATE_ID)))
+            .unwrap_or(PlaybackResolution::Full)
+    }
+
+    /// Persist the chosen resolution and — when an engine is attached —
+    /// apply it immediately via the bridge's `proxy_mode` intent field
+    /// (reconciled into a real `EngineCmd::SetProxyMode` by
+    /// `EngineBridge::apply_proxy_mode`, called each frame from
+    /// `drive_playback`). A no-op on engine-less hosts (tests, GPU-free
+    /// machines) beyond remembering the GUI selection.
+    fn set_monitor_playback_resolution(&mut self, ctx: &egui::Context, res: PlaybackResolution) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(MONITOR_RESOLUTION_STATE_ID), res));
+        if let Some(bridge) = self.engine.as_mut() {
+            bridge.proxy_mode = res.to_proxy_mode();
+        }
+    }
+}
 
 // ── Mode entry/exit (04 §1.2, §1.3) ─────────────────────────────────────────
 
@@ -448,14 +549,51 @@ impl PhotonicApp {
         let target_aspect = format.width.max(1) as f32 / format.height.max(1) as f32;
         let avail_w = content_rect.width().max(1.0);
         let avail_h = content_rect.height().max(1.0);
-        let avail_aspect = avail_w / avail_h;
-        let video_size = if avail_aspect > target_aspect {
-            egui::vec2(avail_h * target_aspect, avail_h) // pillarbox
-        } else {
-            egui::vec2(avail_w, avail_w / target_aspect) // letterbox
+
+        // Image zoom (14 §M-5 polish): `Fit` letterboxes into the available
+        // area exactly as before; `Actual` shows the frame at native pixels,
+        // draggable when it overflows the content area.
+        let mut zoom = self.monitor_zoom_state(ctx);
+        let video_size = match zoom.mode {
+            ImageZoomMode::Fit => {
+                let avail_aspect = avail_w / avail_h;
+                if avail_aspect > target_aspect {
+                    egui::vec2(avail_h * target_aspect, avail_h) // pillarbox
+                } else {
+                    egui::vec2(avail_w, avail_w / target_aspect) // letterbox
+                }
+            }
+            ImageZoomMode::Actual => egui::vec2(format.width as f32, format.height as f32),
         };
-        let video_rect = egui::Rect::from_center_size(content_rect.center(), video_size);
-        painter.rect_filled(video_rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
+        if zoom.mode == ImageZoomMode::Fit {
+            zoom.pan = egui::Vec2::ZERO;
+        } else {
+            // Pan-to-drag, gated to `Actual` so it never competes with the
+            // reframe handles' own drag sense over the default Fit view.
+            let pan_resp = ui.interact(
+                content_rect,
+                ui.id().with("monitor_pan_drag"),
+                egui::Sense::drag(),
+            );
+            if pan_resp.dragged() {
+                zoom.pan += pan_resp.drag_delta();
+            }
+            // Clamp so a drag can't push the frame fully out of view — a
+            // margin stays reachable even once it's mostly offscreen.
+            let max_pan_x = ((video_size.x - avail_w).max(0.0)) / 2.0 + 40.0;
+            let max_pan_y = ((video_size.y - avail_h).max(0.0)) / 2.0 + 40.0;
+            zoom.pan.x = zoom.pan.x.clamp(-max_pan_x, max_pan_x);
+            zoom.pan.y = zoom.pan.y.clamp(-max_pan_y, max_pan_y);
+            if pan_resp.hovered() || pan_resp.dragged() {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+            }
+        }
+        self.set_monitor_zoom_state(ctx, zoom);
+        let video_rect = egui::Rect::from_center_size(content_rect.center() + zoom.pan, video_size);
+        // Clipped to `content_rect` so a zoomed-in (Actual) frame can't paint
+        // over the format/scrub/transport bars above and below it.
+        let content_painter = ui.painter_at(content_rect);
+        content_painter.rect_filled(video_rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
 
         // ── EngineFrame presentation (03 §5) ────────────────────────────────
         // `EngineBridge::present_latest` (run by the host each frame, before
@@ -468,14 +606,14 @@ impl PhotonicApp {
                 let active = doc.timeline.as_ref().and_then(|p| p.active_sequence);
                 if active == Some(fseq) {
                     let uv = engine::padded_uv((format.width, format.height), tex.physical);
-                    painter.image(tex.id, video_rect, uv, egui::Color32::WHITE);
+                    content_painter.image(tex.id, video_rect, uv, egui::Color32::WHITE);
                     drew_frame = true;
                 }
             }
         }
 
         if self.monitor_safe_area {
-            draw_safe_area_guides(&painter, video_rect);
+            draw_safe_area_guides(&content_painter, video_rect);
         }
 
         // Reframe transform handles (04 §3.3, 05 §4.2, CAP-012) — same overlay
@@ -605,8 +743,70 @@ impl PhotonicApp {
                 {
                     super::reframe::fit_clips_to_active_format(doc, history, &selection);
                 }
+
+                // Playback resolution + image zoom (14 §M-5 polish):
+                // right-aligned so they read as a distinct group from the
+                // aspect/reframe controls above. Added in reverse (right_to_
+                // left) order so Resolution reads before Zoom, left to right.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.draw_zoom_selector(ui);
+                    ui.separator();
+                    self.draw_resolution_selector(ui);
+                });
             });
         });
+    }
+
+    /// Playback-resolution selector (14 §M-5): Full / 1/2 / 1/4 preview
+    /// scale. See [`PlaybackResolution`] for the engine-side mapping.
+    fn draw_resolution_selector(&mut self, ui: &mut egui::Ui) {
+        let mut res = self.monitor_playback_resolution(ui.ctx());
+        let prev = res;
+        egui::ComboBox::from_id_salt("monitor_playback_resolution")
+            .selected_text(res.label())
+            .width(48.0)
+            .show_ui(ui, |ui| {
+                for opt in PlaybackResolution::ALL {
+                    ui.selectable_value(&mut res, opt, opt.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Playback resolution — Full plays originals, 1/2 and 1/4 both \
+                 preview at the engine's proxy-media scale",
+            );
+        ui.label(egui::RichText::new(ph::GAUGE).weak())
+            .on_hover_text("Playback resolution");
+        if res != prev {
+            self.set_monitor_playback_resolution(ui.ctx(), res);
+        }
+    }
+
+    /// Image-zoom selector (14 §M-5): `Fit` (default, letterboxed) or
+    /// `Actual` (100%, native pixels, draggable) for the monitor picture.
+    fn draw_zoom_selector(&mut self, ui: &mut egui::Ui) {
+        let mut zoom = self.monitor_zoom_state(ui.ctx());
+        let prev_mode = zoom.mode;
+        egui::ComboBox::from_id_salt("monitor_image_zoom")
+            .selected_text(match zoom.mode {
+                ImageZoomMode::Fit => "Fit",
+                ImageZoomMode::Actual => "100%",
+            })
+            .width(48.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut zoom.mode, ImageZoomMode::Fit, "Fit");
+                ui.selectable_value(&mut zoom.mode, ImageZoomMode::Actual, "100%");
+            })
+            .response
+            .on_hover_text("Image zoom — Fit letterboxes, 100% shows native pixels (drag to pan)");
+        ui.label(egui::RichText::new(ph::MAGNIFYING_GLASS).weak())
+            .on_hover_text("Image zoom");
+        if zoom.mode != prev_mode {
+            if zoom.mode == ImageZoomMode::Fit {
+                zoom.pan = egui::Vec2::ZERO;
+            }
+            self.set_monitor_zoom_state(ui.ctx(), zoom);
+        }
     }
 
     /// Play/pause/step buttons, timecode readout, loop + safe-area toggles,
