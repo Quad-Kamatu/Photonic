@@ -18,9 +18,9 @@
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
-    ops, AssetId, AssetKind, Clip, ClipSource, ClipTiming, FrameRate, Marker, MarkerId, MediaAsset,
-    Sequence, SequenceFormat, SequenceId, Tick, TimelineCmd, TimelineProject, Track, TrackId,
-    TrackKind, TrackSettings, TICKS_PER_SECOND,
+    ops, AssetId, AssetKind, Clip, ClipId, ClipSource, ClipTiming, FrameRate, Marker, MarkerId,
+    MediaAsset, Sequence, SequenceFormat, SequenceId, Tick, TimelineCmd, TimelineProject, Track,
+    TrackId, TrackKind, TrackSettings, TICKS_PER_SECOND,
 };
 
 /// Push one timeline command as a single, non-folding undo step.
@@ -59,7 +59,11 @@ pub(crate) fn switch_to_aspect(
     };
     // Match an existing format by dimensions (name is cosmetic; the aspect is
     // what matters), so repeated clicks just re-activate rather than pile up.
-    if let Some(idx) = seq.formats.iter().position(|f| f.width == w && f.height == h) {
+    if let Some(idx) = seq
+        .formats
+        .iter()
+        .position(|f| f.width == w && f.height == h)
+    {
         if seq.active_format != idx {
             if let Ok(cmd) = ops::set_active_format(project, seq_id, idx) {
                 commit(history, doc, cmd);
@@ -941,6 +945,514 @@ pub(crate) fn set_work_range(
     }
 }
 
+// ── NLE parity round-2 (spec 17 G1): add-edit-all-tracks / close-gap / simplify ──
+//
+// Batch editing verbs that fan out the shipped split / ripple primitives across
+// tracks, each committed as ONE undo step. The pure planning fns (`split_targets`,
+// `close_gap_plan`, `close_all_gaps_changes`, `through_edit_runs`) are unit-tested
+// below; the committing wrappers build the `TimelineCmd` batch from the ORIGINAL
+// project snapshot (like `ripple_delete`) and rely on remove-before-extend
+// ordering so every intermediate state stays invariant-valid (`Command::Batch`
+// validates after each sub-command).
+
+/// Every unlocked track's clip the playhead tick `at` is strictly inside
+/// (`start < at < end`), in timeline order — the split-worthy targets for "Add
+/// Edit to All Tracks". An edge/gap yields none.
+fn split_targets(seq: &Sequence, at: Tick) -> Vec<(TrackId, ClipId)> {
+    let mut out = Vec::new();
+    for t in seq.tracks() {
+        if t.locked {
+            continue;
+        }
+        for c in &t.clips {
+            if c.start < at && at < c.end() {
+                out.push((t.id, c.id));
+            }
+        }
+    }
+    out
+}
+
+/// **Add Edit to All Tracks** (G1, Premiere Ctrl+Shift+K): split every unlocked
+/// track's clip under the playhead in one undo step. Returns the number split.
+pub(crate) fn split_all_tracks(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+) -> usize {
+    let Some(p) = doc.timeline.as_ref() else {
+        return 0;
+    };
+    let Some(s) = p.sequences.get(&seq) else {
+        return 0;
+    };
+    let targets = split_targets(s, at);
+    let mut cmds = Vec::new();
+    for (track, clip) in targets {
+        if let Ok(cmd) = ops::split_clip(p, seq, track, clip, at) {
+            cmds.push(cmd);
+        }
+    }
+    let n = cmds.len();
+    commit_batch(history, doc, cmds);
+    n
+}
+
+/// Plan closing the gap that contains `at` among a track's sorted `clips`:
+/// `(first_shifted_start, gap_width)` — every clip with `start >=
+/// first_shifted_start` shifts LEFT by `gap_width`. `None` when `at` is inside a
+/// clip, in trailing empty space, or on a flush boundary (no gap). Pure G1 math.
+fn close_gap_plan(clips: &[Clip], at: Tick) -> Option<(Tick, Tick)> {
+    let i = clips.iter().position(|c| c.start > at)?;
+    let prev_end = if i == 0 {
+        Tick::ZERO
+    } else {
+        clips[i - 1].end()
+    };
+    if at < prev_end {
+        return None; // inside the previous clip — not a gap
+    }
+    let gap = clips[i].start - prev_end;
+    if gap.0 <= 0 {
+        return None; // clips are already flush
+    }
+    Some((clips[i].start, gap))
+}
+
+/// The `RippleEdit` change list that closes the gap containing `at` on `track`
+/// (shift the post-gap clips left by the gap width). Empty when there is no gap.
+fn close_gap_changes(track: &Track, at: Tick) -> Vec<(ClipId, ClipTiming, ClipTiming)> {
+    let Some((from, gap)) = close_gap_plan(&track.clips, at) else {
+        return Vec::new();
+    };
+    track
+        .clips
+        .iter()
+        .filter(|c| c.start >= from)
+        .map(|c| {
+            let old = ClipTiming::of(c);
+            (
+                c.id,
+                old,
+                ClipTiming {
+                    start: c.start - gap,
+                    ..old
+                },
+            )
+        })
+        .collect()
+}
+
+/// **Close Gap** (G1): close the single gap containing `at` on `track`, one undo
+/// step. `true` if a gap was closed (a locked track or no gap is a no-op).
+pub(crate) fn close_gap_at(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    at: Tick,
+) -> bool {
+    let Some(p) = doc.timeline.as_ref() else {
+        return false;
+    };
+    let Some(t) = p.sequences.get(&seq).and_then(|s| s.track(track)) else {
+        return false;
+    };
+    if t.locked {
+        return false;
+    }
+    let changes = close_gap_changes(t, at);
+    if changes.is_empty() {
+        return false;
+    }
+    commit(
+        history,
+        doc,
+        TimelineCmd::RippleEdit {
+            seq,
+            track,
+            changes,
+        },
+    );
+    true
+}
+
+/// Whether an unlocked track has a closeable gap containing `at` (gates the gap
+/// context-menu entry in `mod.rs`).
+pub(crate) fn gap_at(doc: &Document, seq: SequenceId, track: TrackId, at: Tick) -> bool {
+    doc.timeline
+        .as_ref()
+        .and_then(|p| p.sequences.get(&seq))
+        .and_then(|s| s.track(track))
+        .filter(|t| !t.locked)
+        .is_some_and(|t| close_gap_plan(&t.clips, at).is_some())
+}
+
+/// **Close Gap at Playhead across all tracks** (G1): each unlocked track closes
+/// the gap the playhead `at` sits in, all in ONE undo step. Returns the count.
+pub(crate) fn close_gaps_at_playhead(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+) -> usize {
+    let Some(p) = doc.timeline.as_ref() else {
+        return 0;
+    };
+    let Some(s) = p.sequences.get(&seq) else {
+        return 0;
+    };
+    let mut cmds = Vec::new();
+    for t in s.tracks() {
+        if t.locked {
+            continue;
+        }
+        let changes = close_gap_changes(t, at);
+        if !changes.is_empty() {
+            cmds.push(TimelineCmd::RippleEdit {
+                seq,
+                track: t.id,
+                changes,
+            });
+        }
+    }
+    let n = cmds.len();
+    commit_batch(history, doc, cmds);
+    n
+}
+
+/// Repack sorted `clips` left-contiguous, keeping the first clip's start (removes
+/// every INTERNAL gap; a leading offset is preserved). Returns only the clips
+/// whose start changes. Pure G1 math.
+fn close_all_gaps_changes(clips: &[Clip]) -> Vec<(ClipId, ClipTiming, ClipTiming)> {
+    let mut changes = Vec::new();
+    let mut cursor: Option<Tick> = None;
+    for c in clips {
+        let new_start = cursor.unwrap_or(c.start);
+        if new_start != c.start {
+            let old = ClipTiming::of(c);
+            changes.push((
+                c.id,
+                old,
+                ClipTiming {
+                    start: new_start,
+                    ..old
+                },
+            ));
+        }
+        cursor = Some(new_start + c.duration);
+    }
+    changes
+}
+
+/// **Close All Gaps** (G1): repack every unlocked track left-contiguous, one undo
+/// step. Returns the number of tracks changed.
+pub(crate) fn close_all_gaps(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+) -> usize {
+    let Some(p) = doc.timeline.as_ref() else {
+        return 0;
+    };
+    let Some(s) = p.sequences.get(&seq) else {
+        return 0;
+    };
+    let mut cmds = Vec::new();
+    for t in s.tracks() {
+        if t.locked {
+            continue;
+        }
+        let changes = close_all_gaps_changes(&t.clips);
+        if !changes.is_empty() {
+            cmds.push(TimelineCmd::RippleEdit {
+                seq,
+                track: t.id,
+                changes,
+            });
+        }
+    }
+    let n = cmds.len();
+    commit_batch(history, doc, cmds);
+    n
+}
+
+/// Whether `b` is a "through edit" continuation of `a` — the same source played
+/// on with no change (what a split with no edit leaves): flush on the timeline,
+/// source-continuous, and identical in every property that makes merging them
+/// lossless.
+fn is_through_edit(a: &Clip, b: &Clip) -> bool {
+    a.end() == b.start
+        && a.source == b.source
+        && a.speed == b.speed
+        && b.source_in == a.source_in + a.speed.source_delta(a.duration)
+        && a.effects == b.effects
+        && a.grade == b.grade
+        && a.transform == b.transform
+        && a.reframe == b.reframe
+        && a.composition == b.composition
+        && a.audio == b.audio
+        && a.enabled == b.enabled
+        && a.color_label == b.color_label
+        && a.link_group == b.link_group
+        && a.transition_out.is_none()
+        && b.transition_in.is_none()
+}
+
+/// Maximal runs of consecutive through-edits on a track: `(survivor_index,
+/// merged_indices, merged_duration)` per run of ≥ 2 clips. The survivor keeps its
+/// start/source_in and grows to `merged_duration`; the merged clips are removed.
+/// Pure G1 detection.
+fn through_edit_runs(clips: &[Clip]) -> Vec<(usize, Vec<usize>, Tick)> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i + 1 < clips.len() {
+        let mut j = i;
+        let mut dur = clips[i].duration;
+        let mut merged = Vec::new();
+        while j + 1 < clips.len() && is_through_edit(&clips[j], &clips[j + 1]) {
+            merged.push(j + 1);
+            dur = dur + clips[j + 1].duration;
+            j += 1;
+        }
+        if merged.is_empty() {
+            i += 1;
+        } else {
+            runs.push((i, merged, dur));
+            i = j + 1;
+        }
+    }
+    runs
+}
+
+/// **Simplify Sequence** (G1): merge every through-edit run back into one clip
+/// across all unlocked tracks, one undo step. Returns the number of clips merged
+/// away. Removes-before-extend ordering keeps each intermediate state valid.
+pub(crate) fn simplify_sequence(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+) -> usize {
+    let Some(p) = doc.timeline.as_ref() else {
+        return 0;
+    };
+    let Some(s) = p.sequences.get(&seq) else {
+        return 0;
+    };
+    let mut cmds: Vec<TimelineCmd> = Vec::new();
+    let mut merged_count = 0;
+    for t in s.tracks() {
+        if t.locked {
+            continue;
+        }
+        for (survivor, merged, new_dur) in through_edit_runs(&t.clips) {
+            // Remove the merged-away clips first (frees the span) …
+            for &idx in merged.iter().rev() {
+                cmds.push(TimelineCmd::RemoveClip {
+                    seq,
+                    track: t.id,
+                    clip: Box::new(t.clips[idx].clone()),
+                });
+                merged_count += 1;
+            }
+            // … then extend the survivor over the freed span.
+            let surv = &t.clips[survivor];
+            cmds.push(TimelineCmd::TrimClip {
+                seq,
+                track: t.id,
+                clip: surv.id,
+                old: ClipTiming::of(surv),
+                new: ClipTiming {
+                    start: surv.start,
+                    duration: new_dur,
+                    source_in: surv.source_in,
+                },
+            });
+        }
+    }
+    commit_batch(history, doc, cmds);
+    merged_count
+}
+
+#[cfg(test)]
+mod g1_tests {
+    use super::*;
+    use photonic_core::timeline::{Sequence, TimelineProject};
+
+    fn adj(start: i64, dur: i64) -> Clip {
+        Clip::new(ClipSource::Adjustment, Tick(start), Tick(dur))
+    }
+
+    #[test]
+    fn split_targets_collects_interior_clips_and_skips_locked_and_edges() {
+        let mut s = Sequence::new("s", FrameRate::new(30, 1), 1920, 1080);
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        let mut v2 = Track::new(TrackKind::Video, "V2");
+        let mut a1 = Track::new(TrackKind::Audio, "A1");
+        let c1 = adj(0, 100); // V1 [0,100)
+        let c2 = adj(0, 100); // V2 [0,100)
+        let ca = adj(0, 40); // A1 [0,40) — playhead 50 is OUTSIDE
+        let (id1, id2) = (c1.id, c2.id);
+        v1.clips.push(c1);
+        v2.clips.push(c2);
+        a1.clips.push(ca);
+        let (v1id, v2id) = (v1.id, v2.id);
+        s.video_tracks.push(v1);
+        s.video_tracks.push(v2);
+        s.audio_tracks.push(a1);
+
+        // Playhead 50: interior to V1 & V2 clips, past the A1 clip → two targets.
+        let mut got = split_targets(&s, Tick(50));
+        got.sort();
+        let mut want = vec![(v1id, id1), (v2id, id2)];
+        want.sort();
+        assert_eq!(got, want);
+
+        // Locking V2 drops it from the target set.
+        s.video_tracks[1].locked = true;
+        assert_eq!(split_targets(&s, Tick(50)), vec![(v1id, id1)]);
+
+        // On an edge nothing is strictly interior.
+        assert!(split_targets(&s, Tick(0)).is_empty());
+        assert!(split_targets(&s, Tick(100)).is_empty());
+    }
+
+    #[test]
+    fn close_gap_plan_finds_leading_and_internal_gaps_only() {
+        // Leading gap [0,50), clip [50,150), gap [150,200), clip [200,300).
+        let clips = vec![adj(50, 100), adj(200, 100)];
+        // In the leading gap: shift everything left by 50 (first clip → 0).
+        assert_eq!(close_gap_plan(&clips, Tick(20)), Some((Tick(50), Tick(50))));
+        // In the internal gap [150,200): first shifted is clip@200, gap 50.
+        assert_eq!(
+            close_gap_plan(&clips, Tick(175)),
+            Some((Tick(200), Tick(50)))
+        );
+        // Inside a clip → no gap.
+        assert_eq!(close_gap_plan(&clips, Tick(100)), None);
+        // In trailing empty space → no gap.
+        assert_eq!(close_gap_plan(&clips, Tick(400)), None);
+        // Flush clips have no internal gap.
+        let flush = vec![adj(0, 100), adj(100, 100)];
+        assert_eq!(close_gap_plan(&flush, Tick(150)), None);
+        assert_eq!(close_gap_plan(&flush, Tick(50)), None);
+    }
+
+    #[test]
+    fn close_all_gaps_repacks_internal_gaps_keeping_first_start() {
+        // [10,60), gap, [100,150), gap, [200,260)
+        let clips = vec![adj(10, 50), adj(100, 50), adj(200, 60)];
+        let changes = close_all_gaps_changes(&clips);
+        let by_id: std::collections::HashMap<_, _> =
+            changes.iter().map(|(id, _o, n)| (*id, n.start)).collect();
+        // The first clip is unchanged (keeps start 10) → not emitted.
+        assert!(!by_id.contains_key(&clips[0].id));
+        // Second → 60 (10+50); third → 110 (60+50).
+        assert_eq!(by_id[&clips[1].id], Tick(60));
+        assert_eq!(by_id[&clips[2].id], Tick(110));
+    }
+
+    #[test]
+    fn through_edit_runs_merges_a_continuous_split_chain() {
+        let asset = AssetId::new();
+        let mk = |start: i64, dur: i64, src_in: i64| {
+            let mut c = Clip::new(ClipSource::Asset { asset }, Tick(start), Tick(dur));
+            c.source_in = Tick(src_in);
+            c
+        };
+        // One source split into three flush, source-continuous pieces.
+        let clips = vec![mk(0, 40, 0), mk(40, 60, 40), mk(100, 50, 100)];
+        let runs = through_edit_runs(&clips);
+        assert_eq!(runs.len(), 1);
+        let (survivor, merged, new_dur) = &runs[0];
+        assert_eq!(*survivor, 0);
+        assert_eq!(merged, &vec![1, 2]);
+        assert_eq!(*new_dur, Tick(150));
+
+        // A source discontinuity (source_in jump) breaks the run.
+        let broken = vec![mk(0, 40, 0), mk(40, 60, 999)];
+        assert!(through_edit_runs(&broken).is_empty());
+        // A gap (not flush) breaks the run.
+        let gapped = vec![mk(0, 40, 0), mk(60, 60, 40)];
+        assert!(through_edit_runs(&gapped).is_empty());
+    }
+
+    fn doc_one_video(clips: &[(i64, i64)]) -> (Document, CommandHistory, SequenceId, TrackId) {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("s", FrameRate::new(30, 1), 1920, 1080);
+        let mut v = Track::new(TrackKind::Video, "V1");
+        for (s0, d) in clips {
+            v.clips.push(adj(*s0, *d));
+        }
+        let vid = v.id;
+        seq.video_tracks.push(v);
+        let seq_id = project.insert_sequence(seq);
+        project.active_sequence = Some(seq_id);
+        let mut doc = Document::new("t", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+        (doc, CommandHistory::new(64), seq_id, vid)
+    }
+
+    fn starts(doc: &Document, seq: SequenceId, track: TrackId) -> Vec<Tick> {
+        doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(track)
+            .unwrap()
+            .clips
+            .iter()
+            .map(|c| c.start)
+            .collect()
+    }
+
+    #[test]
+    fn close_gaps_at_playhead_closes_one_gap_and_undoes_in_one_step() {
+        let (mut doc, mut h, seq, v) = doc_one_video(&[(0, 100), (200, 100)]);
+        // Playhead in the gap [100,200): clip@200 → 100.
+        close_gaps_at_playhead(&mut doc, &mut h, seq, Tick(150));
+        assert_eq!(starts(&doc, seq, v), vec![Tick(0), Tick(100)]);
+        h.undo(&mut doc);
+        assert_eq!(starts(&doc, seq, v), vec![Tick(0), Tick(200)]);
+    }
+
+    #[test]
+    fn split_all_tracks_splits_interior_clips_in_one_undo_step() {
+        let (mut doc, mut h, seq, v) = doc_one_video(&[(0, 100)]);
+        let n = split_all_tracks(&mut doc, &mut h, seq, Tick(50));
+        assert_eq!(n, 1);
+        assert_eq!(starts(&doc, seq, v), vec![Tick(0), Tick(50)]);
+        h.undo(&mut doc);
+        assert_eq!(starts(&doc, seq, v), vec![Tick(0)]);
+    }
+
+    #[test]
+    fn simplify_merges_a_split_with_no_change_back_into_one_clip() {
+        // Insert one clip, split it at 50 (a no-change through-edit), then simplify.
+        let (mut doc, mut h, seq, v) = doc_one_video(&[]);
+        let clip = adj(0, 100);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = ops::insert_clip(p, seq, v, clip).unwrap();
+        h.execute_discrete(Command::Timeline(cmd), &mut doc);
+        let clip_id = doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(v)
+            .unwrap()
+            .clips[0]
+            .id;
+        split(&mut doc, &mut h, seq, v, clip_id, Tick(50));
+        assert_eq!(starts(&doc, seq, v), vec![Tick(0), Tick(50)]);
+        let merged = simplify_sequence(&mut doc, &mut h, seq);
+        assert_eq!(merged, 1);
+        assert_eq!(starts(&doc, seq, v), vec![Tick(0)]);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().sequences[&seq]
+                .track(v)
+                .unwrap()
+                .clips[0]
+                .duration,
+            Tick(100)
+        );
+    }
+}
+
 #[cfg(test)]
 mod format_tests {
     use super::*;
@@ -968,23 +1480,35 @@ mod format_tests {
         // New aspect → added at index 1 and activated.
         switch_to_aspect(&mut h, &mut doc, seq, "9:16", 1080, 1920);
         assert_eq!(active(&doc, seq), (1, 1080, 1920));
-        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 2);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(),
+            2
+        );
 
         // Back to the original aspect → re-activates index 0, no new format.
         switch_to_aspect(&mut h, &mut doc, seq, "16:9", 1920, 1080);
         assert_eq!(active(&doc, seq), (0, 1920, 1080));
-        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 2);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(),
+            2
+        );
 
         // Repeating the current aspect is a no-op (no duplicate, still index 0).
         switch_to_aspect(&mut h, &mut doc, seq, "16:9", 1920, 1080);
-        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 2);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(),
+            2
+        );
 
         // Undo the reactivation, then the add — state walks back cleanly.
         h.undo(&mut doc);
         assert_eq!(active(&doc, seq), (1, 1080, 1920));
         h.undo(&mut doc);
         assert_eq!(active(&doc, seq), (0, 1920, 1080));
-        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 1);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(),
+            1
+        );
     }
 }
 

@@ -67,6 +67,7 @@ pub(crate) fn draw_header(
     history: &mut CommandHistory,
     seq_id: SequenceId,
     row: TrackRow,
+    target: &mut Option<TrackId>,
 ) {
     let (name, enabled, locked, solo, sync_lock) = {
         let Some(t) = doc
@@ -80,6 +81,7 @@ pub(crate) fn draw_header(
         let solo = t.audio.as_ref().is_some_and(|a| a.solo);
         (t.name.clone(), t.enabled, t.locked, solo, t.sync_lock)
     };
+    let is_target = *target == Some(row.id);
 
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
@@ -88,6 +90,20 @@ pub(crate) fn draw_header(
         [rect.left_bottom(), rect.right_bottom()],
         egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
     );
+    // Source-patch target highlight (spec 17 G6): a faint tint + accent left bar
+    // so the lane Insert/Overwrite/Paste routes to reads at a glance.
+    if is_target {
+        let accent = visuals.selection.stroke.color;
+        painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.08));
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(rect.left() + 3.0, rect.bottom()),
+            ),
+            0.0,
+            accent,
+        );
+    }
 
     let pad = 4.0;
     let btn = 18.0;
@@ -167,6 +183,25 @@ pub(crate) fn draw_header(
         toggle_sync_lock(doc, history, seq_id, row.id);
     }
 
+    // Source-patch target button (spec 17 G6): routes Insert / Overwrite / Paste
+    // of this lane's kind here. Highlighted when this track is the current target;
+    // click toggles it — clearing falls back to first-enabled in
+    // `interact::resolve_target_track`.
+    let patch_rect = egui::Rect::from_min_size(
+        egui::pos2(sync_rect.right() + 2.0, top),
+        egui::vec2(btn, btn),
+    );
+    if ui
+        .put(
+            patch_rect,
+            egui::SelectableLabel::new(is_target, ph::TARGET),
+        )
+        .on_hover_text("Patch source here — Insert/Overwrite/Paste target for this lane")
+        .clicked()
+    {
+        *target = if is_target { None } else { Some(row.id) };
+    }
+
     // Track display (wrench) menu (14-nle-parity M-10): per-track height
     // presets. Right-aligned so it never collides with the name label.
     let wrench_rect = egui::Rect::from_min_size(
@@ -193,7 +228,7 @@ pub(crate) fn draw_header(
 
     // Name label / inline rename.
     let name_rect = egui::Rect::from_min_max(
-        egui::pos2(sync_rect.right() + 4.0, top),
+        egui::pos2(patch_rect.right() + 4.0, top),
         egui::pos2(wrench_rect.left() - 4.0, top + btn),
     );
     let editing = ui

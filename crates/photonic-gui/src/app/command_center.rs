@@ -7,7 +7,7 @@
 use super::*;
 use crate::app::timeline::{interact, ops_bridge};
 use crate::commands::{self, CommandId};
-use photonic_core::timeline::{ops, Clip, Sequence, SequenceId, TrackKind};
+use photonic_core::timeline::{ops, Clip, ClipTiming, Sequence, SequenceId, TrackKind};
 
 /// One clip captured on the timeline clipboard (Ctrl+C / Ctrl+X, NLE parity
 /// QW-3). Holds a full clone of the source clip — grade, effects, trim, speed
@@ -233,6 +233,21 @@ impl PhotonicApp {
             "video.zoom_in" => self.timeline_zoom_in(),
             "video.zoom_out" => self.timeline_zoom_out(),
             "video.zoom_fit" => self.timeline_zoom_fit(doc),
+            // ── NLE parity round-2 (spec 17) ─────────────────────────────────
+            // G1 Add-Edit-all-tracks / Close-Gap / Simplify; G2 Q/W/E trims +
+            // Shift+Q/W rolls; G3 Match Frame / Reveal. Each is one undo step
+            // (batches via `ops_bridge`); a no-op cleanly when nothing applies.
+            "video.split_all_tracks" => self.timeline_split_all_tracks(doc, history),
+            "video.close_gap" => self.timeline_close_gap_at_playhead(doc, history),
+            "video.close_gaps" => self.timeline_close_all_gaps(doc, history),
+            "video.simplify_sequence" => self.timeline_simplify_sequence(doc, history),
+            "video.trim_start_to_playhead" => self.timeline_trim_to_playhead(doc, history, true),
+            "video.trim_end_to_playhead" => self.timeline_trim_to_playhead(doc, history, false),
+            "video.extend_edit" => self.timeline_extend_edit_to_playhead(doc, history),
+            "video.roll_prev_to_playhead" => self.timeline_roll_to_playhead(doc, history, true),
+            "video.roll_next_to_playhead" => self.timeline_roll_to_playhead(doc, history, false),
+            "video.match_frame" => self.timeline_match_frame(doc),
+            "video.reveal_in_project" => self.timeline_reveal_in_project(doc),
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the
@@ -1179,6 +1194,338 @@ impl PhotonicApp {
     /// territory) — this owns the mode bit and its keybinding.
     pub(crate) fn timeline_toggle_razor(&mut self) {
         self.timeline_razor_active = !self.timeline_razor_active;
+    }
+
+    // ── NLE parity round-2 (spec 17 G1/G2/G3) ────────────────────────────────
+    //
+    // Keyboard-velocity editing riding on the shipped split/trim/roll ops. The
+    // per-frame poll is `handle_timeline_shortcuts` (called from
+    // `draw_timeline_panel`); every mutation batches through `ops_bridge` as a
+    // single undo step and no-ops cleanly when nothing applies.
+
+    /// **Add Edit to All Tracks** (G1, Premiere Ctrl+Shift+K): split every
+    /// unlocked track's clip under the playhead in one undo step.
+    pub(crate) fn timeline_split_all_tracks(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::split_all_tracks(doc, history, seq_id, self.playhead);
+    }
+
+    /// **Close Gap at Playhead** (G1): on every unlocked track, close the gap the
+    /// playhead sits in, all in one undo step.
+    pub(crate) fn timeline_close_gap_at_playhead(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::close_gaps_at_playhead(doc, history, seq_id, self.playhead);
+    }
+
+    /// **Close All Gaps** (G1): repack every unlocked track left-contiguous
+    /// (keeping each track's first clip position), one undo step.
+    pub(crate) fn timeline_close_all_gaps(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::close_all_gaps(doc, history, seq_id);
+    }
+
+    /// **Simplify Sequence** (G1): merge back through-edits — adjacent clips that
+    /// are the same source played continuously (a split with no change) — across
+    /// every unlocked track, one undo step.
+    pub(crate) fn timeline_simplify_sequence(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::simplify_sequence(doc, history, seq_id);
+    }
+
+    /// **Ripple-trim to playhead** (G2, Premiere Q/W): trim the target clip's
+    /// start (`start_edge`, Q) or end (W) to the playhead, rippling downstream
+    /// clips to close the gap. The target is the selected clip the playhead is
+    /// strictly inside, else any clip it is inside (locked tracks skipped). No-op
+    /// when the playhead is on an edge or in a gap.
+    pub(crate) fn timeline_trim_to_playhead(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        start_edge: bool,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let at = self.playhead;
+        // Carry the source-tick advance for a head trim as a plain `Tick` (never
+        // the `SpeedMap` itself — a concurrent speed-ramp story makes it non-Copy).
+        let Some((track, clip, start, duration, source_in, head_advance)) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| {
+                let (track, clip) = interact::trim_target_at(s, &self.timeline_selection, at)?;
+                let c = s.track(track)?.clips.iter().find(|c| c.id == clip)?;
+                let head_advance = c.speed.source_delta(at - c.start);
+                Some((track, clip, c.start, c.duration, c.source_in, head_advance))
+            })
+        else {
+            return;
+        };
+        // Playhead must be strictly interior for either edge to make sense.
+        if !(start < at && at < start + duration) {
+            return;
+        }
+        let new = if start_edge {
+            // Q: remove [start, playhead) from the head — keep the timeline start,
+            // advance source_in, shrink duration; downstream ripples left.
+            let delta = at - start;
+            let new_source_in = source_in + head_advance;
+            if new_source_in.0 < 0 {
+                return;
+            }
+            ClipTiming {
+                start,
+                duration: duration - delta,
+                source_in: new_source_in,
+            }
+        } else {
+            // W: move the out-point to the playhead; downstream ripples left.
+            ClipTiming {
+                start,
+                duration: at - start,
+                source_in,
+            }
+        };
+        if new.duration.0 <= 0 {
+            return;
+        }
+        ops_bridge::ripple_trim(doc, history, seq_id, track, clip, new);
+    }
+
+    /// **Extend Edit to Playhead** (G2, Premiere E): extend the selected clip's
+    /// out-point to the playhead (a plain trim, no ripple), clamped to the next
+    /// clip's start so it never overlaps. No-op with no selection or when the
+    /// playhead is not to the right of the clip's start.
+    pub(crate) fn timeline_extend_edit_to_playhead(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let at = self.playhead;
+        let Some((track, clip, start, source_in, next_start)) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| {
+                let (track, clip) = interact::first_selected(s, &self.timeline_selection)?;
+                let t = s.track(track)?;
+                let c = t.clips.iter().find(|c| c.id == clip)?;
+                let end = c.end();
+                let next_start = t
+                    .clips
+                    .iter()
+                    .filter(|o| o.id != clip && o.start >= end)
+                    .map(|o| o.start)
+                    .min();
+                Some((track, clip, c.start, c.source_in, next_start))
+            })
+        else {
+            return;
+        };
+        let mut new_end = at;
+        if let Some(ns) = next_start {
+            new_end = new_end.min(ns);
+        }
+        if new_end <= start {
+            return;
+        }
+        let new = ClipTiming {
+            start,
+            duration: new_end - start,
+            source_in,
+        };
+        ops_bridge::trim(doc, history, seq_id, track, clip, new);
+    }
+
+    /// **Roll edit to playhead** (G2, Premiere Shift+Q / Shift+W): roll the cut
+    /// immediately before (`prev`) / after the playhead on the target track to
+    /// the playhead. Target track = the selected/under-playhead clip's track,
+    /// else the first unlocked track with a cut. No-op when no such cut exists or
+    /// the roll would collapse a clip (rejected by `ops::roll_edit`).
+    pub(crate) fn timeline_roll_to_playhead(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        prev: bool,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let at = self.playhead;
+        let Some((track, left, right, delta)) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| {
+                let track = interact::roll_target_track(s, &self.timeline_selection, at)?;
+                let t = s.track(track)?;
+                // The flush-adjacent cut nearest before/after the playhead.
+                let mut best: Option<(Tick, ClipId, ClipId)> = None;
+                for w in t.clips.windows(2) {
+                    let (l, r) = (&w[0], &w[1]);
+                    if l.end() != r.start {
+                        continue; // a gap, not a cut
+                    }
+                    let b = l.end();
+                    let take = if prev { b < at } else { b > at };
+                    if !take {
+                        continue;
+                    }
+                    let better = match best {
+                        None => true,
+                        Some((bb, _, _)) => {
+                            if prev {
+                                b > bb
+                            } else {
+                                b < bb
+                            }
+                        }
+                    };
+                    if better {
+                        best = Some((b, l.id, r.id));
+                    }
+                }
+                let (b, l, r) = best?;
+                Some((track, l, r, at - b))
+            })
+        else {
+            return;
+        };
+        if delta.0 == 0 {
+            return;
+        }
+        ops_bridge::roll(doc, history, seq_id, track, left, right, delta);
+    }
+
+    /// **Match Frame** (G3, Premiere F): from the clip under the playhead, arm
+    /// its source at the matching source tick (feeds Insert/Overwrite/Replace).
+    /// Reports the armed source tick via tracing (no source monitor yet — G10).
+    pub(crate) fn timeline_match_frame(&mut self, doc: &Document) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let at = self.playhead;
+        let Some(ps) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| {
+                let (track, clip) = interact::clip_at_playhead(s, &self.timeline_selection, at)?;
+                let t = s.track(track)?;
+                let c = t.clips.iter().find(|c| c.id == clip)?;
+                let matched = c.source_in + c.speed.source_delta(at - c.start);
+                let source_end = c.source_in + c.duration;
+                let src_out = if source_end > matched {
+                    source_end
+                } else {
+                    matched + c.duration
+                };
+                Some(interact::PendingSource {
+                    source: c.source.clone(),
+                    src_in: matched,
+                    src_out,
+                    name: c.name.clone(),
+                    kind: t.kind,
+                })
+            })
+        else {
+            return;
+        };
+        tracing::info!(
+            "Match Frame: armed source \"{}\" at source tick {}",
+            ps.name,
+            ps.src_in.0
+        );
+        self.pending_source = Some(ps);
+    }
+
+    /// **Reveal in Media Pool** (G3): select the source asset of the clip under
+    /// the playhead in the media pool. No-op for generator clips (no asset).
+    pub(crate) fn timeline_reveal_in_project(&mut self, doc: &Document) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let at = self.playhead;
+        let asset = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| {
+                let (track, clip) = interact::clip_at_playhead(s, &self.timeline_selection, at)?;
+                s.track(track)?
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip)?
+                    .source
+                    .asset()
+            });
+        if let Some(asset) = asset {
+            self.media_pool_ui.selected = Some(asset);
+        }
+    }
+
+    /// Per-frame poll for the timeline-panel keyboard commands (spec 17 G1/G2/G3),
+    /// called from `draw_timeline_panel`. The monitor's `handle_video_keyboard`
+    /// owns the transport / 3-4-point keys; these editing keys are owned here so
+    /// no out-of-territory file changes are needed. Gated on
+    /// `!wants_keyboard_input` so a key never fires while a rename field has
+    /// focus, and each id routes through the shared keymap so a user rebind
+    /// applies.
+    pub(crate) fn handle_timeline_shortcuts(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        const KEYS: &[CommandId] = &[
+            "video.split_all_tracks",
+            "video.close_gap",
+            "video.close_gaps",
+            "video.simplify_sequence",
+            "video.trim_start_to_playhead",
+            "video.trim_end_to_playhead",
+            "video.extend_edit",
+            "video.roll_prev_to_playhead",
+            "video.roll_next_to_playhead",
+            "video.match_frame",
+            "video.reveal_in_project",
+        ];
+        for &id in KEYS {
+            if self.binding_pressed(ctx, id) {
+                self.dispatch_command(id, doc, history);
+            }
+        }
     }
 }
 

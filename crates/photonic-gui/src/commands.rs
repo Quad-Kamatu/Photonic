@@ -520,6 +520,67 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Playhead to Sequence End",
         default: Some(KeyBinding::plain(Key::End)),
     },
+    // ── NLE parity round-2 (spec 17) — keyboard-velocity editing riding on the
+    // shipped split/trim/roll ops. G1 (add-edit-all-tracks / close-gap /
+    // simplify), G2 (Q/W/E ripple-trims + Shift+Q/W rolls), G3 (Match Frame /
+    // Reveal). Bound here; dispatched in `command_center`; the per-frame poll
+    // that fires them lives in `timeline/mod.rs::draw_timeline_panel`
+    // (`handle_timeline_shortcuts`) — the timeline panel owns these keys.
+    CommandDef {
+        id: "video.split_all_tracks",
+        label: "Add Edit to All Tracks",
+        default: Some(KeyBinding::ctrl_shift(Key::K)),
+    },
+    CommandDef {
+        id: "video.close_gap",
+        label: "Close Gap at Playhead",
+        default: None,
+    },
+    CommandDef {
+        id: "video.close_gaps",
+        label: "Close All Gaps",
+        default: None,
+    },
+    CommandDef {
+        id: "video.simplify_sequence",
+        label: "Simplify Sequence (remove through-edits)",
+        default: None,
+    },
+    CommandDef {
+        id: "video.trim_start_to_playhead",
+        label: "Ripple Trim Start to Playhead",
+        default: Some(KeyBinding::plain(Key::Q)),
+    },
+    CommandDef {
+        id: "video.trim_end_to_playhead",
+        label: "Ripple Trim End to Playhead",
+        default: Some(KeyBinding::plain(Key::W)),
+    },
+    CommandDef {
+        id: "video.extend_edit",
+        label: "Extend Edit to Playhead",
+        default: Some(KeyBinding::plain(Key::E)),
+    },
+    CommandDef {
+        id: "video.roll_prev_to_playhead",
+        label: "Roll Previous Edit to Playhead",
+        default: Some(KeyBinding::shift(Key::Q)),
+    },
+    CommandDef {
+        id: "video.roll_next_to_playhead",
+        label: "Roll Next Edit to Playhead",
+        default: Some(KeyBinding::shift(Key::W)),
+    },
+    CommandDef {
+        id: "video.match_frame",
+        label: "Match Frame (arm source at playhead)",
+        default: Some(KeyBinding::plain(Key::F)),
+    },
+    CommandDef {
+        id: "video.reveal_in_project",
+        label: "Reveal in Media Pool",
+        default: None,
+    },
 ];
 
 /// Tool-activation commands surfaced in the palette. Labels come from

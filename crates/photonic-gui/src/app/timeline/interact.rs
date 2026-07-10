@@ -372,6 +372,99 @@ pub(crate) fn resolve_target_track(
         .map(|t| t.id)
 }
 
+// ── NLE parity round-2 (spec 17 G2/G3): clip resolution for keyboard edits ──
+
+/// The clip a keyboard trim (spec 17 G2, Q/W) should act on: the selected clip
+/// the playhead is strictly inside (`start < at < end`) if any, else the first
+/// such clip. Locked tracks are skipped (their clips reject edits). `None` when
+/// the playhead is on an edge or in a gap on every unlocked track.
+pub(crate) fn trim_target_at(
+    seq: &Sequence,
+    selection: &[ClipId],
+    at: Tick,
+) -> Option<(TrackId, ClipId)> {
+    // Prefer a selected clip the playhead is strictly inside.
+    for t in seq.tracks() {
+        if t.locked {
+            continue;
+        }
+        for c in &t.clips {
+            if selection.contains(&c.id) && c.start < at && at < c.end() {
+                return Some((t.id, c.id));
+            }
+        }
+    }
+    // Else the first clip the playhead is strictly inside.
+    for t in seq.tracks() {
+        if t.locked {
+            continue;
+        }
+        for c in &t.clips {
+            if c.start < at && at < c.end() {
+                return Some((t.id, c.id));
+            }
+        }
+    }
+    None
+}
+
+/// The clip a Match-Frame / Reveal (spec 17 G3) should read: the selected clip
+/// the playhead sits on (`start <= at < end`) if any, else the first such clip.
+/// Unlike [`trim_target_at`] this includes a clip whose start is exactly at the
+/// playhead and does NOT skip locked tracks (reading a clip is not an edit).
+pub(crate) fn clip_at_playhead(
+    seq: &Sequence,
+    selection: &[ClipId],
+    at: Tick,
+) -> Option<(TrackId, ClipId)> {
+    for t in seq.tracks() {
+        for c in &t.clips {
+            if selection.contains(&c.id) && c.start <= at && at < c.end() {
+                return Some((t.id, c.id));
+            }
+        }
+    }
+    for t in seq.tracks() {
+        for c in &t.clips {
+            if c.start <= at && at < c.end() {
+                return Some((t.id, c.id));
+            }
+        }
+    }
+    None
+}
+
+/// The first selected clip in timeline order (video lanes then audio), skipping
+/// locked tracks. Backs the Extend-Edit target (spec 17 G2, E).
+pub(crate) fn first_selected(seq: &Sequence, selection: &[ClipId]) -> Option<(TrackId, ClipId)> {
+    for t in seq.tracks() {
+        if t.locked {
+            continue;
+        }
+        for c in &t.clips {
+            if selection.contains(&c.id) {
+                return Some((t.id, c.id));
+            }
+        }
+    }
+    None
+}
+
+/// The track a roll-to-playhead (spec 17 G2, Shift+Q/W) should target: the track
+/// of the clip under/selected at the playhead if resolvable, else the first
+/// unlocked track with at least two clips (a possible cut). `None` when no
+/// unlocked track can host a roll.
+pub(crate) fn roll_target_track(seq: &Sequence, selection: &[ClipId], at: Tick) -> Option<TrackId> {
+    if let Some((track, _)) =
+        trim_target_at(seq, selection, at).or_else(|| first_selected(seq, selection))
+    {
+        return Some(track);
+    }
+    seq.tracks()
+        .find(|t| !t.locked && t.clips.len() >= 2)
+        .map(|t| t.id)
+}
+
 /// Commit `cmds` as ONE undo step (spec 16 §2 "batched into one undo step").
 /// A single command keeps the `Command::Timeline` shape the rest of the timeline
 /// relies on rather than a one-element `Batch`; an empty batch is a no-op.
@@ -746,6 +839,33 @@ mod tests {
             resolve_drag_kind(ClipZone::RightEdge, false, false, clip, None, None),
             (DragKind::TrimEnd, clip)
         );
+    }
+
+    #[test]
+    fn trim_target_prefers_selected_then_any_interior_clip() {
+        use photonic_core::timeline::Track;
+        let mut s = Sequence::new("s", FrameRate::FPS_30, 1920, 1080);
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        let mut v2 = Track::new(TrackKind::Video, "V2");
+        let c1 = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)); // V1 [0,100)
+        let c2 = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)); // V2 [0,100)
+        let (id1, id2) = (c1.id, c2.id);
+        v1.clips.push(c1);
+        v2.clips.push(c2);
+        let (v1id, v2id) = (v1.id, v2.id);
+        s.video_tracks.push(v1);
+        s.video_tracks.push(v2);
+
+        // Playhead 50 is interior to both; the selected V2 clip wins.
+        assert_eq!(trim_target_at(&s, &[id2], Tick(50)), Some((v2id, id2)));
+        // No selection → the first interior clip in track order (V1).
+        assert_eq!(trim_target_at(&s, &[], Tick(50)), Some((v1id, id1)));
+        // On an edge nothing is strictly interior.
+        assert_eq!(trim_target_at(&s, &[], Tick(0)), None);
+        assert_eq!(trim_target_at(&s, &[], Tick(100)), None);
+        // A locked track is skipped even when its clip is the selection.
+        s.video_tracks[1].locked = true;
+        assert_eq!(trim_target_at(&s, &[id2], Tick(50)), Some((v1id, id1)));
     }
 
     #[test]

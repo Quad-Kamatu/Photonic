@@ -55,6 +55,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const TOOLBAR_H: f32 = 24.0;
+/// Navigator / horizontal-scrollbar strip height at the panel bottom (spec 17 G8).
+const NAV_H: f32 = 12.0;
 const DRAG_ID: &str = "timeline_drag_state";
 const MARQUEE_ID: &str = "timeline_marquee";
 
@@ -84,6 +86,13 @@ impl PhotonicApp {
         }
         let seq_id = doc.timeline.as_ref().unwrap().active_sequence.unwrap();
 
+        // Timeline-panel keyboard commands (spec 17 G1/G2/G3) — polled here, the
+        // one video-mode surface that owns these editing keys, BEFORE session
+        // state is pulled into locals so a playhead/selection change lands this
+        // frame. Focus-gated inside the helper.
+        let ctx = ui.ctx().clone();
+        self.handle_timeline_shortcuts(&ctx, doc, history);
+
         // Pull session state into locals so helper fns don't fight the `&mut self`
         // borrow; written back at the end.
         let mut view = self.timeline_view;
@@ -91,6 +100,10 @@ impl PhotonicApp {
         let mut selection = std::mem::take(&mut self.timeline_selection);
         let mut snap = self.timeline_snap_enabled;
         let razor = self.timeline_razor_active;
+        // Source-patch target tracks (spec 17 G6) — mutated by the track headers'
+        // patch buttons this frame, written back at the end.
+        let mut target_video = self.target_video_track;
+        let mut target_audio = self.target_audio_track;
 
         // Timeline media caches (spec 15): construct once, then take them out of
         // `self` for the frame — mirroring the `selection` take above — so the
@@ -110,8 +123,21 @@ impl PhotonicApp {
         let toolbar_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TOOLBAR_H));
         draw_mini_toolbar(ui, toolbar_rect, doc, seq_id, &mut view, &mut snap);
 
-        let below =
+        let below_full =
             egui::Rect::from_min_max(egui::pos2(full.left(), toolbar_rect.bottom()), full.max);
+        // Reserve a strip at the bottom for the navigator / horizontal scrollbar
+        // (spec 17 G8); everything else lays out above it.
+        let nav_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                below_full.left(),
+                (below_full.bottom() - NAV_H).max(below_full.top()),
+            ),
+            below_full.max,
+        );
+        let below = egui::Rect::from_min_max(
+            below_full.min,
+            egui::pos2(below_full.right(), nav_rect.top()),
+        );
         let header_w = view.header_width_px;
         let header_col = egui::Rect::from_min_max(
             below.min,
@@ -249,7 +275,13 @@ impl PhotonicApp {
                     egui::pos2(header_col.left(), row_top),
                     egui::pos2(header_col.right(), row_bot.min(header_col.bottom() - 28.0)),
                 );
-                tracks::draw_header(ui, hrect, doc, history, seq_id, *row);
+                // Source-patch target for this row's kind (spec 17 G6): the header
+                // draws a patch button + highlight and toggles it on click.
+                let target = match row.kind {
+                    TrackKind::Video => &mut target_video,
+                    TrackKind::Audio => &mut target_audio,
+                };
+                tracks::draw_header(ui, hrect, doc, history, seq_id, *row, target);
             }
             // Add-track controls pinned to the header column's bottom.
             let footer = egui::Rect::from_min_max(
@@ -359,6 +391,15 @@ impl PhotonicApp {
             colors.selected_stroke,
         );
 
+        // ── Navigator / horizontal scrollbar (spec 17 G8) ───────────────────
+        // A thumb over the whole sequence extent; drag to pan, drag an end to
+        // zoom, click the trough to jump. Writes `view.scroll_ticks`/zoom (the
+        // same fields `handle_scroll_zoom` drives) — mutated after painting, so
+        // the change lands next frame like every other scroll gesture.
+        if let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) {
+            draw_navigator(ui, nav_rect, lane_left, seq, &mut view);
+        }
+
         // Keyframe / curve editor (04 §4.1, 01 §6): a floating editor that
         // auto-targets the selected clip. Invoked from here — the one video-mode
         // draw path that already holds `doc`, `history`, the playhead, and the
@@ -377,6 +418,8 @@ impl PhotonicApp {
         self.timeline_view = view;
         self.playhead = playhead;
         self.timeline_selection = selection;
+        self.target_video_track = target_video;
+        self.target_audio_track = target_audio;
         if snap != self.timeline_snap_enabled {
             self.timeline_snap_enabled = snap;
             self.prefs.timeline_snap_enabled = snap;
@@ -666,6 +709,126 @@ fn handle_scroll_zoom(ui: &egui::Ui, full: egui::Rect, lane_left: f32, view: &mu
     } else {
         // Plain scroll → vertical track pan.
         view.track_scroll_px = (view.track_scroll_px - scroll.y).max(0.0);
+    }
+}
+
+/// Which part of the navigator thumb a drag grabbed (spec 17 G8): the body pans,
+/// an end handle zooms.
+#[derive(Clone, Copy, PartialEq)]
+enum NavGrab {
+    Body,
+    Left,
+    Right,
+}
+
+/// The bottom navigator / horizontal scrollbar (spec 17 G8): a thumb showing the
+/// visible tick window over the whole sequence extent. Drag the body to pan, drag
+/// an end handle to zoom, click the trough to jump. Writes `scroll_ticks` and
+/// `pixels_per_tick` — the same view fields `handle_scroll_zoom` drives.
+fn draw_navigator(
+    ui: &mut egui::Ui,
+    nav_rect: egui::Rect,
+    lane_left: f32,
+    seq: &Sequence,
+    view: &mut TimelineView,
+) {
+    let painter = ui.painter_at(nav_rect);
+    painter.rect_filled(nav_rect, 0.0, ui.visuals().faint_bg_color);
+    // The trough spans the lane column (aligned under the lanes).
+    let trough = egui::Rect::from_min_max(
+        egui::pos2(lane_left, nav_rect.top() + 2.0),
+        egui::pos2(nav_rect.right() - 2.0, nav_rect.bottom() - 2.0),
+    );
+    if trough.width() < 8.0 {
+        return;
+    }
+    let lane_w = view.last_lane_width_px.max(1.0);
+    let visible = view.px_to_ticks(lane_w).0.max(1);
+    let scroll = view.scroll_ticks.0.max(0);
+    // Whole-sequence extent: cover the content and the current window so the
+    // thumb never runs off the trough.
+    let extent = seq.content_end().0.max(scroll + visible).max(1);
+    let ticks_per_px = extent as f64 / trough.width() as f64;
+    let to_x = |t: i64| trough.left() + (t as f64 / extent as f64) as f32 * trough.width();
+    let x0 = to_x(scroll).max(trough.left());
+    let x1 = to_x(scroll + visible).min(trough.right());
+    let thumb = egui::Rect::from_min_max(
+        egui::pos2(x0, trough.top()),
+        egui::pos2(x1.max(x0 + 8.0), trough.bottom()),
+    );
+    let accent = ui.visuals().selection.stroke.color;
+    painter.rect_filled(trough, 3.0, ui.visuals().extreme_bg_color);
+    painter.rect(
+        thumb,
+        egui::Rounding::same(3.0),
+        accent.gamma_multiply(0.35),
+        egui::Stroke::new(1.0, accent),
+    );
+
+    let resp = ui.interact(
+        trough,
+        ui.id().with("tl_navigator"),
+        egui::Sense::click_and_drag(),
+    );
+    if resp.hovered() {
+        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+    }
+    let grab_id = egui::Id::new("tl_nav_grab");
+    let handle = 6.0_f32;
+    if resp.drag_started() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let grab = if (pos.x - thumb.left()).abs() <= handle {
+                NavGrab::Left
+            } else if (pos.x - thumb.right()).abs() <= handle {
+                NavGrab::Right
+            } else {
+                NavGrab::Body
+            };
+            ui.data_mut(|d| d.insert_temp(grab_id, grab));
+        }
+    }
+    if resp.dragged() {
+        let grab = ui
+            .data(|d| d.get_temp::<NavGrab>(grab_id))
+            .unwrap_or(NavGrab::Body);
+        let dx = resp.drag_delta().x as f64;
+        match grab {
+            NavGrab::Body => {
+                let dt = (dx * ticks_per_px) as i64;
+                view.scroll_ticks = Tick((scroll + dt).max(0));
+            }
+            NavGrab::Right => {
+                // Drag the right edge → change the visible span, keep left fixed.
+                let new_right = (((thumb.right() + dx as f32) as f64 - trough.left() as f64)
+                    * ticks_per_px) as i64;
+                let new_visible = (new_right - scroll).max(1);
+                view.pixels_per_tick = (lane_w as f64 / new_visible as f64)
+                    .clamp(layout::MIN_PIXELS_PER_TICK, layout::MAX_PIXELS_PER_TICK);
+            }
+            NavGrab::Left => {
+                // Drag the left edge → change scroll + span, keep right fixed.
+                let right = scroll + visible;
+                let new_left = ((((thumb.left() + dx as f32) as f64 - trough.left() as f64)
+                    * ticks_per_px) as i64)
+                    .clamp(0, right - 1);
+                let new_visible = (right - new_left).max(1);
+                view.scroll_ticks = Tick(new_left);
+                view.pixels_per_tick = (lane_w as f64 / new_visible as f64)
+                    .clamp(layout::MIN_PIXELS_PER_TICK, layout::MAX_PIXELS_PER_TICK);
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<NavGrab>(grab_id));
+    }
+    // Click the trough outside the thumb → center the window on that tick.
+    if resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if pos.x < thumb.left() || pos.x > thumb.right() {
+                let center = ((pos.x - trough.left()) as f64 * ticks_per_px) as i64;
+                view.scroll_ticks = Tick((center - visible / 2).max(0));
+            }
+        }
     }
 }
 
@@ -1024,6 +1187,20 @@ fn self_interact(
 
     // ── Context menu ────────────────────────────────────────────────────────
     let menu_target = resp.hover_pos().and_then(hit_at).map(|(t, c, _, _)| (t, c));
+    // Over empty lane space, resolve the (track, tick) under the cursor so the
+    // menu can offer Close Gap (spec 17 G1).
+    let gap_target = if menu_target.is_none() {
+        resp.hover_pos().and_then(|pos| {
+            if lanes_rect.contains(pos) {
+                track_at_y(rows, lanes_rect, view, pos.y)
+                    .map(|tr| (tr, view.x_to_tick(pos.x, lane_left)))
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
     let ph = *playhead;
     resp.context_menu(|ui| {
         clip_context_menu(
@@ -1032,6 +1209,7 @@ fn self_interact(
             history,
             seq_id,
             menu_target,
+            gap_target,
             ph,
             selection.as_slice(),
         )
@@ -1336,10 +1514,22 @@ fn clip_context_menu(
     history: &mut CommandHistory,
     seq_id: SequenceId,
     target: Option<(TrackId, ClipId)>,
+    gap_target: Option<(TrackId, Tick)>,
     playhead: Tick,
     selection: &[ClipId],
 ) {
     let Some((track, clip)) = target else {
+        // No clip under the cursor — offer Close Gap when it is over a closeable
+        // gap (spec 17 G1), else nothing actionable.
+        if let Some((gtrack, gat)) = gap_target {
+            if ops_bridge::gap_at(doc, seq_id, gtrack, gat) {
+                if ui.button("Close gap").clicked() {
+                    ops_bridge::close_gap_at(doc, history, seq_id, gtrack, gat);
+                    ui.close_menu();
+                }
+                return;
+            }
+        }
         ui.label("No clip");
         return;
     };
