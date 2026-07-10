@@ -40,6 +40,7 @@ pub mod contract;
 
 // ── Facade re-exports (02 §1) — the names Wire-phase consumers import ────────
 pub use graph::eval::GpuContext;
+pub use media::thumbnails::{RgbaThumb, ThumbHandle, ThumbnailCache, WaveformCache};
 pub use session::{
     coalesce_commands, colorimetry_for_probe, EngineCmd, EngineFrame, EngineSession,
     EngineStatus, ExportJob, ProxyMode, VideoEngine,
