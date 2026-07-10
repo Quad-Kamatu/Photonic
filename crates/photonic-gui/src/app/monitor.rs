@@ -450,6 +450,18 @@ impl PhotonicApp {
             draw_safe_area_guides(&painter, video_rect);
         }
 
+        // Reframe transform handles (04 §3.3, 05 §4.2, CAP-012) — same overlay
+        // family as the safe-area guides just above, drawn/driven by the
+        // export-dialog story's `app/reframe.rs` (real, undoable edits via
+        // `ops::set_clip_prop`, not a preview-only gizmo).
+        super::reframe::draw_reframe_handles(
+            ui,
+            video_rect,
+            doc,
+            history,
+            &self.timeline_selection,
+        );
+
         if self.engine.is_none() {
             painter.text(
                 video_rect.center(),

@@ -864,6 +864,30 @@ pub enum PanelAction {
     MediaInsertAtPlayhead {
         asset: photonic_core::timeline::AssetId,
     },
+
+    // ── Clip inspector / effects browser (video mode, 04 §4.1) ───────────────
+    // These video panels are `PropPanelCtx`-based (like every left-rail
+    // drawer) so they carry `doc: &Document` for reads but no `&mut
+    // CommandHistory` — mirrors why `Media*` above exists. Rather than one
+    // named variant per field (transform/speed/reframe/effect-param/
+    // transition — all just sub-fields of `Clip`), the panel builds the
+    // already-validated `TimelineCmd` itself (via `photonic_core::timeline::
+    // ops::*`, reading `ctx.doc`) and hands it up here as one of two generic
+    // carriers, matching `ops_bridge.rs`'s "pure op → history" rule at the
+    // `PropPanelCtx` boundary instead of inside a drawer fn.
+    /// Committed as ONE non-folding undo step (button/toggle actions: add/
+    /// remove/reorder effect, enable toggle, "Reset reframe", etc.).
+    ClipEditDiscrete(photonic_core::timeline::TimelineCmd),
+    /// Committed via the coalescing `history.execute` path (drag-scrub
+    /// numeric fields — transform/speed/reframe/transition values), so a
+    /// streamed drag folds into one undo step like every vector property
+    /// drag (the coalesce anchor is driven globally by pointer-down/up,
+    /// per `app/mod.rs`'s `begin_coalescing`/`end_coalescing`).
+    ClipEditCoalesced(photonic_core::timeline::TimelineCmd),
+    /// Several commands committed as ONE undo step (`Command::Batch`) — e.g.
+    /// the Effects Browser's double-click-to-apply fallback (13 §6.3)
+    /// applying one effect to every selected clip at once.
+    ClipEditBatch(Vec<photonic_core::timeline::TimelineCmd>),
 }
 
 /// Discriminant for which shape the radial wheel should create.

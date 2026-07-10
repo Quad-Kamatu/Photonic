@@ -122,6 +122,22 @@ impl PhotonicApp {
                         doc_modified = true;
                     }
                 }
+                // ── Clip inspector / effects browser (video mode) ────────────
+                PanelAction::ClipEditDiscrete(cmd) => {
+                    history.execute_discrete(Command::Timeline(cmd), doc);
+                    doc_modified = true;
+                }
+                PanelAction::ClipEditCoalesced(cmd) => {
+                    history.execute(Command::Timeline(cmd), doc);
+                    doc_modified = true;
+                }
+                PanelAction::ClipEditBatch(cmds) => {
+                    if !cmds.is_empty() {
+                        let batch = cmds.into_iter().map(Command::Timeline).collect();
+                        history.execute_discrete(Command::Batch(batch), doc);
+                        doc_modified = true;
+                    }
+                }
                 PanelAction::ReorderNode { node_id, op } => {
                     if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
                         let layer_len = doc

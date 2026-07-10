@@ -31,6 +31,7 @@ mod width_tool;
 pub mod engine;
 pub(crate) mod mode;
 pub(crate) mod monitor;
+pub(crate) mod reframe;
 pub(crate) mod timeline;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
@@ -3578,8 +3579,24 @@ impl PhotonicApp {
                 panels::video::color_page::draw_scopes_panel(ctx, &mut vid);
             }
             if self.export_dialog_open {
+                // Widened from the skeleton's `(ctx, vid)` stub — `VideoPanelUi`
+                // carries no `doc`/history handle (unlike the timeline panel's
+                // call site just above), and a real preset/format/range picker
+                // needs both; same "necessary minimal call-site growth" move
+                // already used for `draw_timeline_panel`. `vid`'s borrow of
+                // `self` ends when this call returns, so reaching into
+                // `self.engine` right after for the real `EngineCmd::Export`
+                // send is a plain sequential borrow, not a conflict.
                 let mut vid = self.video_panel_ui();
-                panels::video::export_dialog::draw_export_dialog(ctx, &mut vid);
+                let job =
+                    panels::video::export_dialog::draw_export_dialog(ctx, &mut vid, doc, history);
+                if let Some(job) = job {
+                    if let Some(bridge) = self.engine.as_ref() {
+                        bridge
+                            .session()
+                            .send(photonic_video::EngineCmd::Export(Box::new(job)));
+                    }
+                }
             }
         }
 
