@@ -20,17 +20,27 @@ the "one script, one job" convention started by `gen-mcp-docs.py`.
 - **`as1_arrange_cut.py`** — AS-1 "Social clip" story, arrange + cut slice
   (create sequence, import fixtures, insert/split/move/trim/ripple,
   `render_frame_at` spot-checks, export).
-- **`as2_proxy_edit.py`** — AS-2 "Short film" story, proxy-edit slice
-  (import a heavy fixture, `generate_proxies`, toggle `set_proxy_mode`,
-  edit).
+- **`as2_proxy_edit.py`** — AS-2 "Short film" story, the **full** slice:
+  import fixtures, `generate_proxies` + toggle `set_proxy_mode`, edit,
+  multi-track edit with a cross-dissolve transition (`set_transition`), a
+  per-clip node composition (`create_clip_composition` +
+  `add_graph_node`/`add_graph_edge`, `get_graph` asserts it compiles), a
+  full grade pass (CDL + curves via `set_grade`, `apply_lut`, `get_scopes`),
+  a mixer touch (`set_track_audio` + `audio_fx` EQ/compressor), then export
+  both an AV1 master and a web H.264 (ffprobe-verified).
+- **`as3_motion_graphics.py`** — AS-3 "Motion graphics" story, full slice:
+  create a sequence, place + animate a vector-doc clip (`set_keyframe` on
+  its transform), composite it over footage in a node composition, mock
+  auto-caption + grade, export WebM VP9 with alpha (ffprobe-verified the
+  `alpha_mode` stream tag is present, CAP-021).
 
-Both are scripts, not `cargo test`s: they drive a **running** Photonic MCP
-server over HTTP JSON-RPC (`POST /mcp`), the same protocol a real MCP client
-(e.g. Claude) speaks. `docs/specs/video-editor/11-testing-phasing.md` §3.4
-calls for one such script per acceptance story (AS-1/2/3), expanded
-incrementally as each phase lands more of that story; these two cover the
-slice available as of P3 (see each script's own module docstring for
-exactly what it does and doesn't cover yet).
+All three are scripts, not `cargo test`s: they drive a **running** Photonic
+MCP server over HTTP JSON-RPC (`POST /mcp`), the same protocol a real MCP
+client (e.g. Claude) speaks. `docs/specs/video-editor/11-testing-phasing.md`
+§3.4/P8 calls for one such script per acceptance story (AS-1/2/3); AS-2 and
+AS-3 above are each other's completion of that gate — see each script's own
+module docstring for exactly what it does (and, for AS-1, still doesn't
+cover yet — captions/reframe/grade land on AS-1 in a later increment).
 
 ### Running them
 
@@ -42,6 +52,7 @@ cargo run -p photonic-app -- --headless
 # 2. Run a story script against it from another terminal:
 python3 tools/as1_arrange_cut.py
 python3 tools/as2_proxy_edit.py
+python3 tools/as3_motion_graphics.py
 
 # Point at a non-default port/host:
 python3 tools/as1_arrange_cut.py --url http://127.0.0.1:7842/mcp
@@ -59,17 +70,23 @@ Each script prints one `[PASS]` / `[FAIL]` / `[SKIP]` line per step and a
 final `N/M passed, S skipped, F failed` summary. Exit code is `0` iff
 nothing failed (skips don't count as failures — they're reserved for
 environment gaps the script can't control, e.g. no GPU adapter for the
-engine-backed tools, or no `ffmpeg` on `PATH` for export). A nonzero exit
-means at least one step genuinely failed, which is what makes these
-CI-runnable once a GPU + ffmpeg runner is wired up (currently manual /
-local-only — see `11-testing-phasing.md` §3.4).
+engine-backed tools, no `ffmpeg` on `PATH` for export, or no `ffprobe` on
+`PATH` for `as2`/`as3`'s export-verification steps). A nonzero exit means at
+least one step genuinely failed, which is what makes these CI-runnable once
+a GPU + ffmpeg runner is wired up (currently manual / local-only — see
+`11-testing-phasing.md` §3.4).
 
 ### Fixtures
 
-Both scripts import from the committed corpus at
+All three scripts import from the committed corpus at
 `crates/photonic-video/tests/fixtures/`. If a fixture is missing, regenerate
 the whole corpus with `python3 tools/gen-test-fixtures.py` (needs `ffmpeg`
 on `PATH`). No 4K fixture exists in that corpus (everything is kept tiny to
 stay inside its size budget) — `as2_proxy_edit.py` uses the corpus's
 largest/longest real asset as a stand-in; see that script's module
 docstring for why that's still a meaningful test of the proxy-edit slice.
+`as3_motion_graphics.py` additionally reuses one of `photonic-render`'s own
+golden vector-doc fixtures (`crates/photonic-render/tests/golden/`) as its
+`.photon` vector-document asset — read-only, never modified — since no
+plain vector-doc fixture lives in the video-editor corpus (see that
+script's module docstring).
