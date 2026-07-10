@@ -162,6 +162,95 @@ fn locate_clip(p: &TimelineProject, clip: ClipId) -> Option<(SequenceId, TrackId
     None
 }
 
+// ── Linked clip expansion (INTEG-MCP-LINK, 14 §M-2) ─────────────────────────
+//
+// The GUI (`photonic_gui::app::timeline::ops_bridge`) expands a single-clip
+// move/delete intent across `ops::clips_in_link_group` so linked A/V pairs
+// move and delete as a unit. MCP has no dependency on the GUI crate, so this
+// is a parallel implementation over the same core primitive (`ops::*`),
+// mirroring `ops_bridge::link_partners` / `expand_link_group_move` /
+// `expand_link_group_delete` / `commit_group` field-for-field — an
+// agent-driven `move_clip`/`remove_clip` must leave a linked partner in the
+// same state a GUI drag/delete would. Trim intentionally does NOT propagate
+// (matches the GUI: "trim is independent, move is linked"), nor does
+// `ripple_delete` (Sync Lock, 14 §M-9, isn't built yet).
+
+/// Every OTHER clip in `clip`'s link group within `seq`, paired with the
+/// track that currently owns it. Empty when `clip` isn't linked or has no
+/// partners.
+fn link_partners(
+    p: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+) -> Vec<(TrackId, ClipId)> {
+    let Some(s) = p.sequences.get(&seq) else {
+        return Vec::new();
+    };
+    let Some(group) = s
+        .track(track)
+        .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+        .and_then(|c| c.link_group)
+    else {
+        return Vec::new();
+    };
+    ops::clips_in_link_group(p, group)
+        .into_iter()
+        .filter(|id| *id != clip)
+        .filter_map(|id| {
+            s.tracks()
+                .find(|t| t.clips.iter().any(|c| c.id == id))
+                .map(|t| (t.id, id))
+        })
+        .collect()
+}
+
+/// Expand a move-by-`delta` edit on `clip` to every linked partner. Each
+/// partner shifts by the IDENTICAL tick delta on ITS OWN track (never
+/// reassigned to a different track — only the dragged/moved clip's own track
+/// can change). A partner that can't take the shift (would go negative, or
+/// collides with a neighbour on its own track) is silently dropped from the
+/// batch rather than blocking the primary move.
+fn expand_link_group_move(
+    p: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+    delta: Tick,
+) -> Vec<TimelineCmd> {
+    if delta.0 == 0 {
+        return Vec::new();
+    }
+    let Some(s) = p.sequences.get(&seq) else {
+        return Vec::new();
+    };
+    link_partners(p, seq, track, clip)
+        .into_iter()
+        .filter_map(|(ptrack, pclip)| {
+            let start = s.track(ptrack)?.clips.iter().find(|c| c.id == pclip)?.start;
+            let new_start = start + delta;
+            if new_start.0 < 0 {
+                return None;
+            }
+            ops::move_clip(p, seq, ptrack, pclip, new_start).ok()
+        })
+        .collect()
+}
+
+/// Expand a delete (`remove_clip`'s "lift" semantics — leaves a gap, no
+/// ripple) to every linked partner of `clip` within `seq`.
+fn expand_link_group_delete(
+    p: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+) -> Vec<TimelineCmd> {
+    link_partners(p, seq, track, clip)
+        .into_iter()
+        .filter_map(|(ptrack, pclip)| ops::remove_clip(p, seq, ptrack, pclip).ok())
+        .collect()
+}
+
 /// Which `SequenceId` owns a track.
 fn locate_track(p: &TimelineProject, track: TrackId) -> Option<SequenceId> {
     p.sequences
@@ -771,7 +860,22 @@ pub async fn move_clip(state: &AppState, args: MoveClipArgs) -> ToolResult {
         args.new_track_id,
     ) {
         Ok(cmd) => {
-            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            let old_start = match &cmd {
+                TimelineCmd::MoveClip { old_start, .. } => *old_start,
+                _ => unreachable!("ops::move_clip_to_track always returns MoveClip"),
+            };
+            // Fan the move across the link group (same track_id used whether
+            // this is a same-track or cross-track move — a linked partner
+            // rides along on ITS OWN track, never reassigned).
+            let mut cmds = vec![cmd];
+            cmds.extend(expand_link_group_move(
+                project,
+                seq_id,
+                track_id,
+                args.clip_id,
+                new_start - old_start,
+            ));
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
             ToolResult::text("Moved clip")
         }
         Err(e) => map_edit_error(e),
@@ -879,7 +983,18 @@ pub async fn remove_clip(state: &AppState, args: RemoveClipArgs) -> ToolResult {
     } else {
         match ops::remove_clip(project, seq_id, track_id, args.clip_id) {
             Ok(cmd) => {
-                history.execute_discrete(Command::Timeline(cmd), &mut doc);
+                // Fan the delete across the link group (14 §M-2) — deleting
+                // one half of a linked pair takes the other half with it, in
+                // the same undo step. `ripple`'s branch above deliberately
+                // does not do this (Sync Lock, 14 §M-9, isn't built yet).
+                let mut cmds = vec![cmd];
+                cmds.extend(expand_link_group_delete(
+                    project,
+                    seq_id,
+                    track_id,
+                    args.clip_id,
+                ));
+                history.execute_discrete(batch_or_single(cmds), &mut doc);
                 ToolResult::text("Removed clip")
             }
             Err(e) => map_edit_error(e),
@@ -6382,6 +6497,200 @@ mod tests {
         );
         let r = call(&state, "get_clip", json!({ "clip_id": clip_b })).await;
         assert_eq!(data(&r)["clip"]["start"], json!(1000));
+    }
+
+    // ── Link-group fan-out (INTEG-MCP-LINK): move_clip / remove_clip must
+    // expand across `ops::clips_in_link_group` the same way the GUI's
+    // `ops_bridge` does, so an agent-driven edit doesn't strand a linked
+    // partner. Trim deliberately does NOT propagate (matches the GUI).
+
+    #[tokio::test]
+    async fn move_clip_carries_linked_partner_in_one_undo_step() {
+        let state = test_state();
+        let (seq_id, v_track) = create_seq_and_track(&state, "video").await;
+        let a_track = create_track(&state, &seq_id, "audio").await;
+        let vclip = insert_solid_clip(&state, &v_track, 0, 1000).await;
+        let aclip = insert_solid_clip(&state, &a_track, 0, 1000).await;
+
+        let r = call(
+            &state,
+            "link_clips",
+            json!({ "clip_id_a": vclip, "clip_id_b": aclip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "link_clips: {r:?}");
+
+        // Move only the video clip via MCP — the linked audio partner must
+        // ride along on its own track by the identical delta (gate: "move
+        // video left audio at 0" must NOT happen).
+        let r = call(
+            &state,
+            "move_clip",
+            json!({ "clip_id": vclip, "new_start_ticks": 500 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "move_clip: {r:?}");
+
+        let r = call(&state, "get_clip", json!({ "clip_id": vclip })).await;
+        assert_eq!(data(&r)["clip"]["start"], json!(500));
+        let r = call(&state, "get_clip", json!({ "clip_id": aclip })).await;
+        assert_eq!(
+            data(&r)["clip"]["start"],
+            json!(500),
+            "linked audio partner must move with the video clip"
+        );
+
+        // One undo restores BOTH — proves the fan-out landed as a single
+        // undo step, not two.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "get_clip", json!({ "clip_id": vclip })).await;
+        assert_eq!(data(&r)["clip"]["start"], json!(0));
+        let r = call(&state, "get_clip", json!({ "clip_id": aclip })).await;
+        assert_eq!(
+            data(&r)["clip"]["start"],
+            json!(0),
+            "single undo must restore both halves of the link group"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_track_move_clip_carries_linked_partner_on_its_own_track() {
+        let state = test_state();
+        let (seq_id, v_track) = create_seq_and_track(&state, "video").await;
+        let v2_track = create_track(&state, &seq_id, "video").await;
+        let a_track = create_track(&state, &seq_id, "audio").await;
+        let vclip = insert_solid_clip(&state, &v_track, 0, 1000).await;
+        let aclip = insert_solid_clip(&state, &a_track, 0, 1000).await;
+
+        let r = call(
+            &state,
+            "link_clips",
+            json!({ "clip_id_a": vclip, "clip_id_b": aclip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "link_clips: {r:?}");
+
+        let r = call(
+            &state,
+            "move_clip",
+            json!({ "clip_id": vclip, "new_start_ticks": 200, "new_track_id": v2_track }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "cross-track move_clip: {r:?}");
+
+        // Primary clip landed on the destination track at the new start.
+        let r = call(&state, "list_clips", json!({ "track_id": v2_track })).await;
+        let clips_on_dest = data(&r)["clips"].as_array().cloned().unwrap_or_default();
+        assert_eq!(clips_on_dest.len(), 1, "clip should have moved to V2");
+
+        // Linked audio partner stayed on ITS OWN track (never reassigned)
+        // but shifted by the same delta.
+        let r = call(&state, "get_clip", json!({ "clip_id": aclip })).await;
+        assert_eq!(
+            data(&r)["clip"]["start"],
+            json!(200),
+            "linked audio partner should shift on its own track, not follow to V2"
+        );
+        let r = call(&state, "list_clips", json!({ "track_id": a_track })).await;
+        let clips_on_audio = data(&r)["clips"].as_array().cloned().unwrap_or_default();
+        assert_eq!(clips_on_audio.len(), 1, "audio partner must stay on A1");
+    }
+
+    #[tokio::test]
+    async fn remove_clip_carries_linked_partner_in_one_undo_step() {
+        let state = test_state();
+        let (seq_id, v_track) = create_seq_and_track(&state, "video").await;
+        let a_track = create_track(&state, &seq_id, "audio").await;
+        let vclip = insert_solid_clip(&state, &v_track, 0, 1000).await;
+        let aclip = insert_solid_clip(&state, &a_track, 0, 1000).await;
+
+        let r = call(
+            &state,
+            "link_clips",
+            json!({ "clip_id_a": vclip, "clip_id_b": aclip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "link_clips: {r:?}");
+
+        let r = call(&state, "remove_clip", json!({ "clip_id": vclip })).await;
+        assert_ne!(r.is_error, Some(true), "remove_clip: {r:?}");
+
+        let r = call(&state, "list_clips", json!({})).await;
+        let clips = data(&r)["clips"].as_array().cloned().unwrap_or_default();
+        assert!(
+            clips.is_empty(),
+            "both linked clips should be gone: {clips:?}"
+        );
+
+        // One undo restores BOTH.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "list_clips", json!({})).await;
+        let clips = data(&r)["clips"].as_array().cloned().unwrap_or_default();
+        assert_eq!(
+            clips.len(),
+            2,
+            "single undo must restore both halves of the link group: {clips:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trim_clip_does_not_propagate_to_linked_partner() {
+        let state = test_state();
+        let (seq_id, v_track) = create_seq_and_track(&state, "video").await;
+        let a_track = create_track(&state, &seq_id, "audio").await;
+        let vclip = insert_solid_clip(&state, &v_track, 0, 1000).await;
+        let aclip = insert_solid_clip(&state, &a_track, 0, 1000).await;
+
+        let r = call(
+            &state,
+            "link_clips",
+            json!({ "clip_id_a": vclip, "clip_id_b": aclip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "link_clips: {r:?}");
+
+        let r = call(
+            &state,
+            "trim_clip",
+            json!({ "clip_id": vclip, "edge": "out", "new_ticks": 700 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "trim_clip: {r:?}");
+
+        let r = call(&state, "get_clip", json!({ "clip_id": vclip })).await;
+        assert_eq!(data(&r)["clip"]["duration"], json!(700));
+        // Trim intentionally does NOT propagate — matches the GUI ("trim is
+        // independent, move is linked", 14 §M-2). Linked partner's own
+        // in/out points stay put.
+        let r = call(&state, "get_clip", json!({ "clip_id": aclip })).await;
+        assert_eq!(
+            data(&r)["clip"]["duration"],
+            json!(1000),
+            "trim must NOT propagate to a linked partner"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_clip_of_an_unlinked_clip_leaves_other_clips_untouched() {
+        let state = test_state();
+        let (seq_id, v_track) = create_seq_and_track(&state, "video").await;
+        let a_track = create_track(&state, &seq_id, "audio").await;
+        let vclip = insert_solid_clip(&state, &v_track, 0, 1000).await;
+        let aclip = insert_solid_clip(&state, &a_track, 0, 1000).await;
+        // No link this time.
+
+        let r = call(
+            &state,
+            "move_clip",
+            json!({ "clip_id": vclip, "new_start_ticks": 300 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "move_clip: {r:?}");
+
+        let r = call(&state, "get_clip", json!({ "clip_id": aclip })).await;
+        assert_eq!(data(&r)["clip"]["start"], json!(0));
     }
 
     #[tokio::test]
