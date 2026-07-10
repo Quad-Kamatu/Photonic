@@ -3066,19 +3066,28 @@ impl PhotonicApp {
                         );
                     }
                     ui.separator();
-                    let sel_info = self
-                        .selected_id
-                        .and_then(|id| doc.nodes.get(&id))
-                        .map(|n| format!("  •  \"{}\" selected", n.name))
-                        .unwrap_or_default();
-                    ui.label(format!(
-                        "{} {}  •  {} objects{}  •  {:.0}%",
-                        self.active_tool.icon(),
-                        self.active_tool.label(),
-                        doc.node_count(),
-                        sel_info,
-                        view.zoom * 100.0,
-                    ));
+                    // Mode-aware status: vector editing shows tool/objects/zoom;
+                    // video mode shows sequence/format/playhead — the vector
+                    // tool + document node count are meaningless over a timeline.
+                    if self.mode == AppMode::Video {
+                        if let Some(line) = video_status_line(doc, self.playhead) {
+                            ui.label(line);
+                        }
+                    } else {
+                        let sel_info = self
+                            .selected_id
+                            .and_then(|id| doc.nodes.get(&id))
+                            .map(|n| format!("  •  \"{}\" selected", n.name))
+                            .unwrap_or_default();
+                        ui.label(format!(
+                            "{} {}  •  {} objects{}  •  {:.0}%",
+                            self.active_tool.icon(),
+                            self.active_tool.label(),
+                            doc.node_count(),
+                            sel_info,
+                            view.zoom * 100.0,
+                        ));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Clickable MCP status indicator → opens the MCP modal
                         // (status + restart, #170).
@@ -3600,8 +3609,8 @@ impl PhotonicApp {
                     .as_ref()
                     .and_then(|b| b.session().latest_frame());
                 let frame_tex = frame.as_ref().map(|f| f.texture.as_ref());
-                let device = renderer.shared_device();
-                let queue = renderer.shared_queue();
+                let device = renderer.device_arc();
+                let queue = renderer.queue_arc();
                 panels::video::color_page::draw_scopes_panel(
                     ctx,
                     &device,
@@ -6668,4 +6677,38 @@ mod crash_report_url_tests {
         let body = url.split("&body=").nth(1).unwrap();
         assert!(!body.contains(&percent_encode("truncated to fit")));
     }
+}
+
+/// One-line video-mode status bar content: active sequence, frame/format,
+/// playhead timecode, and track counts — the video analogue of the vector
+/// tool/objects/zoom line. `None` when there's no active sequence (degrades
+/// gracefully; the 04 §1.3 invariant means video mode normally has one).
+fn video_status_line(doc: &Document, playhead: photonic_core::timeline::Tick) -> Option<String> {
+    let p = doc.timeline.as_ref()?;
+    let seq = p.sequences.get(&p.active_sequence?)?;
+    let fmt = seq.formats.get(seq.active_format)?;
+    let fr = seq.frame_rate;
+    let fps = fr.num as f64 / fr.den.max(1) as f64;
+    let frame_idx = fr.frame_at(playhead).max(0);
+    let fpsi = (fps.round() as i64).max(1);
+    let ff = frame_idx % fpsi;
+    let secs = frame_idx / fpsi;
+    let tc = format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs / 60) % 60,
+        secs % 60,
+        ff
+    );
+    Some(format!(
+        "{} {}  •  {}×{} {:.0}fps  •  {}  •  {}V / {}A",
+        ph::FILM_SLATE,
+        seq.name,
+        fmt.width,
+        fmt.height,
+        fps,
+        tc,
+        seq.video_tracks.len(),
+        seq.audio_tracks.len(),
+    ))
 }
