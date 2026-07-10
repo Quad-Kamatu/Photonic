@@ -1,29 +1,1432 @@
-//! Color page (04 §4.1 / 07 §6), split across two surfaces:
-//! - the right-drawer `RightDrawerGroup::ColorControls` group — wheels / curves /
-//!   HSL qualifier / LUT browser for the selected clip's grade
-//!   ([`draw_color_controls`]);
+//! Color page (04 §4.1 / 07 §5-6), split across two surfaces:
+//! - the right-drawer `RightDrawerGroup::ColorControls` group — a grade-op stack
+//!   (wheels / curves / HSL qualifier / LUT / primaries) for the selected clip's
+//!   grade ([`draw_color_controls`]);
 //! - the floating, dockable scopes panel — waveform / parade / vectorscope /
 //!   histogram, parked beside the program monitor ([`draw_scopes_panel`]).
 //!
-//! Both interiors are owned by 07-color-grading.md. Grade-op selection, active
-//! tab, scopes visibility, and scope kind live on [`super::VideoPanelUi`] (and
-//! the [`super::ColorPageTab`] / [`super::ScopeKind`] enums).
+//! **Every mutation goes through a pure core op → `CommandHistory`** (07 §1: a
+//! grade edit is a `SetGrade{old,new}` whole-value swap, `timeline/ops.rs`), never
+//! a direct `doc.timeline` mutation. Each frame we clone the selected clip's
+//! `Grade`, let the widgets accumulate edits into that clone, and commit one
+//! `SetGrade` if it changed — so undo/redo, autosave, MCP and the engine mirror
+//! all observe the edit through the one sanctioned channel.
 //!
-//! Stub — filled by the color-page (07) panel story.
+//! Scopes read `photonic_render::scopes` GPU compute over the engine's presented
+//! working texture (03 §3.6 readback / 07 §6). The per-clip pre-`CaptionOverlay`
+//! isolation of 03 §3.6 awaits an engine `get_scopes(clip, at)` surface (10 §3.10);
+//! until then this scopes the program frame — the 07 §6 / 13 §10.2 "no clip
+//! isolation" fallback, labelled with the selected clip's name for orientation.
 
-use super::VideoPanelUi;
-use egui::Ui;
+use egui::{pos2, vec2, Color32, Pos2, Rect, RichText, Sense, Stroke, TextureOptions, Ui, Vec2};
+use egui_phosphor::regular as ph;
 
-/// Right-rail Color Controls drawer: wheels / curves / qualifier / LUT for the
-/// selected clip's grade, plus the scopes-panel toggle. Called directly from
-/// `app/mod.rs`'s right-drawer match (no `PropPanelCtx`).
-pub(crate) fn draw_color_controls(_ui: &mut Ui, _vid: &mut VideoPanelUi) {
-    // Color-page (07) controls story fills this.
+use photonic_core::document::Document;
+use photonic_core::history::{Command, CommandHistory};
+use photonic_core::timeline::{
+    ops, AssetId, AssetKind, AssetSource, CdlParams, ClipId, Grade, GradeOp, GradeOpId,
+    GradeOpKind, GradeOpParams, LutInterp, SequenceId, TrackId,
+};
+
+use crate::panels::{eyedropper_btn, EyedropperTarget, PanelAction};
+
+use super::{ColorPageTab, ScopeKind};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Theme-token accessors (DESIGN.md — read from live visuals so the panel tracks
+// the light/dark theme switch instead of hard-coding hex).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `primary` accent (electric violet) — active states, offset vectors, readouts.
+fn accent(ui: &Ui) -> Color32 {
+    ui.visuals().selection.stroke.color
+}
+/// `secondary` muted label / neutral dot.
+fn muted(ui: &Ui) -> Color32 {
+    ui.visuals().weak_text_color()
+}
+/// `on-surface` text / control-point dots / scope trace.
+fn on_surface(ui: &Ui) -> Color32 {
+    ui.visuals().text_color()
+}
+/// `surface-widget` — disc / plot fills.
+fn surface_widget(ui: &Ui) -> Color32 {
+    ui.visuals().extreme_bg_color
+}
+/// `border` — disc / plot outlines.
+fn border(ui: &Ui) -> Color32 {
+    ui.visuals().widgets.noninteractive.bg_stroke.color
 }
 
-/// Floating / dockable scopes panel (07 §6), shown while
-/// [`VideoPanelUi::scopes_panel_open`] is set. Its own window close button
-/// clears that flag; the active scope is [`VideoPanelUi::scope_kind`].
-pub(crate) fn draw_scopes_panel(_ctx: &egui::Context, _vid: &mut VideoPanelUi) {
-    // Color-page (07) scopes story fills this.
+/// Section header (13 §6.5, dim-muted `#50506E`), matching `tools_panel`.
+fn section_header(ui: &mut Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(text)
+            .small()
+            .color(Color32::from_rgb(80, 80, 110)),
+    );
+    ui.add_space(2.0);
+}
+
+/// True while a text field / draggable holds keyboard focus — suppresses the
+/// panel's bare-key shortcuts (D bypass, curve arrow-nudge) so typing is safe.
+fn keyboard_captured(ui: &Ui) -> bool {
+    ui.memory(|m| m.focused().is_some())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clip / grade plumbing — locate the selected clip, route edits through ops.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The location of the first selected clip in the active sequence, or `None`.
+fn locate_clip(doc: &Document, selection: &[ClipId]) -> Option<(SequenceId, TrackId, ClipId)> {
+    let clip_id = *selection.first()?;
+    let proj = doc.timeline.as_ref()?;
+    let seq_id = proj.active_sequence?;
+    let seq = proj.sequences.get(&seq_id)?;
+    for t in seq.video_tracks.iter() {
+        if t.clips.iter().any(|c| c.id == clip_id) {
+            return Some((seq_id, t.id, clip_id));
+        }
+    }
+    None
+}
+
+/// Clone the clip's current grade (default-empty if it has none yet).
+fn current_grade(doc: &Document, seq: SequenceId, track: TrackId, clip: ClipId) -> Grade {
+    doc.timeline
+        .as_ref()
+        .and_then(|p| p.sequences.get(&seq))
+        .and_then(|s| s.track(track))
+        .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+        .and_then(|c| c.grade.clone())
+        .unwrap_or_default()
+}
+
+/// Commit a whole-grade replacement as one undoable `SetGrade` step (07 §1).
+/// An empty, un-bypassed stack collapses to no grade so it round-trips cleanly.
+fn commit_grade(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+    new: Grade,
+) {
+    let new = if new.ops.is_empty() && !new.bypass {
+        None
+    } else {
+        Some(new)
+    };
+    let cmd = match doc.timeline.as_ref() {
+        Some(proj) => match ops::set_grade(proj, seq, track, clip, new) {
+            Ok(cmd) => cmd,
+            Err(_) => return,
+        },
+        None => return,
+    };
+    history.execute_discrete(Command::Timeline(cmd), doc);
+}
+
+/// LUT assets already in the media pool, as `(id, display name)` (07 §1: LUTs are
+/// referenced `AssetKind::Lut3d` files, never embedded).
+fn lut_assets(doc: &Document) -> Vec<(AssetId, String)> {
+    let Some(proj) = doc.timeline.as_ref() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(AssetId, String)> = proj
+        .media
+        .assets
+        .values()
+        .filter(|a| a.kind == AssetKind::Lut3d)
+        .map(|a| (a.id, asset_name(&a.source)))
+        .collect();
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+fn asset_name(source: &AssetSource) -> String {
+    match source {
+        AssetSource::File { path, .. } => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "LUT".to_string()),
+        AssetSource::EmbeddedVector { .. } => "embedded".to_string(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grade-op defaults + labels
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn kind_label(kind: GradeOpKind) -> &'static str {
+    match kind {
+        GradeOpKind::Exposure => "Exposure",
+        GradeOpKind::Contrast => "Contrast",
+        GradeOpKind::WhiteBalance => "White Balance",
+        GradeOpKind::Cdl => "CDL",
+        GradeOpKind::Wheels => "Wheels",
+        GradeOpKind::Curves => "Curves",
+        GradeOpKind::HslQualifier => "HSL Qualifier",
+        GradeOpKind::Lut3d => "3D LUT",
+    }
+}
+
+/// A fresh op of `kind` seeded with its neutral (identity) parameters (07 §3).
+fn default_op(kind: GradeOpKind, luts: &[(AssetId, String)]) -> GradeOp {
+    let params = match kind {
+        GradeOpKind::Exposure => GradeOpParams::Exposure { stops: 0.0 },
+        GradeOpKind::Contrast => GradeOpParams::Contrast {
+            pivot: 0.5,
+            amount: 0.0,
+        },
+        GradeOpKind::WhiteBalance => GradeOpParams::WhiteBalance {
+            temp: 0.0,
+            tint: 0.0,
+        },
+        GradeOpKind::Cdl => GradeOpParams::Cdl {
+            slope: [1.0; 3],
+            offset: [0.0; 3],
+            power: [1.0; 3],
+            sat: 1.0,
+        },
+        GradeOpKind::Wheels => GradeOpParams::Wheels {
+            lift: [0.0; 3],
+            gamma: [1.0; 3],
+            gain: [1.0; 3],
+            sat: 1.0,
+        },
+        GradeOpKind::Curves => GradeOpParams::Curves {
+            master: vec![(0.0, 0.0), (1.0, 1.0)],
+            red: Vec::new(),
+            green: Vec::new(),
+            blue: Vec::new(),
+            hue_vs_hue: Vec::new(),
+            hue_vs_sat: Vec::new(),
+        },
+        GradeOpKind::HslQualifier => GradeOpParams::HslQualifier {
+            hue: [0.0, 1.0],
+            sat: [0.0, 1.0],
+            lum: [0.0, 1.0],
+            softness: 0.1,
+            correction: CdlParams::identity(),
+        },
+        GradeOpKind::Lut3d => GradeOpParams::Lut3d {
+            asset: luts.first().map(|(id, _)| *id).unwrap_or_default(),
+            intensity: 1.0,
+            interp: LutInterp::Trilinear,
+        },
+    };
+    GradeOp::new(kind, params)
+}
+
+/// Full add-corrector catalog, in the 07 §4.4 seed order.
+const ALL_KINDS: [GradeOpKind; 8] = [
+    GradeOpKind::WhiteBalance,
+    GradeOpKind::Exposure,
+    GradeOpKind::Contrast,
+    GradeOpKind::Cdl,
+    GradeOpKind::Wheels,
+    GradeOpKind::HslQualifier,
+    GradeOpKind::Curves,
+    GradeOpKind::Lut3d,
+];
+
+/// The `GradeOpKind` a primary-corrector [`ColorPageTab`] quick-adds/selects.
+fn tab_kind(tab: ColorPageTab) -> GradeOpKind {
+    match tab {
+        ColorPageTab::Wheels => GradeOpKind::Wheels,
+        ColorPageTab::Curves => GradeOpKind::Curves,
+        ColorPageTab::Qualifier => GradeOpKind::HslQualifier,
+        ColorPageTab::Lut => GradeOpKind::Lut3d,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Right-drawer Color Controls
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Right-rail Color Controls drawer: grade-op stack + per-op editors for the
+/// selected clip's grade (07 §5), the global bypass (before/after), the
+/// primary-corrector quick tabs, and the scopes-panel toggle. Called from
+/// `app/mod.rs`'s right-drawer match with the live `doc`/`history` (edits commit
+/// through [`commit_grade`]) and the app's pending `PanelAction` queue.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_color_controls(
+    ui: &mut Ui,
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    actions: &mut Vec<PanelAction>,
+    selection: &[ClipId],
+    selected_op: &mut Option<GradeOpId>,
+    tab: &mut ColorPageTab,
+    scopes_open: &mut bool,
+) {
+    let Some((seq, track, clip)) = locate_clip(doc, selection) else {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Select a clip in the timeline to grade it.").color(muted(ui)));
+        return;
+    };
+
+    // Read-only snapshot up front so the later `&mut doc` commit doesn't collide
+    // with the media-pool borrow.
+    let luts = lut_assets(doc);
+    let orig = current_grade(doc, seq, track, clip);
+    let mut g = orig.clone();
+
+    // ── Pinned header: global bypass (= before/after, 07 §5) + scopes toggle ──
+    let captured = keyboard_captured(ui);
+    ui.horizontal(|ui| {
+        let d_pressed = !captured && ui.input(|i| i.key_pressed(egui::Key::D));
+        let resp = ui.selectable_label(g.bypass, format!("{} Bypass", ph::EYE_SLASH));
+        if resp.clicked() || d_pressed {
+            g.bypass = !g.bypass;
+        }
+        resp.on_hover_text("Show the ungraded image (before/after). Shortcut: D");
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .selectable_label(*scopes_open, format!("{} Scopes", ph::WAVE_SINE))
+                .on_hover_text("Toggle the floating waveform / vectorscope / histogram panel")
+                .clicked()
+            {
+                *scopes_open = !*scopes_open;
+            }
+        });
+    });
+
+    ui.separator();
+
+    // ── Primary-corrector quick tabs (07 §4.4) — select existing or create ────
+    section_header(ui, "PRIMARIES");
+    ui.horizontal_wrapped(|ui| {
+        for t in [
+            ColorPageTab::Wheels,
+            ColorPageTab::Curves,
+            ColorPageTab::Qualifier,
+            ColorPageTab::Lut,
+        ] {
+            let kind = tab_kind(t);
+            let existing = g.ops.iter().find(|o| o.kind == kind).map(|o| o.id);
+            let active = *tab == t && *selected_op == existing && existing.is_some();
+            if ui
+                .selectable_label(active, kind_label(kind))
+                .on_hover_text("Select this corrector, or add one if the stack has none")
+                .clicked()
+            {
+                *tab = t;
+                match existing {
+                    Some(id) => *selected_op = Some(id),
+                    None => {
+                        let op = default_op(kind, &luts);
+                        *selected_op = Some(op.id);
+                        g.ops.push(op);
+                    }
+                }
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+
+    // ── Add-corrector menu (full catalog) ────────────────────────────────────
+    ui.menu_button(format!("{} Add corrector", ph::PLUS), |ui| {
+        for kind in ALL_KINDS {
+            if ui.button(kind_label(kind)).clicked() {
+                let op = default_op(kind, &luts);
+                *selected_op = Some(op.id);
+                g.ops.push(op);
+                ui.close_menu();
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    section_header(ui, "GRADE STACK");
+    if g.ops.is_empty() {
+        ui.label(RichText::new("No correctors yet — add one above.").color(muted(ui)));
+    }
+
+    // ── Op stack: enable / select / reorder / remove ─────────────────────────
+    let mut move_up: Option<usize> = None;
+    let mut move_down: Option<usize> = None;
+    let mut remove: Option<usize> = None;
+    let n = g.ops.len();
+    for (i, op) in g.ops.iter_mut().enumerate() {
+        let is_selected = *selected_op == Some(op.id);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut op.enabled, "")
+                .on_hover_text("Enable / bypass this corrector");
+            let unknown = matches!(op.params.base, GradeOpParams::Unknown);
+            let label = if unknown {
+                RichText::new("Unsupported op").color(ui.visuals().warn_fg_color)
+            } else if op.enabled {
+                RichText::new(kind_label(op.kind))
+            } else {
+                RichText::new(kind_label(op.kind)).color(muted(ui))
+            };
+            if ui.selectable_label(is_selected, label).clicked() {
+                *selected_op = Some(op.id);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button(ph::X).on_hover_text("Remove").clicked() {
+                    remove = Some(i);
+                }
+                if ui
+                    .add_enabled(i + 1 < n, egui::Button::new(ph::CARET_DOWN).small())
+                    .on_hover_text("Move down")
+                    .clicked()
+                {
+                    move_down = Some(i);
+                }
+                if ui
+                    .add_enabled(i > 0, egui::Button::new(ph::CARET_UP).small())
+                    .on_hover_text("Move up")
+                    .clicked()
+                {
+                    move_up = Some(i);
+                }
+            });
+        });
+    }
+    if let Some(i) = move_up {
+        g.ops.swap(i, i - 1);
+    }
+    if let Some(i) = move_down {
+        g.ops.swap(i, i + 1);
+    }
+    if let Some(i) = remove {
+        let removed = g.ops.remove(i);
+        if *selected_op == Some(removed.id) {
+            *selected_op = None;
+        }
+    }
+
+    // ── Selected-op editor ───────────────────────────────────────────────────
+    ui.separator();
+    match selected_op.and_then(|sel| g.ops.iter().position(|o| o.id == sel)) {
+        Some(idx) => draw_op_editor(ui, &mut g.ops[idx], &luts, actions, seq, track, clip),
+        None => {
+            ui.label(RichText::new("Select a corrector to edit it.").color(muted(ui)));
+        }
+    }
+
+    // ── Commit one SetGrade if anything changed this frame ───────────────────
+    if g != orig {
+        commit_grade(doc, history, seq, track, clip, g);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-op editors — each mutates `op.params.base`; the caller commits the grade.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn draw_op_editor(
+    ui: &mut Ui,
+    op: &mut GradeOp,
+    luts: &[(AssetId, String)],
+    actions: &mut Vec<PanelAction>,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+) {
+    section_header(ui, kind_label(op.kind));
+    let op_id = op.id;
+    match &mut op.params.base {
+        GradeOpParams::Exposure { stops } => {
+            labelled(ui, "Stops", |ui| {
+                ui.add(egui::Slider::new(stops, -6.0..=6.0).step_by(0.01));
+            });
+        }
+        GradeOpParams::Contrast { pivot, amount } => {
+            labelled(ui, "Amount", |ui| {
+                ui.add(egui::Slider::new(amount, -1.0..=1.0).step_by(0.001));
+            });
+            labelled(ui, "Pivot", |ui| {
+                ui.add(egui::Slider::new(pivot, 0.0..=1.0).step_by(0.001));
+            });
+        }
+        GradeOpParams::WhiteBalance { temp, tint } => {
+            labelled(ui, "Temp", |ui| {
+                ui.add(egui::Slider::new(temp, -1.0..=1.0).step_by(0.001));
+            });
+            labelled(ui, "Tint", |ui| {
+                ui.add(egui::Slider::new(tint, -1.0..=1.0).step_by(0.001));
+            });
+        }
+        GradeOpParams::Cdl {
+            slope,
+            offset,
+            power,
+            sat,
+        } => cdl_editor(ui, slope, offset, power, sat),
+        GradeOpParams::Wheels {
+            lift,
+            gamma,
+            gain,
+            sat,
+        } => {
+            ui.horizontal(|ui| {
+                wheel_dial(ui, "Lift", lift, 0.0);
+                wheel_dial(ui, "Gamma", gamma, 1.0);
+                wheel_dial(ui, "Gain", gain, 1.0);
+            });
+            labelled(ui, "Saturation", |ui| {
+                ui.add(egui::Slider::new(sat, 0.0..=2.0).step_by(0.001));
+            });
+        }
+        GradeOpParams::Curves {
+            master,
+            red,
+            green,
+            blue,
+            hue_vs_hue,
+            hue_vs_sat,
+        } => curves_editor(ui, master, red, green, blue, hue_vs_hue, hue_vs_sat),
+        GradeOpParams::HslQualifier {
+            hue,
+            sat,
+            lum,
+            softness,
+            correction,
+        } => qualifier_editor(
+            ui, hue, sat, lum, softness, correction, actions, seq, track, clip, op_id,
+        ),
+        GradeOpParams::Lut3d {
+            asset,
+            intensity,
+            interp,
+        } => lut_editor(ui, asset, intensity, interp, luts),
+        GradeOpParams::Unknown => {
+            ui.label(
+                RichText::new(
+                    "This corrector was made by a newer Photonic build and can't be edited here. \
+                     It is preserved untouched.",
+                )
+                .color(ui.visuals().warn_fg_color),
+            );
+        }
+    }
+
+    // Per-op mask affordance (07 §4). Power windows are the v1 shape; the
+    // on-canvas handle editor (13 §9.1.1) is a later monitor-overlay story, so
+    // we surface mask presence + a clear-mask control here.
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let has_mask = op.mask.is_some();
+        ui.label(
+            RichText::new(if has_mask { "Masked" } else { "Full frame" })
+                .small()
+                .color(muted(ui)),
+        );
+        if has_mask && ui.small_button("Clear mask").clicked() {
+            op.mask = None;
+        }
+    });
+}
+
+fn labelled(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized([72.0, 16.0], egui::Label::new(RichText::new(label).small()));
+        add(ui);
+    });
+}
+
+fn cdl_editor(
+    ui: &mut Ui,
+    slope: &mut [f32; 3],
+    offset: &mut [f32; 3],
+    power: &mut [f32; 3],
+    sat: &mut f32,
+) {
+    let ch = ["R", "G", "B"];
+    labelled(ui, "Slope", |ui| {
+        for c in 0..3 {
+            ui.add(
+                egui::DragValue::new(&mut slope[c])
+                    .speed(0.005)
+                    .range(0.0..=4.0),
+            )
+            .on_hover_text(ch[c]);
+        }
+    });
+    labelled(ui, "Offset", |ui| {
+        for c in 0..3 {
+            ui.add(
+                egui::DragValue::new(&mut offset[c])
+                    .speed(0.002)
+                    .range(-1.0..=1.0),
+            )
+            .on_hover_text(ch[c]);
+        }
+    });
+    labelled(ui, "Power", |ui| {
+        for c in 0..3 {
+            ui.add(
+                egui::DragValue::new(&mut power[c])
+                    .speed(0.005)
+                    .range(0.1..=4.0),
+            )
+            .on_hover_text(ch[c]);
+        }
+    });
+    labelled(ui, "Saturation", |ui| {
+        ui.add(egui::Slider::new(sat, 0.0..=2.0).step_by(0.001));
+    });
+}
+
+fn lut_editor(
+    ui: &mut Ui,
+    asset: &mut AssetId,
+    intensity: &mut f32,
+    interp: &mut LutInterp,
+    luts: &[(AssetId, String)],
+) {
+    if luts.is_empty() {
+        ui.label(
+            RichText::new("No LUTs in the media pool. Import a .cube file to grade with it here.")
+                .color(muted(ui)),
+        );
+    } else {
+        section_header(ui, "LUT BROWSER");
+        egui::ScrollArea::vertical()
+            .max_height(120.0)
+            .id_salt("lut_browser")
+            .show(ui, |ui| {
+                for (id, name) in luts {
+                    if ui.selectable_label(*asset == *id, name).clicked() {
+                        *asset = *id;
+                    }
+                }
+            });
+    }
+    labelled(ui, "Intensity", |ui| {
+        ui.add(egui::Slider::new(intensity, 0.0..=1.0).step_by(0.01));
+    });
+    labelled(ui, "Interp", |ui| {
+        if ui
+            .selectable_label(*interp == LutInterp::Trilinear, "Trilinear")
+            .clicked()
+        {
+            *interp = LutInterp::Trilinear;
+        }
+        if ui
+            .selectable_label(*interp == LutInterp::Tetrahedral, "Tetrahedral")
+            .on_hover_text("Higher quality at LUT-grid edges (07 §6.5)")
+            .clicked()
+        {
+            *interp = LutInterp::Tetrahedral;
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wheels dial (13 §9.1.1) — 2D chroma disc + precise numeric readouts (kbd path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Draw one lift/gamma/gain dial: a chroma disc plus three numeric readouts (the
+/// keyboard fallback, 13 §9.6). `neutral` is the per-channel identity (0.0 for
+/// lift, 1.0 for gamma/gain). Mutates `v` in place.
+fn wheel_dial(ui: &mut Ui, label: &str, v: &mut [f32; 3], neutral: f32) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new(label).small().color(muted(ui)));
+        let size = 60.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        let center = rect.center();
+        let radius = size * 0.5 - 3.0;
+
+        painter.circle_filled(center, radius, surface_widget(ui));
+        painter.circle_stroke(center, radius, Stroke::new(1.0, border(ui)));
+        painter.line_segment(
+            [
+                pos2(center.x - radius, center.y),
+                pos2(center.x + radius, center.y),
+            ],
+            Stroke::new(0.5, border(ui)),
+        );
+        painter.line_segment(
+            [
+                pos2(center.x, center.y - radius),
+                pos2(center.x, center.y + radius),
+            ],
+            Stroke::new(0.5, border(ui)),
+        );
+
+        let delta = [v[0] - neutral, v[1] - neutral, v[2] - neutral];
+        let chroma = deltas_to_chroma_xy(delta);
+        let tip = center + chroma * (radius / CHROMA_FULL_SCALE);
+
+        // Drag maps the pointer (relative to centre) back to a pure-chroma RGB
+        // delta (no luma shift), preserving each channel's shared luma offset.
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let rel = (p - center) / (radius / CHROMA_FULL_SCALE);
+                let rel = clamp_len(rel, CHROMA_FULL_SCALE);
+                let new_delta = chroma_to_deltas(rel);
+                let luma = (delta[0] + delta[1] + delta[2]) / 3.0;
+                for c in 0..3 {
+                    v[c] = neutral + new_delta[c] + luma;
+                }
+            }
+        }
+        if resp.double_clicked() {
+            *v = [neutral; 3];
+        }
+
+        painter.circle_filled(center, 1.5, muted(ui));
+        if chroma.length() > 0.001 {
+            painter.line_segment([center, tip], Stroke::new(1.5, accent(ui)));
+            painter.circle_filled(tip, 2.5, accent(ui));
+        }
+
+        let ch = ["R", "G", "B"];
+        for c in 0..3 {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ch[c]).small().color(muted(ui)));
+                let range = if neutral == 0.0 {
+                    -0.5..=0.5
+                } else {
+                    0.0..=2.0
+                };
+                ui.add(egui::DragValue::new(&mut v[c]).speed(0.002).range(range));
+            });
+        }
+    });
+}
+
+/// Full-scale chroma radius in RGB-delta space that maps to the disc edge.
+const CHROMA_FULL_SCALE: f32 = 0.5;
+
+/// 120°-spaced primary directions on the colour wheel: R up, G lower-left,
+/// B lower-right (screen space, y-down). Unit vectors.
+fn primary_dirs() -> [Vec2; 3] {
+    let deg = [90.0_f32, 210.0, 330.0];
+    let mut out = [Vec2::ZERO; 3];
+    for c in 0..3 {
+        let r = deg[c].to_radians();
+        out[c] = vec2(r.cos(), -r.sin());
+    }
+    out
+}
+
+fn dot(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.x + a.y * b.y
+}
+
+/// Project a pure-chroma RGB delta onto the 2D colour wheel (luma removed).
+pub(crate) fn deltas_to_chroma_xy(delta: [f32; 3]) -> Vec2 {
+    let luma = (delta[0] + delta[1] + delta[2]) / 3.0;
+    let dirs = primary_dirs();
+    let mut xy = Vec2::ZERO;
+    for c in 0..3 {
+        xy += dirs[c] * (delta[c] - luma);
+    }
+    xy
+}
+
+/// Invert a 2D wheel position into a pure-chroma RGB delta (channel sum == 0).
+/// For 120°-spaced unit directions, `d_c = (2/3)(xy · u_c)` reproduces `xy`
+/// exactly while keeping the channel sum zero (no luma shift).
+pub(crate) fn chroma_to_deltas(xy: Vec2) -> [f32; 3] {
+    let dirs = primary_dirs();
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        out[c] = (2.0 / 3.0) * dot(xy, dirs[c]);
+    }
+    out
+}
+
+fn clamp_len(v: Vec2, max: f32) -> Vec2 {
+    let len = v.length();
+    if len > max && len > 0.0 {
+        v * (max / len)
+    } else {
+        v
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Curve editor (07 §3.6 / 13 §9) — draggable control points, per-channel tabs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn curves_editor(
+    ui: &mut Ui,
+    master: &mut Vec<(f32, f32)>,
+    red: &mut Vec<(f32, f32)>,
+    green: &mut Vec<(f32, f32)>,
+    blue: &mut Vec<(f32, f32)>,
+    hue_vs_hue: &mut Vec<(f32, f32)>,
+    hue_vs_sat: &mut Vec<(f32, f32)>,
+) {
+    let tab_id = ui.id().with("curve_ch");
+    let mut ch: usize = ui.data(|d| d.get_temp::<usize>(tab_id).unwrap_or(0));
+    ui.horizontal_wrapped(|ui| {
+        for (i, name) in ["RGB", "R", "G", "B", "H-H", "H-S"].iter().enumerate() {
+            if ui.selectable_label(ch == i, *name).clicked() {
+                ch = i;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(tab_id, ch));
+
+    let points: &mut Vec<(f32, f32)> = match ch {
+        0 => master,
+        1 => red,
+        2 => green,
+        3 => blue,
+        4 => hue_vs_hue,
+        _ => hue_vs_sat,
+    };
+    if points.is_empty() {
+        *points = vec![(0.0, 0.0), (1.0, 1.0)];
+    }
+    curve_plot(ui, points, ch);
+}
+
+/// Draw + edit a control-point curve. Drag to move, double-click empty area to
+/// add, right-click / Delete to remove. Arrow keys nudge the selected point
+/// (13 §9.6 keyboard mitigation).
+fn curve_plot(ui: &mut Ui, points: &mut Vec<(f32, f32)>, channel: usize) {
+    let w = ui.available_width().min(240.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, w * 0.8), Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, 3.0, surface_widget(ui));
+    for k in 1..4 {
+        let t = k as f32 / 4.0;
+        let x = rect.left() + t * rect.width();
+        let y = rect.top() + t * rect.height();
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(0.5, border(ui)),
+        );
+        painter.line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(0.5, border(ui)),
+        );
+    }
+
+    let to_screen = |p: (f32, f32)| curve_to_screen(p, rect);
+    let from_screen = |s: Pos2| screen_to_curve(s, rect);
+
+    let sel_id = ui.id().with(("curve_sel", channel));
+    let mut sel: Option<usize> = ui.data(|d| d.get_temp::<Option<usize>>(sel_id)).flatten();
+
+    let hit = 10.0;
+    if let Some(p) = resp.interact_pointer_pos() {
+        if resp.drag_started() || resp.clicked() {
+            sel = nearest_point(points, &to_screen, p, hit);
+        }
+        if resp.dragged() {
+            if let Some(i) = sel {
+                let mut np = from_screen(p);
+                if i == 0 {
+                    np.0 = 0.0;
+                } else if i == points.len() - 1 {
+                    np.0 = 1.0;
+                } else {
+                    let lo = points[i - 1].0 + 1e-3;
+                    let hi = points[i + 1].0 - 1e-3;
+                    np.0 = np.0.clamp(lo, hi);
+                }
+                np.1 = np.1.clamp(0.0, 1.0);
+                points[i] = np;
+            }
+        }
+        if resp.double_clicked() && nearest_point(points, &to_screen, p, hit).is_none() {
+            sel = Some(insert_sorted(points, from_screen(p)));
+        }
+        if resp.secondary_clicked() {
+            if let Some(i) = nearest_point(points, &to_screen, p, hit) {
+                if i != 0 && i != points.len() - 1 {
+                    points.remove(i);
+                    sel = None;
+                }
+            }
+        }
+    }
+
+    // Keyboard nudge / delete for the selected point (suppressed while typing).
+    if let Some(i) = sel {
+        if !keyboard_captured(ui) {
+            let (dx, dy, big) = ui.input(|inp| {
+                (
+                    (inp.key_pressed(egui::Key::ArrowRight) as i32
+                        - inp.key_pressed(egui::Key::ArrowLeft) as i32) as f32,
+                    (inp.key_pressed(egui::Key::ArrowUp) as i32
+                        - inp.key_pressed(egui::Key::ArrowDown) as i32) as f32,
+                    inp.modifiers.shift,
+                )
+            });
+            if dx != 0.0 || dy != 0.0 {
+                let step = if big { 0.05 } else { 0.005 };
+                let mut p = points[i];
+                if i != 0 && i != points.len() - 1 {
+                    let lo = points[i - 1].0 + 1e-3;
+                    let hi = points[i + 1].0 - 1e-3;
+                    p.0 = (p.0 + dx * step).clamp(lo, hi);
+                }
+                p.1 = (p.1 + dy * step).clamp(0.0, 1.0);
+                points[i] = p;
+            }
+            let del = ui.input(|inp| {
+                inp.key_pressed(egui::Key::Delete) || inp.key_pressed(egui::Key::Backspace)
+            });
+            if del && i != 0 && i != points.len() - 1 {
+                points.remove(i);
+                sel = None;
+            }
+        }
+    }
+
+    let mut sorted = points.clone();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let line: Vec<Pos2> = sorted.iter().map(|&p| to_screen(p)).collect();
+    if line.len() >= 2 {
+        painter.add(egui::Shape::line(line, Stroke::new(1.5, accent(ui))));
+    }
+    for (i, &p) in points.iter().enumerate() {
+        let s = to_screen(p);
+        painter.circle_filled(s, 3.0, on_surface(ui));
+        if sel == Some(i) {
+            painter.circle_stroke(s, 5.0, Stroke::new(1.5, accent(ui)));
+        }
+    }
+    painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
+
+    ui.data_mut(|d| d.insert_temp(sel_id, sel));
+    ui.label(
+        RichText::new("Drag to move · double-click to add · right-click/Del to remove")
+            .small()
+            .color(muted(ui)),
+    );
+}
+
+/// Curve (0..1, 0..1) → screen. y is flipped (1.0 = top).
+pub(crate) fn curve_to_screen(p: (f32, f32), rect: Rect) -> Pos2 {
+    pos2(
+        rect.left() + p.0.clamp(0.0, 1.0) * rect.width(),
+        rect.bottom() - p.1.clamp(0.0, 1.0) * rect.height(),
+    )
+}
+
+/// Screen → curve (0..1, 0..1), clamped.
+pub(crate) fn screen_to_curve(s: Pos2, rect: Rect) -> (f32, f32) {
+    let x = ((s.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+    let y = ((rect.bottom() - s.y) / rect.height().max(1.0)).clamp(0.0, 1.0);
+    (x, y)
+}
+
+/// Index of the point whose screen position is within `threshold` px of `pointer`.
+pub(crate) fn nearest_point(
+    points: &[(f32, f32)],
+    to_screen: &impl Fn((f32, f32)) -> Pos2,
+    pointer: Pos2,
+    threshold: f32,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, &p) in points.iter().enumerate() {
+        let d = to_screen(p).distance(pointer);
+        if d <= threshold && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Insert a point keeping the vector x-sorted; returns its new index.
+pub(crate) fn insert_sorted(points: &mut Vec<(f32, f32)>, p: (f32, f32)) -> usize {
+    let idx = points
+        .iter()
+        .position(|q| q.0 > p.0)
+        .unwrap_or(points.len());
+    points.insert(idx, p);
+    idx
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HSL qualifier (07 §3.7 / 13 §9) — eyedropper + swatch seed + range gates.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn qualifier_editor(
+    ui: &mut Ui,
+    hue: &mut [f32; 2],
+    sat: &mut [f32; 2],
+    lum: &mut [f32; 2],
+    softness: &mut f32,
+    correction: &mut CdlParams,
+    actions: &mut Vec<PanelAction>,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+    op: GradeOpId,
+) {
+    ui.horizontal(|ui| {
+        // Eyedropper — extends the app-wide EyedropperTarget (07 §5 / 13 §9.3):
+        // the next canvas click seeds this qualifier centre from the sampled colour.
+        if eyedropper_btn(ui) {
+            actions.push(PanelAction::StartEyedropper(
+                EyedropperTarget::GradeQualifier {
+                    seq,
+                    track,
+                    clip,
+                    op,
+                },
+            ));
+        }
+        ui.label(
+            RichText::new("Pick key colour off the monitor")
+                .small()
+                .color(muted(ui)),
+        );
+    });
+
+    // Reliable in-panel seed: a target-colour swatch (keyboard/click accessible)
+    // seeding hue/sat/lum centre ± a default half-width when changed.
+    let seed_id = ui.id().with("qual_seed");
+    let mut seed: [f32; 4] = ui.data(|d| {
+        d.get_temp::<[f32; 4]>(seed_id)
+            .unwrap_or([0.6, 0.4, 0.3, 1.0])
+    });
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Seed colour").small().color(muted(ui)));
+        let resp = crate::color_popup::ColorPopup::swatch_f32(ui, &mut seed);
+        if resp.changed() {
+            let (h, s, l) = rgb_to_hsl(seed[0], seed[1], seed[2]);
+            let (nh, ns, nl) = seed_qualifier(h, s, l);
+            *hue = nh;
+            *sat = ns;
+            *lum = nl;
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(seed_id, seed));
+
+    range_gate(ui, "Hue", hue);
+    range_gate(ui, "Sat", sat);
+    range_gate(ui, "Lum", lum);
+    labelled(ui, "Softness", |ui| {
+        ui.add(egui::Slider::new(softness, 0.0..=1.0).step_by(0.01));
+    });
+
+    // Highlight-matte preview toggle (07 §5 / 13 §9); the monitor-side matte
+    // overlay is a later story, so the workflow control is surfaced + persisted.
+    let hl_id = ui.id().with("qual_highlight");
+    let mut highlight: bool = ui.data(|d| d.get_temp::<bool>(hl_id).unwrap_or(false));
+    if ui
+        .selectable_label(highlight, "Highlight matte")
+        .on_hover_text("Preview the isolated qualifier matte (white = qualified)")
+        .clicked()
+    {
+        highlight = !highlight;
+    }
+    ui.data_mut(|d| d.insert_temp(hl_id, highlight));
+
+    ui.add_space(4.0);
+    section_header(ui, "SECONDARY CORRECTION (CDL)");
+    cdl_editor(
+        ui,
+        &mut correction.slope,
+        &mut correction.offset,
+        &mut correction.power,
+        &mut correction.sat,
+    );
+}
+
+/// A min/max range as two clamped drag values keeping `lo <= hi`.
+fn range_gate(ui: &mut Ui, label: &str, range: &mut [f32; 2]) {
+    labelled(ui, label, |ui| {
+        ui.add(
+            egui::DragValue::new(&mut range[0])
+                .speed(0.005)
+                .range(0.0..=1.0),
+        );
+        ui.label("–");
+        ui.add(
+            egui::DragValue::new(&mut range[1])
+                .speed(0.005)
+                .range(0.0..=1.0),
+        );
+    });
+    if range[0] > range[1] {
+        range.swap(0, 1);
+    }
+}
+
+/// Seed a qualifier's hue/sat/lum gates around a sampled HSL colour with a
+/// sensible default half-width, clamped to `[0,1]` (07 §3.7 gate domain).
+pub(crate) fn seed_qualifier(h: f32, s: f32, l: f32) -> ([f32; 2], [f32; 2], [f32; 2]) {
+    let hw = |v: f32, w: f32| [(v - w).max(0.0), (v + w).min(1.0)];
+    (hw(h, 0.06), hw(s, 0.20), hw(l, 0.20))
+}
+
+/// RGB (0..1) → HSL (all 0..1). Hue normalized to 0..1.
+pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d.abs() < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } / 6.0;
+    (h.rem_euclid(1.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Floating scopes panel (07 §6 / 13 §10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Floating / dockable scopes window (07 §6): waveform / parade / vectorscope /
+/// histogram, GPU-computed via `photonic_render::scopes` over the engine's
+/// presented working texture and painted from the read-back bins. Its own window
+/// close button clears `open`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_scopes_panel(
+    ctx: &egui::Context,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame_tex: Option<&wgpu::Texture>,
+    doc: &Document,
+    selection: &[ClipId],
+    open: &mut bool,
+    kind: &mut ScopeKind,
+) {
+    let mut is_open = *open;
+    let label = scope_source_label(doc, selection);
+
+    egui::Window::new("Scopes")
+        .open(&mut is_open)
+        .resizable(true)
+        .default_size([320.0, 360.0])
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (k, name) in [
+                    (ScopeKind::Waveform, "Waveform"),
+                    (ScopeKind::Parade, "Parade"),
+                    (ScopeKind::Vectorscope, "Vectorscope"),
+                    (ScopeKind::Histogram, "Histogram"),
+                ] {
+                    if ui.selectable_label(*kind == k, name).clicked() {
+                        *kind = k;
+                    }
+                }
+            });
+            ui.label(
+                RichText::new(format!("Scoping: {label}"))
+                    .small()
+                    .color(muted(ui)),
+            );
+            ui.separator();
+
+            let Some(tex) = frame_tex else {
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("No signal — play or seek the sequence.").color(muted(ui)),
+                    );
+                });
+                return;
+            };
+            match *kind {
+                ScopeKind::Histogram => draw_histogram(ui, device, queue, tex),
+                ScopeKind::Parade => draw_parade(ui, device, queue, tex),
+                ScopeKind::Waveform => draw_waveform(ui, device, queue, tex),
+                ScopeKind::Vectorscope => draw_vectorscope(ui, device, queue, tex),
+            }
+        });
+
+    *open = is_open;
+}
+
+fn scope_source_label(doc: &Document, selection: &[ClipId]) -> String {
+    if let Some((seq, track, clip)) = locate_clip(doc, selection) {
+        if let Some(name) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq))
+            .and_then(|s| s.track(track))
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+            .map(|c| c.name.clone())
+        {
+            return name;
+        }
+    }
+    "Program".to_string()
+}
+
+fn draw_histogram(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
+    let h = photonic_render::scopes::histogram_gpu(device, queue, tex);
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, w * 0.6), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, Color32::from_rgb(7, 7, 11));
+
+    let bins = h.luma.len();
+    let max = h
+        .luma
+        .iter()
+        .chain(h.red.iter())
+        .chain(h.green.iter())
+        .chain(h.blue.iter())
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let bw = rect.width() / bins as f32;
+    let filled = |data: &[u32], color: Color32| {
+        for (i, &c) in data.iter().enumerate() {
+            let x = rect.left() + i as f32 * bw;
+            let hgt = (c as f32 / max) * rect.height();
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(x, rect.bottom() - hgt),
+                    pos2(x + bw.max(1.0), rect.bottom()),
+                ),
+                0.0,
+                color,
+            );
+        }
+    };
+    let line = |data: &[u32], color: Color32| {
+        for (i, &c) in data.iter().enumerate() {
+            let x = rect.left() + i as f32 * bw;
+            let hgt = (c as f32 / max) * rect.height();
+            if hgt > 0.5 {
+                painter.line_segment(
+                    [pos2(x, rect.bottom()), pos2(x, rect.bottom() - hgt)],
+                    Stroke::new(1.0, color),
+                );
+            }
+        }
+    };
+    filled(&h.luma, on_surface(ui).gamma_multiply(0.45));
+    line(&h.red, Color32::from_rgb(220, 90, 90));
+    line(&h.green, Color32::from_rgb(90, 200, 110));
+    line(&h.blue, Color32::from_rgb(100, 130, 230));
+    painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
+}
+
+fn draw_parade(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
+    // The render API's waveform is luma-only, so render the three per-channel
+    // histograms side by side as an RGB level parade (real per-channel data).
+    let h = photonic_render::scopes::histogram_gpu(device, queue, tex);
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, w * 0.6), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, Color32::from_rgb(7, 7, 11));
+    let max = h
+        .red
+        .iter()
+        .chain(h.green.iter())
+        .chain(h.blue.iter())
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let cols = [
+        (&h.red, Color32::from_rgb(220, 90, 90)),
+        (&h.green, Color32::from_rgb(90, 200, 110)),
+        (&h.blue, Color32::from_rgb(100, 130, 230)),
+    ];
+    let panel_w = rect.width() / 3.0;
+    for (ci, (data, color)) in cols.iter().enumerate() {
+        let x0 = rect.left() + ci as f32 * panel_w;
+        let bins = data.len();
+        let bw = panel_w / bins as f32;
+        for (i, &c) in data.iter().enumerate() {
+            let x = x0 + i as f32 * bw;
+            let hgt = (c as f32 / max) * rect.height();
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(x, rect.bottom() - hgt),
+                    pos2(x + bw.max(1.0), rect.bottom()),
+                ),
+                0.0,
+                *color,
+            );
+        }
+    }
+    painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
+}
+
+fn draw_waveform(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
+    let wf = photonic_render::scopes::waveform_gpu(device, queue, tex);
+    let out_w = 256usize;
+    let out_h = wf.bins;
+    let mut pixels = vec![Color32::from_rgb(7, 7, 11); out_w * out_h];
+    let peak = wf.data.iter().copied().max().unwrap_or(1).max(1) as f32;
+    let src_w = wf.width.max(1);
+    for ox in 0..out_w {
+        let sx = ox * src_w / out_w;
+        for bin in 0..out_h {
+            let c = wf.count(sx, bin) as f32;
+            if c > 0.0 {
+                let a = (c / peak).sqrt().clamp(0.0, 1.0);
+                let v = ((a * 215.0) as u8).saturating_add(20);
+                let row = out_h - 1 - bin; // luma high → top
+                pixels[row * out_w + ox] = Color32::from_gray(v);
+            }
+        }
+    }
+    scope_image(ui, "scope_waveform", out_w, out_h, pixels, None);
+}
+
+fn draw_vectorscope(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
+    let vs = photonic_render::scopes::vectorscope_gpu(device, queue, tex);
+    let n = vs.size;
+    let mut pixels = vec![Color32::from_rgb(7, 7, 11); n * n];
+    let peak = vs.data.iter().copied().max().unwrap_or(1).max(1) as f32;
+    for cr in 0..n {
+        for cb in 0..n {
+            let c = vs.count(cb, cr) as f32;
+            if c > 0.0 {
+                let a = (c / peak).sqrt().clamp(0.0, 1.0);
+                let v = ((a * 215.0) as u8).saturating_add(20);
+                let row = n - 1 - cr; // Cr axis points up
+                pixels[row * n + cb] = Color32::from_gray(v);
+            }
+        }
+    }
+    scope_image(ui, "scope_vectorscope", n, n, pixels, Some(draw_skin_line));
+}
+
+/// Overlay the standard I-line (skin-tone) reference from the vectorscope centre.
+fn draw_skin_line(ui: &Ui, painter: &egui::Painter, rect: Rect) {
+    let center = rect.center();
+    let ang = 123.0_f32.to_radians();
+    let dir = vec2(ang.cos(), -ang.sin());
+    let end = center + dir * (rect.width() * 0.45);
+    painter.line_segment([center, end], Stroke::new(1.0, muted(ui)));
+    painter.circle_stroke(center, rect.width() * 0.45, Stroke::new(0.5, border(ui)));
+}
+
+/// Upload a scope image and paint it square, with an optional overlay.
+fn scope_image(
+    ui: &mut Ui,
+    name: &str,
+    w: usize,
+    h: usize,
+    pixels: Vec<Color32>,
+    overlay: Option<fn(&Ui, &egui::Painter, Rect)>,
+) {
+    let image = egui::ColorImage {
+        size: [w, h],
+        pixels,
+    };
+    let handle = ui.ctx().load_texture(name, image, TextureOptions::LINEAR);
+    let side = ui.available_width().min(ui.available_height()).max(160.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, Color32::from_rgb(7, 7, 11));
+    painter.image(
+        handle.id(),
+        rect,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    if let Some(f) = overlay {
+        f(ui, &painter, rect);
+    }
+    painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — pure mapping / hit-test / seeding logic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chroma_round_trips_through_wheel() {
+        let delta = [0.2f32, -0.1, -0.1];
+        let xy = deltas_to_chroma_xy(delta);
+        let back = chroma_to_deltas(xy);
+        let luma = (delta[0] + delta[1] + delta[2]) / 3.0;
+        for c in 0..3 {
+            assert!((back[c] - (delta[c] - luma)).abs() < 1e-4, "channel {c}");
+        }
+        assert!((back[0] + back[1] + back[2]).abs() < 1e-4, "no luma shift");
+    }
+
+    #[test]
+    fn neutral_and_pure_luma_have_no_chroma() {
+        assert!(deltas_to_chroma_xy([0.0, 0.0, 0.0]).length() < 1e-6);
+        assert!(deltas_to_chroma_xy([0.3, 0.3, 0.3]).length() < 1e-5);
+    }
+
+    #[test]
+    fn curve_screen_round_trip() {
+        let rect = Rect::from_min_max(pos2(10.0, 20.0), pos2(210.0, 120.0));
+        for &(x, y) in &[(0.0f32, 0.0f32), (0.5, 0.5), (1.0, 1.0), (0.25, 0.8)] {
+            let s = curve_to_screen((x, y), rect);
+            let (rx, ry) = screen_to_curve(s, rect);
+            assert!((rx - x).abs() < 1e-3, "x {x}");
+            assert!((ry - y).abs() < 1e-3, "y {y}");
+        }
+    }
+
+    #[test]
+    fn curve_y_is_flipped() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        assert!(curve_to_screen((0.0, 1.0), rect).y < curve_to_screen((0.0, 0.0), rect).y);
+    }
+
+    #[test]
+    fn nearest_point_picks_within_threshold() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        let pts = vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)];
+        let to_screen = |p: (f32, f32)| curve_to_screen(p, rect);
+        let mid = to_screen((0.5, 0.5));
+        assert_eq!(nearest_point(&pts, &to_screen, mid, 8.0), Some(1));
+        assert_eq!(nearest_point(&pts, &to_screen, pos2(48.0, 90.0), 4.0), None);
+    }
+
+    #[test]
+    fn insert_sorted_keeps_order() {
+        let mut pts = vec![(0.0, 0.0), (1.0, 1.0)];
+        assert_eq!(insert_sorted(&mut pts, (0.4, 0.6)), 1);
+        assert_eq!(pts, vec![(0.0, 0.0), (0.4, 0.6), (1.0, 1.0)]);
+        // 0.9 sorts before the 1.0 endpoint → index 2.
+        assert_eq!(insert_sorted(&mut pts, (0.9, 0.2)), 2);
+        assert_eq!(pts, vec![(0.0, 0.0), (0.4, 0.6), (0.9, 0.2), (1.0, 1.0)]);
+    }
+
+    #[test]
+    fn rgb_hsl_known_values() {
+        let (h, s, l) = rgb_to_hsl(1.0, 0.0, 0.0);
+        assert!(h.abs() < 1e-3 || (h - 1.0).abs() < 1e-3);
+        assert!((s - 1.0).abs() < 1e-3);
+        assert!((l - 0.5).abs() < 1e-3);
+        let (_, s2, l2) = rgb_to_hsl(0.5, 0.5, 0.5);
+        assert!(s2 < 1e-3);
+        assert!((l2 - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn qualifier_seed_brackets_center_and_clamps() {
+        let (hr, sr, lr) = seed_qualifier(0.5, 0.5, 0.5);
+        assert!(hr[0] <= 0.5 && hr[1] >= 0.5);
+        assert!(sr[0] <= 0.5 && sr[1] >= 0.5);
+        assert!(lr[0] <= 0.5 && lr[1] >= 0.5);
+        let (_, sr2, _) = seed_qualifier(0.5, 0.95, 0.5);
+        assert!(sr2[1] <= 1.0, "upper clamps to 1.0");
+    }
 }

@@ -3482,6 +3482,9 @@ impl PhotonicApp {
                     .resizable(false)
                     .exact_width((right_target_w * rt).max(1.0))
             };
+            // Track history so a grade edit committed inside the drawer (via
+            // SetGrade → CommandHistory) marks the document dirty.
+            let right_rev_before = history.revision();
             let resp = panel.show(ctx, |ui| {
                 ui.set_opacity(rt);
                 match right_render_group {
@@ -3501,8 +3504,19 @@ impl PhotonicApp {
                         self.draw_claude_tab(ui);
                     }
                     RightDrawerGroup::ColorControls => {
-                        let mut vid = self.video_panel_ui();
-                        panels::video::color_page::draw_color_controls(ui, &mut vid);
+                        // Grade edits commit straight through `history`
+                        // (SetGrade → CommandHistory); disjoint `self` field
+                        // borrows keep this off `video_panel_ui`'s whole-self loan.
+                        panels::video::color_page::draw_color_controls(
+                            ui,
+                            doc,
+                            history,
+                            &mut self.pending_panel_actions,
+                            &self.timeline_selection,
+                            &mut self.selected_grade_op,
+                            &mut self.color_page_tab,
+                            &mut self.scopes_panel_open,
+                        );
                     }
                     RightDrawerGroup::AudioMixer => {
                         let mut vid = self.video_panel_ui();
@@ -3527,6 +3541,9 @@ impl PhotonicApp {
                 if (w - self.prefs.right_drawer_width).abs() > 0.5 {
                     self.prefs.right_drawer_width = w;
                 }
+            }
+            if history.revision() != right_rev_before {
+                doc_modified = true;
             }
         }
 
@@ -3575,8 +3592,26 @@ impl PhotonicApp {
         // default-off, so vector mode and untouched video mode are unchanged).
         if self.mode == AppMode::Video {
             if self.scopes_panel_open {
-                let mut vid = self.video_panel_ui();
-                panels::video::color_page::draw_scopes_panel(ctx, &mut vid);
+                // GPU scopes run over the engine's presented working texture via
+                // `photonic_render::scopes` (07 §6). The engine shares the
+                // renderer's device (02 §1), so the same device/queue read it.
+                let frame = self
+                    .engine
+                    .as_ref()
+                    .and_then(|b| b.session().latest_frame());
+                let frame_tex = frame.as_ref().map(|f| f.texture.as_ref());
+                let device = renderer.shared_device();
+                let queue = renderer.shared_queue();
+                panels::video::color_page::draw_scopes_panel(
+                    ctx,
+                    &device,
+                    &queue,
+                    frame_tex,
+                    doc,
+                    &self.timeline_selection,
+                    &mut self.scopes_panel_open,
+                    &mut self.scope_kind,
+                );
             }
             if self.export_dialog_open {
                 // Widened from the skeleton's `(ctx, vid)` stub — `VideoPanelUi`

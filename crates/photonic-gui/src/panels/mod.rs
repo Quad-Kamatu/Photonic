@@ -111,6 +111,17 @@ pub enum EyedropperTarget {
         ids: Vec<NodeId>,
         from: [f32; 4],
     },
+    /// Seed a clip grade's HSL qualifier from a pixel sampled off the program
+    /// monitor (07 §5 / 13 §9.3). Extends the one eyedropper idiom into the video
+    /// color page rather than a parallel picker; the app handler samples the
+    /// engine frame and applies the sampled colour's HSL to the clip's
+    /// `HslQualifier` op via `SetGrade`.
+    GradeQualifier {
+        seq: photonic_core::timeline::SequenceId,
+        track: photonic_core::timeline::TrackId,
+        clip: photonic_core::timeline::ClipId,
+        op: photonic_core::timeline::GradeOpId,
+    },
 }
 
 /// An action requested by a panel widget, to be processed by the main draw loop.
