@@ -4162,6 +4162,7 @@ version = "0.2.5"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "crossbeam-channel",
  "egui",
  "egui-phosphor",
  "egui-wgpu",
@@ -4207,6 +4208,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "crossbeam-channel",
  "glyphon",
  "image",
  "kurbo",
