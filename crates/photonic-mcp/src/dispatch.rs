@@ -2238,6 +2238,24 @@ pub(crate) async fn dispatch_tool_inner(
             Ok(ToolOutput::mutating(handlers::video::ripple_edit(state, a).await))
         }
 
+        // 3/4-point editing (16 §2, CAP-019 MCP parity)
+        "insert_edit" => {
+            let a: InsertEditArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::insert_edit(state, a).await))
+        }
+        "overwrite_edit" => {
+            let a: OverwriteEditArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::overwrite_edit(state, a).await))
+        }
+        "lift_edit" => {
+            let a: LiftEditArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::lift_edit(state, a).await))
+        }
+        "extract_edit" => {
+            let a: ExtractEditArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::extract_edit(state, a).await))
+        }
+
         // Clip properties (10 §3.5)
         "set_clip_prop" => {
             let a: SetClipPropArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -2251,6 +2269,17 @@ pub(crate) async fn dispatch_tool_inner(
             let a: SetTransitionArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(handlers::video::set_transition(state, a).await))
         }
+
+        // Clip organization: linking (14 §M-2, CAP-019 MCP parity)
+        "link_clips" => {
+            let a: LinkClipsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::link_clips(state, a).await))
+        }
+        "unlink_clips" => {
+            let a: UnlinkClipsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::unlink_clips(state, a).await))
+        }
+
         "list_clips" => {
             let a: ListClipsArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(handlers::video::list_clips(state, a).await))

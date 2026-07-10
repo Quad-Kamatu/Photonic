@@ -1003,6 +1003,203 @@ pub async fn ripple_edit(state: &AppState, args: RippleEditArgs) -> ToolResult {
     }
 }
 
+// ─── 3/4-point editing (16 §2, CAP-019 MCP parity) ─────────────────────────
+
+pub async fn insert_edit(state: &AppState, args: InsertEditArgs) -> ToolResult {
+    tracing::debug!("tool: insert_edit on track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(project, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let has_source_in = args.source_in_ticks.is_some()
+        || args.source_in_tc.is_some()
+        || args.source_in_seconds.is_some();
+    let source_in = if has_source_in {
+        match resolve_tick(
+            args.source_in_ticks,
+            args.source_in_tc.as_deref(),
+            args.source_in_seconds,
+            Some(fr),
+        ) {
+            Ok(t) => t,
+            Err(e) => return e,
+        }
+    } else {
+        Tick::ZERO
+    };
+    if args.duration_ticks <= 0 {
+        return err_code("TickOutOfRange", "duration_ticks must be > 0");
+    }
+    let source = match to_clip_source(project, args.source) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let mut clip = Clip::new(source, at, Tick(args.duration_ticks));
+    clip.source_in = source_in;
+    if let Some(name) = args.name {
+        clip.name = name;
+    }
+    let clip_id = clip.id;
+
+    match ops::insert_edit(project, seq_id, args.track_id, at, clip) {
+        Ok(cmds) => {
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text("Inserted edit (rippled)").with_data(json!({ "clip_id": clip_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn overwrite_edit(state: &AppState, args: OverwriteEditArgs) -> ToolResult {
+    tracing::debug!("tool: overwrite_edit on track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(project, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let has_source_in = args.source_in_ticks.is_some()
+        || args.source_in_tc.is_some()
+        || args.source_in_seconds.is_some();
+    let source_in = if has_source_in {
+        match resolve_tick(
+            args.source_in_ticks,
+            args.source_in_tc.as_deref(),
+            args.source_in_seconds,
+            Some(fr),
+        ) {
+            Ok(t) => t,
+            Err(e) => return e,
+        }
+    } else {
+        Tick::ZERO
+    };
+    if args.duration_ticks <= 0 {
+        return err_code("TickOutOfRange", "duration_ticks must be > 0");
+    }
+    let source = match to_clip_source(project, args.source) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let mut clip = Clip::new(source, at, Tick(args.duration_ticks));
+    clip.source_in = source_in;
+    if let Some(name) = args.name {
+        clip.name = name;
+    }
+    let clip_id = clip.id;
+
+    match ops::overwrite_edit(project, seq_id, args.track_id, at, clip) {
+        Ok(cmds) => {
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text("Overwrote edit").with_data(json!({ "clip_id": clip_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// Shared by `lift_edit`/`extract_edit`: resolve a [`WorkRangeArg`] to
+/// `(Tick, Tick)` against `fr` — both bounds required (a missing one surfaces
+/// `resolve_tick`'s standard error).
+fn resolve_range(range: &WorkRangeArg, fr: FrameRate) -> Result<(Tick, Tick), ToolResult> {
+    let start = resolve_tick(
+        range.start_ticks,
+        range.start_tc.as_deref(),
+        range.start_seconds,
+        Some(fr),
+    )?;
+    let end = resolve_tick(
+        range.end_ticks,
+        range.end_tc.as_deref(),
+        range.end_seconds,
+        Some(fr),
+    )?;
+    Ok((start, end))
+}
+
+pub async fn lift_edit(state: &AppState, args: LiftEditArgs) -> ToolResult {
+    tracing::debug!("tool: lift_edit on track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(project, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let range = match resolve_range(&args.range, fr) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match ops::lift_edit(project, seq_id, args.track_id, range) {
+        Ok(cmds) => {
+            if cmds.is_empty() {
+                return ToolResult::text("No clips in range — nothing to lift");
+            }
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text("Lifted range")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn extract_edit(state: &AppState, args: ExtractEditArgs) -> ToolResult {
+    tracing::debug!("tool: extract_edit on track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(project, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let range = match resolve_range(&args.range, fr) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match ops::extract_edit(project, seq_id, args.track_id, range) {
+        Ok(cmds) => {
+            if cmds.is_empty() {
+                return ToolResult::text("No clips in range — nothing to extract");
+            }
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text("Extracted range (rippled)")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 // ─── Clip properties (10 §3.5) ──────────────────────────────────────────────
 
 pub async fn set_clip_prop(state: &AppState, args: SetClipPropArgs) -> ToolResult {
@@ -1038,10 +1235,67 @@ pub async fn set_clip_prop(state: &AppState, args: SetClipPropArgs) -> ToolResul
     if let Some(en) = args.enabled {
         new_clip.enabled = en;
     }
+    if let Some(label) = args.color_label {
+        new_clip.color_label = label;
+    }
     match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
         Ok(cmd) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
             ToolResult::text("Updated clip")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+// ─── Clip organization: color label & linking (14 §M-1/M-2, CAP-019 MCP
+// parity) ────────────────────────────────────────────────────────────────
+
+pub async fn link_clips(state: &AppState, args: LinkClipsArgs) -> ToolResult {
+    tracing::debug!("tool: link_clips {} / {}", args.clip_id_a, args.clip_id_b);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_a, track_a)) = locate_clip(project, args.clip_id_a) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id_a));
+    };
+    let Some((seq_b, track_b)) = locate_clip(project, args.clip_id_b) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id_b));
+    };
+    if seq_a != seq_b {
+        return ToolResult::error("link_clips requires both clips to be in the same sequence");
+    }
+    match ops::link_clips(
+        project,
+        seq_a,
+        track_a,
+        args.clip_id_a,
+        track_b,
+        args.clip_id_b,
+    ) {
+        Ok(cmds) => {
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text("Linked clips")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn unlink_clips(state: &AppState, args: UnlinkClipsArgs) -> ToolResult {
+    tracing::debug!("tool: unlink_clips {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    match ops::unlink_clip(project, seq_id, track_id, args.clip_id) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Unlinked clip")
         }
         Err(e) => map_edit_error(e),
     }
@@ -6648,9 +6902,17 @@ mod tests {
         "slip_clip",
         "slide_clip",
         "ripple_edit",
+        // 3/4-point editing (16 §2, CAP-019 MCP parity)
+        "insert_edit",
+        "overwrite_edit",
+        "lift_edit",
+        "extract_edit",
         "set_clip_prop",
         "set_clip_speed",
         "set_transition",
+        // Clip organization: linking (14 §M-2, CAP-019 MCP parity)
+        "link_clips",
+        "unlink_clips",
         "list_clips",
         "get_clip",
         "add_effect",

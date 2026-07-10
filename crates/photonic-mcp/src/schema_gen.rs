@@ -5217,10 +5217,76 @@ pub fn tool_list() -> Value {
             }
         },
 
+        // 3/4-point editing (16 §2, CAP-019 MCP parity)
+        {
+            "name": "insert_edit",
+            "description": "Insert edit (3-point, Premiere ','): open a gap of source's duration at `at` on track_id — splitting any clip straddling `at` and rippling every clip at/after `at` on that track right — then drop source into the gap. The track's content grows by the source duration, as ONE undo step. Time/source args mirror insert_clip (at_* plays start_*'s role). Returns the new clip's id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string", "description": "HH:MM:SS:FF or HH:MM:SS;FF" },
+                    "at_seconds": { "type": "number" },
+                    "source": { "type": "object", "description": "ClipSource — {\"kind\":\"asset\",\"asset_id\":...} | {\"kind\":\"vector\",\"asset_id\":...} | {\"kind\":\"nested_sequence\",\"sequence_id\":...} | {\"kind\":\"solid_color\",\"color\":\"#rrggbb\"} | {\"kind\":\"adjustment\"}" },
+                    "source_in_ticks": { "type": "integer" },
+                    "source_in_tc": { "type": "string" },
+                    "source_in_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer", "description": "Always exact ticks — no dual-unit ambiguity." }
+                },
+                "required": ["track_id","source","duration_ticks"]
+            }
+        },
+        {
+            "name": "overwrite_edit",
+            "description": "Overwrite edit (Premiere '.'): drop source at `at` on track_id, replacing whatever it covers — trimming partially-covered clips, removing fully-covered ones, splitting a clip that spans the region — with NO ripple, as ONE undo step. Timeline duration is unchanged unless source extends past the old end. Same args shape as insert_edit. Returns the new clip's id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string", "description": "HH:MM:SS:FF or HH:MM:SS;FF" },
+                    "at_seconds": { "type": "number" },
+                    "source": { "type": "object", "description": "ClipSource — {\"kind\":\"asset\",\"asset_id\":...} | {\"kind\":\"vector\",\"asset_id\":...} | {\"kind\":\"nested_sequence\",\"sequence_id\":...} | {\"kind\":\"solid_color\",\"color\":\"#rrggbb\"} | {\"kind\":\"adjustment\"}" },
+                    "source_in_ticks": { "type": "integer" },
+                    "source_in_tc": { "type": "string" },
+                    "source_in_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer", "description": "Always exact ticks — no dual-unit ambiguity." }
+                },
+                "required": ["track_id","source","duration_ticks"]
+            }
+        },
+        {
+            "name": "lift_edit",
+            "description": "Lift edit (Premiere ';'): remove clip content in `range` on track_id, leaving a gap (no ripple). Timeline duration is unchanged. ONE undo step; a no-op (no history entry) if nothing overlaps the range.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "range": { "type": "object", "description": "{\"start_ticks\"|\"start_tc\"|\"start_seconds\":...,\"end_ticks\"|\"end_tc\"|\"end_seconds\":...} — both bounds required, ticks > tc > seconds precedence per bound." }
+                },
+                "required": ["track_id","range"]
+            }
+        },
+        {
+            "name": "extract_edit",
+            "description": "Extract edit (Premiere '\\''): remove clip content in `range` on track_id AND ripple everything after it left to close the gap (generalizes remove_clip's ripple flag to an arbitrary range). The track's content shrinks by the range width, as ONE undo step; a no-op (no history entry) if nothing overlaps the range.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "range": { "type": "object", "description": "{\"start_ticks\"|\"start_tc\"|\"start_seconds\":...,\"end_ticks\"|\"end_tc\"|\"end_seconds\":...} — both bounds required, ticks > tc > seconds precedence per bound." }
+                },
+                "required": ["track_id","range"]
+            }
+        },
+
         // Clip properties (10 §3.5)
         {
             "name": "set_clip_prop",
-            "description": "Universal clip-property setter — name, base transform (pos/scale/rotation/anchor/opacity), per-format reframe override, enabled — only supplied fields change. Speed and transitions have dedicated tools (set_clip_speed/set_transition). Supports undo.",
+            "description": "Universal clip-property setter — name, base transform (pos/scale/rotation/anchor/opacity), per-format reframe override, enabled, color_label — only supplied fields change. Speed and transitions have dedicated tools (set_clip_speed/set_transition). Supports undo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5228,7 +5294,8 @@ pub fn tool_list() -> Value {
                     "name": { "type": "string" },
                     "transform": { "type": "object", "description": "Full base-transform replace: {\"x\":0,\"y\":0,\"scale_x\":1,\"scale_y\":1,\"rotation\":0,\"anchor_x\":0,\"anchor_y\":0,\"opacity\":1}" },
                     "reframe": { "type": "object", "description": "{\"format_index\":N,\"transform\":{...}|null} — null clears the override for that format index." },
-                    "enabled": { "type": "boolean" }
+                    "enabled": { "type": "boolean" },
+                    "color_label": { "type": ["integer","null"], "description": "Organizational swatch-palette index. null clears the label; omit the field entirely to leave it unchanged." }
                 },
                 "required": ["clip_id"]
             }
@@ -5256,6 +5323,29 @@ pub fn tool_list() -> Value {
                     "transition": { "type": ["object","null"], "description": "{\"kind\":\"cross_dissolve\"|\"dip_to_black\"|\"dip_to_color\"|\"wipe\"|\"push\",\"duration_ticks\":int,\"params\":{\"curve\":\"linear\"|\"ease_in\"|\"ease_out\"|\"ease_in_out\",\"color\":\"#rrggbb\"?,\"direction\":\"left\"|\"right\"|\"up\"|\"down\",\"softness\":number}}" }
                 },
                 "required": ["clip_id","edge"]
+            }
+        },
+
+        // Clip organization: linking (14 §M-2, CAP-019 MCP parity)
+        {
+            "name": "link_clips",
+            "description": "Link two clips (e.g. a split A/V pair) into the same link group so a future move can carry them together. Reuses whichever clip's group already exists, or mints a fresh one. Both clips must be in the same sequence. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id_a": { "type": "string" },
+                    "clip_id_b": { "type": "string" }
+                },
+                "required": ["clip_id_a","clip_id_b"]
+            }
+        },
+        {
+            "name": "unlink_clips",
+            "description": "Remove a clip from its link group — a no-op if it wasn't linked. Only the named clip leaves the group; its former partners stay linked to each other. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" } },
+                "required": ["clip_id"]
             }
         },
         {

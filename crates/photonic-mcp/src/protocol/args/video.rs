@@ -339,6 +339,83 @@ pub struct SlideClipArgs {
     pub delta_ticks: i64,
 }
 
+// ─── 3/4-point editing (16 §2, CAP-019 MCP parity) ─────────────────────────
+
+/// Args for `insert_edit` (16 §2, Premiere `,`): open a gap of `source`'s
+/// duration at `at` on `track_id` — splitting any clip straddling `at` and
+/// rippling everything at/after `at` on that track right — then place
+/// `source` in the gap. Same source/time-resolution shape as `insert_clip`
+/// (`at_*` plays the role `start_*` plays there).
+#[derive(Debug, Deserialize)]
+pub struct InsertEditArgs {
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Insertion point. Precedence: at_ticks > at_tc > at_seconds (§1 rule 3).
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    pub source: ClipSourceArg,
+    #[serde(default)]
+    pub source_in_ticks: Option<i64>,
+    #[serde(default)]
+    pub source_in_tc: Option<String>,
+    #[serde(default)]
+    pub source_in_seconds: Option<f64>,
+    /// Duration always exact ticks — no dual-unit ambiguity (mirrors
+    /// `insert_clip`).
+    pub duration_ticks: i64,
+}
+
+/// Args for `overwrite_edit` (16 §2, Premiere `.`) — identical shape to
+/// [`InsertEditArgs`], but `source` replaces whatever it covers on
+/// `track_id` at `at` with NO ripple (timeline duration unchanged unless
+/// `source` extends past the old end).
+#[derive(Debug, Deserialize)]
+pub struct OverwriteEditArgs {
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    pub source: ClipSourceArg,
+    #[serde(default)]
+    pub source_in_ticks: Option<i64>,
+    #[serde(default)]
+    pub source_in_tc: Option<String>,
+    #[serde(default)]
+    pub source_in_seconds: Option<f64>,
+    pub duration_ticks: i64,
+}
+
+/// Args for `lift_edit` (16 §2, Premiere `;`): remove clip content in
+/// `range` on `track_id`, leaving a gap (no ripple). `range` reuses
+/// [`WorkRangeArg`]'s shape (`start_*`/`end_*`, ticks > tc > seconds
+/// precedence per bound); both bounds are required in practice — a missing
+/// one surfaces as `resolve_tick`'s standard "missing time value" error.
+#[derive(Debug, Deserialize)]
+pub struct LiftEditArgs {
+    pub track_id: TrackId,
+    pub range: WorkRangeArg,
+}
+
+/// Args for `extract_edit` (16 §2, Premiere `'`) — same shape as
+/// [`LiftEditArgs`], but everything after `range` on `track_id` ripples left
+/// to close the gap (generalizes `remove_clip`'s `ripple` flag to an
+/// arbitrary range instead of one clip).
+#[derive(Debug, Deserialize)]
+pub struct ExtractEditArgs {
+    pub track_id: TrackId,
+    pub range: WorkRangeArg,
+}
+
 // ─── Clip properties (10 §3.5) ──────────────────────────────────────────────
 
 /// Universal clip setter — every field optional, only supplied fields
@@ -358,6 +435,18 @@ pub struct SetClipPropArgs {
     pub reframe: Option<ReframeArg>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Organizational color label — a swatch-palette index (14 §M-1,
+    /// CAP-019 MCP parity). Presence of the field is the change signal:
+    /// `{"color_label": null}` clears the label, `{"color_label": 3}` sets
+    /// it, and omitting the field entirely leaves it unchanged. A plain
+    /// `Option<Option<u8>>` with `#[serde(default)]` can't make that
+    /// distinction on its own — `Option<T>`'s null-handling swallows the
+    /// JSON `null` before the outer `Option` learns the field was even
+    /// present — so this field routes through [`deserialize_present`]
+    /// (`reframe` above sidesteps the same trap differently, by nesting the
+    /// clear signal one level down inside a required object).
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub color_label: Option<Option<u8>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,6 +454,41 @@ pub struct ReframeArg {
     pub format_index: usize,
     /// `null` clears the override for this format index.
     pub transform: Option<ClipTransform>,
+}
+
+/// Deserializes into `Some(_)` whenever the field is present in the JSON
+/// (including an explicit `null`, which resolves to `Some(None)`), and is
+/// simply never invoked when the field is absent — `#[serde(default)]`
+/// supplies `None` for that case instead. Use as
+/// `#[serde(default, deserialize_with = "deserialize_present")]` on an
+/// `Option<Option<T>>` field that needs to distinguish "omitted" from
+/// "explicitly cleared".
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+// ─── Clip organization: color label & linking (14 §M-1/M-2, CAP-019 MCP
+// parity) ────────────────────────────────────────────────────────────────
+
+/// Args for `link_clips` (14 §M-2): link two clips (e.g. a split A/V pair)
+/// into the same link group, reusing whichever clip's group already exists
+/// or minting a fresh one (`ops::link_clips`). One undo step.
+#[derive(Debug, Deserialize)]
+pub struct LinkClipsArgs {
+    pub clip_id_a: ClipId,
+    pub clip_id_b: ClipId,
+}
+
+/// Args for `unlink_clips`: remove `clip_id` from its link group
+/// (`ops::unlink_clip`) — a no-op edit if it wasn't linked. Only the named
+/// clip leaves the group; its former partners stay linked to each other.
+#[derive(Debug, Deserialize)]
+pub struct UnlinkClipsArgs {
+    pub clip_id: ClipId,
 }
 
 /// `SpeedMap` is `Constant`-only in v1 (01 §5.1); there is no ramp variant to
