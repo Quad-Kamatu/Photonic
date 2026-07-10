@@ -1781,6 +1781,46 @@ async fn wait_status(
     }
 }
 
+/// Settle a transport command (seek/step) against the engine the way
+/// `render_frame_at` does, so the returned playhead reflects the command just
+/// dispatched — never the tick one engine loop behind.
+///
+/// The old transport predicates read the *published* playhead directly:
+/// `seek` accepted `playhead >= t` and `step` accepted `playhead != before`.
+/// Both can be satisfied by the **stale pre-command** status, since the engine
+/// sets the clock and re-presents on a later loop iteration than the one that
+/// published the status the tool first observes. A backward seek is the sharp
+/// case — the old (larger) playhead is already `>= t`, so `seek F45` returned
+/// the stale `F150` immediately, and a following `get_engine_status` echoed it.
+///
+/// Instead we wait for a *fresh* frame (newer than `prev`, pointer-compared) at
+/// the exact target frame-start `frame_tick` — a stale pre-command frame has
+/// the wrong tick and can't satisfy it — then, for a paused command, confirm
+/// the published status caught up to `expect` (its store trails the frame store
+/// by under one engine loop). On timeout (no media, or a boundary clamp that
+/// produces no distinct frame) it reports the latest status unconditionally.
+async fn settle_transport(
+    bridge: &EngineBridge,
+    prev: Option<std::sync::Arc<photonic_video::EngineFrame>>,
+    frame_tick: Tick,
+    seq: SequenceId,
+    expect: Option<Tick>,
+    timeout: Duration,
+) -> std::sync::Arc<photonic_video::EngineStatus> {
+    let deadline = Instant::now() + timeout;
+    let produced = bridge
+        .wait_fresh_frame(prev, timeout, |f| f.time == frame_tick && f.sequence == seq)
+        .await
+        .is_some();
+    if produced {
+        if let Some(exp) = expect {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            return wait_status(bridge, remaining, |s| s.playhead == exp).await;
+        }
+    }
+    bridge.session().status()
+}
+
 // ─── Playback (10 §3.13) ─────────────────────────────────────────────────────
 //
 // These mutate **engine/session state only** — never the document, never
@@ -1859,15 +1899,30 @@ pub async fn seek(state: &AppState, args: SeekArgs) -> ToolResult {
     }
     let _transport = bridge.lock_transport().await;
     bridge.sync(state).await;
+    // The engine presents exact frame-start ticks (02 §4); snap the target so
+    // the fresh-frame wait matches what will actually be published.
+    let snapped = fr.frame_start(fr.frame_at(t));
+    let was_playing = bridge.session().status().playing;
+    let prev = bridge.session().latest_frame();
     bridge
         .session()
         .send(EngineCmd::SetActiveSequence(args.sequence_id));
     if !bridge.session().send(EngineCmd::Seek(t)) {
         return ToolResult::error("engine session has shut down");
     }
-    // Paused seek is a pure clock set — confirm the playhead landed. While
-    // playing, the clock keeps advancing, so accept any playhead at/after t.
-    let status = wait_status(bridge, Duration::from_secs(2), |s| s.playhead >= t).await;
+    // Settle against the produced frame (see `settle_transport`): a backward
+    // seek used to report the stale pre-seek playhead because it was already
+    // `>= t`. Paused ⇒ confirm the clock landed exactly on `t`; playing ⇒ the
+    // clock keeps advancing, so the fresh target frame alone proves the seek.
+    let status = settle_transport(
+        bridge,
+        prev,
+        snapped,
+        args.sequence_id,
+        (!was_playing).then_some(t),
+        Duration::from_secs(5),
+    )
+    .await;
     ToolResult::text(format!("seeked to tick {}", t.0)).with_data(engine_status_json(&status))
 }
 
@@ -1879,19 +1934,41 @@ pub async fn step(state: &AppState, args: StepArgs) -> ToolResult {
     };
     let _transport = bridge.lock_transport().await;
     bridge.sync(state).await;
-    let before = bridge.session().status().playhead;
+    // Step is relative, so reading a stale `before` would compound into a
+    // stale result (the finding's "step responses lagged"). Sample the current
+    // status, compute the exact frame the engine will snap to (mirrors
+    // `PlaybackController::step`), then wait for that frame + its published
+    // playhead via the same fresh-frame discipline `render_frame_at` uses.
+    let before_status = bridge.session().status();
+    let before = before_status.playhead;
+    let prev = bridge.session().latest_frame();
     if !bridge.session().send(EngineCmd::Step(args.frames)) {
         return ToolResult::error("engine session has shut down");
     }
-    // Step always pauses (02 §4). Wait for the playhead to move off the
-    // pre-step sample so the returned snapshot reflects the step, not the
-    // stale status published before the command was processed. (A step
-    // clamped at frame 0 keeps the playhead in place and just rides out the
-    // timeout — still correct, merely slower.)
-    let status = wait_status(bridge, Duration::from_secs(2), |s| {
-        !s.playing && s.playhead != before
-    })
-    .await;
+    let status = match before_status.active_sequence {
+        // Step always pauses (02 §4); `expected` is frame-aligned, so we can
+        // confirm the exact landed tick (including a clamp at frame 0, where
+        // the forced re-present of the same frame satisfies the wait at once).
+        Some(seq) => match sequence_render_info(state, seq).await {
+            Ok((fr, _, _)) => {
+                let target_frame = (fr.frame_at(before) + args.frames as i64).max(0);
+                let expected = fr.frame_start(target_frame);
+                settle_transport(
+                    bridge,
+                    prev,
+                    expected,
+                    seq,
+                    Some(expected),
+                    Duration::from_secs(5),
+                )
+                .await
+            }
+            // Sequence vanished from the real doc mid-call — best-effort pause.
+            Err(_) => wait_status(bridge, Duration::from_secs(2), |s| !s.playing).await,
+        },
+        // No active sequence to present against — just confirm the pause.
+        None => wait_status(bridge, Duration::from_secs(2), |s| !s.playing).await,
+    };
     ToolResult::text(format!(
         "stepped {} frame(s) — playhead at tick {} (paused)",
         args.frames, status.playhead.0
@@ -4231,6 +4308,59 @@ mod tests {
         assert_ne!(r.is_error, Some(true), "get_engine_status: {r:?}");
         assert_eq!(data(&r)["active_sequence"], seq_id);
         assert_eq!(data(&r)["snapshot_synced"], true);
+    }
+
+    /// STALE-PLAYHEAD gate: a paused *backward* seek must report the tick it
+    /// landed on, not the (larger) playhead one command behind. Before the
+    /// fresh-frame settle, `seek`'s `playhead >= t` predicate returned the
+    /// stale pre-seek tick immediately (seek F45 reporting F150), and an
+    /// immediately-following `get_engine_status` echoed it. (GPU-gated; on a
+    /// no-GPU box the gate asserts the clean `EngineUnavailable` degradation.)
+    #[tokio::test]
+    async fn seek_then_status_reports_the_seek_target_not_one_behind() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "video").await;
+        insert_solid_clip(&state, &track_id, 0, TICKS_PER_SECOND * 20).await;
+        if !engine_available(&state).await {
+            return;
+        }
+        let tpf = TICKS_PER_SECOND / 30;
+
+        // Seek far forward first so the published playhead is large.
+        let forward = 150 * tpf;
+        let r = call(
+            &state,
+            "seek",
+            json!({ "sequence_id": seq_id, "at_ticks": forward }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "forward seek: {r:?}");
+        assert_eq!(data(&r)["playhead_ticks"], forward);
+
+        // Now seek backward. The old `>=` predicate would report `forward`
+        // (150) rather than the tick this command actually lands on (45).
+        let backward = 45 * tpf;
+        let r = call(
+            &state,
+            "seek",
+            json!({ "sequence_id": seq_id, "at_ticks": backward }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "backward seek: {r:?}");
+        assert_eq!(
+            data(&r)["playhead_ticks"],
+            backward,
+            "backward seek must report the tick it landed on, not one behind"
+        );
+
+        // An immediately-following status read must agree — not lag a command.
+        let r = call(&state, "get_engine_status", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "get_engine_status: {r:?}");
+        assert_eq!(
+            data(&r)["playhead_ticks"],
+            backward,
+            "get_engine_status must reflect the last seek, not a stale playhead"
+        );
     }
 
     /// 10 §9 hook 5: two `render_frame_at` calls with the same args and
