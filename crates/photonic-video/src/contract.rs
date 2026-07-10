@@ -48,9 +48,15 @@ pub enum MatteModel {
     U2NetP,
 }
 
-/// Resolved styled-text block for graph `Text` nodes (08 §3 `TextGen`).
-/// Layout/style payload finalized in P8 alongside the node catalog.
+/// Resolved styled-text block for `TextGen` nodes (08 §3) — the title/text clip
+/// (`ClipSource::Text`, G-12) and the node-graph `Text` op both lower to it. The
+/// payload is a single fully style-resolved [`CaptionCueRun`], the very same
+/// positioned/styled glyph run the `CaptionOverlay` compositor consumes (06 §5.3),
+/// so titles render through one text-raster mechanism rather than a parallel
+/// path. `None` renders transparent (an empty string, or the node-graph `Text`
+/// placeholder until its authoring payload lands). Keyframe evaluation is the
+/// compiler's job (02 §2): the cue is baked at the compiled tick.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ResolvedTextBlock {
-    _pinned_in_p8: (),
+    pub cue: Option<CaptionCueRun>,
 }

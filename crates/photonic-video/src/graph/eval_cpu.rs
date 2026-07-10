@@ -14,18 +14,18 @@
 //! Real CPU kernels now cover `Grade` (`photonic_render::grade::apply_grade_cpu`,
 //! the GPU-parity golden per 03 §4.4) and `Effect{Invert}` (`ops::invert`). The
 //! remaining `Effect` kinds (Blur/Sharpen/Glow/ChromaKey/LumaKey/MaskShapeGen),
-//! `MatteExtract`, `TextGen`, and `ChannelSplit`/`Combine` stay input-passthrough
-//! with the phase noted, exactly as 02 §2 permits — blocked on the still-opaque
-//! `ResolvedParams`/`ResolvedTextBlock` payloads (`contract.rs`), which finalize
-//! in P7/P8.
+//! `MatteExtract`, and `ChannelSplit`/`Combine` stay input-passthrough with the
+//! phase noted, exactly as 02 §2 permits — blocked on the still-opaque
+//! `ResolvedParams` payload (`contract.rs`), which finalizes in P5/P7.
 //!
-//! `CaptionOverlay` carries a fully-resolved `CaptionBatch` (06 §5.3) but is a
-//! **GPU-only** composite here: glyph rasterization is glyphon's (`eval.rs`), and
-//! `photonic_render`'s text path exposes no CPU glyph raster to share, so the CPU
-//! reference passes the input through and burned captions come only from the GPU
-//! path. Caption tracks are therefore excluded from GPU/CPU byte-parity in v1
-//! (documented tolerance, per this story's brief); a shared CPU glyph rasterizer
-//! for full export-determinism parity is a follow-up.
+//! `CaptionOverlay` (06 §5.3) and `TextGen` (G-12 title clips) both carry a fully
+//! resolved glyph payload but are **GPU-only** composites here: glyph
+//! rasterization is glyphon's (`eval.rs`), and `photonic_render`'s text path
+//! exposes no CPU glyph raster to share, so the CPU reference passes the input
+//! through (captions) / emits transparent (`TextGen`) and burned text comes only
+//! from the GPU path. Caption and title tracks are therefore excluded from
+//! GPU/CPU byte-parity in v1 (documented tolerance, per this story's brief); a
+//! shared CPU glyph rasterizer for full export-determinism parity is a follow-up.
 
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::EffectKind;
@@ -127,7 +127,7 @@ fn eval_op(
         IrOp::MatteExtract { .. } => in0(), // P8 U²-Net inference
         IrOp::ChannelSplit { .. } => in0(),
         IrOp::ChannelCombine => in0(),
-        IrOp::TextGen { .. } => Image::new(cw, ch), // P8 styled-text generator
+        IrOp::TextGen { .. } => Image::new(cw, ch), // GPU-only glyph composite (see header); CPU emits transparent
         IrOp::Merge { mode, opacity } => match (inputs.first(), inputs.get(1)) {
             (Some(top), Some(bottom)) => ops::merge(top, bottom, *mode, *opacity),
             (Some(top), None) => (*top).clone(),

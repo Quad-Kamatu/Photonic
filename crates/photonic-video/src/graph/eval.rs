@@ -248,9 +248,23 @@ impl Evaluator {
                 }
                 (None, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
-            IrOp::TextGen { .. } => {
-                // 0-input generator; P3 passthrough is transparent (P8 glyphon).
+            // Styled-text generator (G-12 title clips): start transparent, then
+            // burn the resolved cue on top via the SAME glyphon compositor the
+            // `CaptionOverlay` path uses (06 §5.3) — text over transparent, which
+            // the clip's `Transform2D`/`Merge` then places in the frame. An absent
+            // cue (empty string) stays transparent.
+            IrOp::TextGen { block } => {
                 self.passes.fill(&self.gpu, target, [0.0; 4]);
+                if let Some(cue) = &block.cue {
+                    self.caption.composite(
+                        self.gpu.device(),
+                        self.gpu.queue(),
+                        target,
+                        std::slice::from_ref(cue),
+                        target.width(),
+                        target.height(),
+                    );
+                }
             }
             // Caption overlay (06 §5.3): lay the input composite down, then burn
             // the resolved glyph runs on top via the glyphon pipeline. glyphon's
@@ -722,7 +736,8 @@ mod tests {
     use crate::graph::compile::{compile, Quality};
     use photonic_core::timeline::{
         CaptionCue, CaptionStyle, CaptionTrack, CaptionWord, Clip, ClipSource, FrameRate,
-        KaraokeMode, KaraokeStyle, Sequence, SequenceId, TimelineProject, Track, TrackKind,
+        KaraokeMode, KaraokeStyle, Sequence, SequenceId, TextClipContent, TimelineProject, Track,
+        TrackKind,
     };
     use photonic_core::Color;
 
@@ -943,6 +958,77 @@ mod tests {
         assert!(
             karaoke > 0,
             "WordPop karaoke must change pixels between t=50 and t=150 (got {karaoke})"
+        );
+    }
+
+    // ── Title / text clip rendering (G-12) ────────────────────────────────────
+
+    /// A `ClipSource::Text` clip renders styled glyphs, reusing the caption
+    /// glyphon path: the compiled graph lowers it to a `TextGen` carrying a
+    /// populated cue, and the rendered frame has lit pixels carrying the fill
+    /// colour. Proves the title is no longer a transparent placeholder.
+    #[test]
+    fn text_clip_renders_styled_glyphs() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter — skipping text clip render");
+            return;
+        };
+        let (w, h) = (128u32, 64u32);
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, w, h);
+        let seq_id = seq.id;
+        let mut vt = Track::new(TrackKind::Video, "V1");
+        // Red fill, no stroke, so lit glyph pixels isolate the fill colour.
+        let style = CaptionStyle {
+            font_size: 40.0,
+            fill: Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            stroke: None,
+            position: [0.5, 0.4],
+            ..CaptionStyle::default()
+        };
+        vt.clips.push(Clip::new(
+            ClipSource::Text {
+                content: TextClipContent {
+                    text: "HELLO".to_string(),
+                    style,
+                },
+            },
+            crate::contract::Tick(0),
+            crate::contract::Tick(1000),
+        ));
+        seq.video_tracks.push(vt);
+        project.insert_sequence(seq);
+
+        let compiled = compile(&project, seq_id, 0, crate::contract::Tick(100), Quality::FULL, None);
+        assert!(
+            compiled
+                .graph
+                .nodes
+                .iter()
+                .any(|n| matches!(&n.op, IrOp::TextGen { block } if block.cue.is_some())),
+            "Text clip lowers to a TextGen carrying a resolved cue"
+        );
+
+        let mut eval = Evaluator::new(gpu.clone());
+        let out = eval
+            .evaluate(&compiled.graph, (w, h), &mut NullFrameSource)
+            .expect("output texture");
+        let px = read_texture_rgba16f(&gpu, &out, w, h);
+
+        // Non-zero: glyph coverage lit some pixels over the transparent frame.
+        let lit: Vec<[f32; 4]> = px.into_iter().filter(|p| p[3] > 0.05).collect();
+        assert!(!lit.is_empty(), "text clip must produce lit glyph pixels");
+        // Correctly coloured: premultiplied red (r≈coverage, g≈b≈0) — the fill,
+        // not a stray white/black. Every lit pixel is red-dominant.
+        let red_dominant = lit
+            .iter()
+            .filter(|p| p[0] > 0.05 && p[1] < 0.05 && p[2] < 0.05)
+            .count();
+        assert!(
+            red_dominant > 0,
+            "lit glyph pixels must carry the red fill ({} lit, {} red-dominant)",
+            lit.len(),
+            red_dominant
         );
     }
 }

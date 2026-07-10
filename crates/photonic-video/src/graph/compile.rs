@@ -32,7 +32,7 @@ use photonic_core::timeline::{
     Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp, GradeOpKind,
     GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode,
     LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
-    TimelineProject, TrackKind, TransitionKind,
+    TextClipContent, TimelineProject, TrackKind, TransitionKind,
 };
 use photonic_core::Color;
 use photonic_render::caption::CaptionWordRun;
@@ -762,16 +762,16 @@ fn build_clip_source(
             let _ = seq;
             b.transparent(format)
         }
-        ClipSource::Text { .. } => {
-            // G-12: a title/text clip's source lowers to the same dedicated
-            // `TextGen` IR op as the node-graph `GraphOp::Text` case above —
-            // one text-render mechanism, not a parallel path. The glyphon
-            // raster is P8 (blocked on the still-opaque `ResolvedTextBlock`
-            // payload), so this is a transparent placeholder meanwhile, same
-            // as `GraphOp::Text`'s.
+        ClipSource::Text { content } => {
+            // G-12: a title/text clip lowers to the dedicated `TextGen` IR op,
+            // its `TextClipContent` (text + shared `CaptionStyle`) resolved into
+            // the same `CaptionCueRun` glyph payload the `CaptionOverlay` path
+            // consumes (06 §5.3) — one text-render mechanism, not a parallel
+            // path. The evaluator burns it over transparent via the glyphon
+            // compositor; the clip's own `Transform2D` then places it.
             b.push(
                 IrOp::TextGen {
-                    block: ResolvedTextBlock::default(),
+                    block: resolve_text_block(content),
                 },
                 vec![],
             )
@@ -1443,6 +1443,37 @@ fn resolve_cue(
     })
 }
 
+/// Resolve a title/text clip's [`TextClipContent`] (G-12) into a
+/// [`ResolvedTextBlock`] carrying a single styled [`CaptionCueRun`] — reusing the
+/// caption glyph payload (06 §5.3) so titles render through the one
+/// `TextGen`/glyphon mechanism. The clip's [`CaptionStyle`] (shared caption
+/// styling vocabulary) supplies font / size / fill / position / wrap width; the
+/// whole string is one word run (glyphon shapes embedded spaces itself). An empty
+/// string resolves to `None` (nothing to shape ⇒ transparent). `TextClipContent`
+/// carries a static style in v1, so there is no tick-varying prop to bake yet —
+/// when keyframed title props land they resolve here, exactly as captions bake at
+/// the compiled tick (02 §2).
+fn resolve_text_block(content: &TextClipContent) -> ResolvedTextBlock {
+    if content.text.is_empty() {
+        return ResolvedTextBlock::default();
+    }
+    let style: &CaptionStyle = &content.style;
+    ResolvedTextBlock {
+        cue: Some(CaptionCueRun {
+            words: vec![CaptionWordRun {
+                text: content.text.clone(),
+                font_family: style.font_family.clone(),
+                font_weight: style.weight,
+                color: color_to_srgb_bytes(style.fill),
+            }],
+            font_size: style.font_size.max(1.0),
+            line_height_mul: 1.2,
+            anchor: style.position,
+            max_width: style.max_width,
+        }),
+    }
+}
+
 /// Milliseconds → ticks. `TICKS_PER_SECOND` is a multiple of 1000, so this is
 /// exact (no rounding) — keeping animation timing deterministic.
 fn ms_to_ticks(ms: i64) -> i64 {
@@ -1771,8 +1802,18 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[11]);
             h.update(&[*model as u8]);
         }
-        IrOp::TextGen { block: _ } => {
+        IrOp::TextGen { block } => {
             h.update(&[12]);
+            // The resolved cue (text, font, colour, layout) IS hashed, so distinct
+            // titles are distinct cache identities; an empty/absent cue hashes as a
+            // bare tag (transparent).
+            match &block.cue {
+                Some(cue) => {
+                    h.update(&[1]);
+                    hash_caption_cue(h, cue);
+                }
+                None => h.update(&[0]),
+            }
         }
         IrOp::ChannelSplit { channel } => {
             h.update(&[13]);
@@ -1795,23 +1836,31 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
 /// different word colours ⇒ different hash ⇒ a cache miss ⇒ a fresh composite.
 /// Deterministic: only resolved bytes/f32 bits, no pointer/time state.
 fn hash_caption_batch(h: &mut xxhash_rust::xxh3::Xxh3, batch: &CaptionBatch) {
-    let f32b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f32| h.update(&v.to_bits().to_le_bytes());
     h.update(&(batch.cues.len() as u32).to_le_bytes());
     for cue in &batch.cues {
-        f32b(h, cue.font_size);
-        f32b(h, cue.line_height_mul);
-        f32b(h, cue.anchor[0]);
-        f32b(h, cue.anchor[1]);
-        f32b(h, cue.max_width);
-        h.update(&(cue.words.len() as u32).to_le_bytes());
-        for w in &cue.words {
-            h.update(&(w.text.len() as u32).to_le_bytes());
-            h.update(w.text.as_bytes());
-            h.update(&(w.font_family.len() as u32).to_le_bytes());
-            h.update(w.font_family.as_bytes());
-            h.update(&w.font_weight.to_le_bytes());
-            h.update(&w.color);
-        }
+        hash_caption_cue(h, cue);
+    }
+}
+
+/// Hash one resolved [`CaptionCueRun`] — layout plus every word's text, font,
+/// weight, and baked colour — into the content hash. Shared by
+/// [`hash_caption_batch`] (06 §5.3 `CaptionOverlay`) and the `TextGen` block
+/// (G-12 title clips), so both text-raster paths key their cache identically.
+fn hash_caption_cue(h: &mut xxhash_rust::xxh3::Xxh3, cue: &CaptionCueRun) {
+    let f32b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f32| h.update(&v.to_bits().to_le_bytes());
+    f32b(h, cue.font_size);
+    f32b(h, cue.line_height_mul);
+    f32b(h, cue.anchor[0]);
+    f32b(h, cue.anchor[1]);
+    f32b(h, cue.max_width);
+    h.update(&(cue.words.len() as u32).to_le_bytes());
+    for w in &cue.words {
+        h.update(&(w.text.len() as u32).to_le_bytes());
+        h.update(w.text.as_bytes());
+        h.update(&(w.font_family.len() as u32).to_le_bytes());
+        h.update(w.font_family.as_bytes());
+        h.update(&w.font_weight.to_le_bytes());
+        h.update(&w.color);
     }
 }
 
