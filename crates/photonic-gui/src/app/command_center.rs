@@ -23,8 +23,14 @@ pub(crate) struct ClipboardClip {
 
 /// Occupied `[start, end)` clip spans on one track (paste overlap-avoidance).
 type Spans = Vec<(Tick, Tick)>;
-/// A candidate paste track: id, kind, and its currently-occupied spans.
-type PasteTrack = (TrackId, TrackKind, Spans);
+/// A candidate paste track: id, kind, enabled, locked, and occupied spans.
+struct PasteTrack {
+    id: TrackId,
+    kind: TrackKind,
+    enabled: bool,
+    locked: bool,
+    spans: Spans,
+}
 /// A clipboard entry reduced to what the paste planner needs: kind, source
 /// start, duration.
 type PasteEntry = (TrackKind, Tick, Tick);
@@ -971,10 +977,11 @@ impl PhotonicApp {
     }
 
     /// Paste the clipboard at the playhead (`Ctrl+V`, QW-3): each clip lands on
-    /// the first compatible-kind track with room, at `playhead + (its source
-    /// start − earliest source start)` so a multi-clip paste keeps its spacing.
-    /// Committed as one undo step; the pasted clips become the new selection.
-    /// Returns `true` if at least one clip was inserted.
+    /// the patched compatible-kind track when available, else the first one
+    /// with room, at `playhead + (its source start − earliest source start)` so
+    /// a multi-clip paste keeps its spacing. Committed as one undo step; the
+    /// pasted clips become the new selection. Returns `true` if at least one
+    /// clip was inserted.
     pub(crate) fn timeline_paste_clipboard(
         &mut self,
         doc: &mut Document,
@@ -994,18 +1001,18 @@ impl PhotonicApp {
             .unwrap_or(Tick::ZERO);
         let playhead = self.playhead;
 
-        // Candidate tracks (id + kind + occupied spans), in timeline order.
+        // Candidate tracks, in timeline order.
         let cand: Vec<PasteTrack> = {
             let Some(s) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
                 return false;
             };
             s.tracks()
-                .map(|t| {
-                    (
-                        t.id,
-                        t.kind,
-                        t.clips.iter().map(|c| (c.start, c.end())).collect(),
-                    )
+                .map(|t| PasteTrack {
+                    id: t.id,
+                    kind: t.kind,
+                    enabled: t.enabled,
+                    locked: t.locked,
+                    spans: t.clips.iter().map(|c| (c.start, c.end())).collect(),
                 })
                 .collect()
         };
@@ -1015,11 +1022,14 @@ impl PhotonicApp {
             .iter()
             .map(|e| (e.kind, e.clip.start, e.clip.duration))
             .collect();
-        let tracks_for_plan: Vec<(TrackKind, Spans)> = cand
-            .iter()
-            .map(|(_, k, spans)| (*k, spans.clone()))
-            .collect();
-        let placements = plan_paste_placements(&entries, playhead, anchor, &tracks_for_plan);
+        let placements = plan_paste_placements(
+            &entries,
+            playhead,
+            anchor,
+            &cand,
+            self.target_video_track,
+            self.target_audio_track,
+        );
         if placements.is_empty() {
             return false;
         }
@@ -1031,7 +1041,7 @@ impl PhotonicApp {
                 return false;
             };
             for (ei, ti, start) in &placements {
-                let track_id = cand[*ti].0;
+                let track_id = cand[*ti].id;
                 let mut clip = self.timeline_clipboard[*ei].clip.clone();
                 clip.id = ClipId::new();
                 clip.start = *start;
@@ -1554,22 +1564,49 @@ fn spans_overlap(a0: Tick, a1: Tick, b0: Tick, b1: Tick) -> bool {
 /// multi-clip paste keeps its spacing and the earliest clip lands on the
 /// playhead. For each entry in order, the first track of a matching kind with
 /// room — no overlap against existing spans or already-placed pastes — is
-/// chosen; entries that fit nowhere are skipped. Returns `(entry index, track
-/// index into `tracks`, new start)`.
+/// chosen. A matching, enabled, unlocked source-patch target gets first refusal;
+/// if it cannot take the entry, the existing timeline-order fallback is used
+/// without retrying that blocked target. Entries that fit nowhere are skipped.
+/// Returns `(entry index, track index into `tracks`, new start)`.
 fn plan_paste_placements(
     entries: &[PasteEntry],
     playhead: Tick,
     anchor: Tick,
-    tracks: &[(TrackKind, Spans)],
+    tracks: &[PasteTrack],
+    target_video: Option<TrackId>,
+    target_audio: Option<TrackId>,
 ) -> Vec<Placement> {
-    let mut occ: Vec<Spans> = tracks.iter().map(|(_, s)| s.clone()).collect();
+    let mut occ: Vec<Spans> = tracks.iter().map(|track| track.spans.clone()).collect();
     let mut out: Vec<Placement> = Vec::new();
     for (ei, (kind, src_start, dur)) in entries.iter().enumerate() {
         let raw = playhead + (*src_start - anchor);
         let start = if raw.0 < 0 { Tick::ZERO } else { raw };
         let end = start + *dur;
-        for (ti, (tkind, _)) in tracks.iter().enumerate() {
-            if tkind != kind {
+        let explicit = match kind {
+            TrackKind::Video => target_video,
+            TrackKind::Audio => target_audio,
+        };
+        let explicit_index = explicit.and_then(|id| tracks.iter().position(|track| track.id == id));
+        let preferred = explicit_index.filter(|&ti| {
+            let track = &tracks[ti];
+            track.kind == *kind
+                && track.enabled
+                && !track.locked
+                && occ[ti]
+                    .iter()
+                    .all(|(s0, s1)| !spans_overlap(start, end, *s0, *s1))
+        });
+        if let Some(ti) = preferred {
+            occ[ti].push((start, end));
+            out.push((ei, ti, start));
+            continue;
+        }
+
+        for (ti, track) in tracks.iter().enumerate() {
+            if Some(ti) == explicit_index {
+                continue;
+            }
+            if track.kind != *kind || !track.enabled || track.locked {
                 continue;
             }
             let fits = occ[ti]
@@ -1588,7 +1625,17 @@ fn plan_paste_placements(
 #[cfg(test)]
 mod clip_edit_tests {
     use super::*;
-    use photonic_core::timeline::{ClipSource, FrameRate, Track};
+    use photonic_core::timeline::{ClipSource, FrameRate, TimelineProject, Track};
+
+    fn paste_track(kind: TrackKind, spans: Spans) -> PasteTrack {
+        PasteTrack {
+            id: TrackId::new(),
+            kind,
+            enabled: true,
+            locked: false,
+            spans,
+        }
+    }
 
     fn clip_at(start: i64, dur: i64) -> Clip {
         Clip::new(ClipSource::Adjustment, Tick(start), Tick(dur))
@@ -1633,8 +1680,8 @@ mod clip_edit_tests {
         // One video clip copied from start=200; anchor is its own start, so it
         // pastes exactly at the playhead regardless of its original position.
         let entries = [(TrackKind::Video, Tick(200), Tick(100))];
-        let tracks = [(TrackKind::Video, Vec::new())];
-        let out = plan_paste_placements(&entries, Tick(1000), Tick(200), &tracks);
+        let tracks = [paste_track(TrackKind::Video, Vec::new())];
+        let out = plan_paste_placements(&entries, Tick(1000), Tick(200), &tracks, None, None);
         assert_eq!(out, vec![(0, 0, Tick(1000))]);
     }
 
@@ -1646,8 +1693,8 @@ mod clip_edit_tests {
             (TrackKind::Video, Tick(200), Tick(100)),
             (TrackKind::Video, Tick(500), Tick(100)),
         ];
-        let tracks = [(TrackKind::Video, Vec::new())];
-        let out = plan_paste_placements(&entries, Tick(1000), Tick(200), &tracks);
+        let tracks = [paste_track(TrackKind::Video, Vec::new())];
+        let out = plan_paste_placements(&entries, Tick(1000), Tick(200), &tracks, None, None);
         assert_eq!(out, vec![(0, 0, Tick(1000)), (1, 0, Tick(1300))]);
     }
 
@@ -1656,10 +1703,10 @@ mod clip_edit_tests {
         // An audio entry must skip the video track and land on the audio one.
         let entries = [(TrackKind::Audio, Tick(0), Tick(100))];
         let tracks = [
-            (TrackKind::Video, Vec::new()),
-            (TrackKind::Audio, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Audio, Vec::new()),
         ];
-        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks);
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks, None, None);
         assert_eq!(out, vec![(0, 1, Tick(500))]);
     }
 
@@ -1668,10 +1715,10 @@ mod clip_edit_tests {
         // Playhead lands the clip over an existing span on V1 → it goes to V2.
         let entries = [(TrackKind::Video, Tick(0), Tick(100))];
         let tracks = [
-            (TrackKind::Video, vec![(Tick(450), Tick(600))]),
-            (TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Video, vec![(Tick(450), Tick(600))]),
+            paste_track(TrackKind::Video, Vec::new()),
         ];
-        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks);
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks, None, None);
         assert_eq!(out, vec![(0, 1, Tick(500))]);
     }
 
@@ -1679,8 +1726,203 @@ mod clip_edit_tests {
     fn paste_is_skipped_when_no_track_has_room() {
         let entries = [(TrackKind::Video, Tick(0), Tick(100))];
         // The only video track is fully blocked across the paste span.
-        let tracks = [(TrackKind::Video, vec![(Tick(400), Tick(700))])];
-        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks);
+        let tracks = [paste_track(TrackKind::Video, vec![(Tick(400), Tick(700))])];
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks, None, None);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn paste_explicit_video_target_wins() {
+        let entries = [(TrackKind::Video, Tick(0), Tick(100))];
+        let tracks = [
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+        ];
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            Some(tracks[1].id),
+            None,
+        );
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_explicit_target_falls_back_after_planned_occupancy() {
+        let entries = [
+            (TrackKind::Video, Tick(0), Tick(100)),
+            (TrackKind::Video, Tick(0), Tick(100)),
+        ];
+        let tracks = [
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+        ];
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            Some(tracks[1].id),
+            None,
+        );
+        assert_eq!(out, vec![(0, 1, Tick(500)), (1, 0, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_explicit_audio_target_wins() {
+        let entries = [(TrackKind::Audio, Tick(0), Tick(100))];
+        let tracks = [
+            paste_track(TrackKind::Audio, Vec::new()),
+            paste_track(TrackKind::Audio, Vec::new()),
+        ];
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            None,
+            Some(tracks[1].id),
+        );
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_missing_wrong_or_blocked_target_falls_back() {
+        let entries = [(TrackKind::Video, Tick(0), Tick(100))];
+        let mut tracks = [
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Audio, Vec::new()),
+        ];
+
+        for target in [Some(TrackId::new()), Some(tracks[2].id)] {
+            let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks, target, None);
+            assert_eq!(out, vec![(0, 0, Tick(500))]);
+        }
+
+        tracks[0].enabled = false;
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            Some(tracks[0].id),
+            None,
+        );
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+
+        tracks[0].enabled = true;
+        tracks[0].locked = true;
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            Some(tracks[0].id),
+            None,
+        );
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+
+        tracks[0].locked = false;
+        tracks[0].spans.push((Tick(450), Tick(600)));
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            Some(tracks[0].id),
+            None,
+        );
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_automatic_fallback_skips_disabled_and_locked_tracks() {
+        let entries = [(TrackKind::Video, Tick(0), Tick(100))];
+        let mut tracks = [
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+        ];
+        tracks[0].enabled = false;
+        tracks[1].locked = true;
+
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks, None, None);
+        assert_eq!(out, vec![(0, 2, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_mixed_video_audio_routes_to_independent_targets() {
+        let entries = [
+            (TrackKind::Video, Tick(0), Tick(100)),
+            (TrackKind::Audio, Tick(20), Tick(50)),
+        ];
+        let tracks = [
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Audio, Vec::new()),
+            paste_track(TrackKind::Video, Vec::new()),
+            paste_track(TrackKind::Audio, Vec::new()),
+        ];
+        let out = plan_paste_placements(
+            &entries,
+            Tick(500),
+            Tick(0),
+            &tracks,
+            Some(tracks[2].id),
+            Some(tracks[3].id),
+        );
+        assert_eq!(out, vec![(0, 2, Tick(500)), (1, 3, Tick(520))]);
+    }
+
+    #[test]
+    fn timeline_paste_applies_targets_and_undoes_as_one_step() {
+        let mut project = TimelineProject::new();
+        let mut sequence = Sequence::new("s", FrameRate::FPS_30, 1920, 1080);
+        let video_fallback = Track::new(TrackKind::Video, "V1");
+        let video_target = Track::new(TrackKind::Video, "V2");
+        let audio_fallback = Track::new(TrackKind::Audio, "A1");
+        let audio_target = Track::new(TrackKind::Audio, "A2");
+        let video_target_id = video_target.id;
+        let audio_target_id = audio_target.id;
+        sequence.video_tracks.extend([video_fallback, video_target]);
+        sequence.audio_tracks.extend([audio_fallback, audio_target]);
+        let sequence_id = project.insert_sequence(sequence);
+
+        let mut doc = Document::new("paste", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+        let mut history = CommandHistory::new(32);
+        let mut app = PhotonicApp::default();
+        app.playhead = Tick(1_000);
+        app.target_video_track = Some(video_target_id);
+        app.target_audio_track = Some(audio_target_id);
+        app.timeline_clipboard = vec![
+            ClipboardClip {
+                clip: clip_at(100, 200),
+                kind: TrackKind::Video,
+            },
+            ClipboardClip {
+                clip: clip_at(125, 150),
+                kind: TrackKind::Audio,
+            },
+        ];
+
+        assert!(app.timeline_paste_clipboard(&mut doc, &mut history));
+        let sequence = &doc.timeline.as_ref().unwrap().sequences[&sequence_id];
+        let pasted_video = &sequence.track(video_target_id).unwrap().clips;
+        let pasted_audio = &sequence.track(audio_target_id).unwrap().clips;
+        assert_eq!(pasted_video.len(), 1);
+        assert_eq!(pasted_audio.len(), 1);
+        assert_eq!(pasted_video[0].start, Tick(1_000));
+        assert_eq!(pasted_audio[0].start, Tick(1_025));
+        assert_eq!(app.timeline_selection.len(), 2);
+        assert_eq!(history.undo_depth(), 1);
+
+        assert!(history.undo(&mut doc));
+        let sequence = &doc.timeline.as_ref().unwrap().sequences[&sequence_id];
+        assert!(sequence.track(video_target_id).unwrap().clips.is_empty());
+        assert!(sequence.track(audio_target_id).unwrap().clips.is_empty());
+        assert_eq!(history.undo_depth(), 0);
     }
 }
