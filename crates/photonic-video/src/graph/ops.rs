@@ -153,6 +153,35 @@ pub fn crop(input: &Image) -> Image {
     input.clone()
 }
 
+/// `Effect{Invert}` (08 §3 / §2 `Invert` row): invert the straight (unpremult)
+/// linear color, preserving alpha, then re-premultiply — the CPU twin of the GPU
+/// invert pass (`eval::Passes::invert`). Straight color is clamped to `[0,1]`
+/// before inversion so the op is well-defined for out-of-range working values,
+/// matching the shader's `1 - clamp(c, 0, 1)`. For an opaque pixel this reduces
+/// to `1 - rgb`.
+pub fn invert(input: &Image) -> Image {
+    let mut out = Image::new(input.width, input.height);
+    for (o, p) in out.pixels.iter_mut().zip(input.pixels.iter()) {
+        let a = p[3];
+        let straight = if a > 1e-6 {
+            [
+                (p[0] / a).clamp(0.0, 1.0),
+                (p[1] / a).clamp(0.0, 1.0),
+                (p[2] / a).clamp(0.0, 1.0),
+            ]
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+        *o = [
+            (1.0 - straight[0]) * a,
+            (1.0 - straight[1]) * a,
+            (1.0 - straight[2]) * a,
+            a,
+        ];
+    }
+    out
+}
+
 /// `Merge`: composite `top` over `bottom` with global `opacity`, under `mode`
 /// (02 §2 `Merge`). Premultiplied linear source-over with a blend function
 /// (W3C compositing model); `Normal` reduces to plain `over`. Blend math reuses
@@ -293,6 +322,32 @@ mod tests {
         let bottom = Image::new(1, 1);
         let out = merge(&top, &bottom, BlendMode::Normal, 1.0);
         assert_eq!(out.pixels[0], premult(1.0, 0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn invert_opaque_is_one_minus_rgb() {
+        let img = solid(2, 2, LinearColor { r: 0.2, g: 0.6, b: 0.9, a: 1.0 });
+        let out = invert(&img);
+        for p in &out.pixels {
+            assert!((p[0] - 0.8).abs() < 1e-6, "r={}", p[0]);
+            assert!((p[1] - 0.4).abs() < 1e-6, "g={}", p[1]);
+            assert!((p[2] - 0.1).abs() < 1e-6, "b={}", p[2]);
+            assert!((p[3] - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn invert_preserves_premultiplied_alpha() {
+        // A 50%-transparent white premult pixel [0.5,0.5,0.5,0.5] → straight white
+        // → inverted straight black → premult [0,0,0,0.5], alpha unchanged.
+        let mut img = Image::new(1, 1);
+        img.pixels[0] = [0.5, 0.5, 0.5, 0.5];
+        let out = invert(&img);
+        let p = out.pixels[0];
+        for (c, &v) in p[..3].iter().enumerate() {
+            assert!(v.abs() < 1e-6, "channel {c} = {v}");
+        }
+        assert!((p[3] - 0.5).abs() < 1e-6);
     }
 
     #[test]

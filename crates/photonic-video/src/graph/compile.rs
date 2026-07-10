@@ -28,16 +28,20 @@ use std::collections::{HashMap, HashSet};
 use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
-    self, AnimProps, AssetKind, Clip, ClipSource, ClipTransform, EffectKind, GraphId, GraphNode,
-    GraphNodeId, GraphNodeParams, GraphOp, InPort, NodeGraph, PropPath, PropValue, Sequence,
-    SequenceFormat, SequenceId, TimelineProject, TrackKind,
+    self, AnimProps, AssetKind, Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade,
+    GradeOp, GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp,
+    InPort, LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
+    TimelineProject, TrackKind, TransitionKind,
 };
 use photonic_core::Color;
 
-use crate::contract::{AssetId, CaptionBatch, ResolvedParams, Tick, VectorRef, VectorStateKey};
+use crate::contract::{
+    AssetId, CaptionBatch, MatteModel, ResolvedParams, ResolvedTextBlock, Tick, VectorRef,
+    VectorStateKey,
+};
 use crate::graph::ir::{
-    ContentHash, FitMode, FrameGraph, IrNode, IrNodeId, IrOp, LinearColor, OutPort, Sampling,
-    TextureDesc,
+    Channel, ContentHash, FitMode, FrameGraph, IrNode, IrNodeId, IrOp, LinearColor, OutPort,
+    Sampling, TextureDesc,
 };
 
 /// Preview vs full-resolution compile flags (02 §2's "quality flags"). `proxy`
@@ -283,9 +287,11 @@ fn fold_sequence(
         if track.kind != TrackKind::Video || !track.enabled {
             continue;
         }
-        let Some(clip) = covering_clip(track.clips.as_slice(), tick) else {
+        let clips = track.clips.as_slice();
+        let Some(idx) = covering_clip_index(clips, tick) else {
             continue;
         };
+        let clip = &clips[idx];
         if !clip.enabled {
             continue; // step 8: disabled clip is a dead branch.
         }
@@ -298,6 +304,21 @@ fn fold_sequence(
                 acc = Some(apply_effect_grade_chain(b, clip, below, dt));
             }
             continue;
+        }
+
+        // Transition partner (02 §2 step 1 / 08 §2.0b): during a clip-overlap
+        // window, blend the outgoing + incoming partner by the eased mix factor.
+        // A successful transition contributes a single track image at opacity 1
+        // (each partner's own opacity is baked into its side of the mix).
+        if let Some(tr) = active_transition(clips, idx, tick) {
+            if let Some(node) = build_transition(
+                b, project, seq, format_index, format, clips, &tr, tick, quality, cycle,
+            ) {
+                acc = Some(fold_over(b, acc, node, 1.0));
+                continue;
+            }
+            // Partner unavailable (disabled / opacity-0 / Adjustment): fall
+            // through to the plain covering-clip render below.
         }
 
         let Some((image, opacity)) = build_clip_chain(
@@ -318,10 +339,226 @@ fn fold_sequence(
     acc
 }
 
-/// The clip whose `[start, end)` covers `t` on this track (tracks are sorted,
-/// non-overlapping — 01 §4).
-fn covering_clip(clips: &[Clip], t: Tick) -> Option<&Clip> {
-    clips.iter().find(|c| c.start <= t && t < c.end())
+/// Index of the clip whose `[start, end)` covers `t` on this track (tracks are
+/// sorted, non-overlapping — 01 §4).
+fn covering_clip_index(clips: &[Clip], t: Tick) -> Option<usize> {
+    clips.iter().position(|c| c.start <= t && t < c.end())
+}
+
+// ── Transitions (02 §2 step 1 / 08 §2.0b) ─────────────────────────────────────
+
+/// A resolved clip transition covering `tick`: which two clips blend, the mix
+/// factor (already eased; `0` = fully outgoing, `1` = fully incoming), and how.
+struct ActiveTransition {
+    outgoing: usize,
+    incoming: usize,
+    kind: TransitionKind,
+    params: timeline::TransitionParams,
+    /// Eased mix in `0..1`.
+    t: f32,
+}
+
+/// Detect a transition active at `tick` for the covering clip `idx` (08 §2.0b).
+/// A `transition_in` borrows the previous clip as the outgoing partner; a
+/// `transition_out` borrows the next clip as the incoming partner. Returns `None`
+/// when no transition is active or the partner index is out of range.
+fn active_transition(clips: &[Clip], idx: usize, tick: Tick) -> Option<ActiveTransition> {
+    let clip = &clips[idx];
+    // Start-boundary transition: this clip transitions IN from the previous clip.
+    if let Some(tr) = &clip.transition_in {
+        if idx > 0 && tr.duration.0 > 0 {
+            let start = clip.start;
+            let end = clip.start + tr.duration;
+            if start <= tick && tick < end {
+                let raw = (tick - start).0 as f32 / tr.duration.0 as f32;
+                return Some(ActiveTransition {
+                    outgoing: idx - 1,
+                    incoming: idx,
+                    kind: tr.kind,
+                    params: tr.params,
+                    t: ease(tr.params.curve, raw),
+                });
+            }
+        }
+    }
+    // End-boundary transition: this clip transitions OUT into the next clip.
+    if let Some(tr) = &clip.transition_out {
+        if idx + 1 < clips.len() && tr.duration.0 > 0 {
+            let start = clip.end() - tr.duration;
+            let end = clip.end();
+            if start <= tick && tick < end {
+                let raw = (tick - start).0 as f32 / tr.duration.0 as f32;
+                return Some(ActiveTransition {
+                    outgoing: idx,
+                    incoming: idx + 1,
+                    kind: tr.kind,
+                    params: tr.params,
+                    t: ease(tr.params.curve, raw),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Build the transition mix node, or `None` when a partner can't contribute
+/// (disabled / opacity-0 / Adjustment) so the caller falls back to the plain
+/// covering-clip render. Each partner is evaluated at `tick` (the outgoing clip
+/// past its own end, into its source handles — the standard NLE overlap model).
+#[allow(clippy::too_many_arguments)]
+fn build_transition(
+    b: &mut Builder,
+    project: &TimelineProject,
+    seq: &Sequence,
+    format_index: usize,
+    format: &SequenceFormat,
+    clips: &[Clip],
+    tr: &ActiveTransition,
+    tick: Tick,
+    quality: Quality,
+    cycle: &mut HashSet<SequenceId>,
+) -> Option<IrNodeId> {
+    let outgoing_clip = &clips[tr.outgoing];
+    let incoming_clip = &clips[tr.incoming];
+    if !outgoing_clip.enabled
+        || !incoming_clip.enabled
+        || matches!(outgoing_clip.source, ClipSource::Adjustment)
+        || matches!(incoming_clip.source, ClipSource::Adjustment)
+    {
+        return None;
+    }
+    let (out_img, out_op) = build_clip_chain(
+        b, project, seq, format_index, format, outgoing_clip, tick, quality, cycle,
+    )?;
+    let (in_img, in_op) = build_clip_chain(
+        b, project, seq, format_index, format, incoming_clip, tick, quality, cycle,
+    )?;
+    let outgoing = bake_opacity(b, out_img, out_op);
+    let incoming = bake_opacity(b, in_img, in_op);
+    Some(transition_mix(b, tr.kind, &tr.params, outgoing, incoming, tr.t))
+}
+
+/// Fade `node` toward transparent by `opacity` (premultiplied) when `opacity < 1`,
+/// so a partner's own clip opacity is baked into its side of a transition before
+/// the mix. A fully-opaque partner is returned unchanged.
+fn bake_opacity(b: &mut Builder, node: IrNodeId, opacity: f32) -> IrNodeId {
+    if opacity >= 1.0 {
+        return node;
+    }
+    let transparent = b.push(
+        IrOp::SolidColor {
+            color: LinearColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        },
+        vec![],
+    );
+    b.push(
+        IrOp::Merge {
+            mode: BlendMode::Normal,
+            opacity,
+        },
+        vec![
+            (node, OutPort::default()),
+            (transparent, OutPort::default()),
+        ],
+    )
+}
+
+/// Emit the time-parameterized mix for a transition at eased factor `t` (08 §2.0b).
+/// Reuses `Merge` (premultiplied `over`) and `SolidColor` — the mix factor is a
+/// compile-time constant, so distinct ticks produce distinct `Merge` opacities
+/// (and thus distinct content hashes). Geometric `Wipe`/`Push` fall back to a
+/// cross-dissolve in P3 (no directional wipe pass yet) with a diagnostic.
+fn transition_mix(
+    b: &mut Builder,
+    kind: TransitionKind,
+    params: &timeline::TransitionParams,
+    outgoing: IrNodeId,
+    incoming: IrNodeId,
+    t: f32,
+) -> IrNodeId {
+    match kind {
+        TransitionKind::CrossDissolve => merge_over(b, incoming, outgoing, t),
+        TransitionKind::DipToBlack => dip_through(b, outgoing, incoming, t, opaque_black()),
+        TransitionKind::DipToColor => {
+            dip_through(b, outgoing, incoming, t, params.color.unwrap_or_else(opaque_black))
+        }
+        TransitionKind::Wipe | TransitionKind::Push => {
+            b.diag(CompileDiagnostic::plain(format!(
+                "{kind:?} transition renders as a cross-dissolve in P3 \
+                 (directional wipe/push pass pending)"
+            )));
+            merge_over(b, incoming, outgoing, t)
+        }
+    }
+}
+
+/// `Merge` `top` over `bottom` at `opacity` (Normal blend), the fold primitive
+/// shared by every transition kind.
+fn merge_over(b: &mut Builder, top: IrNodeId, bottom: IrNodeId, opacity: f32) -> IrNodeId {
+    b.push(
+        IrOp::Merge {
+            mode: BlendMode::Normal,
+            opacity: opacity.clamp(0.0, 1.0),
+        },
+        vec![(top, OutPort::default()), (bottom, OutPort::default())],
+    )
+}
+
+/// Dip-through-color mix (`DipToBlack`/`DipToColor`, 08 §2.0b): outgoing dips to
+/// `color` over the first half (`t < 0.5`), then `color` reveals the incoming
+/// over the second half.
+fn dip_through(
+    b: &mut Builder,
+    outgoing: IrNodeId,
+    incoming: IrNodeId,
+    t: f32,
+    color: Color,
+) -> IrNodeId {
+    let solid = b.push(
+        IrOp::SolidColor {
+            color: color_to_linear_premult(color),
+        },
+        vec![],
+    );
+    if t < 0.5 {
+        // outgoing → color; the solid fades in over `[0, 0.5)`.
+        merge_over(b, solid, outgoing, t * 2.0)
+    } else {
+        // color → incoming; the incoming fades in over `[0.5, 1]`.
+        merge_over(b, incoming, solid, (t - 0.5) * 2.0)
+    }
+}
+
+fn opaque_black() -> Color {
+    Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    }
+}
+
+/// Ease `t∈0..1` under `curve` (08 §2.0b transition easing). `EaseInOut` is the
+/// standard smooth-in/out quadratic; the endpoints are exact (0→0, 1→1).
+fn ease(curve: EaseCurve, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match curve {
+        EaseCurve::Linear => t,
+        EaseCurve::EaseIn => t * t,
+        EaseCurve::EaseOut => t * (2.0 - t),
+        EaseCurve::EaseInOut => {
+            if t < 0.5 {
+                2.0 * t * t
+            } else {
+                1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+            }
+        }
+    }
 }
 
 /// Composite `top` over `acc` with `opacity` (premultiplied `over`). A single
@@ -409,18 +646,19 @@ fn build_clip_chain(
 }
 
 /// Append the clip's enabled effect stack then its grade (if any) onto `input`.
-/// Shared by the normal chain (step 2) and Adjustment re-rooting (step 4).
-fn apply_effect_grade_chain(b: &mut Builder, clip: &Clip, input: IrNodeId, _dt: Tick) -> IrNodeId {
+/// Shared by the normal chain (step 2) and Adjustment re-rooting (step 4). `dt`
+/// is clip-relative time (01 §6) — the domain the effect/grade keyframes live in.
+fn apply_effect_grade_chain(b: &mut Builder, clip: &Clip, input: IrNodeId, dt: Tick) -> IrNodeId {
     let mut cur = input;
     for fx in &clip.effects {
         if !fx.enabled {
             continue;
         }
-        // Effect params are keyframe-resolved at compile time; the resolved
-        // payload shape (`ResolvedParams`) finalizes in P5/P7, so P3 emits the
-        // node (correct arity + ordering) with default resolved params and the
-        // evaluator passes it through. The op discriminant + kind still
-        // participate in the content hash so distinct effects don't collide.
+        // `Invert` is a real pass in the evaluator (08 §3); the other effect
+        // kinds still emit a marker node (correct arity + ordering + content-hash
+        // identity) that the evaluator passes through until their `ResolvedParams`
+        // payload shape finalizes (P5/P7). The op discriminant + kind participate
+        // in the content hash so distinct effects never collide.
         cur = b.push(
             IrOp::Effect {
                 kind: fx.kind,
@@ -430,13 +668,33 @@ fn apply_effect_grade_chain(b: &mut Builder, clip: &Clip, input: IrNodeId, _dt: 
         );
     }
     if let Some(grade) = &clip.grade {
-        if !grade.bypass && !grade.ops.is_empty() {
-            // Resolved grade-op payloads finalize in P7; emit a marker Grade
-            // node (empty ops = passthrough) so the chain shape is right now.
-            cur = b.push(IrOp::Grade { ops: Vec::new() }, vec![(cur, OutPort::default())]);
-        }
+        cur = apply_grade(b, grade, cur, dt);
     }
     cur
+}
+
+/// Resolve `grade` at `tick` and emit a `Grade` IR op carrying the resolved stack
+/// (07 §2/§3), or return `input` unchanged when the grade is bypassed / empty /
+/// fully inert. Shared by clip grades (step 2) and graph `Grade`/`Lut` nodes.
+fn apply_grade(b: &mut Builder, grade: &Grade, input: IrNodeId, tick: Tick) -> IrNodeId {
+    let ops = resolve_grade(grade, tick);
+    if ops.is_empty() {
+        input
+    } else {
+        b.push(IrOp::Grade { ops }, vec![(input, OutPort::default())])
+    }
+}
+
+/// Resolve an authoring [`Grade`] at `tick` into the resolved op stack (07 §2)
+/// via `photonic_render::grade::resolve`.
+///
+/// P3 has no `MediaPool` at the compile layer, so `Lut3d` asset ops resolve inert
+/// (dropped → identity). LUT-table resolution lands when a `lut_provider` is
+/// threaded through `compile` (needs pool access — out of `graph/` territory).
+fn resolve_grade(grade: &Grade, tick: Tick) -> Vec<crate::contract::ResolvedGradeOp> {
+    photonic_render::grade::resolve(grade, tick, |_asset: AssetId| {
+        None::<std::sync::Arc<photonic_render::Lut3d>>
+    })
 }
 
 // ── Step 2: clip source ────────────────────────────────────────────────────────
@@ -873,11 +1131,57 @@ fn lower_node_uncached(
         }
         GraphOp::Grade { grade } => {
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
-            if grade.bypass || grade.ops.is_empty() {
-                input
-            } else {
-                b.push(IrOp::Grade { ops: Vec::new() }, vec![(input, OutPort::default())])
-            }
+            apply_grade(b, grade, input, tick)
+        }
+        GraphOp::Lut { asset } => {
+            // 08 §2: `Lut` lowers to a single-op `Grade{Lut3d}` — one mechanism,
+            // not a parallel LUT path. In P3 the LUT asset resolves inert (no pool
+            // at compile), so this is a passthrough until the lut_provider reaches
+            // compile; the chain shape is correct now.
+            let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
+            apply_grade(b, &single_lut_grade(*asset), input, tick)
+        }
+        GraphOp::Text { .. } => {
+            // 08 §2: `Text` lowers to the dedicated `TextGen` IR op (a 0-input
+            // styled-text generator). The glyphon raster is P8 (blocked on the
+            // still-opaque `ResolvedTextBlock` payload); the evaluator emits a
+            // transparent placeholder meanwhile.
+            b.push(
+                IrOp::TextGen {
+                    block: ResolvedTextBlock::default(),
+                },
+                vec![],
+            )
+        }
+        GraphOp::MaskFromMatte => {
+            // 08 §2: lowers to the dedicated `MatteExtract` IR op (U²-Net subject
+            // cutout). CPU inference is P8; the evaluator passes the input through
+            // (a no-op/opaque mask) until photonic-matte is wired.
+            let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
+            b.push(
+                IrOp::MatteExtract {
+                    model: MatteModel::U2NetP,
+                },
+                vec![(input, OutPort::default())],
+            )
+        }
+        GraphOp::ChannelSplit => {
+            // 08 §2: dedicated `ChannelSplit` IR op. The current single-output
+            // lowering can't yet route the four (r/g/b/a) out-ports independently,
+            // so it emits the alpha channel — the canonical alpha-as-mask output
+            // (08 §2 note). Per-out-port routing lands with multi-output lowering.
+            let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
+            b.push(
+                IrOp::ChannelSplit { channel: Channel::A },
+                vec![(input, OutPort::default())],
+            )
+        }
+        GraphOp::ChannelCombine => {
+            // 08 §2: dedicated `ChannelCombine` IR op. Full four-mask (r/g/b/a)
+            // wiring needs per-in-port lowering; P3 feeds the primary input and
+            // defaults the rest, matching the evaluator's passthrough.
+            let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
+            b.push(IrOp::ChannelCombine, vec![(input, OutPort::default())])
         }
         GraphOp::TimeOffset { offset } => {
             // Step 7: re-lower the upstream subgraph at t − offset. Identical
@@ -914,21 +1218,19 @@ fn lower_node_uncached(
             // ancestor of Output, but be defensive.
             b.transparent(lc.format)
         }
-        // Filters and generators that P3 carries as passthrough / marker Effect
-        // nodes (real kernels land P8): keep arity + ordering + content-hash
-        // identity so caching and the DAG shape are correct now.
+        // Filter/generator effects that lower to `IrOp::Effect`. `Invert` is a
+        // real evaluator pass (08 §3); the rest keep arity + ordering +
+        // content-hash identity as marker nodes until their `ResolvedParams`
+        // payload finalizes (P5/P7). `MaskShape` is a 0-input generator; P3 still
+        // routes the missing-input default through it (harmless — the evaluator
+        // ignores it), pending generator-arity lowering.
         GraphOp::Blur
         | GraphOp::Sharpen
         | GraphOp::Glow
         | GraphOp::ChromaKey
         | GraphOp::LumaKey
         | GraphOp::Invert
-        | GraphOp::MaskShape { .. }
-        | GraphOp::MaskFromMatte
-        | GraphOp::ChannelSplit
-        | GraphOp::ChannelCombine
-        | GraphOp::Lut { .. }
-        | GraphOp::Text { .. } => {
+        | GraphOp::MaskShape { .. } => {
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
             b.push(
                 IrOp::Effect {
@@ -939,6 +1241,21 @@ fn lower_node_uncached(
             )
         }
     }
+}
+
+/// Build a single-op [`Grade`] carrying one `Lut3d` op for the `Lut` graph node
+/// (08 §2 — `Lut` is a one-op grade, not a parallel path).
+fn single_lut_grade(asset: AssetId) -> Grade {
+    let mut grade = Grade::new();
+    grade.ops.push(GradeOp::new(
+        GradeOpKind::Lut3d,
+        GradeOpParams::Lut3d {
+            asset,
+            intensity: 1.0,
+            interp: LutInterp::Trilinear,
+        },
+    ));
+    grade
 }
 
 /// Lower a unary op's primary input, or the missing-input default: transparent
@@ -987,9 +1304,10 @@ fn map_fit(fit: photonic_core::timeline::FitMode) -> FitMode {
     }
 }
 
-/// Map a filter/generator `GraphOp` to the closest authoring `EffectKind` for the
-/// passthrough Effect node (P3). The mapping is a P3 placeholder; the real per-op
-/// kernels replace these Effect nodes in P8.
+/// Map a filter/generator `GraphOp` to its `EffectKind` for the `IrOp::Effect`
+/// lowering (08 §2). Only the effect-family ops reach here; the non-effect
+/// catalog entries (Grade/Lut/Text/MaskFromMatte/Channel*) lower to their own
+/// dedicated IR ops in `lower_node_uncached`.
 fn graph_op_effect_kind(op: &GraphOp) -> EffectKind {
     match op {
         GraphOp::Blur => EffectKind::Blur,
@@ -999,7 +1317,8 @@ fn graph_op_effect_kind(op: &GraphOp) -> EffectKind {
         GraphOp::LumaKey => EffectKind::LumaKey,
         GraphOp::Invert => EffectKind::Invert,
         GraphOp::MaskShape { .. } => EffectKind::MaskShapeGen,
-        _ => EffectKind::Blur, // placeholder for MaskFromMatte/Channel*/Lut/Text
+        // Unreachable: only the effect-family ops above call this.
+        _ => EffectKind::Blur,
     }
 }
 
@@ -1265,6 +1584,9 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
         IrOp::Grade { ops } => {
             h.update(&[6]);
             h.update(&(ops.len() as u32).to_le_bytes());
+            for op in ops {
+                hash_resolved_grade_op(h, op);
+            }
         }
         IrOp::Merge { mode, opacity } => {
             h.update(&[7]);
@@ -1301,6 +1623,88 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[15]);
             h.update(&w.to_le_bytes());
             h.update(&gh.to_le_bytes());
+        }
+    }
+}
+
+/// Hash one resolved grade op (payload + mask) into the content hash so distinct
+/// grades never collide in the node-result cache (02 §5). Deterministic: only
+/// resolved f32 params + discriminants, no `Instant`/pointer state.
+fn hash_resolved_grade_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &crate::contract::ResolvedGradeOp) {
+    use photonic_render::grade::ResolvedGradePayload as P;
+    let f32b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f32| h.update(&v.to_bits().to_le_bytes());
+    let cdl = |h: &mut xxhash_rust::xxh3::Xxh3, c: &photonic_render::grade::ResolvedCdl| {
+        for v in c.slope.iter().chain(&c.offset).chain(&c.power) {
+            f32b(h, *v);
+        }
+        f32b(h, c.sat);
+    };
+    match &op.mask {
+        None => h.update(&[0]),
+        Some(m) => {
+            h.update(&[1, m.rectangle as u8, m.invert as u8]);
+            for v in [
+                m.center[0], m.center[1], m.size[0], m.size[1], m.rotation, m.softness,
+            ] {
+                f32b(h, v);
+            }
+        }
+    }
+    match &op.payload {
+        P::Exposure { stops } => {
+            h.update(&[0]);
+            f32b(h, *stops);
+        }
+        P::Contrast { pivot, amount } => {
+            h.update(&[1]);
+            f32b(h, *pivot);
+            f32b(h, *amount);
+        }
+        P::WhiteBalance { temp, tint } => {
+            h.update(&[2]);
+            f32b(h, *temp);
+            f32b(h, *tint);
+        }
+        P::Cdl(c) => {
+            h.update(&[3]);
+            cdl(h, c);
+        }
+        P::Curves(c) => {
+            h.update(&[4]);
+            for arr in [&c.master, &c.red, &c.green, &c.blue] {
+                for v in arr.iter() {
+                    f32b(h, *v);
+                }
+            }
+            for opt in [&c.hue_vs_hue, &c.hue_vs_sat] {
+                match opt {
+                    Some(a) => {
+                        h.update(&[1]);
+                        for v in a.iter() {
+                            f32b(h, *v);
+                        }
+                    }
+                    None => h.update(&[0]),
+                }
+            }
+        }
+        P::HslQualifier(q) => {
+            h.update(&[5]);
+            for v in [
+                q.hue[0], q.hue[1], q.sat[0], q.sat[1], q.lum[0], q.lum[1], q.softness,
+            ] {
+                f32b(h, v);
+            }
+            cdl(h, &q.correction);
+        }
+        P::Lut3d(l) => {
+            h.update(&[6]);
+            f32b(h, l.intensity);
+            h.update(&[l.tetrahedral as u8]);
+            h.update(&(l.table.size as u32).to_le_bytes());
+            for v in l.table.domain_min.iter().chain(&l.table.domain_max) {
+                f32b(h, *v);
+            }
         }
     }
 }
@@ -1708,6 +2112,168 @@ mod tests {
         // src_time = source_in(1000) + (tick 500 − clip.start 0) at 1× speed = 1500.
         assert_eq!(decode.0, Tick(1500));
         assert!(decode.1, "preview quality requests proxy");
+    }
+
+    #[test]
+    fn distinct_grades_produce_distinct_hashes() {
+        use photonic_core::timeline::grade::{Grade, GradeOp, GradeOpKind, GradeOpParams};
+        let grade_node_hash = |stops: f32| -> u128 {
+            let (mut project, seq_id) = base_project();
+            let tk = add_video_track(&mut project, seq_id);
+            let mut clip = solid_clip(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, 0, Tick::from_seconds(2).0);
+            let mut grade = Grade::new();
+            grade.ops.push(GradeOp::new(
+                GradeOpKind::Exposure,
+                GradeOpParams::Exposure { stops },
+            ));
+            clip.grade = Some(grade);
+            project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+                .clips
+                .push(clip);
+            let out = compile(&project, seq_id, 0, Tick(0), Quality::FULL, None);
+            out.graph
+                .nodes
+                .iter()
+                .find_map(|n| match &n.op {
+                    IrOp::Grade { .. } => Some(n.content_hash.0),
+                    _ => None,
+                })
+                .expect("grade node present")
+        };
+        // Different resolved params ⇒ different content hash (cache-correct).
+        assert_ne!(grade_node_hash(1.0), grade_node_hash(2.0));
+        // Same params ⇒ stable hash (determinism, 02 §2).
+        assert_eq!(grade_node_hash(1.5), grade_node_hash(1.5));
+    }
+
+    #[test]
+    fn text_node_lowers_to_textgen() {
+        // Project graph: Text → Output. `Text` is a 0-input generator lowering to
+        // the dedicated `TextGen` IR op (08 §2).
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0));
+
+        let text = GraphNode::new(GraphOp::Text {
+            text: photonic_core::timeline::TextGen::default(),
+        });
+        let output = GraphNode::new(GraphOp::Output);
+        let (tx, ou) = (text.id, output.id);
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(tx, text);
+        nodes.insert(ou, output);
+        let pg = NodeGraph {
+            id: GraphId::new(),
+            name: "pg".into(),
+            nodes,
+            edges: vec![GraphEdge { from: (tx, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) }],
+            output: ou,
+            ui: std::collections::HashMap::new(),
+        };
+        let pgid = pg.id;
+        project.graphs.insert(pgid, pg);
+        project.project_graph = Some(pgid);
+
+        let out = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let output = out.graph.output.unwrap();
+        let out_in = out.graph.nodes[output.0 as usize].inputs[0].0;
+        assert!(
+            matches!(out.graph.nodes[out_in.0 as usize].op, IrOp::TextGen { .. }),
+            "Text lowered to TextGen feeding Output"
+        );
+    }
+
+    #[test]
+    fn channel_and_matte_nodes_lower_to_dedicated_ir() {
+        // Composition: ClipIn → ChannelSplit → MaskFromMatte → Output. Verifies
+        // both dedicated IR lowerings (08 §2 §3.4) land as ChannelSplit +
+        // MatteExtract, not generic Effect nodes.
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+
+        let clip_in = GraphNode::new(GraphOp::ClipIn);
+        let split = GraphNode::new(GraphOp::ChannelSplit);
+        let matte = GraphNode::new(GraphOp::MaskFromMatte);
+        let output = GraphNode::new(GraphOp::Output);
+        let (ci, sp, ma, ou) = (clip_in.id, split.id, matte.id, output.id);
+        let mut nodes = std::collections::HashMap::new();
+        for n in [clip_in, split, matte, output] {
+            nodes.insert(n.id, n);
+        }
+        let graph = NodeGraph {
+            id: GraphId::new(),
+            name: "comp".into(),
+            nodes,
+            edges: vec![
+                GraphEdge { from: (ci, GOutPort::PRIMARY), to: (sp, InPort::PRIMARY) },
+                GraphEdge { from: (sp, GOutPort::PRIMARY), to: (ma, InPort::PRIMARY) },
+                GraphEdge { from: (ma, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) },
+            ],
+            output: ou,
+            ui: std::collections::HashMap::new(),
+        };
+        let gid = graph.id;
+        project.graphs.insert(gid, graph);
+        let mut clip = solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0);
+        clip.composition = Some(gid);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(clip);
+
+        let out = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::ChannelSplit { .. })),
+            "ChannelSplit lowered to its dedicated IR op"
+        );
+        assert!(
+            out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::MatteExtract { .. })),
+            "MaskFromMatte lowered to MatteExtract"
+        );
+        assert!(
+            !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Effect { .. })),
+            "no generic Effect placeholders for these ops"
+        );
+    }
+
+    #[test]
+    fn dip_to_black_midpoint_is_black() {
+        // Two adjacent solids; the second dips-to-black in. At the exact midpoint
+        // the frame is black (through-color), regardless of either clip's color.
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        let clips = &mut project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk].clips;
+        clips.push(Clip::new(
+            ClipSource::SolidColor { color: Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } },
+            Tick(0),
+            Tick(100),
+        ));
+        let mut b = Clip::new(
+            ClipSource::SolidColor { color: Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } },
+            Tick(100),
+            Tick(100),
+        );
+        b.transition_in = Some(photonic_core::timeline::Transition::new(
+            TransitionKind::DipToBlack,
+            Tick(40),
+        ));
+        clips.push(b);
+
+        // t=120 → raw 0.5 → EaseInOut 0.5 → second phase opacity 0 → pure black.
+        let out = compile(&project, seq_id, 0, Tick(120), Quality::FULL, None);
+        let img = crate::graph::eval_cpu::evaluate(
+            &out.graph,
+            (4, 4),
+            &mut crate::graph::eval_cpu::EmptyProvider,
+        );
+        for p in &img.pixels {
+            for (c, &v) in p[..3].iter().enumerate() {
+                assert!(v.abs() < 1e-4, "dip midpoint black, channel {c} = {v}");
+            }
+        }
     }
 
     fn op_name(op: &IrOp) -> &'static str {

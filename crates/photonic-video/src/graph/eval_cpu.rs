@@ -9,11 +9,18 @@
 //! Source ops (`DecodeVideo`/`DecodeStill`/`RasterVector`) are delegated to a
 //! [`FrameProvider`] so tests can inject known pixels without a real decoder; the
 //! GPU evaluator (`eval.rs`) resolves the same ops against decode rings and the
-//! headless vector renderer. Ops without a P3 kernel (`Effect`, `Grade`,
-//! `CaptionOverlay`, `MatteExtract`, `TextGen`, `ChannelSplit`/`Combine`) are
-//! input-passthrough with the phase noted, exactly as 02 §2 permits.
+//! headless vector renderer.
+//!
+//! Real CPU kernels now cover `Grade` (`photonic_render::grade::apply_grade_cpu`,
+//! the GPU-parity golden per 03 §4.4) and `Effect{Invert}` (`ops::invert`). The
+//! remaining `Effect` kinds (Blur/Sharpen/Glow/ChromaKey/LumaKey/MaskShapeGen),
+//! `CaptionOverlay`, `MatteExtract`, `TextGen`, and `ChannelSplit`/`Combine` stay
+//! input-passthrough with the phase noted, exactly as 02 §2 permits — the first
+//! three families are blocked on the still-opaque `ResolvedParams`/`CaptionBatch`/
+//! `ResolvedTextBlock` payloads (`contract.rs`), which finalize in P5/P7/P8.
 
 use photonic_core::layer::BlendMode;
+use photonic_core::timeline::EffectKind;
 
 use crate::contract::{AssetId, Tick, VectorRef, VectorStateKey};
 use crate::graph::ir::{FitMode, FrameGraph, IrOp};
@@ -100,10 +107,14 @@ fn eval_op(
             Some(input) => ops::transform2d(input, *mat, *sampling),
             None => Image::new(cw, ch),
         },
-        // Passthrough ops (real kernels land in later phases; 02 §2 permits an
-        // input-passthrough marker in P3).
-        IrOp::Effect { .. } => in0(),      // P5/P7 effect kernels
-        IrOp::Grade { .. } => in0(),       // P7 grade math
+        // Real kernel: Invert (08 §3). Other effect kinds stay passthrough until
+        // their `ResolvedParams` payload finalizes (P5/P7).
+        IrOp::Effect { kind, .. } => match kind {
+            EffectKind::Invert => ops::invert(&in0()),
+            _ => in0(),
+        },
+        // Real kernel: the resolved grade stack (07 §3), the GPU-parity golden.
+        IrOp::Grade { ops: grade_ops } => apply_grade_cpu_image(in0(), grade_ops),
         IrOp::CaptionOverlay { .. } => in0(), // P5 glyph batching
         IrOp::MatteExtract { .. } => in0(), // P8 U²-Net inference
         IrOp::ChannelSplit { .. } => in0(),
@@ -129,6 +140,28 @@ fn eval_op(
             None => Image::new(*w, *h),
         },
     }
+}
+
+/// Run the resolved grade stack over an [`Image`] via
+/// [`photonic_render::grade::apply_grade_cpu`] — the golden CPU reference the GPU
+/// grade pass must match within 1e-3 (03 §4.4). The `Image` is premultiplied
+/// linear Rec.709 (D-09); the grade ops operate on the stored RGB directly and
+/// preserve alpha, exactly matching the GPU pass which samples the same
+/// premultiplied working texture. Empty stacks are an exact passthrough.
+fn apply_grade_cpu_image(mut img: Image, ops: &[photonic_render::grade::ResolvedGradeOp]) -> Image {
+    if ops.is_empty() {
+        return img;
+    }
+    // Flatten to the contiguous `[r,g,b,a, …]` f32 buffer `apply_grade_cpu` wants.
+    let mut buf: Vec<f32> = Vec::with_capacity(img.pixels.len() * 4);
+    for p in &img.pixels {
+        buf.extend_from_slice(p);
+    }
+    photonic_render::grade::apply_grade_cpu(&mut buf, img.width, img.height, ops);
+    for (px, chunk) in img.pixels.iter_mut().zip(buf.chunks_exact(4)) {
+        px.copy_from_slice(chunk);
+    }
+    img
 }
 
 /// The blend mode a `Merge` node applies (exposed for tests / callers that want
@@ -220,6 +253,174 @@ mod tests {
         let a = evaluate(&out.graph, (8, 8), &mut EmptyProvider);
         let b = evaluate(&out.graph, (8, 8), &mut EmptyProvider);
         assert_eq!(a.pixels, b.pixels);
+    }
+
+    // ── real Grade / Effect / transition kernels (this story) ─────────────────
+
+    use photonic_core::timeline::{
+        grade::{Grade, GradeOp, GradeOpKind, GradeOpParams},
+        ClipEffect, EffectKind, GraphEdge, GraphId, GraphNode, GraphOp, InPort,
+        OutPort as GOutPort, Transition, TransitionKind,
+    };
+
+    fn single_solid_project(color: Color) -> (TimelineProject, SequenceId) {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        t.clips.push(Clip::new(
+            ClipSource::SolidColor { color },
+            crate::contract::Tick(0),
+            crate::contract::Tick::from_seconds(2),
+        ));
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+        (project, seq_id)
+    }
+
+    /// A clip grade of Exposure +1 stop doubles the linear working value — proving
+    /// `IrOp::Grade` runs the real resolved stack, not a passthrough.
+    #[test]
+    fn grade_exposure_applies_non_passthrough() {
+        // sRGB 0.5 → ~0.2140 linear; +1 stop (×2) → ~0.4280.
+        let (mut project, seq_id) = single_solid_project(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
+        let mut grade = Grade::new();
+        grade.ops.push(GradeOp::new(
+            GradeOpKind::Exposure,
+            GradeOpParams::Exposure { stops: 1.0 },
+        ));
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[0].clips[0].grade = Some(grade);
+
+        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        // The graph must contain a real Grade node with one resolved op.
+        assert!(
+            out.graph.nodes.iter().any(|n| matches!(&n.op, IrOp::Grade { ops } if ops.len() == 1)),
+            "a Grade IR op with one resolved op is present"
+        );
+        let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
+        let expected = {
+            let lin = ((0.5f32 + 0.055) / 1.055).powf(2.4);
+            lin * 2.0
+        };
+        for p in &img.pixels {
+            assert!((p[0] - expected).abs() < 1e-3, "graded r={} want {}", p[0], expected);
+        }
+    }
+
+    /// A clip `Invert` effect maps opaque white → black — proving `Effect{Invert}`
+    /// is a real kernel, not a passthrough.
+    #[test]
+    fn invert_effect_applies_non_passthrough() {
+        let (mut project, seq_id) = single_solid_project(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[0].clips[0]
+            .effects
+            .push(ClipEffect::new(EffectKind::Invert));
+        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
+        for p in &img.pixels {
+            for (c, &v) in p[..3].iter().enumerate() {
+                assert!(v.abs() < 1e-4, "inverted white → black, channel {c} = {v}");
+            }
+            assert!((p[3] - 1.0).abs() < 1e-4);
+        }
+    }
+
+    /// A CrossDissolve at its exact midpoint blends the outgoing + incoming clips
+    /// 50/50 (08 §2.0b). Two adjacent opaque solids on one track; the second
+    /// transitions in from the first.
+    #[test]
+    fn cross_dissolve_midpoint_is_5050() {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        // A: red [0,100); B: blue [100,200) transitioning in over 40 ticks.
+        t.clips.push(Clip::new(
+            ClipSource::SolidColor { color: Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 } },
+            crate::contract::Tick(0),
+            crate::contract::Tick(100),
+        ));
+        let mut b = Clip::new(
+            ClipSource::SolidColor { color: Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 } },
+            crate::contract::Tick(100),
+            crate::contract::Tick(100),
+        );
+        b.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, crate::contract::Tick(40)));
+        t.clips.push(b);
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+
+        // Midpoint of the [100,140) window → raw 0.5, EaseInOut(0.5)=0.5.
+        let out = compile(&project, seq_id, 0, crate::contract::Tick(120), Quality::FULL, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
+        for p in &img.pixels {
+            assert!((p[0] - 0.5).abs() < 1e-4, "red half r={}", p[0]);
+            assert!(p[1].abs() < 1e-4, "g={}", p[1]);
+            assert!((p[2] - 0.5).abs() < 1e-4, "blue half b={}", p[2]);
+            assert!((p[3] - 1.0).abs() < 1e-4);
+        }
+    }
+
+    /// A two-node composition (`SolidColor(white) → Invert → Output`) lowers to IR
+    /// and evaluates: the invert produces black, exercising node-catalog lowering
+    /// + the real effect kernel end-to-end.
+    #[test]
+    fn two_node_composition_lowers_and_evals() {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let tk = {
+            seq.video_tracks.push(Track::new(TrackKind::Video, "V1"));
+            0usize
+        };
+
+        let mut solid = GraphNode::new(GraphOp::SolidColor);
+        solid.params.base.0.set(
+            "params.color",
+            photonic_core::timeline::PropValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+        );
+        let invert = GraphNode::new(GraphOp::Invert);
+        let output = GraphNode::new(GraphOp::Output);
+        let (so, iv, ou) = (solid.id, invert.id, output.id);
+        let mut nodes = std::collections::HashMap::new();
+        for n in [solid, invert, output] {
+            nodes.insert(n.id, n);
+        }
+        let graph = photonic_core::timeline::NodeGraph {
+            id: GraphId::new(),
+            name: "comp".into(),
+            nodes,
+            edges: vec![
+                GraphEdge { from: (so, GOutPort::PRIMARY), to: (iv, InPort::PRIMARY) },
+                GraphEdge { from: (iv, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) },
+            ],
+            output: ou,
+            ui: std::collections::HashMap::new(),
+        };
+        let gid = graph.id;
+        project.graphs.insert(gid, graph);
+        let mut clip = Clip::new(
+            ClipSource::SolidColor { color: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 } },
+            crate::contract::Tick(0),
+            crate::contract::Tick::from_seconds(2),
+        );
+        clip.composition = Some(gid);
+        seq.video_tracks[tk].clips.push(clip);
+        project.insert_sequence(seq);
+
+        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.graph.nodes.iter().any(|n| matches!(&n.op, IrOp::Effect { kind, .. } if *kind == EffectKind::Invert)),
+            "the composition's Invert lowered to an Effect{{Invert}} node"
+        );
+        let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
+        for p in &img.pixels {
+            for (c, &v) in p[..3].iter().enumerate() {
+                assert!(v.abs() < 1e-4, "white inverted to black, channel {c} = {v}");
+            }
+        }
     }
 
     /// A bare SolidColor graph evaluates to the premultiplied linear color.

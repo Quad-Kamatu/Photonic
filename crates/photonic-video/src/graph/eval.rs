@@ -14,14 +14,21 @@
 //!   session layer; never called for the solid-color paths tests exercise).
 //! - `Merge` — a premultiplied `over` composite. **Normal only in P3** — the
 //!   full 26-mode `COMPOSITE_SHADER` wiring (03 §2.4) is the seam noted below.
-//! - `Transform2D` / `Crop` / `Resize` / `Output` and the passthrough filter
-//!   ops — a texture blit. **The `Transform2D` matrix is not yet applied on the
-//!   GPU preview path in P3** (identity blit); the exact matrix lives in the CPU
+//! - `Grade` — the resolved grade stack, run through
+//!   [`photonic_render::apply_grade_stack_gpu`] (07 §3), byte-for-byte the WGSL
+//!   twin of `eval_cpu`'s `apply_grade_cpu` (GPU/CPU parity, 03 §4.4).
+//! - `Effect{Invert}` — a real invert pass (08 §3). The other `Effect` kinds
+//!   (Blur/Sharpen/Glow/ChromaKey/LumaKey/MaskShapeGen) stay blit-passthrough
+//!   until their `ResolvedParams` payload finalizes (P5/P7).
+//! - `Transform2D` / `Crop` / `Resize` / `Output` and the passthrough ops — a
+//!   texture blit. **The `Transform2D` matrix is not yet applied on the GPU
+//!   preview path in P3** (identity blit); the exact matrix lives in the CPU
 //!   reference (`eval_cpu`), which is the export-determinism path. The GPU
 //!   matrix-sample pass lands with the transform-gizmo UI story.
 
 use std::sync::Arc;
 
+use photonic_core::timeline::EffectKind;
 use wgpu::util::DeviceExt;
 
 use crate::contract::{AssetId, Tick, VectorRef, VectorStateKey};
@@ -235,8 +242,30 @@ impl Evaluator {
                 // 0-input generator; P3 passthrough is transparent (P8 glyphon).
                 self.passes.fill(&self.gpu, target, [0.0; 4]);
             }
+            // Real effect kernel: Invert (08 §3). Other kinds fall through to the
+            // blit passthrough below until their `ResolvedParams` payload lands.
+            IrOp::Effect { kind: EffectKind::Invert, .. } => match inputs.first() {
+                Some(src) => self.passes.invert(&self.gpu, src, target),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            // Real grade kernel: run the resolved stack through the WGSL twins of
+            // `eval_cpu`'s `apply_grade_cpu`, then blit the result into the pooled
+            // cache target (07 §3, GPU/CPU parity 03 §4.4). An empty stack falls
+            // through to the passthrough blit below.
+            IrOp::Grade { ops } if !ops.is_empty() => match inputs.first() {
+                Some(src) => {
+                    let graded = photonic_render::apply_grade_stack_gpu(
+                        self.gpu.device(),
+                        self.gpu.queue(),
+                        src,
+                        ops,
+                    );
+                    self.passes.blit(&self.gpu, &graded, target);
+                }
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             // Blit passthrough for Transform2D (matrix seam), Crop, Resize,
-            // Output, and the marker filter/color ops.
+            // Output, empty Grade, and the marker filter/color ops.
             _ => match inputs.first() {
                 Some(src) => self.passes.blit(&self.gpu, src, target),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
@@ -276,6 +305,8 @@ struct Passes {
     fill_bgl: wgpu::BindGroupLayout,
     blit_pipeline: wgpu::RenderPipeline,
     blit_bgl: wgpu::BindGroupLayout,
+    /// `Effect{Invert}` (08 §3): shares the blit bind-group layout (tex + sampler).
+    invert_pipeline: wgpu::RenderPipeline,
     merge_pipeline: wgpu::RenderPipeline,
     merge_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -331,6 +362,13 @@ impl Passes {
         );
         let blit_pipeline = make_pipeline(device, &blit_bgl, &blit_src, "fs");
 
+        // Invert (08 §3): invert straight (unpremult) color, keep alpha, then
+        // re-premultiply — the WGSL twin of `ops::invert`. Reuses the blit BGL.
+        let invert_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var straight = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ straight = clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0)); }}\n  let inv = (vec3<f32>(1.0) - straight) * c.a;\n  return vec4<f32>(inv, c.a);\n}}\n"
+        );
+        let invert_pipeline = make_pipeline(device, &blit_bgl, &invert_src, "fs");
+
         // Merge: premultiplied `over`, Normal only (26-mode seam).
         let merge_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("merge_bgl"),
@@ -346,6 +384,7 @@ impl Passes {
             fill_bgl,
             blit_pipeline,
             blit_bgl,
+            invert_pipeline,
             merge_pipeline,
             merge_bgl,
             sampler,
@@ -388,6 +427,27 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.blit_pipeline, &bind, target);
+    }
+
+    /// `Effect{Invert}` pass — same bind group as `blit` (tex + sampler), the
+    /// invert pipeline instead.
+    fn invert(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture) {
+        let view = src.create_view(&Default::default());
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("invert_bg"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.run(gpu, &self.invert_pipeline, &bind, target);
     }
 
     fn merge(
@@ -678,5 +738,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Build a single-clip project (solid `color`) and let `decorate` attach a
+    /// grade / effect before compiling. Returns the compiled graph.
+    fn solid_project_graph(
+        color: Color,
+        decorate: impl FnOnce(&mut Clip),
+    ) -> crate::graph::compile::CompiledFrame {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 8, 8);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        let mut clip = Clip::new(
+            ClipSource::SolidColor { color },
+            crate::contract::Tick(0),
+            crate::contract::Tick::from_seconds(2),
+        );
+        decorate(&mut clip);
+        t.clips.push(clip);
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+        compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None)
+    }
+
+    fn assert_graph_gpu_matches_cpu(compiled: &crate::graph::compile::CompiledFrame, tol: f32) {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter — skipping GPU parity");
+            return;
+        };
+        let cpu = crate::graph::eval_cpu::evaluate(
+            &compiled.graph,
+            (8, 8),
+            &mut crate::graph::eval_cpu::EmptyProvider,
+        );
+        let mut eval = Evaluator::new(gpu.clone());
+        let out = eval
+            .evaluate(&compiled.graph, (8, 8), &mut NullFrameSource)
+            .expect("output texture");
+        let gpu_px = read_texture_rgba16f(&gpu, &out, 8, 8);
+        for (g, c) in gpu_px.iter().zip(cpu.pixels.iter()) {
+            for k in 0..4 {
+                assert!(
+                    (g[k] - c[k]).abs() < tol,
+                    "channel {k}: gpu {} vs cpu {}",
+                    g[k],
+                    c[k]
+                );
+            }
+        }
+    }
+
+    /// GPU/CPU parity for the `Grade` op (07 §3, 03 §4.4): an Exposure grade over a
+    /// solid must agree within 1e-3 between `apply_grade_stack_gpu` and
+    /// `apply_grade_cpu`.
+    #[test]
+    fn graded_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::grade::{Grade, GradeOp, GradeOpKind, GradeOpParams};
+        let compiled = solid_project_graph(
+            Color { r: 0.5, g: 0.4, b: 0.6, a: 1.0 },
+            |clip| {
+                let mut grade = Grade::new();
+                grade.ops.push(GradeOp::new(
+                    GradeOpKind::Exposure,
+                    GradeOpParams::Exposure { stops: 0.7 },
+                ));
+                clip.grade = Some(grade);
+            },
+        );
+        assert!(
+            compiled.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Grade { .. })),
+            "a real Grade node is present"
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{Invert}` (08 §3).
+    #[test]
+    fn inverted_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{ClipEffect, EffectKind};
+        let compiled = solid_project_graph(
+            Color { r: 0.7, g: 0.2, b: 0.9, a: 1.0 },
+            |clip| clip.effects.push(ClipEffect::new(EffectKind::Invert)),
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
     }
 }
