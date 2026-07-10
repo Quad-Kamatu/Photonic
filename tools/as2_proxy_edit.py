@@ -268,6 +268,12 @@ def identity_lut_path(tmp_dir: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default=DEFAULT_URL, help=f"MCP endpoint (default: {DEFAULT_URL})")
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help="Persist the AV1/H.264 exports to this directory instead of an "
+        "auto-deleted temp dir (the two deliverable acceptance videos).",
+    )
     args = parser.parse_args()
 
     client = Client(args.url)
@@ -576,12 +582,20 @@ def main() -> int:
         # + web H.264" — the two builtin presets by name (export_presets.rs).
         if not engine_available(client):
             raise Skip("no GPU adapter (EngineUnavailable) — export needs the engine")
-        with tempfile.TemporaryDirectory() as tmp:
+        import contextlib
+        out_dir = getattr(args, "out_dir", None)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            dir_ctx = contextlib.nullcontext(out_dir)
+        else:
+            dir_ctx = tempfile.TemporaryDirectory()
+        with dir_ctx as tmp:
             for preset, ext, codec_name in (
                 ("Master AV1 High", "mkv", "av1"),
                 ("Web H.264", "mp4", "h264"),
             ):
-                out_path = os.path.join(tmp, f"as2_export.{ext}")
+                name = f"AS2_short_film_{codec_name}.{ext}" if out_dir else f"as2_export.{ext}"
+                out_path = os.path.join(tmp, name)
                 r = client.tool(
                     "export_sequence", {"sequence_id": state["sequence_id"], "out_path": out_path, "preset": preset}
                 )
