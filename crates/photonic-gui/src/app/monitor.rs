@@ -553,6 +553,10 @@ impl PhotonicApp {
     /// active one highlighted. Clicking a preset activates it (or adds+activates
     /// it if the sequence doesn't have it yet), undoably — so reframing the
     /// whole edit for a different platform is a single, discoverable click.
+    /// Also hosts the "Fit clips" auto-reframe button (14 §9/CAP-012,
+    /// `app/reframe.rs::fit_clips_to_active_format`) — the CapCut "Auto
+    /// reframe" affordance that center-fills the selected clip(s) (or every
+    /// clip if none are selected) for whichever format is active above.
     fn draw_format_bar(
         &mut self,
         ui: &mut egui::Ui,
@@ -567,6 +571,9 @@ impl PhotonicApp {
             let f = active_format(doc);
             (f.width, f.height)
         };
+        // Snapshot before entering the `FnOnce` ui closure below, which
+        // already needs to reborrow `doc`/`history` mutably.
+        let selection = self.timeline_selection.clone();
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal_centered(|ui| {
                 ui.add_space(4.0);
@@ -585,6 +592,18 @@ impl PhotonicApp {
                 }
                 if let Some((name, w, h)) = clicked {
                     super::timeline::ops_bridge::switch_to_aspect(history, doc, seq_id, name, w, h);
+                }
+
+                ui.separator();
+                if ui
+                    .button(format!("{} Fit clips", ph::FRAME_CORNERS))
+                    .on_hover_text(
+                        "Auto-frame the selected clip(s) — or every clip if none are \
+                         selected — to fill the current aspect (center-fill, one undo step)",
+                    )
+                    .clicked()
+                {
+                    super::reframe::fit_clips_to_active_format(doc, history, &selection);
                 }
             });
         });

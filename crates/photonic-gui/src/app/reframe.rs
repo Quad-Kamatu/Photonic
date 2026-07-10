@@ -241,6 +241,77 @@ pub(crate) fn draw_reframe_handles(
     }
 }
 
+// ── Auto-reframe: "Fit clips" (14 §9/CAP-012) ───────────────────────────────
+
+/// Auto-frame the monitor's selected clip(s) — or every video clip in the
+/// active sequence when nothing is selected — to the sequence's ACTIVE
+/// format, via [`ops::fit_clip_to_format`]'s center-fill convention, as one
+/// undoable batch. Driven by the monitor format bar's "Fit clips" button
+/// (`app/monitor.rs::draw_format_bar`) — the CapCut "Auto reframe" affordance
+/// for a Photonic sequence: one click reframes the edit for whatever aspect
+/// is currently active instead of manually dragging each clip's reframe
+/// handles.
+///
+/// Audio clips are left alone (reframe is a visual-only concept); a clip
+/// already missing from the active sequence/track by the time this runs is
+/// silently skipped rather than aborting the whole batch.
+pub(crate) fn fit_clips_to_active_format(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    selection: &[ClipId],
+) {
+    let Some(project) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Some(seq_id) = project.active_sequence else {
+        return;
+    };
+    let Some(seq) = project.sequences.get(&seq_id) else {
+        return;
+    };
+    let active_format = seq.active_format;
+    // `ops::fit_clip_to_format`'s documented content-box convention: the
+    // sequence's format at index 0 is what an un-reframed clip transform
+    // already fills.
+    let Some(content) = seq.formats.first().cloned() else {
+        return;
+    };
+    let target = seq.format().clone();
+    let xf = ops::fit_clip_to_format(&content, &target);
+
+    let targets: Vec<(TrackId, ClipId)> = if selection.is_empty() {
+        seq.video_tracks
+            .iter()
+            .flat_map(|t| t.clips.iter().map(move |c| (t.id, c.id)))
+            .collect()
+    } else {
+        selection
+            .iter()
+            .filter_map(|&clip_id| {
+                locate(project, seq_id, clip_id).map(|(track_id, _)| (track_id, clip_id))
+            })
+            .collect()
+    };
+    if targets.is_empty() {
+        return;
+    }
+
+    let cmds: Vec<Command> = targets
+        .into_iter()
+        .filter_map(|(track_id, clip_id)| {
+            ops::set_clip_reframe(project, seq_id, track_id, clip_id, active_format, Some(xf))
+                .ok()
+                .map(Command::Timeline)
+        })
+        .collect();
+    if cmds.is_empty() {
+        return;
+    }
+    // One click == one undo step, same as `commit_reframe`'s single-transform
+    // commits above.
+    history.execute(Command::Batch(cmds), doc);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +410,136 @@ mod tests {
         let pointer = Pos2::new(50.0, 0.0);
         let r = rotation_from_handle_drag(center, pointer);
         assert!((r - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod fit_clips_tests {
+    use super::*;
+    use photonic_core::timeline::{
+        ClipSource, FrameRate, Sequence, SequenceId, Tick, TimelineProject, Track, TrackKind,
+    };
+    use photonic_core::Color;
+
+    fn doc_with_seq() -> (Document, CommandHistory, SequenceId) {
+        let mut project = TimelineProject::new();
+        let seq = Sequence::new("s", FrameRate::new(30, 1), 1920, 1080); // 16:9 @ index 0
+        let seq_id = project.insert_sequence(seq);
+        project.active_sequence = Some(seq_id);
+        let mut doc = Document::new("t", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+        (doc, CommandHistory::new(64), seq_id)
+    }
+
+    fn push_clip(doc: &mut Document, seq_id: SequenceId, kind: TrackKind) -> ClipId {
+        let project = doc.timeline.as_mut().unwrap();
+        let seq = project.sequences.get_mut(&seq_id).unwrap();
+        let clip = Clip::new(
+            ClipSource::SolidColor {
+                color: Color::BLACK,
+            },
+            Tick::ZERO,
+            Tick::from_seconds(1),
+        );
+        let clip_id = clip.id;
+        let mut track = Track::new(kind, "T");
+        track.clips.push(clip);
+        match kind {
+            TrackKind::Video => seq.video_tracks.push(track),
+            TrackKind::Audio => seq.audio_tracks.push(track),
+        }
+        clip_id
+    }
+
+    /// A clip's stored reframe override at `format_index`, searching every
+    /// track (video + audio) of `seq_id`.
+    fn reframe_at(
+        doc: &Document,
+        seq_id: SequenceId,
+        clip_id: ClipId,
+        format_index: usize,
+    ) -> Option<ClipTransform> {
+        let seq = &doc.timeline.as_ref().unwrap().sequences[&seq_id];
+        seq.tracks()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.id == clip_id)
+            .and_then(|c| c.reframe.get(&format_index))
+            .copied()
+    }
+
+    #[test]
+    fn empty_selection_reframes_every_video_clip_but_not_audio() {
+        let (mut doc, mut h, seq) = doc_with_seq();
+        let v1 = push_clip(&mut doc, seq, TrackKind::Video);
+        let v2 = push_clip(&mut doc, seq, TrackKind::Video);
+        let a1 = push_clip(&mut doc, seq, TrackKind::Audio);
+
+        // Switch to a target aspect that actually differs from the 16:9
+        // content box so the fit isn't a no-op identity scale, and so a
+        // stray write to the wrong (index-0) format slot would be caught.
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let s = project.sequences.get_mut(&seq).unwrap();
+            s.formats.push(SequenceFormat::new("9:16", 1080, 1920));
+            s.active_format = 1;
+        }
+        let target_idx = 1;
+
+        fit_clips_to_active_format(&mut doc, &mut h, &[]);
+
+        // Both video clips got the ACTIVE (index-1) format's reframe, and
+        // nothing landed at index 0.
+        assert!(reframe_at(&doc, seq, v1, 0).is_none());
+        assert!(reframe_at(&doc, seq, v2, 0).is_none());
+        let xf1 = reframe_at(&doc, seq, v1, target_idx).expect("v1 reframed");
+        let xf2 = reframe_at(&doc, seq, v2, target_idx).expect("v2 reframed");
+        // 16:9 (1920x1080) content into a 9:16 (1080x1920) target: cover-fit
+        // scale is max(1080/1920, 1920/1080) = 16/9.
+        assert!((xf1.scale_x - 16.0 / 9.0).abs() < 1e-6);
+        assert!((xf2.scale_x - 16.0 / 9.0).abs() < 1e-6);
+
+        // Audio is never touched.
+        assert!(reframe_at(&doc, seq, a1, target_idx).is_none());
+
+        // Both video reframes landed as ONE undo step.
+        h.undo(&mut doc);
+        assert!(reframe_at(&doc, seq, v1, target_idx).is_none());
+        assert!(reframe_at(&doc, seq, v2, target_idx).is_none());
+    }
+
+    #[test]
+    fn nonempty_selection_only_reframes_selected_clips() {
+        let (mut doc, mut h, seq) = doc_with_seq();
+        let v1 = push_clip(&mut doc, seq, TrackKind::Video);
+        let v2 = push_clip(&mut doc, seq, TrackKind::Video);
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let s = project.sequences.get_mut(&seq).unwrap();
+            s.formats.push(SequenceFormat::new("9:16", 1080, 1920));
+            s.active_format = 1;
+        }
+
+        fit_clips_to_active_format(&mut doc, &mut h, &[v1]);
+
+        let s = &doc.timeline.as_ref().unwrap().sequences[&seq];
+        let has_reframe = |cid: ClipId| {
+            s.video_tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == cid)
+                .map(|c| !c.reframe.is_empty())
+                .unwrap_or(false)
+        };
+        assert!(has_reframe(v1));
+        assert!(!has_reframe(v2));
+    }
+
+    #[test]
+    fn no_op_without_a_timeline_project() {
+        let mut doc = Document::new("t", 1920.0, 1080.0);
+        let mut h = CommandHistory::new(64);
+        // Must not panic when there's no timeline at all.
+        fit_clips_to_active_format(&mut doc, &mut h, &[]);
+        assert!(doc.timeline.is_none());
     }
 }
