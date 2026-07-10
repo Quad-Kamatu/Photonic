@@ -13,7 +13,7 @@
 //! `GroupNodes` batching idiom.
 
 use super::anim::{Interp, Keyframe, PropPath, PropertyTrack};
-use super::clip::{Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId};
+use super::clip::{Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, TextClipContent};
 use super::commands::{
     AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings,
 };
@@ -324,6 +324,48 @@ fn nests_into(p: &TimelineProject, outer: SequenceId, target: SequenceId) -> boo
         }
     }
     false
+}
+
+/// Create and insert a `ClipSource::Adjustment` clip spanning
+/// `[start, start+duration)` on `track_id` (G-7 data half): an adjustment layer
+/// whose effect stack / grade applies to the composite of every lower track
+/// beneath its span. The clip carries no media — the create/insert is the model
+/// op; the engine composites it (a separate lane). Undoable via the existing
+/// [`insert_clip`] path (duration `> 0`, non-overlap and track existence
+/// validated there).
+pub fn add_adjustment_clip(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    start: Tick,
+    duration: Tick,
+) -> Result<TimelineCmd, EditError> {
+    insert_clip(
+        p,
+        id,
+        track_id,
+        Clip::new(ClipSource::Adjustment, start, duration),
+    )
+}
+
+/// Create and insert a `ClipSource::Text` title/graphics clip spanning
+/// `[start, start+duration)` on `track_id` (G-12 data half): styled text on a
+/// video track, rendered by the engine's text path (no render here). The clip's
+/// `name` defaults to the text so the timeline shows a friendly label. Undoable
+/// via the existing [`insert_clip`] path.
+pub fn add_text_clip(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    start: Tick,
+    duration: Tick,
+    content: TextClipContent,
+) -> Result<TimelineCmd, EditError> {
+    let mut clip = Clip::new(ClipSource::Text { content }, start, duration);
+    if let ClipSource::Text { content } = &clip.source {
+        clip.name = content.text.clone();
+    }
+    insert_clip(p, id, track_id, clip)
 }
 
 pub fn remove_clip(
@@ -718,6 +760,46 @@ pub fn set_clip_prop(
         old: Box::new(old),
         new: Box::new(new),
     })
+}
+
+/// **Replace With Clip / Replace Edit** (G-5, Premiere): swap a clip's SOURCE
+/// (and, optionally, its `source_in`) in place — keeping the clip's timeline
+/// `start`, `duration`, `speed`, transform, effect stack, grade, transitions,
+/// audio, reframe, color label and link group untouched. The shot changes;
+/// everything the editor built around the slot stays. Undoable via the existing
+/// [`set_clip_prop`] whole-clip diff (one undo step).
+///
+/// Rejects a nested-sequence source that would cycle (mirrors [`insert_clip`])
+/// and a replacement into `Adjustment` on a clip that still carries a
+/// composition (07 §6.6). Duration is unchanged, so a shorter new source is
+/// held to the slot (Premiere trims-to-slot; the source is sampled from
+/// `new_source_in` for the slot's length by the engine).
+pub fn replace_clip_source(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    new_source: ClipSource,
+    new_source_in: Option<Tick>,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let mut new = clip(t, clip_id)?.clone();
+
+    if let ClipSource::NestedSequence { sequence } = &new_source {
+        if *sequence == id || nests_into(p, *sequence, id) {
+            return Err(EditError::SequenceCycle);
+        }
+    }
+    if matches!(new_source, ClipSource::Adjustment) && new.composition.is_some() {
+        return Err(EditError::CompositionOnAdjustment);
+    }
+
+    new.source = new_source;
+    if let Some(si) = new_source_in {
+        new.source_in = si;
+    }
+    set_clip_prop(p, id, track_id, new)
 }
 
 // ── Color labels & linking (14 §M-1/M-2, gaps #7/#8's data half) ───────────
@@ -1888,6 +1970,131 @@ mod tests {
         let (doc, ..) = fixture();
         let project = doc.timeline.as_ref().unwrap();
         assert!(clips_in_link_group(project, LinkGroupId::new()).is_empty());
+    }
+
+    // ── Replace edit + adjustment/text create (G-5 / G-7 / G-12) ──────────
+
+    #[test]
+    fn replace_clip_source_keeps_timing_effects_grade_and_is_undo_idempotent() {
+        use super::super::clip::{Ratio, SpeedKey, SpeedMap};
+        use super::super::effect_kind::EffectKind;
+
+        let (doc, seq_id, track_id, clip_id) = fixture();
+
+        // Seed the slot with an effect, a grade, and a keyframed speed ramp —
+        // exactly the "everything the editor built" that Replace must preserve.
+        let mut seeded = find_clip(&doc, seq_id, track_id, clip_id).clone();
+        seeded.effects.push(ClipEffect::new(EffectKind::Blur));
+        seeded.grade = Some(Grade::default());
+        seeded.speed = SpeedMap::Keyframed {
+            keys: vec![SpeedKey::new(Tick(0), Ratio::new(1, 2))],
+        };
+        let install =
+            set_clip_prop(doc.timeline.as_ref().unwrap(), seq_id, track_id, seeded).unwrap();
+        let mut seeded_doc = doc.clone();
+        Command::Timeline(install).apply(&mut seeded_doc);
+
+        let new_source = ClipSource::SolidColor {
+            color: crate::Color {
+                r: 0.2,
+                g: 0.4,
+                b: 0.6,
+                a: 1.0,
+            },
+        };
+        let project = seeded_doc.timeline.as_ref().unwrap();
+        let cmd = replace_clip_source(
+            project,
+            seq_id,
+            track_id,
+            clip_id,
+            new_source.clone(),
+            Some(Tick(500)),
+        )
+        .unwrap();
+        assert_undo_roundtrip(&seeded_doc, &cmd);
+
+        let mut replaced = seeded_doc.clone();
+        Command::Timeline(cmd).apply(&mut replaced);
+        let c = find_clip(&replaced, seq_id, track_id, clip_id);
+        assert_eq!(c.source, new_source, "source swapped");
+        assert_eq!(c.source_in, Tick(500), "source_in updated");
+        assert_eq!(c.start, Tick(0), "start preserved");
+        assert_eq!(c.duration, Tick(100), "duration preserved");
+        assert_eq!(c.effects.len(), 1, "effect stack preserved");
+        assert!(c.grade.is_some(), "grade preserved");
+        assert!(
+            matches!(c.speed, SpeedMap::Keyframed { .. }),
+            "speed ramp preserved"
+        );
+    }
+
+    #[test]
+    fn replace_clip_source_none_keeps_source_in_and_is_undo_idempotent() {
+        let (doc, seq_id, track_id, clip_id) = fixture();
+        let new_source = ClipSource::SolidColor {
+            color: crate::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd =
+            replace_clip_source(project, seq_id, track_id, clip_id, new_source, None).unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+    }
+
+    #[test]
+    fn add_adjustment_clip_inserts_and_is_undo_idempotent() {
+        let (doc, seq_id, track_id) = track_fixture(&[]);
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd = add_adjustment_clip(project, seq_id, track_id, Tick(200), Tick(150)).unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+
+        let mut applied = doc.clone();
+        Command::Timeline(cmd).apply(&mut applied);
+        let clips = &the_track(&applied, seq_id, track_id).clips;
+        assert_eq!(clips.len(), 1);
+        assert!(matches!(clips[0].source, ClipSource::Adjustment));
+        assert_eq!((clips[0].start.0, clips[0].duration.0), (200, 150));
+    }
+
+    #[test]
+    fn add_adjustment_clip_rejects_overlap() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100)]);
+        let project = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            add_adjustment_clip(project, seq_id, track_id, Tick(50), Tick(100)),
+            Err(EditError::Overlap)
+        );
+    }
+
+    #[test]
+    fn add_text_clip_inserts_titled_and_is_undo_idempotent() {
+        use super::super::clip::TextClipContent;
+        let (doc, seq_id, track_id) = track_fixture(&[]);
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd = add_text_clip(
+            project,
+            seq_id,
+            track_id,
+            Tick(0),
+            Tick(90),
+            TextClipContent::new("Hello"),
+        )
+        .unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+
+        let mut applied = doc.clone();
+        Command::Timeline(cmd).apply(&mut applied);
+        let clips = &the_track(&applied, seq_id, track_id).clips;
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].name, "Hello", "name defaults to the text");
+        assert!(
+            matches!(&clips[0].source, ClipSource::Text { content } if content.text == "Hello")
+        );
     }
 
     // ── Auto-reframe ─────────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 
 use super::anim::{AnimProps, PropSet};
 use super::audio::ClipAudio;
+use super::captions::CaptionStyle;
 use super::effect_kind::{EffectKind, EffectParams};
 use super::grade::Grade;
 use super::ids::{AssetId, ClipId, GraphId, SequenceId};
@@ -151,6 +152,13 @@ pub enum ClipSource {
     },
     /// Affects everything below (effects/grade apply to the composite).
     Adjustment,
+    /// A title / text / graphics clip living on a video track (G-12). Carries
+    /// styled text the engine renders through its text path (`TextGen`); no
+    /// render logic lives here. Reuses the caption [`CaptionStyle`] cascade so
+    /// titles and captions share one styling vocabulary.
+    Text {
+        content: TextClipContent,
+    },
 }
 
 impl ClipSource {
@@ -159,6 +167,28 @@ impl ClipSource {
         match self {
             ClipSource::Asset { asset } | ClipSource::Vector { asset } => Some(*asset),
             _ => None,
+        }
+    }
+}
+
+/// Styled text carried by a [`ClipSource::Text`] title / graphics clip (G-12).
+/// Reuses the caption [`CaptionStyle`] type for font / size / fill / stroke /
+/// background / position so titles and captions share one styling vocabulary;
+/// the engine renders it (no render logic here). Serde-additive: `style`
+/// defaults so older/hand-written text clips omitting it still load.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextClipContent {
+    pub text: String,
+    #[serde(default)]
+    pub style: CaptionStyle,
+}
+
+impl TextClipContent {
+    /// Text with the default caption style.
+    pub fn new(text: impl Into<String>) -> Self {
+        TextClipContent {
+            text: text.into(),
+            style: CaptionStyle::default(),
         }
     }
 }
@@ -185,12 +215,35 @@ impl Ratio {
     }
 }
 
-/// Clip speed. Keyframed speed ramps are a post-v1 non-goal; the enum leaves
-/// room for them.
+/// One control point in a keyframed speed ramp (G-11): at clip-relative
+/// timeline tick `at`, the exact-rational playback speed `ratio` takes effect.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpeedKey {
+    pub at: Tick,
+    pub ratio: Ratio,
+}
+
+impl SpeedKey {
+    #[inline]
+    pub fn new(at: Tick, ratio: Ratio) -> Self {
+        SpeedKey { at, ratio }
+    }
+}
+
+/// Clip speed. `Constant` is the default and common case; `Keyframed` is a
+/// variable-speed ramp (G-11). Serde-additive: the internal `speed` tag keeps
+/// existing `constant` documents byte-identical, and `keyframed` is a new tag.
+///
+/// Ramp interpolation is currently piecewise-constant — each key's `ratio`
+/// holds until the next key, and the first/last key's ratio holds before/after
+/// the ramp — which integrates to exact integer source ticks. Eased (bezier)
+/// segments are a later refinement layered on this data (the on-clip rubber
+/// band is a GUI lane); the data shape here already carries the keys.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "speed", rename_all = "snake_case")]
 pub enum SpeedMap {
     Constant(Ratio),
+    Keyframed { keys: Vec<SpeedKey> },
 }
 
 impl Default for SpeedMap {
@@ -200,14 +253,67 @@ impl Default for SpeedMap {
 }
 
 impl SpeedMap {
-    /// Source time for a clip-relative time delta `dt` (01 §5.1: exact rational
-    /// arithmetic; `source = source_in + dt * speed`). Returns the source-time
-    /// delta only (caller adds `source_in`).
-    pub fn source_delta(self, dt: Tick) -> Tick {
+    /// Source-time delta consumed over the clip-relative interval `[0, dt]`
+    /// (01 §5.1: exact rational arithmetic; `source = source_in + dt * speed`).
+    /// Returns the source-time delta only (the caller adds `source_in`).
+    ///
+    /// - `Constant`: exact rational scale of `dt`.
+    /// - `Keyframed`: the piecewise-constant speed integrated segment-by-segment
+    ///   (∫₀ᵈᵗ speed). Handles negative `dt` (reverse trim) by symmetry and an
+    ///   empty ramp as identity (1×). Exact integer arithmetic (i128 accumulate).
+    pub fn source_delta(&self, dt: Tick) -> Tick {
         match self {
-            SpeedMap::Constant(r) => Tick(dt.0 * r.num as i64 / r.den.max(1) as i64),
+            SpeedMap::Constant(r) => Tick(scale_ticks(dt.0, *r)),
+            SpeedMap::Keyframed { keys } => Tick(integrate_ramp(keys, dt.0)),
         }
     }
+}
+
+/// `len * ratio`, exact (multiply-before-divide in i128, saturating back to i64).
+#[inline]
+fn scale_ticks(len: i64, r: Ratio) -> i64 {
+    ((len as i128 * r.num as i128) / r.den.max(1) as i128) as i64
+}
+
+/// Integrate a piecewise-constant speed ramp over `[0, target]` (or `[target, 0]`
+/// when `target < 0`, negating the result). Each key's ratio holds until the
+/// next; the first/last key's ratio holds before/after the ramp. An empty ramp
+/// is identity (1×). Keys need not be pre-sorted.
+fn integrate_ramp(keys: &[SpeedKey], target: i64) -> i64 {
+    if keys.is_empty() {
+        return target;
+    }
+    if target == 0 {
+        return 0;
+    }
+    let mut sorted = keys.to_vec();
+    sorted.sort_by_key(|k| k.at.0);
+    let (lo, hi) = if target >= 0 {
+        (0, target)
+    } else {
+        (target, 0)
+    };
+    let n = sorted.len();
+    let mut acc: i128 = 0;
+    for i in 0..n {
+        // Segment `i` spans `[seg_start, seg_end)` at `sorted[i].ratio`.
+        let seg_start = if i == 0 { i64::MIN } else { sorted[i].at.0 };
+        let seg_end = if i + 1 < n {
+            sorted[i + 1].at.0
+        } else {
+            i64::MAX
+        };
+        let a = seg_start.max(lo);
+        let b = seg_end.min(hi);
+        if b > a {
+            let r = sorted[i].ratio;
+            acc += (b - a) as i128 * r.num as i128 / r.den.max(1) as i128;
+        }
+    }
+    if target < 0 {
+        acc = -acc;
+    }
+    acc as i64
 }
 
 /// Animatable clip transform (01 §5/§6). Field names match the `prop_registry`
@@ -366,6 +472,131 @@ mod tests {
         // Reverse.
         let r = SpeedMap::Constant(Ratio::new(-1, 1));
         assert_eq!(r.source_delta(Tick(100)), Tick(-100));
+    }
+
+    // ── Speed ramps (G-11) ───────────────────────────────────────────────
+
+    #[test]
+    fn speed_map_default_is_constant_one() {
+        assert_eq!(SpeedMap::default(), SpeedMap::Constant(Ratio::ONE));
+    }
+
+    #[test]
+    fn speed_map_constant_serde_tag_unchanged() {
+        // Additive discipline: `Constant` still serializes under the `constant`
+        // tag with the flattened ratio and no ramp field, so pre-existing saved
+        // clips load byte-shape-identically.
+        let j = serde_json::to_string(&SpeedMap::Constant(Ratio::new(2, 1))).unwrap();
+        assert!(j.contains("\"speed\":\"constant\""));
+        assert!(!j.contains("keys"));
+        let back: SpeedMap = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, SpeedMap::Constant(Ratio::new(2, 1)));
+    }
+
+    #[test]
+    fn speed_map_keyframed_serde_roundtrip() {
+        let ramp = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::new(Tick(0), Ratio::new(1, 2)),
+                SpeedKey::new(Tick(50), Ratio::new(2, 1)),
+                SpeedKey::new(Tick(120), Ratio::new(-1, 1)),
+            ],
+        };
+        let j = serde_json::to_string(&ramp).unwrap();
+        assert!(j.contains("\"speed\":\"keyframed\""));
+        let back: SpeedMap = serde_json::from_str(&j).unwrap();
+        assert_eq!(ramp, back);
+    }
+
+    #[test]
+    fn speed_ramp_source_time_mapping() {
+        // A 2× ramp doubles the source advance (100 timeline → 200 source),
+        // matching the constant case; a ½× ramp halves it (100 → 50).
+        let fast = SpeedMap::Keyframed {
+            keys: vec![SpeedKey::new(Tick(0), Ratio::new(2, 1))],
+        };
+        assert_eq!(fast.source_delta(Tick(100)), Tick(200));
+        let slow = SpeedMap::Keyframed {
+            keys: vec![SpeedKey::new(Tick(0), Ratio::new(1, 2))],
+        };
+        assert_eq!(slow.source_delta(Tick(100)), Tick(50));
+
+        // A single-key ramp is exactly equivalent to the matching constant.
+        for dt in [Tick(0), Tick(37), Tick(100), Tick(-100)] {
+            assert_eq!(
+                fast.source_delta(dt),
+                SpeedMap::Constant(Ratio::new(2, 1)).source_delta(dt)
+            );
+        }
+
+        // A two-segment ramp integrates piecewise: 1× over [0,50) = 50 source,
+        // then 2× over [50,100) = 100 source ⇒ 150 total; 50 at the split.
+        let ramp = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::new(Tick(0), Ratio::new(1, 1)),
+                SpeedKey::new(Tick(50), Ratio::new(2, 1)),
+            ],
+        };
+        assert_eq!(ramp.source_delta(Tick(50)), Tick(50));
+        assert_eq!(ramp.source_delta(Tick(100)), Tick(150));
+
+        // Before the first key the first key's ratio holds (reverse scrub).
+        assert_eq!(ramp.source_delta(Tick(-20)), Tick(-20));
+    }
+
+    #[test]
+    fn speed_ramp_empty_is_identity() {
+        let empty = SpeedMap::Keyframed { keys: vec![] };
+        assert_eq!(empty.source_delta(Tick(100)), Tick(100));
+    }
+
+    #[test]
+    fn speed_ramp_integrates_regardless_of_key_order() {
+        let sorted = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::new(Tick(0), Ratio::new(1, 1)),
+                SpeedKey::new(Tick(50), Ratio::new(2, 1)),
+            ],
+        };
+        let shuffled = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::new(Tick(50), Ratio::new(2, 1)),
+                SpeedKey::new(Tick(0), Ratio::new(1, 1)),
+            ],
+        };
+        assert_eq!(
+            sorted.source_delta(Tick(100)),
+            shuffled.source_delta(Tick(100))
+        );
+    }
+
+    // ── Text clips (G-12) ────────────────────────────────────────────────
+
+    #[test]
+    fn text_clip_content_new_uses_default_style() {
+        let c = TextClipContent::new("Title");
+        assert_eq!(c.text, "Title");
+        assert_eq!(c.style, CaptionStyle::default());
+    }
+
+    #[test]
+    fn clip_source_text_serde_roundtrip() {
+        let mut content = TextClipContent::new("Chapter One");
+        content.style.font_size = 96.0;
+        let clip = Clip::new(
+            ClipSource::Text {
+                content: content.clone(),
+            },
+            Tick(0),
+            Tick(300),
+        );
+        let j = serde_json::to_string(&clip).unwrap();
+        assert!(j.contains("\"source\":\"text\""));
+        let back: Clip = serde_json::from_str(&j).unwrap();
+        assert_eq!(clip, back);
+        assert!(
+            matches!(back.source, ClipSource::Text { content } if content.text == "Chapter One")
+        );
     }
 
     #[test]
