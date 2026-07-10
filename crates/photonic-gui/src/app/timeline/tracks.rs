@@ -6,8 +6,8 @@
 
 use super::ops_bridge;
 use photonic_core::document::Document;
-use photonic_core::history::CommandHistory;
-use photonic_core::timeline::{Sequence, SequenceId, TrackId, TrackKind};
+use photonic_core::history::{Command, CommandHistory};
+use photonic_core::timeline::{ops, Sequence, SequenceId, TrackId, TrackKind, TrackSettings};
 
 /// A laid-out track row (video lanes first, then audio), shared by the header
 /// column and the clip-lane area so the two stay vertically aligned.
@@ -16,6 +16,9 @@ pub(crate) struct TrackRow {
     pub id: TrackId,
     pub kind: TrackKind,
     pub height: f32,
+    /// Locked tracks reject all clip edits (14-nle-parity QW-2); the clip-lane
+    /// hit-testing and painting both key off this.
+    pub locked: bool,
     /// Index within its own lane group (for reorder bounds).
     pub index_in_kind: usize,
     pub count_in_kind: usize,
@@ -30,6 +33,7 @@ pub(crate) fn track_rows(seq: &Sequence) -> Vec<TrackRow> {
             id: t.id,
             kind: TrackKind::Video,
             height: t.height_px,
+            locked: t.locked,
             index_in_kind: i,
             count_in_kind: vc,
         });
@@ -40,6 +44,7 @@ pub(crate) fn track_rows(seq: &Sequence) -> Vec<TrackRow> {
             id: t.id,
             kind: TrackKind::Audio,
             height: t.height_px,
+            locked: t.locked,
             index_in_kind: i,
             count_in_kind: ac,
         });
@@ -62,7 +67,7 @@ pub(crate) fn draw_header(
     seq_id: SequenceId,
     row: TrackRow,
 ) {
-    let (name, enabled, locked) = {
+    let (name, enabled, locked, solo) = {
         let Some(t) = doc
             .timeline
             .as_ref()
@@ -71,7 +76,8 @@ pub(crate) fn draw_header(
         else {
             return;
         };
-        (t.name.clone(), t.enabled, t.locked)
+        let solo = t.audio.as_ref().is_some_and(|a| a.solo);
+        (t.name.clone(), t.enabled, t.locked, solo)
     };
 
     let painter = ui.painter_at(rect);
@@ -107,11 +113,24 @@ pub(crate) fn draw_header(
         ops_bridge::toggle_enabled(doc, history, seq_id, row.id);
     }
 
+    // Solo toggle (audio tracks only — 14-nle-parity QW-6). Sits next to
+    // mute, matching the M/S pairing every DAW/NLE audio header uses; video
+    // tracks have no solo concept and keep the original 2-button layout.
+    let mut next_x = enable_rect.right() + 2.0;
+    if row.kind == TrackKind::Audio {
+        let solo_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
+        if ui
+            .put(solo_rect, egui::SelectableLabel::new(solo, "S"))
+            .on_hover_text("Solo (solo-safe)")
+            .clicked()
+        {
+            toggle_solo(doc, history, seq_id, row.id);
+        }
+        next_x = solo_rect.right() + 2.0;
+    }
+
     // Lock toggle.
-    let lock_rect = egui::Rect::from_min_size(
-        egui::pos2(enable_rect.right() + 2.0, top),
-        egui::vec2(btn, btn),
-    );
+    let lock_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
     if ui
         .put(
             lock_rect,
@@ -240,5 +259,39 @@ pub(crate) fn draw_add_controls(
         .clicked()
     {
         ops_bridge::add_track(doc, history, seq_id, TrackKind::Audio);
+    }
+}
+
+/// Flip an audio track's `TrackAudio::solo` flag (14-nle-parity QW-6). The
+/// solo-safe *mixing* resolution already lives in the audio mixer drawer
+/// (`panels/video/audio_mixer.rs::resolve_audible`); this control just
+/// exposes the same `TrackAudio.solo` bit from the timeline header so both
+/// surfaces read/write one piece of state.
+///
+/// Deliberately mirrors `ops_bridge::set_track_settings`'s
+/// snapshot→edit→`ops::set_track_prop`→`history.execute_discrete` pattern
+/// rather than calling into `ops_bridge.rs` — this story's territory is
+/// `{mod.rs, clips.rs, tracks.rs, interact.rs}` only, and `set_track_settings`
+/// is private to `ops_bridge.rs`. No-op if the track has no `TrackAudio`
+/// (i.e. isn't an audio track).
+fn toggle_solo(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    track: TrackId,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Some(t) = p.sequences.get(&seq_id).and_then(|s| s.track(track)) else {
+        return;
+    };
+    let mut settings = TrackSettings::of(t);
+    let Some(audio) = settings.audio.as_mut() else {
+        return;
+    };
+    audio.solo = !audio.solo;
+    if let Ok(cmd) = ops::set_track_prop(p, seq_id, track, settings) {
+        history.execute_discrete(Command::Timeline(cmd), doc);
     }
 }

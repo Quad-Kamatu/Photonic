@@ -59,6 +59,41 @@ pub(crate) struct Marquee {
     pub additive: bool,
 }
 
+/// One painted clip rect offered up for pointer hit-testing, tagged with its
+/// track and that track's lock state (04 §2.3 / 14-nle-parity QW-2).
+#[derive(Clone, Copy)]
+pub(crate) struct HitCandidate {
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub rect: egui::Rect,
+    pub locked: bool,
+}
+
+/// Hit-test a pointer position against painted clip candidates, honoring
+/// track lock: a candidate whose track is locked is never a hit. Selection,
+/// drag-start, and the context-menu target all resolve through this one
+/// function, so a locked track rejects every clip edit while its clips stay
+/// fully visible/paintable — only interaction is gated here, not painting
+/// (`clips.rs::paint_lane` draws locked lanes unconditionally, plus a
+/// diagonal-hatch cue).
+pub(crate) fn hit_at(
+    pos: egui::Pos2,
+    edge: f32,
+    candidates: &[HitCandidate],
+) -> Option<(TrackId, ClipId, egui::Rect, ClipZone)> {
+    for h in candidates {
+        if h.locked {
+            continue;
+        }
+        if pos.y >= h.rect.top() && pos.y <= h.rect.bottom() {
+            if let Some(z) = hit_zone(h.rect.left(), h.rect.right(), pos.x, edge) {
+                return Some((h.track, h.clip, h.rect, z));
+            }
+        }
+    }
+    None
+}
+
 /// Hit-test a pointer x against a clip rect `[x0, x1]`. Returns the zone, or
 /// `None` if the pointer is outside the rect. Clips narrower than `2*edge` split
 /// at the midpoint so a tiny clip is still trimmable from both sides.
@@ -254,6 +289,68 @@ mod tests {
             Some(ClipZone::RightEdge)
         );
         assert!(hit_zone(100.0, 108.0, 104.0, 6.0).is_some());
+    }
+
+    #[test]
+    fn hit_at_locked_track_rejects_the_edit_intent() {
+        let track = TrackId::new();
+        let clip = ClipId::new();
+        let rect = egui::Rect::from_min_max(egui::pos2(100.0, 10.0), egui::pos2(200.0, 40.0));
+        let pos = egui::pos2(150.0, 25.0); // dead center of the rect.
+
+        // Locked track: a pointer squarely over the clip is never a hit — no
+        // selection, no drag-start, no context-menu target (14-nle-parity
+        // QW-2 — a locked track rejects every clip edit intent).
+        let locked = [HitCandidate {
+            track,
+            clip,
+            rect,
+            locked: true,
+        }];
+        assert_eq!(hit_at(pos, 6.0, &locked), None);
+
+        // Identical geometry, unlocked, resolves normally — proves the miss
+        // above is the lock guard, not a bug in the rect math.
+        let unlocked = [HitCandidate {
+            track,
+            clip,
+            rect,
+            locked: false,
+        }];
+        assert_eq!(
+            hit_at(pos, 6.0, &unlocked),
+            Some((track, clip, rect, ClipZone::Body))
+        );
+    }
+
+    #[test]
+    fn hit_at_falls_through_a_locked_candidate_to_an_unlocked_one() {
+        // Two overlapping candidates at the same point (e.g. adjacent lanes'
+        // edge case) — the locked one must not shadow a legitimately
+        // unlocked hit later in the list.
+        let locked_track = TrackId::new();
+        let locked_clip = ClipId::new();
+        let unlocked_track = TrackId::new();
+        let unlocked_clip = ClipId::new();
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 30.0));
+        let candidates = [
+            HitCandidate {
+                track: locked_track,
+                clip: locked_clip,
+                rect,
+                locked: true,
+            },
+            HitCandidate {
+                track: unlocked_track,
+                clip: unlocked_clip,
+                rect,
+                locked: false,
+            },
+        ];
+        assert_eq!(
+            hit_at(egui::pos2(50.0, 15.0), 6.0, &candidates),
+            Some((unlocked_track, unlocked_clip, rect, ClipZone::Body))
+        );
     }
 
     #[test]

@@ -30,13 +30,6 @@ const TOOLBAR_H: f32 = 24.0;
 const DRAG_ID: &str = "timeline_drag_state";
 const MARQUEE_ID: &str = "timeline_marquee";
 
-/// A clip rect painted this frame, tagged with its track for hit-testing.
-struct HitClip {
-    track: TrackId,
-    clip: ClipId,
-    rect: egui::Rect,
-}
-
 impl PhotonicApp {
     /// The bottom timeline panel's entry point (04 §1.1/§2). Registered by
     /// `app/mod.rs` as a `TopBottomPanel::bottom("timeline")` gated on
@@ -122,7 +115,7 @@ impl PhotonicApp {
         view.track_scroll_px = view.track_scroll_px.clamp(0.0, max_scroll);
 
         let colors = lane_colors(ui);
-        let mut hits: Vec<HitClip> = Vec::new();
+        let mut hits: Vec<interact::HitCandidate> = Vec::new();
         {
             // Clip the painter to the lanes rect so scrolled rows don't overflow.
             let lane_painter = ui.painter_at(lanes_rect);
@@ -177,10 +170,11 @@ impl PhotonicApp {
                                 colors.selected_stroke,
                             );
                         }
-                        hits.push(HitClip {
+                        hits.push(interact::HitCandidate {
                             track: row.id,
                             clip: pc.clip,
                             rect: pc.rect,
+                            locked: row.locked,
                         });
                     }
                 }
@@ -257,25 +251,33 @@ impl PhotonicApp {
                 }
                 let at = Tick(at);
                 // y → row under the cursor (same walk as the paint loop).
+                // Locked tracks reject drops too (14-nle-parity QW-2
+                // watch-out): `target` stays `None` over a locked lane, so no
+                // caret shows and the release below is a no-op there.
                 let mut yy = lanes_rect.top() - view.track_scroll_px;
                 let mut target: Option<TrackId> = None;
                 for row in &rows {
                     let (top, bot) = (yy, yy + row.height);
                     yy = bot;
                     if pos.y >= top && pos.y < bot {
-                        target = Some(row.id);
+                        if !row.locked {
+                            target = Some(row.id);
+                        }
                         break;
                     }
                 }
-                // Hover caret.
-                let x = view.tick_to_x(at, lane_left);
-                ui.painter_at(lanes_rect).line_segment(
-                    [
-                        egui::pos2(x, lanes_rect.top()),
-                        egui::pos2(x, lanes_rect.bottom()),
-                    ],
-                    egui::Stroke::new(2.0, colors.selected_stroke.gamma_multiply(0.8)),
-                );
+                // Hover caret — suppressed over a locked lane so the absent
+                // caret itself signals "can't drop here".
+                if target.is_some() {
+                    let x = view.tick_to_x(at, lane_left);
+                    ui.painter_at(lanes_rect).line_segment(
+                        [
+                            egui::pos2(x, lanes_rect.top()),
+                            egui::pos2(x, lanes_rect.bottom()),
+                        ],
+                        egui::Stroke::new(2.0, colors.selected_stroke.gamma_multiply(0.8)),
+                    );
+                }
                 if ui.input(|i| i.pointer.any_released()) {
                     egui::DragAndDrop::clear_payload(ui.ctx());
                     if let Some(track) = target {
@@ -410,6 +412,12 @@ impl PhotonicApp {
         let mut targets: Vec<(TrackId, ClipId)> = Vec::new();
         if let Some(s) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) {
             for t in s.tracks() {
+                // Locked tracks reject the split too (14-nle-parity QW-2) —
+                // this is a keyboard/command path, not `hit_at`-gated, so it
+                // needs its own guard.
+                if t.locked {
+                    continue;
+                }
                 for c in &t.clips {
                     let inside = at > c.start && at < c.end();
                     let hit = self.timeline_selection.contains(&c.id)
@@ -614,6 +622,7 @@ fn lane_colors(ui: &egui::Ui) -> clips::LaneColors {
         label: v.text_color(),
         transition: v.warn_fg_color,
         offline: v.error_fg_color,
+        locked_hatch: v.weak_text_color().gamma_multiply(0.5),
     }
 }
 
@@ -634,7 +643,7 @@ fn self_interact(
     frame_rate: FrameRate,
     lanes_rect: egui::Rect,
     rows: &[tracks::TrackRow],
-    hits: &[HitClip],
+    hits: &[interact::HitCandidate],
 ) {
     let resp = ui.interact(
         lanes_rect,
@@ -644,18 +653,12 @@ fn self_interact(
     let drag_id = egui::Id::new(DRAG_ID);
     let marquee_id = egui::Id::new(MARQUEE_ID);
 
-    // Which clip/zone is under a given screen pos.
+    // Which clip/zone is under a given screen pos. Locked-track candidates
+    // are never a hit (14-nle-parity QW-2) — see `interact::hit_at`. This one
+    // function backs selection, drag-start, and the context-menu target, so
+    // the lock guard applies uniformly to all three.
     let hit_at = |pos: egui::Pos2| -> Option<(TrackId, ClipId, egui::Rect, interact::ClipZone)> {
-        for h in hits {
-            if pos.y >= h.rect.top() && pos.y <= h.rect.bottom() {
-                if let Some(z) =
-                    interact::hit_zone(h.rect.left(), h.rect.right(), pos.x, EDGE_ZONE_PX)
-                {
-                    return Some((h.track, h.clip, h.rect, z));
-                }
-            }
-        }
-        None
+        interact::hit_at(pos, EDGE_ZONE_PX, hits)
     };
 
     // ── Selection on click ──────────────────────────────────────────────────
@@ -734,9 +737,11 @@ fn self_interact(
                     egui::Color32::TRANSPARENT,
                     egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
                 );
+                // Locked-track clips are excluded from marquee selection too
+                // (14-nle-parity QW-2 — fully inert, not just edit-blocked).
                 interact::apply_marquee(
                     rect,
-                    hits.iter().map(|h| (h.rect, h.clip)),
+                    hits.iter().filter(|h| !h.locked).map(|h| (h.rect, h.clip)),
                     m.additive,
                     selection,
                 );

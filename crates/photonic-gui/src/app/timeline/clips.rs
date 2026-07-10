@@ -19,6 +19,10 @@ pub(crate) struct LaneColors {
     pub label: egui::Color32,
     pub transition: egui::Color32,
     pub offline: egui::Color32,
+    /// Diagonal-hatch overlay stroke for a locked track's lane (14-nle-parity
+    /// QW-2) — a shape-only cue (13 §1.6), same convention as the offline
+    /// per-clip stripe, so lock state reads without relying on color alone.
+    pub locked_hatch: egui::Color32,
 }
 
 /// A painted clip's screen rect, returned for hit-testing in `interact.rs`.
@@ -149,6 +153,15 @@ pub(crate) fn paint_lane(
         }
     }
 
+    // Locked-track cue (14-nle-parity QW-2): a diagonal-hatch overlay across
+    // the whole lane, drawn last so it reads over clips/labels and empty
+    // space alike — lock state is visible independent of what's under it.
+    // Interaction is gated separately (`interact.rs::hit_at`); this is
+    // paint-only, clips stay fully visible underneath.
+    if track.locked {
+        paint_locked_hatch(painter, lane_rect, colors.locked_hatch);
+    }
+
     painted
 }
 
@@ -169,6 +182,28 @@ fn edge_triangle(rect: egui::Rect, inbound: bool, color: egui::Color32) -> egui:
         ]
     };
     egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE)
+}
+
+/// Diagonal-hatch overlay for a locked track's whole lane (14-nle-parity
+/// QW-2). Draws full-height diagonal strokes clipped to `rect` — same stripe
+/// geometry as the per-clip offline placeholder, just spanning the lane
+/// instead of one clip.
+fn paint_locked_hatch(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let step = 10.0;
+    let clipped = painter.with_clip_rect(rect);
+    let mut shapes = Vec::new();
+    let mut x = rect.left() - rect.height();
+    while x < rect.right() {
+        shapes.push(egui::Shape::line_segment(
+            [
+                egui::pos2(x, rect.bottom()),
+                egui::pos2(x + rect.height(), rect.top()),
+            ],
+            egui::Stroke::new(1.0, color),
+        ));
+        x += step;
+    }
+    clipped.extend(shapes);
 }
 
 fn clip_label(track: &Track, id: ClipId) -> Option<String> {
