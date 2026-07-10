@@ -37,8 +37,8 @@ use photonic_core::history::Command;
 use photonic_core::timeline::{
     ops, AnimTarget, AssetId, AssetKind, Clip, ClipEffect, ClipId, ClipSource, ClipTiming,
     EditError, FormatOp, FrameRate, Keyframe, Marker, MarkerId, PropPath, ProxyRef, ProxyStatus,
-    Ratio, SequenceId, SpeedMap, Tick, TimelineCmd, TimelineProject, Track, TrackId, TrackSettings,
-    Transition, TICKS_PER_SECOND,
+    Ratio, Sequence, SequenceId, SpeedMap, Tick, TimelineCmd, TimelineProject, Track, TrackId,
+    TrackSettings, Transition, TICKS_PER_SECOND,
 };
 use photonic_core::Color;
 use photonic_video::export::convert as export_convert;
@@ -62,6 +62,12 @@ use photonic_core::timeline::{
     LoudnessTarget, MasterBusParams, NodePos, OutPort, StyleTarget, TrackAudio, TrackAudioParams,
 };
 use photonic_video::captions;
+
+// G-11/G-12 (17-nle-parity-round2.md) types: `SpeedKey`/`TextClipContent` live
+// in the `clip` submodule but aren't in the curated `timeline::{..}`
+// re-export yet (core-timeline's territory, not this story's) — reached via
+// the fully-qualified submodule path instead.
+use photonic_core::timeline::clip::{SpeedKey, TextClipContent};
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -1315,6 +1321,393 @@ pub async fn extract_edit(state: &AppState, args: ExtractEditArgs) -> ToolResult
     }
 }
 
+// ─── NLE parity round-2 (17-nle-parity-round2.md, G21 CAP-019 MCP parity) ──
+//
+// `add_edit_all_tracks`/`close_gap` mirror `photonic_gui::app::timeline::
+// ops_bridge`'s `split_all_tracks`/`close_gap_plan`/`close_gap_changes`/
+// `close_gaps_at_playhead` field-for-field. MCP has no dependency on the GUI
+// crate (see the link-group note above `expand_link_group_move`) so this is a
+// parallel implementation over the same core primitives (`ops::split_clip`,
+// `TimelineCmd::RippleEdit` built directly — the same pattern `ops::
+// ripple_trim`/`extract_edit` already use internally).
+
+/// Every unlocked track's clip the tick `at` is strictly inside (`start < at
+/// < end`), in track order — the split-worthy targets for Add Edit to All
+/// Tracks (G-1). An edge/gap yields none for that track.
+fn split_targets(seq: &Sequence, at: Tick) -> Vec<(TrackId, ClipId)> {
+    let mut out = Vec::new();
+    for t in seq.tracks() {
+        if t.locked {
+            continue;
+        }
+        for c in &t.clips {
+            if c.start < at && at < c.end() {
+                out.push((t.id, c.id));
+            }
+        }
+    }
+    out
+}
+
+/// Plan closing the gap that contains `at` among a track's sorted `clips`:
+/// `(first_shifted_start, gap_width)` — every clip with `start >=
+/// first_shifted_start` shifts LEFT by `gap_width`. `None` when `at` is
+/// inside a clip, in trailing empty space, or on a flush boundary (no gap).
+fn close_gap_plan(clips: &[Clip], at: Tick) -> Option<(Tick, Tick)> {
+    let i = clips.iter().position(|c| c.start > at)?;
+    let prev_end = if i == 0 {
+        Tick::ZERO
+    } else {
+        clips[i - 1].end()
+    };
+    if at < prev_end {
+        return None; // inside the previous clip — not a gap
+    }
+    let gap = clips[i].start - prev_end;
+    if gap.0 <= 0 {
+        return None; // clips are already flush
+    }
+    Some((clips[i].start, gap))
+}
+
+/// The `RippleEdit` change list that closes the gap containing `at` on
+/// `track`. Empty when there is no gap there.
+fn close_gap_changes(track: &Track, at: Tick) -> Vec<(ClipId, ClipTiming, ClipTiming)> {
+    let Some((from, gap)) = close_gap_plan(&track.clips, at) else {
+        return Vec::new();
+    };
+    track
+        .clips
+        .iter()
+        .filter(|c| c.start >= from)
+        .map(|c| {
+            let old = ClipTiming::of(c);
+            (
+                c.id,
+                old,
+                ClipTiming {
+                    start: c.start - gap,
+                    ..old
+                },
+            )
+        })
+        .collect()
+}
+
+/// **Replace With Clip** (G-5, Premiere): swap `clip_id`'s source in place —
+/// `start`/`duration`/effects/transitions/grade untouched
+/// (`ops::replace_clip_source`, a `set_clip_prop` whole-clip diff, one undo
+/// step). A shorter new source is held to the slot (the engine samples from
+/// `new_source_in` for the slot's length).
+pub async fn replace_clip_source(state: &AppState, args: ReplaceClipSourceArgs) -> ToolResult {
+    tracing::debug!("tool: replace_clip_source {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let new_source = match to_clip_source(project, args.new_source) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let has_source_in = args.new_source_in_ticks.is_some()
+        || args.new_source_in_tc.is_some()
+        || args.new_source_in_seconds.is_some();
+    let new_source_in = if has_source_in {
+        match resolve_tick(
+            args.new_source_in_ticks,
+            args.new_source_in_tc.as_deref(),
+            args.new_source_in_seconds,
+            Some(fr),
+        ) {
+            Ok(t) => Some(t),
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
+    match ops::replace_clip_source(
+        project,
+        seq_id,
+        track_id,
+        args.clip_id,
+        new_source,
+        new_source_in,
+    ) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Replaced clip source").with_data(json!({ "clip_id": args.clip_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// **Add Edit to All Tracks** (G-1, Premiere Ctrl+Shift+K): split every
+/// unlocked track's clip under `at` in one undo step. Mirrors the GUI's
+/// forgiving fan-out — a track whose split fails (shouldn't happen for a
+/// `split_targets` candidate) is silently skipped rather than aborting the
+/// whole batch.
+pub async fn add_edit_all_tracks(state: &AppState, args: AddEditAllTracksArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: add_edit_all_tracks on sequence {}",
+        args.sequence_id
+    );
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let targets = split_targets(seq, at);
+    if targets.is_empty() {
+        return ToolResult::text("No clips under the given tick — nothing to split")
+            .with_data(json!({ "split_count": 0, "new_clip_ids": [] }));
+    }
+    let mut cmds = Vec::new();
+    let mut new_clip_ids = Vec::new();
+    for (track, clip) in targets {
+        if let Ok(cmd) = ops::split_clip(project, args.sequence_id, track, clip, at) {
+            if let TimelineCmd::SplitClip { new_clip_id, .. } = &cmd {
+                new_clip_ids.push(*new_clip_id);
+            }
+            cmds.push(cmd);
+        }
+    }
+    let n = cmds.len();
+    if n == 0 {
+        return ToolResult::text("No clips under the given tick — nothing to split")
+            .with_data(json!({ "split_count": 0, "new_clip_ids": [] }));
+    }
+    history.execute_discrete(batch_or_single(cmds), &mut doc);
+    ToolResult::text(format!("Split {n} clip(s) across all tracks"))
+        .with_data(json!({ "split_count": n, "new_clip_ids": new_clip_ids }))
+}
+
+/// **Close Gap** (G-1): close the gap containing `at` — on just `track_id`
+/// when supplied, or on every unlocked track in the sequence when omitted —
+/// as ONE undo step either way. A no-op (no history entry, `tracks_changed:
+/// 0`) when there is nothing to close.
+pub async fn close_gap(state: &AppState, args: CloseGapArgs) -> ToolResult {
+    tracing::debug!("tool: close_gap on sequence {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+
+    if let Some(track_id) = args.track_id {
+        let Some(t) = seq.track(track_id) else {
+            return ToolResult::error(format!("track {track_id} not found"));
+        };
+        if t.locked {
+            return ToolResult::text("Track is locked — nothing to close")
+                .with_data(json!({ "tracks_changed": 0 }));
+        }
+        let changes = close_gap_changes(t, at);
+        if changes.is_empty() {
+            return ToolResult::text("No gap at the given tick — nothing to close")
+                .with_data(json!({ "tracks_changed": 0 }));
+        }
+        history.execute_discrete(
+            Command::Timeline(TimelineCmd::RippleEdit {
+                seq: args.sequence_id,
+                track: track_id,
+                changes,
+            }),
+            &mut doc,
+        );
+        ToolResult::text("Closed gap").with_data(json!({ "tracks_changed": 1 }))
+    } else {
+        let mut cmds = Vec::new();
+        for t in seq.tracks() {
+            if t.locked {
+                continue;
+            }
+            let changes = close_gap_changes(t, at);
+            if !changes.is_empty() {
+                cmds.push(TimelineCmd::RippleEdit {
+                    seq: args.sequence_id,
+                    track: t.id,
+                    changes,
+                });
+            }
+        }
+        if cmds.is_empty() {
+            return ToolResult::text("No gap at the given tick on any unlocked track — nothing to close")
+                .with_data(json!({ "tracks_changed": 0 }));
+        }
+        let n = cmds.len();
+        history.execute_discrete(batch_or_single(cmds), &mut doc);
+        ToolResult::text(format!("Closed gap on {n} track(s)"))
+            .with_data(json!({ "tracks_changed": n }))
+    }
+}
+
+/// **Match Frame** (G-3, Premiere F): from `clip_id`, compute the source-media
+/// tick that lines up with timeline position `at` (`source_in +
+/// speed.source_delta(at - clip.start)`, exact-rational — mirrors the GUI's
+/// `timeline_match_frame`). Read-only: no mutation, no undo step. `at` must
+/// fall within `[clip.start, clip.end())`.
+pub async fn match_frame(state: &AppState, args: MatchFrameArgs) -> ToolResult {
+    tracing::debug!("tool: match_frame {}", args.clip_id);
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let at = match resolve_tick(args.at_ticks, args.at_tc.as_deref(), args.at_seconds, Some(fr)) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if at < clip.start || at >= clip.end() {
+        return err_code(
+            "TickOutOfRange",
+            "at must fall within the clip's timeline span [start, end)",
+        );
+    }
+    let matched = clip.source_in + clip.speed.source_delta(at - clip.start);
+    ToolResult::text(format!("Matched source tick {}", matched.0)).with_data(json!({
+        "source_tick": matched.0,
+        "asset_id": clip.source.asset(),
+        "clip_name": clip.name,
+    }))
+}
+
+/// **Adjustment-layer clip** (G-7): create a no-media `ClipSource::Adjustment`
+/// clip spanning `[start, start+duration)` on `track_id`
+/// (`ops::add_adjustment_clip`) — its effect stack/grade composites over
+/// every lower track beneath its span (engine side, not this tool).
+pub async fn insert_adjustment_clip(
+    state: &AppState,
+    args: InsertAdjustmentClipArgs,
+) -> ToolResult {
+    tracing::debug!("tool: insert_adjustment_clip on track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(project, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let start = match resolve_tick(
+        args.start_ticks,
+        args.start_tc.as_deref(),
+        args.start_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if args.duration_ticks <= 0 {
+        return err_code("TickOutOfRange", "duration_ticks must be > 0");
+    }
+    match ops::add_adjustment_clip(project, seq_id, args.track_id, start, Tick(args.duration_ticks))
+    {
+        Ok(cmd) => {
+            let clip_id = match &cmd {
+                TimelineCmd::InsertClip { clip, .. } => Some(clip.id),
+                _ => None,
+            };
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Inserted adjustment clip").with_data(json!({ "clip_id": clip_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// **Title/text clip** (G-12): create a `ClipSource::Text` title/graphics
+/// clip spanning `[start, start+duration)` on `track_id`
+/// (`ops::add_text_clip`) — `style` patches `CaptionStyle::default()` via the
+/// same partial-style vocabulary `set_caption_style` uses.
+pub async fn insert_text_clip(state: &AppState, args: InsertTextClipArgs) -> ToolResult {
+    tracing::debug!("tool: insert_text_clip on track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(project, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let start = match resolve_tick(
+        args.start_ticks,
+        args.start_tc.as_deref(),
+        args.start_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if args.duration_ticks <= 0 {
+        return err_code("TickOutOfRange", "duration_ticks must be > 0");
+    }
+    let style = match args.style {
+        Some(patch) => match merge_caption_style(&CaptionStyle::default(), &patch) {
+            Ok(s) => s,
+            Err(e) => return e,
+        },
+        None => CaptionStyle::default(),
+    };
+    let content = TextClipContent {
+        text: args.text,
+        style,
+    };
+    match ops::add_text_clip(
+        project,
+        seq_id,
+        args.track_id,
+        start,
+        Tick(args.duration_ticks),
+        content,
+    ) {
+        Ok(cmd) => {
+            let clip_id = match &cmd {
+                TimelineCmd::InsertClip { clip, .. } => Some(clip.id),
+                _ => None,
+            };
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Inserted text clip").with_data(json!({ "clip_id": clip_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 // ─── Clip properties (10 §3.5) ──────────────────────────────────────────────
 
 pub async fn set_clip_prop(state: &AppState, args: SetClipPropArgs) -> ToolResult {
@@ -1418,8 +1811,10 @@ pub async fn unlink_clips(state: &AppState, args: UnlinkClipsArgs) -> ToolResult
 
 pub async fn set_clip_speed(state: &AppState, args: SetClipSpeedArgs) -> ToolResult {
     tracing::debug!("tool: set_clip_speed {}", args.clip_id);
-    if args.ratio.den == 0 {
-        return ToolResult::error("ratio.den must be > 0");
+    if args.ratio.is_some() == args.keys.is_some() {
+        return ToolResult::error(
+            "supply exactly one of ratio (constant speed) or keys (keyframed ramp, G-11)",
+        );
     }
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
@@ -1432,8 +1827,32 @@ pub async fn set_clip_speed(state: &AppState, args: SetClipSpeedArgs) -> ToolRes
     let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
         return ToolResult::error(format!("clip {} not found", args.clip_id));
     };
+    let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
+    let speed = if let Some(ratio) = args.ratio {
+        if ratio.den == 0 {
+            return ToolResult::error("ratio.den must be > 0");
+        }
+        SpeedMap::Constant(Ratio::new(ratio.num, ratio.den))
+    } else {
+        let keys = args.keys.unwrap();
+        if keys.is_empty() {
+            return ToolResult::error("keys must have at least one control point");
+        }
+        let mut resolved = Vec::with_capacity(keys.len());
+        for k in keys {
+            if k.ratio.den == 0 {
+                return ToolResult::error("ratio.den must be > 0");
+            }
+            let at = match resolve_tick(k.at_ticks, k.at_tc.as_deref(), k.at_seconds, Some(fr)) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+            resolved.push(SpeedKey::new(at, Ratio::new(k.ratio.num, k.ratio.den)));
+        }
+        SpeedMap::Keyframed { keys: resolved }
+    };
     let mut new_clip = clip.clone();
-    new_clip.speed = SpeedMap::Constant(Ratio::new(args.ratio.num, args.ratio.den));
+    new_clip.speed = speed;
     match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
         Ok(cmd) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
@@ -7216,6 +7635,13 @@ mod tests {
         "overwrite_edit",
         "lift_edit",
         "extract_edit",
+        // NLE parity round-2 (17-nle-parity-round2.md, G21 CAP-019 MCP parity)
+        "replace_clip_source",
+        "add_edit_all_tracks",
+        "close_gap",
+        "match_frame",
+        "insert_adjustment_clip",
+        "insert_text_clip",
         "set_clip_prop",
         "set_clip_speed",
         "set_transition",

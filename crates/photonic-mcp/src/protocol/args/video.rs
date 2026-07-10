@@ -416,6 +416,109 @@ pub struct ExtractEditArgs {
     pub range: WorkRangeArg,
 }
 
+// ─── NLE parity round-2 (17-nle-parity-round2.md, G21 CAP-019 MCP parity) ──
+
+/// Args for `replace_clip_source` (G-5, Premiere "Replace With Clip"): swap
+/// `clip_id`'s source in place — `start`/`duration`/effects/transitions/grade
+/// untouched (`ops::replace_clip_source`). A shorter new source is held to the
+/// slot (sampled from `new_source_in` for the slot's length by the engine).
+#[derive(Debug, Deserialize)]
+pub struct ReplaceClipSourceArgs {
+    pub clip_id: ClipId,
+    pub new_source: ClipSourceArg,
+    /// Offset into the new source to sample from. Omit to keep the clip's
+    /// existing `source_in`. Precedence: ticks > tc > seconds (§1 rule 3).
+    #[serde(default)]
+    pub new_source_in_ticks: Option<i64>,
+    #[serde(default)]
+    pub new_source_in_tc: Option<String>,
+    #[serde(default)]
+    pub new_source_in_seconds: Option<f64>,
+}
+
+/// Args for `add_edit_all_tracks` (G-1, Premiere Ctrl+Shift+K): split every
+/// unlocked track's clip that `at` sits strictly inside, across the whole
+/// sequence, as ONE undo step.
+#[derive(Debug, Deserialize)]
+pub struct AddEditAllTracksArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
+/// Args for `close_gap` (G-1): close the gap containing `at` — on just
+/// `track_id` when supplied, or on every unlocked track in the sequence (one
+/// undo step either way) when omitted.
+#[derive(Debug, Deserialize)]
+pub struct CloseGapArgs {
+    pub sequence_id: SequenceId,
+    /// Restrict to one track. Omit to close the gap at `at` on every
+    /// unlocked track in the sequence.
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
+/// Args for `match_frame` (G-3, Premiere F): from `clip_id`, compute the
+/// source-media tick that lines up with timeline position `at` (which must
+/// fall within the clip's span). Read-only — does not mutate the project or
+/// arm anything; the caller feeds the returned tick into
+/// `replace_clip_source`/`insert_edit`/`overwrite_edit`.
+#[derive(Debug, Deserialize)]
+pub struct MatchFrameArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
+/// Args for `insert_adjustment_clip` (G-7): create a `ClipSource::Adjustment`
+/// clip spanning `[start, start+duration)` on `track_id` — no media, its
+/// effect stack/grade composites over every lower track beneath its span
+/// (engine side; `ops::add_adjustment_clip`).
+#[derive(Debug, Deserialize)]
+pub struct InsertAdjustmentClipArgs {
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    pub duration_ticks: i64,
+}
+
+/// Args for `insert_text_clip` (G-12): create a `ClipSource::Text` title clip
+/// spanning `[start, start+duration)` on `track_id` (`ops::add_text_clip`).
+/// `style` is a partial [`CaptionStyleArg`] patch over `CaptionStyle::default()`
+/// — reuses the caption styling vocabulary (font/fill/position/etc.).
+#[derive(Debug, Deserialize)]
+pub struct InsertTextClipArgs {
+    pub track_id: TrackId,
+    pub text: String,
+    #[serde(default)]
+    pub style: Option<CaptionStyleArg>,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    pub duration_ticks: i64,
+}
+
 // ─── Clip properties (10 §3.5) ──────────────────────────────────────────────
 
 /// Universal clip setter — every field optional, only supplied fields
@@ -491,12 +594,35 @@ pub struct UnlinkClipsArgs {
     pub clip_id: ClipId,
 }
 
-/// `SpeedMap` is `Constant`-only in v1 (01 §5.1); there is no ramp variant to
-/// request, so this tool never actually rejects with `NotSupportedV1` today —
-/// the field is kept for forward compatibility.
+/// Set a clip's speed to either a constant ratio or a keyframed ramp (G-11) —
+/// supply exactly one of `ratio`/`keys`. `keys` mirrors `SpeedMap::Keyframed`
+/// (clip.rs): control points at clip-relative timeline ticks, piecewise-constant
+/// between them (each key's ratio holds until the next).
 #[derive(Debug, Deserialize)]
 pub struct SetClipSpeedArgs {
     pub clip_id: ClipId,
+    /// Constant-speed ratio. Mutually exclusive with `keys`.
+    #[serde(default)]
+    pub ratio: Option<RatioArg>,
+    /// Keyframed variable-speed ramp control points, in clip-relative-tick
+    /// order (not required to be pre-sorted — `ops::set_clip_prop` doesn't
+    /// care, but `SpeedMap::source_delta`'s integration assumes ascending
+    /// `at`). Mutually exclusive with `ratio`.
+    #[serde(default)]
+    pub keys: Option<Vec<SpeedKeyArg>>,
+}
+
+/// One control point of a [`SetClipSpeedArgs::keys`] ramp — clip-relative
+/// position (`at_*`, §1 rule 3 precedence) + the exact-rational ratio that
+/// takes effect there.
+#[derive(Debug, Deserialize)]
+pub struct SpeedKeyArg {
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
     pub ratio: RatioArg,
 }
 

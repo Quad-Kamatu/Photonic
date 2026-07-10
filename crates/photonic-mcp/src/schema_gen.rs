@@ -5283,6 +5283,98 @@ pub fn tool_list() -> Value {
             }
         },
 
+        // NLE parity round-2 (17-nle-parity-round2.md, G21 CAP-019 MCP parity)
+        {
+            "name": "replace_clip_source",
+            "description": "Replace With Clip (Premiere, G-5): swap a clip's source in place — start/duration/effects/transitions/grade untouched. A shorter new source is held to the slot (sampled from new_source_in for the slot's length by the engine). Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "new_source": { "type": "object", "description": "ClipSource — {\"kind\":\"asset\",\"asset_id\":...} | {\"kind\":\"vector\",\"asset_id\":...} | {\"kind\":\"nested_sequence\",\"sequence_id\":...} | {\"kind\":\"solid_color\",\"color\":\"#rrggbb\"} | {\"kind\":\"adjustment\"}" },
+                    "new_source_in_ticks": { "type": "integer" },
+                    "new_source_in_tc": { "type": "string" },
+                    "new_source_in_seconds": { "type": "number", "description": "Offset into the new source to sample from. Omit to keep the clip's existing source_in. Precedence: ticks > tc > seconds." }
+                },
+                "required": ["clip_id","new_source"]
+            }
+        },
+        {
+            "name": "add_edit_all_tracks",
+            "description": "Add Edit to All Tracks (Premiere Ctrl+Shift+K, G-1): split every unlocked track's clip that `at` sits strictly inside, across the whole sequence, as ONE undo step. Returns the number split and their new (right-hand) clip ids; a no-op (no history entry) if nothing is under `at`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "close_gap",
+            "description": "Close Gap (G-1): close the gap containing `at` — on just track_id when supplied, or on every unlocked track in the sequence when omitted — as ONE undo step either way. A no-op (no history entry) when there is nothing to close.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "track_id": { "type": "string", "description": "Restrict to one track. Omit to close the gap at `at` on every unlocked track in the sequence." },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "match_frame",
+            "description": "Match Frame (Premiere F, G-3): from clip_id, compute the source-media tick that lines up with timeline position `at` (which must fall within the clip's span). Read-only — no mutation, no undo step. Returns the matching source tick and the clip's asset id (null for generator/adjustment/text clips) so the caller can feed replace_clip_source/insert_edit/overwrite_edit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "insert_adjustment_clip",
+            "description": "Adjustment-layer clip (G-7): create a no-media ClipSource::Adjustment clip spanning [start, start+duration) on track_id — its effect stack/grade composites over every lower track beneath its span (engine side). Returns the new clip's id. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string" },
+                    "start_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer" }
+                },
+                "required": ["track_id","duration_ticks"]
+            }
+        },
+        {
+            "name": "insert_text_clip",
+            "description": "Title/text clip (G-12): create a ClipSource::Text title/graphics clip spanning [start, start+duration) on track_id. `style` patches CaptionStyle::default() using the same partial-style vocabulary as set_caption_style (font_family/font_size/weight/fill/position/max_width) — omit for the default style. Returns the new clip's id. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "text": { "type": "string" },
+                    "style": { "type": "object", "description": "Partial CaptionStyle patch: {\"font_family\":str,\"font_size\":number,\"weight\":int,\"fill\":\"#rrggbb\",\"position\":[x,y],\"max_width\":number} — every field optional." },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string" },
+                    "start_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer" }
+                },
+                "required": ["track_id","text","duration_ticks"]
+            }
+        },
+
         // Clip properties (10 §3.5)
         {
             "name": "set_clip_prop",
@@ -5302,14 +5394,15 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_clip_speed",
-            "description": "Set a clip's playback speed as an exact rational ratio (SpeedMap::Constant — the only variant in v1; keyframed speed ramps are a post-v1 non-goal). Supports undo.",
+            "description": "Set a clip's playback speed — supply exactly one of `ratio` (SpeedMap::Constant, an exact rational) or `keys` (SpeedMap::Keyframed, a variable-speed ramp, G-11): control points at clip-relative timeline ticks, piecewise-constant between them. Supports undo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string" },
-                    "ratio": { "type": "object", "description": "{\"num\":int,\"den\":uint} — e.g. {\"num\":2,\"den\":1} for 2x, {\"num\":-1,\"den\":1} for reverse.", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] }
+                    "ratio": { "type": "object", "description": "Constant speed. {\"num\":int,\"den\":uint} — e.g. {\"num\":2,\"den\":1} for 2x, {\"num\":-1,\"den\":1} for reverse. Mutually exclusive with keys.", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] },
+                    "keys": { "type": "array", "description": "Keyframed ramp control points, clip-relative. Mutually exclusive with ratio.", "items": { "type": "object", "properties": { "at_ticks": {"type":"integer"}, "at_tc": {"type":"string"}, "at_seconds": {"type":"number"}, "ratio": { "type": "object", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] } }, "required": ["ratio"] } }
                 },
-                "required": ["clip_id","ratio"]
+                "required": ["clip_id"]
             }
         },
         {

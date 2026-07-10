@@ -2256,6 +2256,35 @@ pub(crate) async fn dispatch_tool_inner(
             Ok(ToolOutput::mutating(handlers::video::extract_edit(state, a).await))
         }
 
+        // NLE parity round-2 (17-nle-parity-round2.md, G21 CAP-019 MCP parity)
+        "replace_clip_source" => {
+            let a: ReplaceClipSourceArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::replace_clip_source(state, a).await))
+        }
+        "add_edit_all_tracks" => {
+            let a: AddEditAllTracksArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::add_edit_all_tracks(state, a).await))
+        }
+        "close_gap" => {
+            let a: CloseGapArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::close_gap(state, a).await))
+        }
+        "match_frame" => {
+            let a: MatchFrameArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::match_frame(state, a).await))
+        }
+        "insert_adjustment_clip" => {
+            let a: InsertAdjustmentClipArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::insert_adjustment_clip(state, a).await,
+            ))
+        }
+        "insert_text_clip" => {
+            let a: InsertTextClipArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::insert_text_clip(state, a).await))
+        }
+
         // Clip properties (10 §3.5)
         "set_clip_prop" => {
             let a: SetClipPropArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
