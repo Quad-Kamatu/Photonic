@@ -479,16 +479,56 @@ pub(crate) fn do_extract_edit(
 
 /// Razor/blade decision (spec 16 §4, M-4): a lane click at `at` on `clip` splits
 /// it only when strictly interior (`clip.start < at < clip.end()`); a click on
-/// an edge is not a split. Returns the split tick to hand to `ops_bridge::split`.
-///
-/// The lane-click call site lives in the timeline-panel story's `self_interact`
-/// (its territory); this is the pure guard it consults, kept here alongside the
-/// other timeline-interaction logic. Unused until that one-line seam is wired
-/// — same `dead_code` posture the panel's own command entry points used before
-/// dispatch reached them.
-#[allow(dead_code)]
+/// an edge is not a split. Returns the split tick to hand to [`do_razor_split`].
 pub(crate) fn razor_split_tick(clip: &Clip, at: Tick) -> Option<Tick> {
     (clip.start < at && at < clip.end()).then_some(at)
+}
+
+/// Consume a lane click while the razor tool is active (spec 16 §4 M-4):
+/// resolve `at` against `clip`'s live extent via [`razor_split_tick`] and, if
+/// interior, split it there through the same `ops::split_clip` path
+/// `timeline_split_at_playhead` uses (mirrors `ops_bridge::split`'s one-undo-
+/// step discipline). `true` if the click was consumed as a split — the caller
+/// should skip its normal select-on-click handling in that case; an edge/
+/// outside click or a missing clip returns `false` and falls through to
+/// ordinary selection.
+///
+/// The lane-click call site lives in the timeline-panel story's `self_interact`
+/// (its territory) — the one-line seam is the "Selection on click" block:
+/// when `razor_active`, try `do_razor_split(doc, history, seq_id, track, clip,
+/// tick_at(pos))` first and only fall back to `apply_selection` on `false`.
+/// Unused until that seam is wired — same `dead_code` posture the panel's own
+/// command entry points used before dispatch reached them.
+#[allow(dead_code)]
+pub(crate) fn do_razor_split(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+    at: Tick,
+) -> bool {
+    let Some(p) = doc.timeline.as_ref() else {
+        return false;
+    };
+    let Some(c) = p
+        .sequences
+        .get(&seq)
+        .and_then(|s| s.track(track))
+        .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+    else {
+        return false;
+    };
+    let Some(split_at) = razor_split_tick(c, at) else {
+        return false;
+    };
+    match ops::split_clip(p, seq, track, clip, split_at) {
+        Ok(cmd) => {
+            commit_edit(history, doc, vec![cmd]);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -1009,5 +1049,95 @@ mod edit_tests {
         assert_eq!(razor_split_tick(&c, Tick(100)), None); // start edge
         assert_eq!(razor_split_tick(&c, Tick(200)), None); // end edge
         assert_eq!(razor_split_tick(&c, Tick(50)), None); // outside
+    }
+
+    // ── Razor click → split consumption (spec 16 §4 M-4) ─────────────────────
+
+    #[test]
+    fn razor_split_consumes_an_interior_click_in_one_undo_step() {
+        let (mut doc, seq, vids, _a) = doc_with_tracks(&[("V1", false)], &[]);
+        let v = vids[0];
+        seed(&mut doc, seq, v, 100, 100); // [100,200)
+        let clip_id = doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(v)
+            .unwrap()
+            .clips[0]
+            .id;
+        let mut hist = CommandHistory::new(64);
+
+        assert!(do_razor_split(
+            &mut doc,
+            &mut hist,
+            seq,
+            v,
+            clip_id,
+            Tick(150)
+        ));
+        assert_eq!(
+            clips_of(&doc, seq, v),
+            vec![(Tick(100), Tick(50)), (Tick(150), Tick(50))]
+        );
+
+        // One undo step restores the single clip.
+        assert!(hist.undo(&mut doc));
+        assert_eq!(clips_of(&doc, seq, v), vec![(Tick(100), Tick(100))]);
+    }
+
+    #[test]
+    fn razor_split_leaves_edge_and_outside_clicks_unconsumed() {
+        let (mut doc, seq, vids, _a) = doc_with_tracks(&[("V1", false)], &[]);
+        let v = vids[0];
+        seed(&mut doc, seq, v, 100, 100); // [100,200)
+        let clip_id = doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(v)
+            .unwrap()
+            .clips[0]
+            .id;
+        let mut hist = CommandHistory::new(64);
+
+        assert!(!do_razor_split(
+            &mut doc,
+            &mut hist,
+            seq,
+            v,
+            clip_id,
+            Tick(100)
+        )); // start edge
+        assert!(!do_razor_split(
+            &mut doc,
+            &mut hist,
+            seq,
+            v,
+            clip_id,
+            Tick(200)
+        )); // end edge
+        assert!(!do_razor_split(
+            &mut doc,
+            &mut hist,
+            seq,
+            v,
+            clip_id,
+            Tick(50)
+        )); // outside
+        assert_eq!(clips_of(&doc, seq, v), vec![(Tick(100), Tick(100))]); // untouched, no undo entry
+        assert!(!hist.undo(&mut doc));
+    }
+
+    #[test]
+    fn razor_split_on_an_unknown_clip_is_a_no_op() {
+        let (mut doc, seq, vids, _a) = doc_with_tracks(&[("V1", false)], &[]);
+        let v = vids[0];
+        seed(&mut doc, seq, v, 100, 100);
+        let mut hist = CommandHistory::new(64);
+
+        assert!(!do_razor_split(
+            &mut doc,
+            &mut hist,
+            seq,
+            v,
+            ClipId::new(),
+            Tick(150)
+        ));
+        assert_eq!(clips_of(&doc, seq, v), vec![(Tick(100), Tick(100))]);
     }
 }
