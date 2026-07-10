@@ -497,9 +497,6 @@ pub(crate) fn razor_split_tick(clip: &Clip, at: Tick) -> Option<Tick> {
 /// (its territory) — the one-line seam is the "Selection on click" block:
 /// when `razor_active`, try `do_razor_split(doc, history, seq_id, track, clip,
 /// tick_at(pos))` first and only fall back to `apply_selection` on `false`.
-/// Unused until that seam is wired — same `dead_code` posture the panel's own
-/// command entry points used before dispatch reached them.
-#[allow(dead_code)]
 pub(crate) fn do_razor_split(
     doc: &mut Document,
     history: &mut CommandHistory,

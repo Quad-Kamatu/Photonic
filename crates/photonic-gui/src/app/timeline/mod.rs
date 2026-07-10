@@ -90,6 +90,7 @@ impl PhotonicApp {
         let mut playhead = self.playhead;
         let mut selection = std::mem::take(&mut self.timeline_selection);
         let mut snap = self.timeline_snap_enabled;
+        let razor = self.timeline_razor_active;
 
         // Timeline media caches (spec 15): construct once, then take them out of
         // `self` for the frame — mirroring the `selection` take above — so the
@@ -281,6 +282,7 @@ impl PhotonicApp {
             &mut playhead,
             &mut selection,
             snap,
+            razor,
             lane_left,
             frame_rate,
             lanes_rect,
@@ -884,6 +886,7 @@ fn self_interact(
     playhead: &mut Tick,
     selection: &mut Vec<ClipId>,
     snap: bool,
+    razor: bool,
     lane_left: f32,
     frame_rate: FrameRate,
     lanes_rect: egui::Rect,
@@ -910,8 +913,15 @@ fn self_interact(
     if resp.clicked() {
         let mods = ui.input(|i| i.modifiers);
         if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some((_t, clip, _r, _z)) = hit_at(pos) {
-                apply_selection(selection, clip, mods);
+            if let Some((track, clip, _r, _z)) = hit_at(pos) {
+                if razor {
+                    // Blade tool: a click splits the clip at the click tick
+                    // (spec 16 §4, M-4) instead of selecting it.
+                    let at = view.x_to_tick(pos.x, lane_left);
+                    interact::do_razor_split(doc, history, seq_id, track, clip, at);
+                } else {
+                    apply_selection(selection, clip, mods);
+                }
             } else if !mods.ctrl && !mods.shift && !mods.command {
                 selection.clear();
             }
