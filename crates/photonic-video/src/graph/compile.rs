@@ -806,7 +806,6 @@ fn build_nested_sequence(
         return b.transparent(parent_format);
     };
 
-    cycle.insert(sequence);
     let nested_format_index = nested.active_format.min(nested.formats.len().saturating_sub(1));
     let Some(nested_format) = nested.formats.get(nested_format_index) else {
         b.diag(CompileDiagnostic::plain(format!(
@@ -814,6 +813,10 @@ fn build_nested_sequence(
         )));
         return b.transparent(parent_format);
     };
+    // Arm the cycle guard around the recursive fold ONLY: every early return
+    // above leaves the visited-set untouched, so a bail-out (missing / no-format
+    // nested sequence referenced more than once) never poisons a sibling lower.
+    cycle.insert(sequence);
     let program = fold_sequence(
         b,
         project,
@@ -2282,6 +2285,78 @@ mod tests {
             "self-nesting must produce a cycle diagnostic, got {:?}",
             out.diagnostics
         );
+    }
+
+    /// A `ClipSource::NestedSequence` clip splices its inner sequence's composite
+    /// as the clip's *source* (02 §2 step 3 / CAP-005). The inner sequence here is
+    /// a real 2-clip composite — an opaque red backdrop under a half-opacity blue —
+    /// and it must ride through the outer clip unchanged, proving the recursive
+    /// compile lowers the inner program (not a transparent fallback / single clip).
+    #[test]
+    fn nested_sequence_composites_inner_as_one_clip() {
+        let mut project = TimelineProject::new();
+
+        // Inner sequence: bottom opaque red, top blue at 0.5 opacity. Premultiplied
+        // linear `over` (0 and 1 map through sRGB→linear unchanged):
+        //   top_eff = (0,0,1,1)·0.5 = (0,0,0.5,0.5)
+        //   out     = top_eff + red·(1−0.5) = (0.5, 0, 0.5, 1.0)
+        let mut inner = Sequence::new("inner", FrameRate::FPS_30, 4, 4);
+        let inner_id = inner.id;
+        let mut bottom = Track::new(TrackKind::Video, "V1");
+        bottom.clips.push(solid_clip(
+            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            0,
+            Tick::from_seconds(2).0,
+        ));
+        let mut top = Track::new(TrackKind::Video, "V2");
+        let mut blue = solid_clip(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }, 0, Tick::from_seconds(2).0);
+        blue.transform.base.opacity = 0.5;
+        top.clips.push(blue);
+        inner.video_tracks.push(bottom);
+        inner.video_tracks.push(top);
+        project.insert_sequence(inner);
+
+        // Outer sequence: one clip whose source is the inner sequence.
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 4, 4);
+        let outer_id = outer.id;
+        let mut ot = Track::new(TrackKind::Video, "V1");
+        ot.clips.push(Clip::new(
+            ClipSource::NestedSequence { sequence: inner_id },
+            Tick(0),
+            Tick::from_seconds(2),
+        ));
+        outer.video_tracks.push(ot);
+        project.insert_sequence(outer);
+
+        let out = compile(&project, outer_id, 0, Tick(0), Quality::FULL, None);
+        assert!(
+            out.diagnostics.is_empty(),
+            "clean nested compile has no diagnostics, got {:?}",
+            out.diagnostics
+        );
+        // Both inner clips were lowered as the nested source (two distinct solids),
+        // not collapsed to a single clip or a transparent fallback.
+        let solids = out
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
+            .count();
+        assert!(solids >= 2, "inner composite lowers both source solids, got {solids}");
+
+        // The composited pixels match the inner sequence's blend, evaluated through
+        // the deterministic CPU reference (03 §6).
+        let img = crate::graph::eval_cpu::evaluate(
+            &out.graph,
+            (4, 4),
+            &mut crate::graph::eval_cpu::EmptyProvider,
+        );
+        for p in &img.pixels {
+            assert!((p[0] - 0.5).abs() < 1e-4, "r={}", p[0]);
+            assert!(p[1].abs() < 1e-4, "g={}", p[1]);
+            assert!((p[2] - 0.5).abs() < 1e-4, "b={}", p[2]);
+            assert!((p[3] - 1.0).abs() < 1e-4, "a={}", p[3]);
+        }
     }
 
     #[test]
