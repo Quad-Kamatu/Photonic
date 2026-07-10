@@ -1,15 +1,17 @@
 //! Video-mode program monitor + transport (video-editor-module
-//! `04-ui-mode-timeline.md` §1.2, §1.3, §3). This is the SHELL only per the
-//! story that landed it: a letterboxed placeholder in place of the real
-//! `EngineFrame` presentation (03 §5), which lands in P3. Also owns mode
-//! entry/exit (lazy project creation, §1.3) and the first-run discoverability
-//! hints (§1.2).
+//! `04-ui-mode-timeline.md` §1.2, §1.3, §3). Wired to the real engine: when
+//! `self.engine` is `Some`, the monitor presents the latest `EngineFrame`
+//! (03 §5, presented into an egui native texture by
+//! `app/engine.rs::EngineBridge::present_latest` each host frame) and the
+//! transport reconciles GUI intent into `EngineCmd`s
+//! (`drive_engine_playback`). Also owns mode entry/exit (lazy project
+//! creation, §1.3) and the first-run discoverability hints (§1.2).
 //!
-//! `EngineCmd`/`EngineStatus` (02 §1) don't exist yet, so "playback" here is a
-//! wall-clock placeholder that advances `self.playhead` directly — every seam
-//! where the real engine will plug in is marked `EngineCmd::* when P3 lands`.
+//! Engine-less hosts (unit tests, GPU-free machines) keep the original
+//! wall-clock placeholder playback so the transport/scrub UX still works.
 
 use super::*;
+use crate::app::engine;
 use crate::app::timeline::ops_bridge;
 use crate::commands;
 use photonic_core::timeline::{FrameRate, Sequence, SequenceFormat, TICKS_PER_SECOND};
@@ -31,11 +33,12 @@ impl PhotonicApp {
         match self.mode {
             AppMode::Video => {
                 // Exit-to-Vector always pauses first, unconditionally (04 §7
-                // "mode-switch race with in-flight engine playback" — cheap
-                // no-op today since there's no engine, mandatory once P3
-                // lands so a hidden monitor never keeps decoding).
-                // EngineCmd::Pause when P3 lands.
+                // "mode-switch race with in-flight engine playback") — a real
+                // `EngineCmd::Pause` so a hidden monitor never keeps decoding.
                 self.monitor_playing = false;
+                if let Some(bridge) = self.engine.as_mut() {
+                    bridge.set_playing(false);
+                }
                 self.mode = AppMode::Vector;
             }
             AppMode::Vector => {
@@ -155,15 +158,16 @@ fn format_timecode(fr: FrameRate, t: Tick) -> String {
 
 // ── Transport (04 §3.2, §5.1) ───────────────────────────────────────────────
 //
-// Every method below is a placeholder standing in for the real `EngineCmd`
-// dispatch (02 §1: Play/Pause/Seek/Step/SetLoop) — the GUI will eventually
-// only ever *reflect* `EngineStatus`, never simulate playback itself. Until
-// P3, these directly move `self.playhead` (session state, 04 §6) so the
-// transport bar and JKL/space/arrow keys are testable now.
+// Transport methods mutate GUI *intent* (`monitor_playing`, reverse/speed,
+// `self.playhead`); `drive_engine_playback` reconciles that intent into the
+// minimal `EngineCmd` stream each frame (02 §1: Play/Pause/Seek/Step/SetLoop)
+// and follows `EngineStatus.playhead` while the engine is playing. With no
+// engine attached (tests, GPU-less hosts) the original wall-clock placeholder
+// (`advance_monitor_playback`) keeps the UX testable.
 
 impl PhotonicApp {
     pub(crate) fn video_play_pause(&mut self) {
-        // EngineCmd::Play / EngineCmd::Pause when P3 lands.
+        // Intent only — `drive_engine_playback` sends Play/Pause on the diff.
         self.monitor_playing = !self.monitor_playing;
         if self.monitor_playing {
             self.monitor_play_reverse = false;
@@ -172,8 +176,10 @@ impl PhotonicApp {
     }
 
     /// J: play reverse; repeated presses ramp speed (reference-NLE convention).
+    /// The engine has no reverse primitive (speed-maps story, P8), so with an
+    /// engine attached this becomes a coalesced-`Seek` shuttle while the
+    /// engine stays paused — see `drive_engine_playback`.
     pub(crate) fn video_play_reverse(&mut self) {
-        // EngineCmd::Play { reverse: true, .. } when P3 lands.
         if self.monitor_playing && self.monitor_play_reverse {
             self.monitor_play_speed = (self.monitor_play_speed * 2.0).min(8.0);
         } else {
@@ -185,13 +191,12 @@ impl PhotonicApp {
 
     /// K: pause.
     pub(crate) fn video_pause(&mut self) {
-        // EngineCmd::Pause when P3 lands.
         self.monitor_playing = false;
     }
 
-    /// L: play forward; repeated presses ramp speed.
+    /// L: play forward; repeated presses ramp speed (1× uses the engine's
+    /// audio-mastered `Play`; >1× falls back to the `Seek` shuttle).
     pub(crate) fn video_play_forward(&mut self) {
-        // EngineCmd::Play { reverse: false, .. } when P3 lands.
         if self.monitor_playing && !self.monitor_play_reverse {
             self.monitor_play_speed = (self.monitor_play_speed * 2.0).min(8.0);
         } else {
@@ -202,14 +207,18 @@ impl PhotonicApp {
     }
 
     pub(crate) fn video_step_back(&mut self, doc: &Document) {
-        // EngineCmd::Step { frames: -1 } when P3 lands.
         self.monitor_playing = false;
         let tpf = active_frame_rate(doc).ticks_per_frame().0.max(1);
         self.playhead = Tick((self.playhead.0 - tpf).max(0));
+        if let Some(bridge) = self.engine.as_mut() {
+            // Exact-frame step on the engine (02 §4: Step always pauses); the
+            // local move above is the optimistic echo of the same arithmetic.
+            bridge.step(-1);
+            bridge.note_agreed(self.playhead);
+        }
     }
 
     pub(crate) fn video_step_forward(&mut self, doc: &Document) {
-        // EngineCmd::Step { frames: 1 } when P3 lands.
         self.monitor_playing = false;
         let tpf = active_frame_rate(doc).ticks_per_frame().0.max(1);
         let mut next = self.playhead.0 + tpf;
@@ -218,16 +227,20 @@ impl PhotonicApp {
             next = next.min(end);
         }
         self.playhead = Tick(next);
+        if let Some(bridge) = self.engine.as_mut() {
+            bridge.step(1);
+            bridge.note_agreed(self.playhead);
+        }
     }
 
     pub(crate) fn video_playhead_home(&mut self) {
-        // EngineCmd::Seek { to: Tick::ZERO } when P3 lands.
+        // Intent only — the reconciler's scrub detector turns the moved
+        // playhead into an `EngineCmd::Seek`.
         self.monitor_playing = false;
         self.playhead = Tick::ZERO;
     }
 
     pub(crate) fn video_playhead_end(&mut self, doc: &Document) {
-        // EngineCmd::Seek { to: content_end } when P3 lands.
         self.monitor_playing = false;
         self.playhead = sequence_end_tick(doc);
     }
@@ -275,8 +288,78 @@ impl PhotonicApp {
         ops_bridge::set_work_range(doc, history, seq_id, Some((in_t, out_t)));
     }
 
-    /// Advance the placeholder playhead by wall-clock dt while "playing"
-    /// (04 §3.2 seam note). Called once per frame from [`Self::draw_video_monitor`].
+    /// Per-frame playback driver: reconcile GUI intent into `EngineCmd`s and
+    /// follow `EngineStatus` when an engine is attached; otherwise fall back
+    /// to the wall-clock placeholder. Called once per frame from
+    /// [`Self::draw_video_monitor`].
+    fn drive_playback(&mut self, ctx: &egui::Context, doc: &Document) {
+        if self.engine.is_none() {
+            self.advance_monitor_playback(ctx, doc);
+            return;
+        }
+
+        // Desired-state inputs computed before borrowing the bridge.
+        let active_seq = doc.timeline.as_ref().and_then(|p| p.active_sequence);
+        let end = sequence_end_tick(doc);
+        let loop_range = if self.monitor_loop_enabled && end.0 > 0 {
+            Some(
+                active_sequence(doc)
+                    .and_then(|s| s.work_range)
+                    .unwrap_or((Tick::ZERO, end)),
+            )
+        } else {
+            None
+        };
+        let shuttle = self.monitor_playing
+            && (self.monitor_play_reverse || self.monitor_play_speed != 1.0);
+        let dt = ctx.input(|i| i.unstable_dt as f64).min(0.25);
+
+        let bridge = self.engine.as_mut().expect("checked above");
+        bridge.set_active_sequence(active_seq);
+        bridge.apply_proxy_mode();
+        bridge.set_loop(loop_range);
+
+        // User scrub (ruler drag, Home/End, marker jump): the playhead moved
+        // without the bridge agreeing to it → Seek.
+        if bridge.agreed_playhead != Some(self.playhead) {
+            bridge.seek(self.playhead);
+        }
+
+        if shuttle {
+            // Reverse / ramped playback: no engine primitive yet (P8 speed
+            // maps), so scrub with coalesced Seeks while the engine is paused.
+            bridge.set_playing(false);
+            ctx.request_repaint();
+            let dir = if self.monitor_play_reverse { -1.0 } else { 1.0 };
+            let delta = (dt * TICKS_PER_SECOND as f64 * self.monitor_play_speed * dir) as i64;
+            let mut next = self.playhead.0 + delta;
+            if self.monitor_loop_enabled && end.0 > 0 {
+                next = next.rem_euclid(end.0.max(1));
+            } else {
+                next = next.max(0);
+                if end.0 > 0 && next >= end.0 {
+                    next = end.0;
+                    self.monitor_playing = false;
+                }
+            }
+            self.playhead = Tick(next);
+            bridge.seek(self.playhead);
+        } else {
+            bridge.set_playing(self.monitor_playing);
+            if self.monitor_playing {
+                ctx.request_repaint();
+                let status = bridge.status();
+                if status.playing {
+                    // The engine's clock is authoritative at 1× (02 §4).
+                    self.playhead = status.playhead;
+                    bridge.note_agreed(self.playhead);
+                }
+            }
+        }
+    }
+
+    /// Wall-clock placeholder playback for engine-less hosts (pre-P3
+    /// behavior, kept for tests and GPU-free machines).
     fn advance_monitor_playback(&mut self, ctx: &egui::Context, doc: &Document) {
         if !self.monitor_playing {
             return;
@@ -305,8 +388,9 @@ impl PhotonicApp {
 impl PhotonicApp {
     /// The video-mode program monitor + transport bar, drawn in place of the
     /// vector canvas content when `self.mode == AppMode::Video` (04 §1.1
-    /// point 3). SHELL only: a dark letterboxed placeholder standing in for
-    /// `present_engine_frame` (03 §5), which lands in P3.
+    /// point 3). With an engine attached this paints the latest presented
+    /// `EngineFrame` (03 §5) cropped to the sequence format's logical size;
+    /// engine-less hosts keep the dark letterboxed placeholder.
     pub(crate) fn draw_video_monitor(
         &mut self,
         ui: &mut egui::Ui,
@@ -315,7 +399,7 @@ impl PhotonicApp {
         doc: &mut Document,
         history: &mut CommandHistory,
     ) {
-        self.advance_monitor_playback(ctx, doc);
+        self.drive_playback(ctx, doc);
         self.handle_video_keyboard(ctx, doc, history);
 
         let format = active_format(doc);
@@ -345,17 +429,61 @@ impl PhotonicApp {
         let video_rect = egui::Rect::from_center_size(content_rect.center(), video_size);
         painter.rect_filled(video_rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
 
+        // ── EngineFrame presentation (03 §5) ────────────────────────────────
+        // `EngineBridge::present_latest` (run by the host each frame, before
+        // egui) has already presented the newest frame into a registered
+        // native texture; paint it cropped to the format's logical size (the
+        // engine texture is pool-bucket padded — facade note).
+        let mut drew_frame = false;
+        if let Some(bridge) = &self.engine {
+            if let (Some(tex), Some((_, fseq))) = (&bridge.monitor_tex, bridge.presented_frame) {
+                let active = doc.timeline.as_ref().and_then(|p| p.active_sequence);
+                if active == Some(fseq) {
+                    let uv = engine::padded_uv((format.width, format.height), tex.physical);
+                    painter.image(tex.id, video_rect, uv, egui::Color32::WHITE);
+                    drew_frame = true;
+                }
+            }
+        }
+
         if self.monitor_safe_area {
             draw_safe_area_guides(&painter, video_rect);
         }
 
-        painter.text(
-            video_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "No preview — engine lands in P3",
-            egui::FontId::proportional(15.0),
-            egui::Color32::from_gray(130),
-        );
+        if self.engine.is_none() {
+            painter.text(
+                video_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No preview — video engine unavailable on this host",
+                egui::FontId::proportional(15.0),
+                egui::Color32::from_gray(130),
+            );
+        }
+
+        // ── Buffering spinner + engine error surface (04 §3.3) ──────────────
+        if let Some(bridge) = &self.engine {
+            let status = bridge.status();
+            let tpf = active_frame_rate(doc).ticks_per_frame().0.max(1);
+            let presented_time = bridge.presented_frame.map(|(t, _)| t);
+            let buffering = !drew_frame && status.playing
+                || engine::is_buffering(status.playing, status.playhead, presented_time, tpf, 4);
+            if buffering {
+                let spinner_rect = egui::Rect::from_center_size(
+                    video_rect.center(),
+                    egui::vec2(28.0, 28.0),
+                );
+                ui.put(spinner_rect, egui::Spinner::new().size(26.0));
+            }
+            if let Some(err) = &status.last_error {
+                painter.text(
+                    video_rect.left_bottom() + egui::vec2(6.0, -6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    err,
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(235, 130, 100),
+                );
+            }
+        }
 
         self.draw_transport_bar(ui, transport_rect, doc, history);
         self.draw_video_shortcut_sheet(ctx);

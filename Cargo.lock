@@ -4065,6 +4065,7 @@ dependencies = [
  "photonic-embed",
  "photonic-matte",
  "photonic-render",
+ "photonic-video",
  "pollster 0.3.0",
  "regex",
  "rfd",

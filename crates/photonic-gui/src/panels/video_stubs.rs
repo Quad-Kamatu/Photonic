@@ -7,11 +7,8 @@ use super::PropPanelCtx;
 use egui::Ui;
 
 // ── Left rail (`DrawerGroup`) ─────────────────────────────────────────────────
-
-/// `DrawerGroup::MediaPool` shell. Owner: 05-import-export.md.
-pub(crate) fn draw_media_pool(_ui: &mut Ui, _ctx: &mut PropPanelCtx) {
-    // P2 wave fills this.
-}
+//
+// `MediaPool` graduated to `panels/media_pool.rs` (05 §2 interior).
 
 /// `DrawerGroup::ClipInspector` shell. Owner: this doc (04); widgets source
 /// from `prop_registry` (01 §6.2).

@@ -228,6 +228,57 @@ impl PhotonicApp {
             &hits,
         );
 
+        // ── Media-pool asset drop (05 §2) ───────────────────────────────────
+        // A drag started in the media pool drawer carries an `AssetDrag`
+        // payload; dropping it over a lane inserts a clip there via the
+        // ops_bridge path (kind-checked, one undo step). While hovering, a
+        // frame-snapped insertion caret previews the landing tick.
+        let asset_payload =
+            egui::DragAndDrop::payload::<crate::panels::media_pool::AssetDrag>(ui.ctx());
+        if let (Some(payload), Some(pos)) = (asset_payload, ui.ctx().pointer_latest_pos()) {
+            if lanes_rect.contains(pos) {
+                let tpf = frame_rate.ticks_per_frame().0.max(1);
+                let mut at = view.x_to_tick(pos.x, lane_left).0.max(0);
+                if snap {
+                    at = (at / tpf) * tpf;
+                }
+                let at = Tick(at);
+                // y → row under the cursor (same walk as the paint loop).
+                let mut yy = lanes_rect.top() - view.track_scroll_px;
+                let mut target: Option<TrackId> = None;
+                for row in &rows {
+                    let (top, bot) = (yy, yy + row.height);
+                    yy = bot;
+                    if pos.y >= top && pos.y < bot {
+                        target = Some(row.id);
+                        break;
+                    }
+                }
+                // Hover caret.
+                let x = view.tick_to_x(at, lane_left);
+                ui.painter_at(lanes_rect).line_segment(
+                    [
+                        egui::pos2(x, lanes_rect.top()),
+                        egui::pos2(x, lanes_rect.bottom()),
+                    ],
+                    egui::Stroke::new(2.0, colors.selected_stroke.gamma_multiply(0.8)),
+                );
+                if ui.input(|i| i.pointer.any_released()) {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                    if let Some(track) = target {
+                        ops_bridge::insert_asset_clip(
+                            doc,
+                            history,
+                            seq_id,
+                            track,
+                            payload.asset,
+                            at,
+                        );
+                    }
+                }
+            }
+        }
+
         // Playhead line over everything (drawn last).
         ruler::draw_playhead_line(
             &ui.painter_at(content_rect),

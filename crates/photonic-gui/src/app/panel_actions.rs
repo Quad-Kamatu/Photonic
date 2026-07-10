@@ -34,6 +34,94 @@ impl PhotonicApp {
                         ctx.request_repaint();
                     }
                 }
+                // ── Media pool (video mode, 05 §2) ───────────────────────────
+                PanelAction::MediaImportDialog { bin } => {
+                    // Blocking OS picker — same precedent as the existing rfd
+                    // usage in `dialogs.rs`. Probing happens on a worker
+                    // thread; results land as undoable `AddAsset`s in `draw`.
+                    let files = rfd::FileDialog::new()
+                        .set_title("Import media")
+                        .add_filter(
+                            "Media",
+                            &[
+                                "mp4", "mov", "mkv", "avi", "webm", "m4v", "mts", "mxf", "mp3",
+                                "wav", "aac", "flac", "ogg", "m4a", "opus", "png", "jpg", "jpeg",
+                                "gif", "webp", "bmp", "tiff", "tif", "exr", "svg", "photon",
+                                "cube",
+                            ],
+                        )
+                        .pick_files();
+                    if let Some(paths) = files {
+                        self.media_pool_ui.spawn_import(paths, bin);
+                    }
+                }
+                PanelAction::MediaCreateBin { name, parent } => {
+                    use photonic_core::timeline::ops;
+                    timeline::ops_bridge::ensure_project_and_sequence(
+                        doc,
+                        history,
+                        photonic_core::timeline::FrameRate::FPS_30,
+                    );
+                    history.execute_discrete(Command::Timeline(ops::create_bin(name, parent)), doc);
+                    doc_modified = true;
+                }
+                PanelAction::MediaRemoveBin { bin } => {
+                    use photonic_core::timeline::ops;
+                    if let Some(p) = doc.timeline.as_ref() {
+                        if let Ok(cmd) = ops::remove_bin(p, bin) {
+                            history.execute_discrete(Command::Timeline(cmd), doc);
+                            doc_modified = true;
+                        }
+                    }
+                    if self.media_pool_ui.current_bin == Some(bin) {
+                        self.media_pool_ui.current_bin = None;
+                    }
+                }
+                PanelAction::MediaRemoveAsset { asset } => {
+                    use photonic_core::timeline::ops;
+                    if let Some(p) = doc.timeline.as_ref() {
+                        if let Ok(cmd) = ops::remove_asset(p, asset) {
+                            history.execute_discrete(Command::Timeline(cmd), doc);
+                            doc_modified = true;
+                        }
+                    }
+                    if self.media_pool_ui.selected == Some(asset) {
+                        self.media_pool_ui.selected = None;
+                    }
+                }
+                PanelAction::MediaAssignBin { asset, bin } => {
+                    use photonic_core::timeline::ops;
+                    if let Some(p) = doc.timeline.as_ref() {
+                        if let Ok(cmd) = ops::assign_asset_bin(p, asset, bin) {
+                            history.execute_discrete(Command::Timeline(cmd), doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+                PanelAction::MediaRelink { asset } => {
+                    use photonic_core::timeline::ops;
+                    let picked = rfd::FileDialog::new().set_title("Relink media").pick_file();
+                    if let Some(new_path) = picked {
+                        if let Some(p) = doc.timeline.as_ref() {
+                            if let Ok(cmd) = ops::relink_asset(p, asset, new_path) {
+                                history.execute_discrete(Command::Timeline(cmd), doc);
+                                doc_modified = true;
+                            }
+                        }
+                    }
+                }
+                PanelAction::MediaSetProxyMode { mode } => {
+                    if let Some(bridge) = self.engine.as_mut() {
+                        // Reconciled into `EngineCmd::SetProxyMode` next frame.
+                        bridge.proxy_mode = mode;
+                    }
+                }
+                PanelAction::MediaInsertAtPlayhead { asset } => {
+                    let at = self.playhead;
+                    if timeline::ops_bridge::insert_asset_at_first_fit(doc, history, asset, at) {
+                        doc_modified = true;
+                    }
+                }
                 PanelAction::ReorderNode { node_id, op } => {
                     if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
                         let layer_len = doc

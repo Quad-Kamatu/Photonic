@@ -26,6 +26,7 @@ mod navigator;
 mod toolbar;
 mod tools_panel;
 mod vertex_panel;
+pub(crate) mod media_pool;
 pub(crate) mod video_stubs;
 
 use arrange::*;
@@ -824,6 +825,43 @@ pub enum PanelAction {
     DeleteWorkspace { name: String },
     /// Recenter the canvas viewport on a canvas-space point (Navigator click).
     CenterViewOn { canvas_x: f64, canvas_y: f64 },
+
+    // ── Media pool (video mode, 05 §2) ────────────────────────────────────────
+    /// Open the OS multi-file picker and enqueue the chosen files for
+    /// background import (probe + hash) into `bin`.
+    MediaImportDialog {
+        bin: Option<photonic_core::timeline::BinId>,
+    },
+    /// Create a media bin (folder).
+    MediaCreateBin {
+        name: String,
+        parent: Option<photonic_core::timeline::BinId>,
+    },
+    /// Remove a media bin (assets fall back to the root).
+    MediaRemoveBin {
+        bin: photonic_core::timeline::BinId,
+    },
+    /// Remove an asset from the pool.
+    MediaRemoveAsset {
+        asset: photonic_core::timeline::AssetId,
+    },
+    /// Move an asset to `bin` (`None` = pool root).
+    MediaAssignBin {
+        asset: photonic_core::timeline::AssetId,
+        bin: Option<photonic_core::timeline::BinId>,
+    },
+    /// Open the OS file picker and relink an offline asset to the chosen file.
+    MediaRelink {
+        asset: photonic_core::timeline::AssetId,
+    },
+    /// Engine-wide proxy playback mode (05 §4; `EngineCmd::SetProxyMode`).
+    MediaSetProxyMode { mode: photonic_video::ProxyMode },
+    /// Insert the asset as a clip at the playhead on the first compatible
+    /// track (double-click / context menu; drag-to-timeline is the primary
+    /// path and is handled in the timeline panel itself).
+    MediaInsertAtPlayhead {
+        asset: photonic_core::timeline::AssetId,
+    },
 }
 
 /// Discriminant for which shape the radial wheel should create.
@@ -1068,6 +1106,12 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) event_trigger_event: &'a mut String,
     pub(crate) event_trigger_action: &'a mut String,
     pub(crate) workspace_name_input: &'a mut String,
+    /// Media pool drawer state (video mode, 05 §2).
+    pub(crate) media_ui: &'a mut media_pool::MediaPoolUi,
+    /// Whether a `VideoEngine` session is attached (proxy toggle hint).
+    pub(crate) engine_online: bool,
+    /// Current engine proxy-mode intent (05 §4).
+    pub(crate) proxy_mode: photonic_video::ProxyMode,
     pub(crate) action: Option<PanelAction>,
     pub(crate) q: String,
     pub(crate) forced_open: Option<bool>,
@@ -1408,7 +1452,7 @@ pub(crate) fn draw_drawer(
             // separate "Branches" accordion has been retired.
             draw_edit_history(ui, ctx);
         }
-        DrawerGroup::MediaPool => video_stubs::draw_media_pool(ui, ctx),
+        DrawerGroup::MediaPool => media_pool::draw_media_pool(ui, ctx),
         DrawerGroup::ClipInspector => video_stubs::draw_clip_inspector(ui, ctx),
         DrawerGroup::Effects => video_stubs::draw_effects_browser(ui, ctx),
         DrawerGroup::Captions => video_stubs::draw_captions_panel(ui, ctx),

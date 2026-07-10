@@ -8,6 +8,7 @@ license.workspace = true
 photonic-core = { path = "../photonic-core" }
 kurbo = { workspace = true }
 photonic-render = { path = "../photonic-render" }
+photonic-video = { path = "../photonic-video" }
 photonic-embed = { path = "../photonic-embed" }
 photonic-matte = { path = "../photonic-matte" }
 egui = { workspace = true }

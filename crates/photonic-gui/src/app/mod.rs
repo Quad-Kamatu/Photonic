@@ -23,6 +23,7 @@ mod rulers;
 mod tabs;
 mod tool_handlers;
 mod width_tool;
+pub mod engine;
 pub(crate) mod mode;
 pub(crate) mod monitor;
 pub(crate) mod timeline;
@@ -828,6 +829,12 @@ pub struct PhotonicApp {
     /// open") has run. Guards `ensure_initial_tab`'s one-shot sibling check so
     /// it only inspects `doc.timeline` once, on the very first `draw` call.
     pub(crate) initial_mode_checked: bool,
+    /// Live video-engine session (02 §1), attached by the host after the
+    /// shared wgpu device exists. `None` = engine-less host (tests, no GPU):
+    /// the monitor/transport fall back to the placeholder wall-clock paths.
+    pub engine: Option<engine::EngineBridge>,
+    /// Media pool drawer state + background import channel (05 §2).
+    pub(crate) media_pool_ui: panels::media_pool::MediaPoolUi,
 
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
@@ -1431,6 +1438,8 @@ impl Default for PhotonicApp {
             monitor_safe_area: false,
             show_video_shortcut_sheet: false,
             initial_mode_checked: false,
+            engine: None,
+            media_pool_ui: panels::media_pool::MediaPoolUi::default(),
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
@@ -2120,6 +2129,13 @@ impl PhotonicApp {
             event_trigger_event: &mut self.event_trigger_event,
             event_trigger_action: &mut self.event_trigger_action,
             workspace_name_input: &mut self.workspace_name_input,
+            media_ui: &mut self.media_pool_ui,
+            engine_online: self.engine.is_some(),
+            proxy_mode: self
+                .engine
+                .as_ref()
+                .map(|b| b.proxy_mode)
+                .unwrap_or_default(),
             action: None,
             q: String::new(),
             forced_open: None,
@@ -2195,7 +2211,21 @@ impl PhotonicApp {
         // Wayland this handler never fires and File → Open/Place Image… is the
         // way in.
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        // In video mode, dropped media files import into the media pool
+        // (05 §2) instead of placing raster layers; anything the pool doesn't
+        // recognize falls through to the image path below.
+        let mut media_drops: Vec<std::path::PathBuf> = Vec::new();
         for file in dropped {
+            if self.mode == AppMode::Video {
+                if let Some(path) = file
+                    .path
+                    .as_deref()
+                    .filter(|p| panels::media_pool::guess_asset_kind(p).is_some())
+                {
+                    media_drops.push(path.to_path_buf());
+                    continue;
+                }
+            }
             if let Some(path) = file.path.as_deref().filter(|p| is_image_path(p)) {
                 let path = path.to_path_buf();
                 self.place_image_file(doc, history, &path);
@@ -2207,6 +2237,35 @@ impl PhotonicApp {
                     doc_modified = true;
                 }
             }
+        }
+        if !media_drops.is_empty() {
+            let bin = self.media_pool_ui.current_bin;
+            self.media_pool_ui.spawn_import(media_drops, bin);
+        }
+
+        // ── Video engine upkeep ───────────────────────────────────────────────
+        // Mirror the timeline into the engine's snapshot pair whenever the
+        // history revision moved (see `app/engine.rs`), and commit any
+        // background media imports that finished probing (one undoable
+        // `AddAsset` each, 05 §2).
+        if let Some(bridge) = self.engine.as_mut() {
+            bridge.sync_document(doc, history);
+        }
+        let finished_imports = self.media_pool_ui.drain_finished();
+        if !finished_imports.is_empty() {
+            use photonic_core::timeline::ops;
+            // Imports originate in video mode, but a tab switch may have
+            // landed us on a document with no project — create one rather
+            // than dropping the user's finished imports.
+            timeline::ops_bridge::ensure_project_and_sequence(
+                doc,
+                history,
+                photonic_core::timeline::FrameRate::FPS_30,
+            );
+            for asset in finished_imports {
+                history.execute_discrete(Command::Timeline(ops::add_asset(asset)), doc);
+            }
+            doc_modified = true;
         }
 
         // ── Direct Select entry seed (#164) ───────────────────────────────────

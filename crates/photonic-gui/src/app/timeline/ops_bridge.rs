@@ -18,8 +18,9 @@
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
-    ops, ClipTiming, FrameRate, Marker, MarkerId, Sequence, SequenceId, Tick, TimelineCmd, Track,
-    TrackId, TrackKind, TrackSettings,
+    ops, AssetId, AssetKind, Clip, ClipSource, ClipTiming, FrameRate, Marker, MarkerId,
+    MediaAsset, Sequence, SequenceId, Tick, TimelineCmd, Track, TrackId, TrackKind, TrackSettings,
+    TICKS_PER_SECOND,
 };
 
 /// Push one timeline command as a single, non-folding undo step.
@@ -429,6 +430,108 @@ pub(crate) fn set_clip_enabled(
     if let Ok(cmd) = ops::set_clip_prop(p, seq, track, new) {
         commit(history, doc, cmd);
     }
+}
+
+// ── Media pool → timeline (05 §2) ────────────────────────────────────────────
+
+/// Which track kind can host a clip of this asset kind. `None` = not
+/// insertable as a clip (LUTs attach to grades, not tracks).
+pub(crate) fn track_kind_for_asset(kind: AssetKind) -> Option<TrackKind> {
+    match kind {
+        AssetKind::Audio => Some(TrackKind::Audio),
+        AssetKind::Video | AssetKind::Image | AssetKind::VectorDoc => Some(TrackKind::Video),
+        AssetKind::Lut3d => None,
+    }
+}
+
+/// Build the default clip for dropping `asset` at `start`: duration from the
+/// probe (images / probe-less assets default to 5 s), `Vector` source for
+/// vector docs, clip named after the asset.
+pub(crate) fn clip_for_asset(asset: &MediaAsset, start: Tick) -> Clip {
+    let duration = asset
+        .probe
+        .as_ref()
+        .map(|p| p.duration)
+        .filter(|d| d.0 > 0)
+        .unwrap_or(Tick(5 * TICKS_PER_SECOND));
+    let source = match asset.kind {
+        AssetKind::VectorDoc => ClipSource::Vector { asset: asset.id },
+        _ => ClipSource::Asset { asset: asset.id },
+    };
+    let mut clip = Clip::new(source, start, duration);
+    clip.name = crate::panels::media_pool::asset_display_name(asset);
+    clip
+}
+
+/// Insert `asset` as a new clip starting at `start` on `track` (the timeline
+/// drag-drop path). Kind-checked against the track; a rejected insert
+/// (overlap, wrong lane) is a silent no-op like other invalid gestures.
+pub(crate) fn insert_asset_clip(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track_id: TrackId,
+    asset_id: AssetId,
+    start: Tick,
+) -> bool {
+    let Some(p) = doc.timeline.as_ref() else {
+        return false;
+    };
+    let Some(asset) = p.media.assets.get(&asset_id) else {
+        return false;
+    };
+    let wanted = track_kind_for_asset(asset.kind);
+    let track_kind = p
+        .sequences
+        .get(&seq)
+        .and_then(|s| s.track(track_id))
+        .map(|t| t.kind);
+    if wanted.is_none() || track_kind != wanted {
+        return false;
+    }
+    let clip = clip_for_asset(asset, start);
+    match ops::insert_clip(p, seq, track_id, clip) {
+        Ok(cmd) => {
+            commit(history, doc, cmd);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Insert `asset` at the playhead on the first compatible track that accepts
+/// it (double-click / context-menu path).
+pub(crate) fn insert_asset_at_first_fit(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    asset_id: AssetId,
+    at: Tick,
+) -> bool {
+    let Some(p) = doc.timeline.as_ref() else {
+        return false;
+    };
+    let Some(seq_id) = p.active_sequence else {
+        return false;
+    };
+    let Some(asset) = p.media.assets.get(&asset_id) else {
+        return false;
+    };
+    let Some(wanted) = track_kind_for_asset(asset.kind) else {
+        return false;
+    };
+    let Some(seq) = p.sequences.get(&seq_id) else {
+        return false;
+    };
+    let tracks: Vec<TrackId> = match wanted {
+        TrackKind::Video => seq.video_tracks.iter().map(|t| t.id).collect(),
+        TrackKind::Audio => seq.audio_tracks.iter().map(|t| t.id).collect(),
+    };
+    for track in tracks {
+        if insert_asset_clip(doc, history, seq_id, track, asset_id, at) {
+            return true;
+        }
+    }
+    false
 }
 
 // ── Markers & work range ─────────────────────────────────────────────────────

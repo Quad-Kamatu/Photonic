@@ -157,6 +157,14 @@ fn main() -> Result<()> {
 
     // ── Headless mode ─────────────────────────────────────────────────────────
     if args.headless {
+        // Video engine: no wiring needed here — `McpServer`'s `AppState` owns
+        // a lazy headless `VideoEngine` (own adapter, created on the first
+        // engine-backed tool call; see photonic-mcp's `VideoEngineHandle`).
+        // GUI mode instead shares the winit renderer's device via
+        // `EngineBridge::from_renderer` (see `resumed`). Unifying the GUI
+        // process's MCP engine with the GUI's shared-device engine is a
+        // follow-up seam (two engines in one process work, but pay double GPU
+        // memory for the same media).
         info!("Running in headless mode (MCP server only)");
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -513,6 +521,14 @@ impl ApplicationHandler for PhotonicWinitApp {
         gui.audit.log = Some(Arc::clone(&self.audit_log));
         gui.mcp_restart_requested = Some(Arc::clone(&self.mcp_restart_requested));
 
+        // ── Video engine (video-editor 02 §1) ─────────────────────────────────
+        // One engine per process, sharing the winit renderer's wgpu device and
+        // queue so `EngineFrame` textures can be sampled by the egui pass
+        // directly (03 §5). The bridge owns the engine thread; dropping the
+        // GUI shuts it down and joins.
+        gui.engine = Some(photonic_gui::EngineBridge::from_renderer(&renderer));
+        info!("Video engine session opened (shared wgpu device)");
+
         self.state = Some(RenderState {
             window,
             renderer,
@@ -637,6 +653,17 @@ impl PhotonicWinitApp {
 
         // 2c. Render Gaussian glow effects (GPU blur passes, additive composite).
         state.renderer.render_gaussian_glow_pass(&mut frame);
+
+        // 2d. Present the newest video EngineFrame (03 §5) into its egui
+        // native texture BEFORE the egui pass runs, so the monitor paints the
+        // current frame this very frame. No-op when nothing new was published.
+        if let Some(bridge) = state.gui.engine.as_mut() {
+            bridge.present_latest(
+                state.renderer.device(),
+                state.renderer.queue(),
+                &mut state.egui_renderer,
+            );
+        }
 
         // 3. Run egui (doc lock is held only for the duration of this closure)
         let raw_input = state.egui_state.take_egui_input(&state.window);
