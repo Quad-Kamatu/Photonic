@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod caption;
 pub mod color;
 pub mod compositor;
 pub mod grade;
@@ -15,6 +16,7 @@ pub mod text_path;
 pub mod video;
 
 pub use canvas::CanvasView;
+pub use caption::{CaptionCompositor, CaptionCueRun, CaptionWordRun};
 pub use color::{Colorimetry, Matrix, Range};
 pub use grade::{
     apply_grade_cpu, resolve, ResolvedCdl, ResolvedCurves, ResolvedGradeOp, ResolvedGradePayload,

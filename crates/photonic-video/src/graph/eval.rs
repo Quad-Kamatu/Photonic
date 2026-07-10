@@ -123,6 +123,10 @@ pub struct Evaluator {
     gpu: GpuContext,
     passes: Passes,
     cache: NodeCache,
+    /// Glyphon caption text compositor (06 §5.3) — burns `CaptionOverlay` glyph
+    /// runs over the working texture. Owns its glyphon state behind a `Mutex` so
+    /// it composites through `&self` like the rest of `render_op`.
+    caption: photonic_render::caption::CaptionCompositor,
     /// The content hash of the last presented output, pinned in the cache.
     pinned_output: Option<crate::graph::ir::ContentHash>,
 }
@@ -135,10 +139,16 @@ impl Evaluator {
     pub fn with_budget(gpu: GpuContext, budget_bytes: u64) -> Self {
         let passes = Passes::new(gpu.device());
         let cache = NodeCache::new(gpu.device().clone(), budget_bytes);
+        let caption = photonic_render::caption::CaptionCompositor::new(
+            gpu.device(),
+            gpu.queue(),
+            WORKING_FORMAT,
+        );
         Evaluator {
             gpu,
             passes,
             cache,
+            caption,
             pinned_output: None,
         }
     }
@@ -241,6 +251,26 @@ impl Evaluator {
             IrOp::TextGen { .. } => {
                 // 0-input generator; P3 passthrough is transparent (P8 glyphon).
                 self.passes.fill(&self.gpu, target, [0.0; 4]);
+            }
+            // Caption overlay (06 §5.3): lay the input composite down, then burn
+            // the resolved glyph runs on top via the glyphon pipeline. glyphon's
+            // `ALPHA_BLENDING` + `Accurate` sRGB→linear conversion make this a
+            // correct straight-alpha `over` onto the premultiplied linear target.
+            IrOp::CaptionOverlay { cue_batch } => {
+                match inputs.first() {
+                    Some(src) => self.passes.blit(&self.gpu, src, target),
+                    None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+                }
+                if !cue_batch.cues.is_empty() {
+                    self.caption.composite(
+                        self.gpu.device(),
+                        self.gpu.queue(),
+                        target,
+                        &cue_batch.cues,
+                        target.width(),
+                        target.height(),
+                    );
+                }
             }
             // Real effect kernel: Invert (08 §3). Other kinds fall through to the
             // blit passthrough below until their `ResolvedParams` payload lands.
@@ -691,7 +721,8 @@ mod tests {
     use super::*;
     use crate::graph::compile::{compile, Quality};
     use photonic_core::timeline::{
-        Clip, ClipSource, FrameRate, Sequence, TimelineProject, Track, TrackKind,
+        CaptionCue, CaptionStyle, CaptionTrack, CaptionWord, Clip, ClipSource, FrameRate,
+        KaraokeMode, KaraokeStyle, Sequence, SequenceId, TimelineProject, Track, TrackKind,
     };
     use photonic_core::Color;
 
@@ -822,5 +853,96 @@ mod tests {
             |clip| clip.effects.push(ClipEffect::new(EffectKind::Invert)),
         );
         assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    // ── Caption overlay compositing (06 §5.3) ─────────────────────────────────
+
+    /// A 128×64 blue-background sequence with one caption track (cue `[0,200)`,
+    /// two words "AB"/"CD"), optionally karaoke-highlighted.
+    fn captioned_project(highlight: Option<KaraokeStyle>) -> (TimelineProject, SequenceId) {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 128, 64);
+        let seq_id = seq.id;
+        let mut vt = Track::new(TrackKind::Video, "V1");
+        vt.clips.push(Clip::new(
+            ClipSource::SolidColor {
+                color: Color { r: 0.0, g: 0.0, b: 0.6, a: 1.0 },
+            },
+            crate::contract::Tick(0),
+            crate::contract::Tick(1000),
+        ));
+        seq.video_tracks.push(vt);
+
+        let mut ct = CaptionTrack::new("Caps");
+        ct.style = CaptionStyle {
+            font_size: 22.0,
+            position: [0.5, 0.25],
+            highlight,
+            ..CaptionStyle::default()
+        };
+        ct.cues.push(CaptionCue::new(
+            crate::contract::Tick(0),
+            crate::contract::Tick(200),
+            vec![
+                CaptionWord::new("AB", crate::contract::Tick(0), crate::contract::Tick(100)),
+                CaptionWord::new("CD", crate::contract::Tick(100), crate::contract::Tick(200)),
+            ],
+        ));
+        seq.caption_tracks.push(ct);
+        project.insert_sequence(seq);
+        (project, seq_id)
+    }
+
+    /// Count pixels differing in any channel by more than `tol`.
+    fn count_diff(a: &[[f32; 4]], b: &[[f32; 4]], tol: f32) -> usize {
+        a.iter()
+            .zip(b)
+            .filter(|(p, q)| (0..4).any(|k| (p[k] - q[k]).abs() > tol))
+            .count()
+    }
+
+    /// AS-1 "burned caption": a covering cue burns glyphs over the frame (non-zero
+    /// delta vs the caption-free background), and WordPop karaoke recolors the
+    /// active word so a mid-word tick differs from a tick where the other word is
+    /// active. Proves `CaptionOverlay` is no longer a passthrough stub.
+    #[test]
+    fn caption_overlay_burns_glyphs_and_karaoke_recolors() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter — skipping caption overlay render");
+            return;
+        };
+        let (w, h) = (128u32, 64u32);
+        let highlight = KaraokeStyle {
+            mode: KaraokeMode::WordPop,
+            active_color: Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }, // yellow
+            inactive_color: Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, // grey
+        };
+        let (project, seq_id) = captioned_project(Some(highlight));
+        let mut eval = Evaluator::new(gpu.clone());
+        let render = |eval: &mut Evaluator, t: i64| {
+            let c = compile(&project, seq_id, 0, crate::contract::Tick(t), Quality::FULL, None);
+            let out = eval
+                .evaluate(&c.graph, (w, h), &mut NullFrameSource)
+                .expect("output texture");
+            read_texture_rgba16f(&gpu, &out, w, h)
+        };
+
+        // t=500 is inside the background clip but past the cue → background only.
+        let bg = render(&mut eval, 500);
+        // t=50: "AB" active (yellow), "CD" inactive (grey).
+        let f_before = render(&mut eval, 50);
+        // t=150: swap — "AB" inactive, "CD" active.
+        let f_mid = render(&mut eval, 150);
+
+        let burned = count_diff(&f_before, &bg, 0.02);
+        assert!(
+            burned > 0,
+            "caption glyphs must change pixels vs the caption-free background (got {burned})"
+        );
+        let karaoke = count_diff(&f_before, &f_mid, 0.02);
+        assert!(
+            karaoke > 0,
+            "WordPop karaoke must change pixels between t=50 and t=150 (got {karaoke})"
+        );
     }
 }

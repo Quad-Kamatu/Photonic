@@ -28,16 +28,18 @@ use std::collections::{HashMap, HashSet};
 use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
-    self, AnimProps, AssetKind, Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade,
-    GradeOp, GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp,
-    InPort, LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
+    self, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack, CaptionWord,
+    Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp, GradeOpKind,
+    GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode,
+    LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
     TimelineProject, TrackKind, TransitionKind,
 };
 use photonic_core::Color;
+use photonic_render::caption::CaptionWordRun;
 
 use crate::contract::{
-    AssetId, CaptionBatch, MatteModel, ResolvedParams, ResolvedTextBlock, Tick, VectorRef,
-    VectorStateKey,
+    AssetId, CaptionBatch, CaptionCueRun, MatteModel, ResolvedParams, ResolvedTextBlock, Tick,
+    VectorRef, VectorStateKey, TICKS_PER_SECOND,
 };
 use crate::graph::ir::{
     Channel, ContentHash, FitMode, FrameGraph, IrNode, IrNodeId, IrOp, LinearColor, OutPort,
@@ -46,16 +48,11 @@ use crate::graph::ir::{
 
 /// Preview vs full-resolution compile flags (02 §2's "quality flags"). `proxy`
 /// selects proxy media where available (session state, `SetProxyMode`).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Quality {
     /// Decode proxy media instead of originals (preview). Export forces `false`.
+    /// `Default` (`false`) is full quality.
     pub proxy: bool,
-}
-
-impl Default for Quality {
-    fn default() -> Self {
-        Quality { proxy: false }
-    }
 }
 
 impl Quality {
@@ -147,7 +144,7 @@ pub fn compile(
     let program = fold_sequence(&mut b, project, seq, format_index, format, tick, quality, &mut cycle);
 
     // Step 5: caption overlay (enabled caption tracks with a cue covering t).
-    let program = splice_captions(&mut b, seq, tick, program);
+    let program = splice_captions(&mut b, seq, format, tick, program);
 
     // Step 6: project graph splice (08 §5) — between the fold result and Output.
     let program = splice_project_graph(&mut b, project, program, format, tick);
@@ -1324,41 +1321,189 @@ fn graph_op_effect_kind(op: &GraphOp) -> EffectKind {
 
 // ── Caption overlay (step 5) ──────────────────────────────────────────────────
 
-/// Emit a `CaptionOverlay` when any enabled caption track has a cue covering `t`
-/// (06 §4). The batch is a minimal covering-cues carrier in P3 (glyph batching is
-/// P5); its presence is what the evaluator/present path keys on.
+/// Emit one `CaptionOverlay` per enabled caption track with a cue covering `t`
+/// (06 §5.3: one node per active track per compiled frame). Each node carries a
+/// [`CaptionBatch`] whose words are fully cascade-resolved and whose
+/// karaoke/animation state is baked at this tick — so the evaluator stays
+/// time-ignorant (02 §2). Tracks with no covering cue contribute nothing; a
+/// `None` program (captions over an empty sequence) roots on transparent black.
 fn splice_captions(
     b: &mut Builder,
     seq: &Sequence,
+    format: &SequenceFormat,
     tick: Tick,
     program: Option<IrNodeId>,
 ) -> Option<IrNodeId> {
-    let has_cue = seq.caption_tracks.iter().any(|t| {
-        t.enabled && t.cues.iter().any(|c| c.start <= tick && tick < c.end)
-    });
-    if !has_cue {
-        return program;
+    let mut cur = program;
+    for track in &seq.caption_tracks {
+        if !track.enabled {
+            continue;
+        }
+        let batch = resolve_caption_batch(track, tick, format);
+        if batch.cues.is_empty() {
+            continue;
+        }
+        let input = cur.unwrap_or_else(|| b.transparent(format));
+        cur = Some(b.push(
+            IrOp::CaptionOverlay { cue_batch: batch },
+            vec![(input, OutPort::default())],
+        ));
     }
-    let input = match program {
-        Some(p) => p,
-        None => b.push(
-            IrOp::SolidColor {
-                color: LinearColor {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.0,
-                },
-            },
-            vec![],
-        ),
+    cur
+}
+
+/// Resolve a caption track's cues covering `tick` into a [`CaptionBatch`] of
+/// positioned, styled, karaoke-resolved word runs for the render text pipeline
+/// (06 §5). Cues are non-overlapping (01 §4), so v1 collects at most one — the
+/// loop stays general. Deterministic in `tick` (no wall-clock).
+fn resolve_caption_batch(track: &CaptionTrack, tick: Tick, format: &SequenceFormat) -> CaptionBatch {
+    let mut cues = Vec::new();
+    for cue in &track.cues {
+        if cue.start <= tick && tick < cue.end {
+            if let Some(run) = resolve_cue(track, cue, tick, format) {
+                cues.push(run);
+            }
+        }
+    }
+    CaptionBatch { cues }
+}
+
+/// Resolve one covering cue at `tick`. Style cascades word → cue → track (01 §7,
+/// each override a complete [`CaptionStyle`]); karaoke colour (06 §5.1) and
+/// animation state (06 §5.2) are baked here. Returns `None` if nothing is visible
+/// (e.g. Typewriter before the first character reveals).
+fn resolve_cue(
+    track: &CaptionTrack,
+    cue: &CaptionCue,
+    tick: Tick,
+    _format: &SequenceFormat,
+) -> Option<CaptionCueRun> {
+    let cue_style: &CaptionStyle = cue.style_override.as_ref().unwrap_or(&track.style);
+    let anim = cue_style.animation;
+
+    // SlideUp (06 §5.2): whole-cue fade + upward translate over the first 200 ms,
+    // both baked deterministically at compile time.
+    let (cue_opacity, y_shift) = match anim {
+        CaptionAnim::SlideUp => {
+            let dur = ms_to_ticks(200).max(1);
+            let p = ((tick - cue.start).0 as f32 / dur as f32).clamp(0.0, 1.0);
+            (p, (1.0 - p) * 0.05) // slides up from +5% of frame height into place
+        }
+        _ => (1.0, 0.0),
     };
-    Some(b.push(
-        IrOp::CaptionOverlay {
-            cue_batch: CaptionBatch::default(),
-        },
-        vec![(input, OutPort::default())],
-    ))
+
+    let base_pos = cue.position_override.unwrap_or(cue_style.position);
+    let anchor = [base_pos[0], base_pos[1] + y_shift];
+
+    let mut words = Vec::with_capacity(cue.words.len());
+    for w in &cue.words {
+        // Word-level effective style: word → cue → track (each a full style).
+        let eff: &CaptionStyle = w
+            .style_override
+            .as_ref()
+            .or(cue.style_override.as_ref())
+            .unwrap_or(&track.style);
+        let text = reveal_text(&w.text, anim, w, tick);
+        let mut color = karaoke_color(eff, w, tick);
+        let mut opacity = cue_opacity;
+        if let CaptionAnim::FadeWords = anim {
+            opacity *= fade_word_opacity(w, tick);
+        }
+        color[3] = (color[3] as f32 * opacity).round().clamp(0.0, 255.0) as u8;
+        words.push(CaptionWordRun {
+            text,
+            font_family: eff.font_family.clone(),
+            font_weight: eff.weight,
+            color,
+        });
+    }
+    if words.iter().all(|w| w.text.is_empty()) {
+        return None;
+    }
+    Some(CaptionCueRun {
+        words,
+        font_size: cue_style.font_size.max(1.0),
+        line_height_mul: 1.2,
+        anchor,
+        max_width: cue_style.max_width,
+    })
+}
+
+/// Milliseconds → ticks. `TICKS_PER_SECOND` is a multiple of 1000, so this is
+/// exact (no rounding) — keeping animation timing deterministic.
+fn ms_to_ticks(ms: i64) -> i64 {
+    (TICKS_PER_SECOND / 1000) * ms
+}
+
+/// The word's fill colour at `tick`, resolved through its karaoke highlight
+/// (06 §5.1), as sRGB straight RGBA bytes. Without a highlight it is the plain
+/// fill. FillSweep's intra-glyph split is approximated at word granularity by
+/// colour-lerping the sweeping word by the sweep fraction (the true per-glyph
+/// split is a render follow-up).
+fn karaoke_color(style: &CaptionStyle, w: &CaptionWord, tick: Tick) -> [u8; 4] {
+    let Some(k) = style.highlight else {
+        return color_to_srgb_bytes(style.fill);
+    };
+    let c = match k.mode {
+        KaraokeMode::WordPop => {
+            if w.start <= tick && tick < w.end {
+                k.active_color
+            } else {
+                k.inactive_color
+            }
+        }
+        // Glyph keeps its fill; the underline decoration is a render follow-up.
+        KaraokeMode::Underline => style.fill,
+        KaraokeMode::FillSweep => {
+            if tick < w.start {
+                k.inactive_color
+            } else if tick >= w.end {
+                k.active_color // already-spoken words stay active (standard karaoke read)
+            } else {
+                let span = (w.end - w.start).0.max(1) as f32;
+                let f = ((tick - w.start).0 as f32 / span).clamp(0.0, 1.0);
+                lerp_color(k.inactive_color, k.active_color, f)
+            }
+        }
+    };
+    color_to_srgb_bytes(c)
+}
+
+/// FadeWords opacity (06 §5.2): ramps `0 → 1` over a 150 ms lead-in ending at
+/// `w.start`, then holds at `1`.
+fn fade_word_opacity(w: &CaptionWord, tick: Tick) -> f32 {
+    let lead = ms_to_ticks(150).max(1);
+    let start = w.start.0 - lead;
+    ((tick.0 - start) as f32 / lead as f32).clamp(0.0, 1.0)
+}
+
+/// Typewriter reveal (06 §5.2): the first
+/// `floor(char_count * clamp((t − start)/(end − start), 0, 1))` characters of the
+/// word; the full text for any other animation.
+fn reveal_text(text: &str, anim: CaptionAnim, w: &CaptionWord, tick: Tick) -> String {
+    if !matches!(anim, CaptionAnim::Typewriter) {
+        return text.to_string();
+    }
+    let span = (w.end - w.start).0.max(1) as f32;
+    let f = ((tick - w.start).0 as f32 / span).clamp(0.0, 1.0);
+    let total = text.chars().count();
+    let n = (total as f32 * f).floor() as usize;
+    text.chars().take(n).collect()
+}
+
+fn lerp_color(a: Color, b: Color, f: f32) -> Color {
+    let l = |x: f32, y: f32| x + (y - x) * f;
+    Color {
+        r: l(a.r, b.r),
+        g: l(a.g, b.g),
+        b: l(a.b, b.b),
+        a: l(a.a, b.a),
+    }
+}
+
+fn color_to_srgb_bytes(c: Color) -> [u8; 4] {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [q(c.r), q(c.g), q(c.b), q(c.a)]
 }
 
 // ── Keyframe resolution ───────────────────────────────────────────────────────
@@ -1542,8 +1687,10 @@ pub fn content_hash(op: &IrOp, inputs: &[(IrNodeId, OutPort)], input_hashes: &[u
 
 fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
     // A per-variant tag byte, then the resolved params in a fixed order. The
-    // opaque resolved-param stubs (`ResolvedParams`, `CaptionBatch`, …)
+    // remaining opaque resolved-param stubs (`ResolvedParams`, `ResolvedTextBlock`)
     // contribute nothing until their payloads land — extend here when they do.
+    // `CaptionOverlay`'s resolved batch (incl. baked karaoke colours) IS hashed,
+    // so a mid-word highlight change is a distinct cache identity (06 §5).
     let f32b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f32| h.update(&v.to_bits().to_le_bytes());
     match op {
         IrOp::DecodeVideo { asset, src_time, proxy } => {
@@ -1593,8 +1740,9 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[*mode as u8]);
             f32b(h, *opacity);
         }
-        IrOp::CaptionOverlay { cue_batch: _ } => {
+        IrOp::CaptionOverlay { cue_batch } => {
             h.update(&[8]);
+            hash_caption_batch(h, cue_batch);
         }
         IrOp::Crop => {
             h.update(&[9]);
@@ -1623,6 +1771,32 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[15]);
             h.update(&w.to_le_bytes());
             h.update(&gh.to_le_bytes());
+        }
+    }
+}
+
+/// Hash a resolved [`CaptionBatch`] (06 §5.3) into the content hash: cue layout
+/// plus every word's text, font, weight, and baked karaoke colour. This is what
+/// makes a karaoke sweep re-render — the same cue at two ticks resolves to
+/// different word colours ⇒ different hash ⇒ a cache miss ⇒ a fresh composite.
+/// Deterministic: only resolved bytes/f32 bits, no pointer/time state.
+fn hash_caption_batch(h: &mut xxhash_rust::xxh3::Xxh3, batch: &CaptionBatch) {
+    let f32b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f32| h.update(&v.to_bits().to_le_bytes());
+    h.update(&(batch.cues.len() as u32).to_le_bytes());
+    for cue in &batch.cues {
+        f32b(h, cue.font_size);
+        f32b(h, cue.line_height_mul);
+        f32b(h, cue.anchor[0]);
+        f32b(h, cue.anchor[1]);
+        f32b(h, cue.max_width);
+        h.update(&(cue.words.len() as u32).to_le_bytes());
+        for w in &cue.words {
+            h.update(&(w.text.len() as u32).to_le_bytes());
+            h.update(w.text.as_bytes());
+            h.update(&(w.font_family.len() as u32).to_le_bytes());
+            h.update(w.font_family.as_bytes());
+            h.update(&w.font_weight.to_le_bytes());
+            h.update(&w.color);
         }
     }
 }
@@ -2274,6 +2448,153 @@ mod tests {
                 assert!(v.abs() < 1e-4, "dip midpoint black, channel {c} = {v}");
             }
         }
+    }
+
+    // ── Caption overlay resolution (06 §5) ────────────────────────────────────
+
+    use photonic_core::timeline::{
+        CaptionCue, CaptionStyle, CaptionTrack, CaptionWord, KaraokeMode, KaraokeStyle,
+    };
+
+    /// Fetch the single `CaptionOverlay` node's resolved batch + content hash.
+    fn caption_node(graph: &FrameGraph) -> (&CaptionBatch, ContentHash) {
+        let n = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, IrOp::CaptionOverlay { .. }))
+            .expect("a CaptionOverlay node is present");
+        match &n.op {
+            IrOp::CaptionOverlay { cue_batch } => (cue_batch, n.content_hash),
+            _ => unreachable!(),
+        }
+    }
+
+    fn wordpop_track() -> CaptionTrack {
+        let mut track = CaptionTrack::new("Captions");
+        track.style = CaptionStyle {
+            highlight: Some(KaraokeStyle {
+                mode: KaraokeMode::WordPop,
+                active_color: Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }, // yellow
+                inactive_color: Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, // grey
+            }),
+            ..CaptionStyle::default()
+        };
+        // "hello" [0,100), "world" [100,200); cue [0,200).
+        let cue = CaptionCue::new(
+            Tick(0),
+            Tick(200),
+            vec![
+                CaptionWord::new("hello", Tick(0), Tick(100)),
+                CaptionWord::new("world", Tick(100), Tick(200)),
+            ],
+        );
+        track.cues.push(cue);
+        track
+    }
+
+    /// A covering cue on an enabled caption track lowers to a `CaptionOverlay`
+    /// carrying a populated batch (not the old empty default) — the un-stubbing.
+    #[test]
+    fn covering_cue_populates_caption_batch() {
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(solid_clip(Color::BLACK, 0, 400));
+        project
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .caption_tracks
+            .push(wordpop_track());
+
+        let out = compile(&project, seq_id, 0, Tick(50), Quality::FULL, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            "graph has a CaptionOverlay node"
+        );
+        let (batch, _) = caption_node(&out.graph);
+        assert_eq!(batch.cues.len(), 1, "one covering cue resolved");
+        let cue = &batch.cues[0];
+        assert_eq!(cue.words.len(), 2);
+        assert_eq!(cue.words[0].text, "hello");
+        assert_eq!(cue.words[1].text, "world");
+        // Anchor is the track style's default caption position (01 §7).
+        assert_eq!(cue.anchor, CaptionStyle::default().position);
+    }
+
+    /// No enabled caption track / no covering cue ⇒ no CaptionOverlay node.
+    #[test]
+    fn no_cue_emits_no_caption_overlay() {
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(solid_clip(Color::BLACK, 0, 400));
+        project
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .caption_tracks
+            .push(wordpop_track());
+        // Tick 300 is past the cue's [0,200) span.
+        let out = compile(&project, seq_id, 0, Tick(300), Quality::FULL, None);
+        assert!(
+            !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            "no covering cue ⇒ no CaptionOverlay"
+        );
+        // A disabled track never overlays even when a cue covers the tick.
+        project
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .caption_tracks[0]
+            .enabled = false;
+        let out = compile(&project, seq_id, 0, Tick(50), Quality::FULL, None);
+        assert!(
+            !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            "disabled caption track ⇒ no CaptionOverlay"
+        );
+    }
+
+    /// WordPop karaoke (06 §5.1): the word whose window contains `t` renders in
+    /// `active_color`, the others in `inactive_color`; and the resolved batch's
+    /// content hash changes across ticks so the node-result cache re-renders the
+    /// sweep (02 §5). Before/mid the second word must differ.
+    #[test]
+    fn wordpop_karaoke_recolors_and_rehashes() {
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(solid_clip(Color::BLACK, 0, 400));
+        project
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .caption_tracks
+            .push(wordpop_track());
+
+        let active = [255, 255, 0, 255]; // yellow
+        let inactive = [128, 128, 128, 255]; // grey (0.5 → 128)
+
+        let at = |t: i64| compile(&project, seq_id, 0, Tick(t), Quality::FULL, None).graph;
+
+        // t=50: word0 ("hello") active, word1 ("world") inactive.
+        let g_before = at(50);
+        let (b0, h0) = caption_node(&g_before);
+        assert_eq!(b0.cues[0].words[0].color, active, "hello active at t=50");
+        assert_eq!(b0.cues[0].words[1].color, inactive, "world inactive at t=50");
+
+        // t=150: swap — word1 ("world") active, word0 inactive.
+        let g_mid = at(150);
+        let (b1, h1) = caption_node(&g_mid);
+        assert_eq!(b1.cues[0].words[0].color, inactive, "hello inactive at t=150");
+        assert_eq!(b1.cues[0].words[1].color, active, "world active at t=150");
+
+        // The sweep must change the CaptionOverlay content hash (drives re-render).
+        assert_ne!(h0, h1, "karaoke sweep changes the CaptionOverlay content hash");
     }
 
     fn op_name(op: &IrOp) -> &'static str {

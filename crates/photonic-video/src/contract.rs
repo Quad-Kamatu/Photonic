@@ -25,11 +25,19 @@ pub struct ResolvedParams {
 /// stack payload — re-exported from `photonic-render` (GPU/CPU color math).
 pub use photonic_render::grade::ResolvedGradeOp;
 
-/// Batch of caption cues covering the compiled tick (06 §4). Glyph-run batching
-/// shape finalized in P5.
+/// One caption cue resolved to positioned, styled, karaoke-resolved word runs
+/// for the render text pipeline (06 §5.3) — re-exported from `photonic-render`
+/// (owns the glyphon color/compositing math), the same pattern as
+/// [`ResolvedGradeOp`].
+pub use photonic_render::caption::CaptionCueRun;
+
+/// Batch of caption cues covering the compiled tick (06 §4/§5.3), each word's
+/// style fully cascade-resolved and its karaoke/animation state baked at compile
+/// time so the evaluator stays time-ignorant (02 §2). Empty by default (no cue
+/// covers the tick); populated by `graph::compile::splice_captions`.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct CaptionBatch {
-    _pinned_in_p5: (),
+    pub cues: Vec<CaptionCueRun>,
 }
 
 /// Matte-extraction model selector (08 §3 `MaskFromMatte`; wraps

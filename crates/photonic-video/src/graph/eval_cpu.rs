@@ -14,10 +14,18 @@
 //! Real CPU kernels now cover `Grade` (`photonic_render::grade::apply_grade_cpu`,
 //! the GPU-parity golden per 03 §4.4) and `Effect{Invert}` (`ops::invert`). The
 //! remaining `Effect` kinds (Blur/Sharpen/Glow/ChromaKey/LumaKey/MaskShapeGen),
-//! `CaptionOverlay`, `MatteExtract`, `TextGen`, and `ChannelSplit`/`Combine` stay
-//! input-passthrough with the phase noted, exactly as 02 §2 permits — the first
-//! three families are blocked on the still-opaque `ResolvedParams`/`CaptionBatch`/
-//! `ResolvedTextBlock` payloads (`contract.rs`), which finalize in P5/P7/P8.
+//! `MatteExtract`, `TextGen`, and `ChannelSplit`/`Combine` stay input-passthrough
+//! with the phase noted, exactly as 02 §2 permits — blocked on the still-opaque
+//! `ResolvedParams`/`ResolvedTextBlock` payloads (`contract.rs`), which finalize
+//! in P7/P8.
+//!
+//! `CaptionOverlay` carries a fully-resolved `CaptionBatch` (06 §5.3) but is a
+//! **GPU-only** composite here: glyph rasterization is glyphon's (`eval.rs`), and
+//! `photonic_render`'s text path exposes no CPU glyph raster to share, so the CPU
+//! reference passes the input through and burned captions come only from the GPU
+//! path. Caption tracks are therefore excluded from GPU/CPU byte-parity in v1
+//! (documented tolerance, per this story's brief); a shared CPU glyph rasterizer
+//! for full export-determinism parity is a follow-up.
 
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::EffectKind;
@@ -115,7 +123,7 @@ fn eval_op(
         },
         // Real kernel: the resolved grade stack (07 §3), the GPU-parity golden.
         IrOp::Grade { ops: grade_ops } => apply_grade_cpu_image(in0(), grade_ops),
-        IrOp::CaptionOverlay { .. } => in0(), // P5 glyph batching
+        IrOp::CaptionOverlay { .. } => in0(), // GPU-only glyph composite (see header); CPU passes through
         IrOp::MatteExtract { .. } => in0(), // P8 U²-Net inference
         IrOp::ChannelSplit { .. } => in0(),
         IrOp::ChannelCombine => in0(),
