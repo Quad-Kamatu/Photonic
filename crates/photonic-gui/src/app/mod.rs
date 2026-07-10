@@ -2144,6 +2144,7 @@ impl PhotonicApp {
             caption_edit_cue: &mut self.caption_edit_cue,
             export_dialog_open: &mut self.export_dialog_open,
             last_export_preset: &mut self.last_export_preset,
+            playhead: self.playhead,
         }
     }
 
@@ -2267,6 +2268,7 @@ impl PhotonicApp {
                 caption_edit_cue: &mut self.caption_edit_cue,
                 export_dialog_open: &mut self.export_dialog_open,
                 last_export_preset: &mut self.last_export_preset,
+                playhead: self.playhead,
             },
             action: None,
             q: String::new(),

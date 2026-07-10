@@ -762,6 +762,20 @@ fn build_clip_source(
             let _ = seq;
             b.transparent(format)
         }
+        ClipSource::Text { .. } => {
+            // G-12: a title/text clip's source lowers to the same dedicated
+            // `TextGen` IR op as the node-graph `GraphOp::Text` case above —
+            // one text-render mechanism, not a parallel path. The glyphon
+            // raster is P8 (blocked on the still-opaque `ResolvedTextBlock`
+            // payload), so this is a transparent placeholder meanwhile, same
+            // as `GraphOp::Text`'s.
+            b.push(
+                IrOp::TextGen {
+                    block: ResolvedTextBlock::default(),
+                },
+                vec![],
+            )
+        }
     }
 }
 

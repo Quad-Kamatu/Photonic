@@ -13,10 +13,13 @@
 //! - [`node_editor`]     — 08-fusion-node-flows.md (left palette + central canvas)
 //! - [`audio_mixer`]     — 09-audio-mixer.md
 //! - [`export_dialog`]   — 05-import-export.md
+//! - [`titles`]          — 05-import-export.md §4b / 17 G-12 (minimal: starter
+//!   presets + `ClipSource::Text` insert/edit; not the full VectorDoc template
+//!   system — see [`titles`]'s module doc for the scope cut)
 
 use std::collections::HashSet;
 
-use photonic_core::timeline::{ClipId, CueId, GradeOpId, GraphId, GraphNodeId, TrackId};
+use photonic_core::timeline::{ClipId, CueId, GradeOpId, GraphId, GraphNodeId, Tick, TrackId};
 
 pub(crate) mod audio_mixer;
 pub(crate) mod caption_editor;
@@ -26,6 +29,7 @@ pub(crate) mod effects_browser;
 pub(crate) mod export_dialog;
 pub(crate) mod keyframe_editor;
 pub(crate) mod node_editor;
+pub(crate) mod titles;
 
 /// Which sub-section of the right-drawer Color Controls group is active
 /// (07 §6). Owned by the color page story; defined here so the shared
@@ -104,4 +108,10 @@ pub(crate) struct VideoPanelUi<'a> {
     /// [export_dialog] name of the last-used export preset, seed for the dialog
     /// (05 §3). Session-only here; the export story persists it to prefs.
     pub(crate) last_export_preset: &'a mut String,
+    /// [titles] Live playhead position (04 §6), read-only here. `PropPanelCtx`
+    /// otherwise carries no live playhead (see `keyframe_editor.rs`'s
+    /// `no_live_playhead` note) — the Titles panel needs the real value to
+    /// insert a starter title at the playhead, so it's threaded through here
+    /// rather than faked.
+    pub(crate) playhead: Tick,
 }

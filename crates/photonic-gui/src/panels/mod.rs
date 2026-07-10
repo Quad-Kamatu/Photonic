@@ -1217,6 +1217,12 @@ pub enum DrawerGroup {
     /// canvas itself (that lives in the central panel's node-canvas content
     /// state, 08 §6.1). Interior owned by 08-fusion-node-flows.md.
     NodeEditor,
+    /// Video mode (04 §4.1): starter title/lower-third/caption-card presets
+    /// that insert a `ClipSource::Text` clip at the playhead, plus a basic
+    /// text/size/color/position editor for the selected Text clip (05 §4b /
+    /// 17 G-12 minimal — not the full VectorDoc title-template system).
+    /// Interior owned by `panels/video/titles.rs`.
+    Titles,
 }
 
 impl DrawerGroup {
@@ -1235,12 +1241,13 @@ impl DrawerGroup {
 
     /// Left-rail groups in Video mode (04 §4.1) — Media Pool first, matching
     /// every reference NLE's left-most-panel convention.
-    pub const VIDEO_ALL: [DrawerGroup; 5] = [
+    pub const VIDEO_ALL: [DrawerGroup; 6] = [
         DrawerGroup::MediaPool,
         DrawerGroup::ClipInspector,
         DrawerGroup::Effects,
         DrawerGroup::Captions,
         DrawerGroup::NodeEditor,
+        DrawerGroup::Titles,
     ];
 
     /// Which group set the left rail offers for `mode` (04 §4).
@@ -1266,6 +1273,7 @@ impl DrawerGroup {
             DrawerGroup::Effects => ph::SPARKLE,
             DrawerGroup::Captions => ph::CLOSED_CAPTIONING,
             DrawerGroup::NodeEditor => ph::FLOW_ARROW,
+            DrawerGroup::Titles => ph::TEXT_T,
         }
     }
 
@@ -1284,6 +1292,7 @@ impl DrawerGroup {
             DrawerGroup::Effects => "Effects",
             DrawerGroup::Captions => "Captions",
             DrawerGroup::NodeEditor => "Node Editor",
+            DrawerGroup::Titles => "Titles",
         }
     }
 
@@ -1309,7 +1318,8 @@ impl DrawerGroup {
             | DrawerGroup::MediaPool
             | DrawerGroup::Effects
             | DrawerGroup::Captions
-            | DrawerGroup::NodeEditor => true,
+            | DrawerGroup::NodeEditor
+            | DrawerGroup::Titles => true,
             DrawerGroup::Modify | DrawerGroup::Arrange | DrawerGroup::ClipInspector => {
                 selection_count >= 1
             }
@@ -1512,6 +1522,7 @@ pub(crate) fn draw_drawer(
         DrawerGroup::Effects => video::effects_browser::draw_effects_browser(ui, ctx),
         DrawerGroup::Captions => video::caption_editor::draw_caption_editor(ui, ctx),
         DrawerGroup::NodeEditor => video::node_editor::draw_node_editor_palette(ui, ctx),
+        DrawerGroup::Titles => video::titles::draw_titles(ui, ctx),
         // Tools is rendered by the app layer (it needs tool state, not the
         // property ctx), so it is never routed through draw_drawer.
         DrawerGroup::Tools => {}
