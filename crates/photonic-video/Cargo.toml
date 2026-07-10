@@ -86,6 +86,15 @@ tiny_http = "0.12"
 # not needed for the console pass/fail this crate's benches print; only
 # `cargo_bench_support` is required for the standard `cargo bench` harness.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Golden-frame corpus harness (11 §1): PNG encode/decode for the blessed
+# CPU-reference frames. `image` is already a vetted workspace dependency
+# (canvas screenshots / raster buffers in five other crates), so reusing it
+# here adds no new dependency footprint. cargo-deny clean.
+image = { workspace = true }
+# Golden-case `meta.toml` parsing (11 §1.1: ticks/format/notes per case). The
+# generator writes the TOML text directly; only the harness deserializes it.
+# Already resolved in the workspace lock; MIT/Apache-2.0, cargo-deny clean.
+toml = "1"
 
 [[bench]]
 name = "engine"
