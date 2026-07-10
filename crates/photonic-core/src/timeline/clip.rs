@@ -16,6 +16,7 @@ use super::time::Tick;
 use crate::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// A clip on a track.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,6 +56,17 @@ pub struct Clip {
     pub audio: Option<ClipAudio>,
     #[serde(default = "super::grade::default_true")]
     pub enabled: bool,
+    /// Organizational color label — index into the GUI's fixed swatch
+    /// palette (the palette itself is a GUI concern, out of scope here).
+    /// `None` = unlabeled (14 §M-1, gap #7's data half).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_label: Option<u8>,
+    /// Groups this clip with its linked partner(s) (e.g. an A/V pair split
+    /// from one media import) so an editor can move them as a unit. `None` =
+    /// unlinked (14 §M-2, gap #8's data half — the GUI move-together wiring
+    /// is a later story).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_group: Option<LinkGroupId>,
 }
 
 impl Clip {
@@ -77,6 +89,8 @@ impl Clip {
             transition_out: None,
             audio: None,
             enabled: true,
+            color_label: None,
+            link_group: None,
         }
     }
 
@@ -89,6 +103,30 @@ impl Clip {
     /// Whether this clip overlaps `[start, end)` on the timeline.
     pub fn overlaps(&self, start: Tick, end: Tick) -> bool {
         self.start < end && start < self.end()
+    }
+}
+
+/// Identifies a link group — clips carrying the same id (e.g. a split A/V
+/// pair) are meant to move together (14 gap #8). Defined here rather than
+/// alongside the rest of the id newtypes in `ids.rs` since this story's
+/// territory is limited to `clip.rs`/`sequence.rs`/`ops.rs`/`commands.rs`;
+/// same derive/shape as the `id_newtype!` family there.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LinkGroupId(pub Uuid);
+
+impl LinkGroupId {
+    /// A fresh random (v4) id.
+    #[inline]
+    pub fn new() -> Self {
+        LinkGroupId(Uuid::new_v4())
+    }
+}
+
+impl Default for LinkGroupId {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -341,8 +379,39 @@ mod tests {
         );
         c.effects.push(ClipEffect::new(EffectKind::Blur));
         c.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, Tick(20)));
+        c.color_label = Some(3);
+        c.link_group = Some(LinkGroupId::new());
+        c.reframe.insert(1, ClipTransform::default());
         let j = serde_json::to_string(&c).unwrap();
         let back: Clip = serde_json::from_str(&j).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn clip_color_label_and_link_group_default_to_none() {
+        let c = Clip::new(ClipSource::Adjustment, Tick(0), Tick(10));
+        assert_eq!(c.color_label, None);
+        assert_eq!(c.link_group, None);
+    }
+
+    #[test]
+    fn clip_color_label_and_link_group_absent_from_json_when_unset() {
+        // Additive-field discipline: an unset optional field must not appear
+        // in the serialized form, so pre-existing saved documents that never
+        // had these fields still round-trip byte-for-byte-equivalent shape.
+        let c = Clip::new(ClipSource::Adjustment, Tick(0), Tick(10));
+        let j = serde_json::to_string(&c).unwrap();
+        assert!(!j.contains("color_label"));
+        assert!(!j.contains("link_group"));
+    }
+
+    #[test]
+    fn link_group_id_serde_is_transparent_uuid() {
+        let id = LinkGroupId::new();
+        let j = serde_json::to_string(&id).unwrap();
+        let as_uuid: Uuid = serde_json::from_str(&j).unwrap();
+        assert_eq!(as_uuid, id.0);
+        let back: LinkGroupId = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, id);
     }
 }
