@@ -350,6 +350,18 @@ fn draw_reframe_section(
 
 // ── Effects stack (13 §5.1, 08 §2) ──────────────────────────────────────────
 
+/// Whether `clip` carries any effect in its stack (enabled or disabled) — a
+/// glanceable "has effects" signal. Exposed `pub(crate)` so another surface
+/// (e.g. a future `app/timeline/clips.rs` fx badge, 14 §M-8) can read it
+/// without re-deriving the effects-stack check itself; this story's territory
+/// stops at `clip_inspector.rs`/`effects_browser.rs`, so wiring the badge into
+/// the timeline lane paint is left to whoever picks that up — until then this
+/// has no in-crate caller, hence the allow.
+#[allow(dead_code)]
+pub(crate) fn clip_has_effects(clip: &Clip) -> bool {
+    !clip.effects.is_empty()
+}
+
 fn effect_label(kind: EffectKind) -> &'static str {
     match kind {
         EffectKind::Blur => "Blur",
@@ -714,5 +726,16 @@ mod tests {
         assert_eq!(param_short_label("params.radius"), "radius");
         assert_eq!(param_short_label("transform.x"), "x");
         assert_eq!(param_short_label("noprefix"), "noprefix");
+    }
+
+    #[test]
+    fn clip_has_effects_reflects_stack_emptiness() {
+        use photonic_core::timeline::ClipSource;
+
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick(0), Tick(1000));
+        assert!(!clip_has_effects(&clip));
+        clip.effects
+            .push(photonic_core::timeline::ClipEffect::new(EffectKind::Blur));
+        assert!(clip_has_effects(&clip));
     }
 }
