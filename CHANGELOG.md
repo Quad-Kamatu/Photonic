@@ -11,6 +11,8 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-10
+
 ### Added
 
 - **Live per-layer compositing on the canvas (#226).** Layers with opacity < 1 or
