@@ -462,4 +462,129 @@ mod tests {
         assert!((expected - 0.2140).abs() < 1e-3);
         let _ = LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
     }
+
+    /// G7 adjustment layer (07 §2 / source-substitution): an Adjustment clip
+    /// carries no source of its own — its grade re-roots the *composite of every
+    /// track beneath it* across the Adjustment's own span. Bottom track V1 holds
+    /// three sequential solids: A `[0,100)` and B `[100,200)` fall under a single
+    /// Adjustment `[0,200)` on V2 carrying Exposure +1 (×2 in linear); the control
+    /// C `[200,300)` sits past the Adjustment's end. Evaluated per frame, A and B
+    /// are BOTH shifted while C is untouched — proving the re-root is applied to
+    /// whichever lower clip composites at each tick and only within the
+    /// Adjustment's extent, not per-source and not to unrelated regions.
+    #[test]
+    fn adjustment_exposure_shifts_every_lower_clip_but_not_the_control() {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+
+        let grey_half = Color {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let grey_quarter = Color {
+            r: 0.25,
+            g: 0.25,
+            b: 0.25,
+            a: 1.0,
+        };
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        v1.clips.push(Clip::new(
+            ClipSource::SolidColor { color: grey_half },
+            crate::contract::Tick(0),
+            crate::contract::Tick(100),
+        )); // A [0,100)
+        v1.clips.push(Clip::new(
+            ClipSource::SolidColor {
+                color: grey_quarter,
+            },
+            crate::contract::Tick(100),
+            crate::contract::Tick(100),
+        )); // B [100,200)
+        v1.clips.push(Clip::new(
+            ClipSource::SolidColor { color: grey_half },
+            crate::contract::Tick(200),
+            crate::contract::Tick(100),
+        )); // C [200,300) control
+        seq.video_tracks.push(v1);
+
+        // Top track: one Adjustment [0,200) carrying Exposure +1 stop.
+        let mut adj = Clip::new(
+            ClipSource::Adjustment,
+            crate::contract::Tick(0),
+            crate::contract::Tick(200),
+        );
+        let mut grade = Grade::new();
+        grade.ops.push(GradeOp::new(
+            GradeOpKind::Exposure,
+            GradeOpParams::Exposure { stops: 1.0 },
+        ));
+        adj.grade = Some(grade);
+        let mut v2 = Track::new(TrackKind::Video, "V2");
+        v2.clips.push(adj);
+        seq.video_tracks.push(v2);
+
+        project.insert_sequence(seq);
+
+        // sRGB→linear; the Exposure +1 stop doubles the linear value.
+        let lin = |c: f32| ((c + 0.055) / 1.055).powf(2.4);
+        let eval_at = |t: i64| {
+            let out = compile(&project, seq_id, 0, crate::contract::Tick(t), Quality::FULL, None);
+            evaluate(&out.graph, (4, 4), &mut EmptyProvider)
+        };
+
+        // t=50: clip A beneath the Adjustment → linear(0.5) × 2.
+        let want_a = lin(0.5) * 2.0;
+        for p in &eval_at(50).pixels {
+            assert!(
+                (p[0] - want_a).abs() < 1e-3,
+                "A shifted r={} want {}",
+                p[0],
+                want_a
+            );
+        }
+        // t=150: clip B beneath the SAME Adjustment → linear(0.25) × 2. Proves
+        // BOTH lower clips are re-rooted, not just the first-composited one.
+        let want_b = lin(0.25) * 2.0;
+        for p in &eval_at(150).pixels {
+            assert!(
+                (p[0] - want_b).abs() < 1e-3,
+                "B shifted r={} want {}",
+                p[0],
+                want_b
+            );
+        }
+        // t=250: control clip C is past the Adjustment's [0,200) span → untouched
+        // (plain linear(0.5), NOT doubled), alpha preserved.
+        let want_c = lin(0.5);
+        for p in &eval_at(250).pixels {
+            assert!(
+                (p[0] - want_c).abs() < 1e-3,
+                "C untouched r={} want {}",
+                p[0],
+                want_c
+            );
+            assert!((p[3] - 1.0).abs() < 1e-4, "control alpha preserved");
+        }
+
+        // Structural guard: the Adjustment introduces a Grade node within its span
+        // and none past it, and never a track-fold Merge (it replaces the
+        // accumulator rather than compositing over it).
+        let g50 = compile(&project, seq_id, 0, crate::contract::Tick(50), Quality::FULL, None);
+        assert!(
+            g50.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Grade { .. })),
+            "Grade present under the Adjustment"
+        );
+        assert!(
+            !g50.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Merge { .. })),
+            "Adjustment re-roots without introducing a Merge"
+        );
+        let g250 = compile(&project, seq_id, 0, crate::contract::Tick(250), Quality::FULL, None);
+        assert!(
+            !g250.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Grade { .. })),
+            "no Grade past the Adjustment's span"
+        );
+    }
 }
