@@ -27,7 +27,9 @@ mod toolbar;
 mod tools_panel;
 mod vertex_panel;
 pub(crate) mod media_pool;
-pub(crate) mod video_stubs;
+pub(crate) mod video;
+
+pub(crate) use video::{ColorPageTab, ScopeKind, VideoPanelUi};
 
 use arrange::*;
 use assets::*;
@@ -1112,6 +1114,12 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) engine_online: bool,
     /// Current engine proxy-mode intent (05 §4).
     pub(crate) proxy_mode: photonic_video::ProxyMode,
+    /// Video-editor session state the video-mode drawers read/mutate (04 §4.1).
+    /// The left-rail video drawers (`ClipInspector`/`Effects`/`Captions`/
+    /// `NodeEditor`) reach their per-panel state through here so panel builders
+    /// never touch `PhotonicApp` or `draw_drawer`.
+    #[allow(dead_code)] // read as each left-rail video panel story is filled in.
+    pub(crate) video: VideoPanelUi<'a>,
     pub(crate) action: Option<PanelAction>,
     pub(crate) q: String,
     pub(crate) forced_open: Option<bool>,
@@ -1453,10 +1461,10 @@ pub(crate) fn draw_drawer(
             draw_edit_history(ui, ctx);
         }
         DrawerGroup::MediaPool => media_pool::draw_media_pool(ui, ctx),
-        DrawerGroup::ClipInspector => video_stubs::draw_clip_inspector(ui, ctx),
-        DrawerGroup::Effects => video_stubs::draw_effects_browser(ui, ctx),
-        DrawerGroup::Captions => video_stubs::draw_captions_panel(ui, ctx),
-        DrawerGroup::NodeEditor => video_stubs::draw_node_editor_palette(ui, ctx),
+        DrawerGroup::ClipInspector => video::clip_inspector::draw_clip_inspector(ui, ctx),
+        DrawerGroup::Effects => video::effects_browser::draw_effects_browser(ui, ctx),
+        DrawerGroup::Captions => video::caption_editor::draw_caption_editor(ui, ctx),
+        DrawerGroup::NodeEditor => video::node_editor::draw_node_editor_palette(ui, ctx),
         // Tools is rendered by the app layer (it needs tool state, not the
         // property ctx), so it is never routed through draw_drawer.
         DrawerGroup::Tools => {}

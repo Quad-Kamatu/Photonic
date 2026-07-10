@@ -41,7 +41,7 @@ use photonic_core::{
     layer::LayerId,
     node::{GroupNode, NodeId, PathNode},
     ops::artboard_ops,
-    timeline::{ClipId, Tick},
+    timeline::{ClipId, CueId, GradeOpId, GraphId, GraphNodeId, Tick, TrackId},
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
@@ -53,8 +53,8 @@ use timeline::TimelineView;
 use crate::{
     hotbar::{self, HotbarAction, HotbarBucket, HotbarEffect, HotbarItem, HotbarMode},
     panels::{
-        self, DrawerGroup, EyedropperTarget, PanelAction, RightDrawerGroup, SelectSameAttr,
-        ShapeKind, ZOrderOp,
+        self, ColorPageTab, DrawerGroup, EyedropperTarget, PanelAction, RightDrawerGroup,
+        ScopeKind, SelectSameAttr, ShapeKind, VideoPanelUi, ZOrderOp,
     },
     preferences::AppPreferences,
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
@@ -841,6 +841,41 @@ pub struct PhotonicApp {
     /// Media pool drawer state + background import channel (05 §2).
     pub(crate) media_pool_ui: panels::media_pool::MediaPoolUi,
 
+    // ── Video-mode panel session state (04 §4.1) ────────────────────────────
+    // Storage the six video panel stories read/mutate through
+    // `panels::VideoPanelUi` (built by `video_panel_ui`), so panel builders
+    // never touch this struct. Session-only (this struct is not serde; anything
+    // that must persist belongs in `AppPreferences`). Each field names its
+    // owning panel/spec.
+    /// [color_page, 07 §1] Selected grade op in the clip's grade stack.
+    pub(crate) selected_grade_op: Option<GradeOpId>,
+    /// [color_page, 07 §6] Active Color Controls sub-tab.
+    pub(crate) color_page_tab: ColorPageTab,
+    /// [color_page, 07 §6] Floating scopes panel visibility.
+    pub(crate) scopes_panel_open: bool,
+    /// [color_page, 07 §6] Which scope the floating panel shows.
+    pub(crate) scope_kind: ScopeKind,
+    /// [node_editor, 08 §6.1] Graph open in the central node canvas, if any.
+    pub(crate) open_graph: Option<GraphId>,
+    /// [node_editor, 08 §6.1] Selected node in the open graph (drives the
+    /// left-rail inspector).
+    pub(crate) selected_graph_node: Option<GraphNodeId>,
+    /// [node_editor, 08 §6.1] Whether the central panel shows the node canvas
+    /// instead of the program monitor.
+    pub(crate) node_canvas_active: bool,
+    /// [audio_mixer, 09] Track strips whose EQ/comp/automation are expanded.
+    pub(crate) mixer_expanded_tracks: std::collections::HashSet<TrackId>,
+    /// [clip_inspector, 04 §4.1 / 01 §6] Clip whose animated props the keyframe
+    /// editor targets.
+    pub(crate) keyframe_editor_target: Option<ClipId>,
+    /// [caption_editor, 06] Caption cue currently being edited.
+    pub(crate) caption_edit_cue: Option<CueId>,
+    /// [export_dialog, 05 §3] Whether the video export dialog is open.
+    pub(crate) export_dialog_open: bool,
+    /// [export_dialog, 05 §3] Name of the last-used export preset, seed for the
+    /// dialog. Session-only for now; the export story persists it to prefs.
+    pub(crate) last_export_preset: String,
+
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
 
@@ -1445,6 +1480,18 @@ impl Default for PhotonicApp {
             initial_mode_checked: false,
             engine: None,
             media_pool_ui: panels::media_pool::MediaPoolUi::default(),
+            selected_grade_op: None,
+            color_page_tab: ColorPageTab::default(),
+            scopes_panel_open: false,
+            scope_kind: ScopeKind::default(),
+            open_graph: None,
+            selected_graph_node: None,
+            node_canvas_active: false,
+            mixer_expanded_tracks: std::collections::HashSet::new(),
+            keyframe_editor_target: None,
+            caption_edit_cue: None,
+            export_dialog_open: false,
+            last_export_preset: String::new(),
             drag_start_canvas: None,
             pen_points: Vec::new(),
             moving: false,
@@ -2038,6 +2085,31 @@ impl PhotonicApp {
         s
     }
 
+    /// Borrow the video-editor session state as a [`VideoPanelUi`] (04 §4.1) for
+    /// the video panels that do **not** go through [`PropPanelCtx`] — the
+    /// right-rail Color/Audio drawers, the floating scopes/export panels, and the
+    /// central node canvas. The left-rail video drawers get the same view via
+    /// `ctx.video` inside [`Self::draw_property_drawer_content`] instead (that one
+    /// must inline the borrows, since the surrounding `PropPanelCtx` literal
+    /// already holds disjoint `&mut self` field borrows).
+    fn video_panel_ui(&mut self) -> VideoPanelUi<'_> {
+        VideoPanelUi {
+            selection: &self.timeline_selection,
+            selected_grade_op: &mut self.selected_grade_op,
+            color_page_tab: &mut self.color_page_tab,
+            scopes_panel_open: &mut self.scopes_panel_open,
+            scope_kind: &mut self.scope_kind,
+            open_graph: &mut self.open_graph,
+            selected_graph_node: &mut self.selected_graph_node,
+            node_canvas_active: &mut self.node_canvas_active,
+            mixer_expanded_tracks: &mut self.mixer_expanded_tracks,
+            keyframe_editor_target: &mut self.keyframe_editor_target,
+            caption_edit_cue: &mut self.caption_edit_cue,
+            export_dialog_open: &mut self.export_dialog_open,
+            last_export_preset: &mut self.last_export_preset,
+        }
+    }
+
     /// Build the shared [`PropPanelCtx`] and render one property-drawer group into
     /// `ui`, forwarding any produced action. Factored out so both the left drawer
     /// and the right drawer (which now hosts History) can render property groups
@@ -2141,6 +2213,24 @@ impl PhotonicApp {
                 .as_ref()
                 .map(|b| b.proxy_mode)
                 .unwrap_or_default(),
+            // Inlined rather than `self.video_panel_ui()` because that borrows
+            // all of `self`, which would collide with the disjoint `&mut self`
+            // field borrows already held by this `PropPanelCtx` literal.
+            video: VideoPanelUi {
+                selection: &self.timeline_selection,
+                selected_grade_op: &mut self.selected_grade_op,
+                color_page_tab: &mut self.color_page_tab,
+                scopes_panel_open: &mut self.scopes_panel_open,
+                scope_kind: &mut self.scope_kind,
+                open_graph: &mut self.open_graph,
+                selected_graph_node: &mut self.selected_graph_node,
+                node_canvas_active: &mut self.node_canvas_active,
+                mixer_expanded_tracks: &mut self.mixer_expanded_tracks,
+                keyframe_editor_target: &mut self.keyframe_editor_target,
+                caption_edit_cue: &mut self.caption_edit_cue,
+                export_dialog_open: &mut self.export_dialog_open,
+                last_export_preset: &mut self.last_export_preset,
+            },
             action: None,
             q: String::new(),
             forced_open: None,
@@ -2887,6 +2977,20 @@ impl PhotonicApp {
                         self.audit.panel_open = !self.audit.panel_open;
                     }
 
+                    // Video export dialog toggle (05 §3) — video mode only.
+                    // Toolbar entry for `export_dialog_open`; the floating dialog
+                    // body is filled by the export-dialog (05) story. (The scopes
+                    // panel toggle is owned by the Color Controls drawer instead,
+                    // via `VideoPanelUi::scopes_panel_open`, per 07 §6.)
+                    if self.mode == AppMode::Video
+                        && ui
+                            .selectable_label(self.export_dialog_open, "Export")
+                            .on_hover_text("Export video (04 §4.1)")
+                            .clicked()
+                    {
+                        self.export_dialog_open = !self.export_dialog_open;
+                    }
+
                     // Global search (command palette) — tools + actions.
                     ui.separator();
                     self.global_search_ui(ui, doc, history);
@@ -3396,10 +3500,12 @@ impl PhotonicApp {
                         self.draw_claude_tab(ui);
                     }
                     RightDrawerGroup::ColorControls => {
-                        panels::video_stubs::draw_color_controls(ui);
+                        let mut vid = self.video_panel_ui();
+                        panels::video::color_page::draw_color_controls(ui, &mut vid);
                     }
                     RightDrawerGroup::AudioMixer => {
-                        panels::video_stubs::draw_audio_mixer(ui);
+                        let mut vid = self.video_panel_ui();
+                        panels::video::audio_mixer::draw_audio_mixer(ui, &mut vid);
                     }
                     RightDrawerGroup::History => {
                         egui::ScrollArea::vertical()
@@ -3460,6 +3566,21 @@ impl PhotonicApp {
                 &mut self.audit.panel_open,
                 &mut self.audit.filter,
             );
+        }
+
+        // ── Video floating panels (04 §4.1) ──────────────────────────────────
+        // The scopes panel (07 §6) and the video export dialog (05 §3) are
+        // floating windows, not drawers. Gated on their session flags (both
+        // default-off, so vector mode and untouched video mode are unchanged).
+        if self.mode == AppMode::Video {
+            if self.scopes_panel_open {
+                let mut vid = self.video_panel_ui();
+                panels::video::color_page::draw_scopes_panel(ctx, &mut vid);
+            }
+            if self.export_dialog_open {
+                let mut vid = self.video_panel_ui();
+                panels::video::export_dialog::draw_export_dialog(ctx, &mut vid);
+            }
         }
 
         // ── Central canvas area ──────────────────────────────────────────────
@@ -3533,7 +3654,16 @@ impl PhotonicApp {
                          §1.3) — every entry path must call \
                          ensure_timeline_project[_with] first"
                     );
-                    self.draw_video_monitor(ui, ctx, rect, doc, history);
+                    // Central-panel content state (08 §6.1): the node canvas
+                    // replaces the program monitor while a composition is being
+                    // edited; otherwise the monitor draws as before. Node-canvas
+                    // entry/escape is wired by the node-editor (08) story.
+                    if self.node_canvas_active {
+                        let mut vid = self.video_panel_ui();
+                        panels::video::node_editor::draw_node_canvas(ui, doc, &mut vid);
+                    } else {
+                        self.draw_video_monitor(ui, ctx, rect, doc, history);
+                    }
                     return;
                 }
 
