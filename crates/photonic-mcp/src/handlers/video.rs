@@ -54,6 +54,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
+// P4+ slice (captions/tts/grade/graph/audio/titles) type imports.
+use photonic_core::timeline::{
+    graph_ops, AudioCmd, AudioFade, AudioFxUnit, CaptionCmd, CaptionCue, CaptionStyle,
+    CaptionTrack, CaptionWord, ClipAudio, ClipAudioParams, CueId, FadeEdge, FadeShape, FxOwner,
+    Grade, GradeOp, GradeOpKind, GradeOpParams, GraphNode, GraphNodeParams, GraphOp, InPort,
+    LoudnessTarget, MasterBusParams, NodePos, OutPort, StyleTarget, TrackAudio, TrackAudioParams,
+};
+use photonic_video::captions;
+
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
 /// A structured-error `ToolResult` per 10 §8's taxonomy.
@@ -3429,6 +3438,2306 @@ pub async fn delete_export_preset(_state: &AppState, args: DeleteExportPresetArg
     ToolResult::text(format!("deleted custom preset {:?}", args.name))
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// P4+ slice (10-mcp-tools.md): captions (§3.8), tts (§3.9), grade (§3.10),
+// node graph (§3.11), audio (§3.12), title templates (05 §4b). Every mutating
+// handler routes through a committed core op / command (design rule 1): a pure
+// `ops`/`graph_ops` fn where one exists, otherwise the exact
+// `CaptionCmd`/`AudioCmd`/`TtsCmd`/`GraphCmd`/`TimelineCmd` variant it maps to
+// (01 §10), executed via `history.execute_discrete` (design rule 4). Lock order
+// is document before history (design rule 7).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Wrap `cmds` so that `target_seq` is the active sequence while they apply,
+/// restoring the prior active sequence afterward — needed because a few core
+/// `apply` paths (caption-track *creation* via `BulkInsertCues.created_track`,
+/// and every master-bus edit) resolve against `TimelineProject::active_sequence`
+/// (01 §10). The whole thing is one undo step and leaves the active sequence
+/// unchanged. Degrades to a plain batch/single when `target_seq` is already
+/// active.
+fn with_active_seq(p: &TimelineProject, target_seq: SequenceId, cmds: Vec<TimelineCmd>) -> Command {
+    let prev = p.active_sequence;
+    if prev == Some(target_seq) || cmds.is_empty() {
+        return batch_or_single(cmds);
+    }
+    let mut wrapped = Vec::with_capacity(cmds.len() + 2);
+    wrapped.push(TimelineCmd::SetActiveSequence {
+        old: prev,
+        new: Some(target_seq),
+    });
+    wrapped.extend(cmds);
+    wrapped.push(TimelineCmd::SetActiveSequence {
+        old: Some(target_seq),
+        new: prev,
+    });
+    Command::Batch(wrapped.into_iter().map(Command::Timeline).collect())
+}
+
+fn batch_or_single(cmds: Vec<TimelineCmd>) -> Command {
+    if cmds.len() == 1 {
+        Command::Timeline(cmds.into_iter().next().unwrap())
+    } else {
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect())
+    }
+}
+
+/// Which `(SequenceId, &CaptionTrack)` owns a caption track id.
+fn find_caption_track(p: &TimelineProject, track: TrackId) -> Option<(SequenceId, &CaptionTrack)> {
+    for (sid, s) in &p.sequences {
+        if let Some(t) = s.caption_tracks.iter().find(|t| t.id == track) {
+            return Some((*sid, t));
+        }
+    }
+    None
+}
+
+/// Which `(SequenceId, TrackId, &CaptionCue)` owns a cue id.
+fn find_cue(p: &TimelineProject, cue: CueId) -> Option<(SequenceId, TrackId, &CaptionCue)> {
+    for (sid, s) in &p.sequences {
+        for ct in &s.caption_tracks {
+            if let Some(c) = ct.cues.iter().find(|c| c.id == cue) {
+                return Some((*sid, ct.id, c));
+            }
+        }
+    }
+    None
+}
+
+fn tick_from_seconds_f64(secs: f64) -> Tick {
+    Tick((secs * TICKS_PER_SECOND as f64).round() as i64)
+}
+
+fn provider_error_code(e: &captions::ProviderError) -> &'static str {
+    use captions::ProviderError::*;
+    match e {
+        Unauthorized => "ProviderAuthError",
+        Unavailable => "ProviderAuthError",
+        RateLimited => "RateLimited",
+        Timeout => "Timeout",
+        Cancelled => "Cancelled",
+        _ => "ProviderError",
+    }
+}
+
+// ─── Captions (10 §3.8) ─────────────────────────────────────────────────────
+
+/// Hosted transcription config from environment (D-04). `None` when unset.
+fn hosted_transcription_from_env() -> Option<captions::HostedTranscriptionConfig> {
+    let base_url = std::env::var("PHOTONIC_TRANSCRIBE_URL").ok()?;
+    let auth = std::env::var("PHOTONIC_TRANSCRIBE_TOKEN")
+        .ok()
+        .map(|t| ("Authorization".to_string(), format!("Bearer {t}")));
+    let path = std::env::var("PHOTONIC_TRANSCRIBE_PATH")
+        .unwrap_or_else(|_| "/v1/audio/transcriptions".to_string());
+    Some(captions::HostedTranscriptionConfig {
+        base_url,
+        auth_header: auth,
+        shape: captions::TranscriptionEndpointShape::OpenAiCompatible { path },
+        extra_timeout: Duration::from_secs(0),
+    })
+}
+
+enum TranscribeChoice {
+    Mock(String),
+    Hosted(captions::HostedTranscriptionConfig),
+}
+
+pub async fn auto_caption(state: &AppState, args: AutoCaptionArgs) -> ToolResult {
+    tracing::debug!("tool: auto_caption");
+    let provider = args
+        .provider
+        .clone()
+        .unwrap_or_else(|| "hosted".to_string());
+
+    // Resolve target sequence, the absolute placement range (for the mock
+    // fixture), the clip's source span + placement offset (for hosted
+    // extraction), and the backing audio file.
+    let (seq_id, span, source_range, place_offset, audio_path) = {
+        let doc = state.document.lock().await;
+        let Some(p) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        if let Some(clip_id) = args.clip_id {
+            let Some((sid, tid)) = locate_clip(p, clip_id) else {
+                return ToolResult::error(format!("clip {clip_id} not found"));
+            };
+            let clip = find_clip(p, sid, tid, clip_id).unwrap();
+            let audio = match &clip.source {
+                ClipSource::Asset { asset } | ClipSource::Vector { asset } => {
+                    p.media.assets.get(asset).and_then(|a| match &a.source {
+                        photonic_core::timeline::AssetSource::File { path, .. } => {
+                            Some(path.clone())
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            (
+                sid,
+                (clip.start, clip.end()),
+                Some((clip.source_in, clip.source_in + clip.duration)),
+                clip.start,
+                audio,
+            )
+        } else if let Some(sid) = args.sequence_id {
+            let Some(s) = p.sequences.get(&sid) else {
+                return ToolResult::error(format!("sequence {sid} not found"));
+            };
+            let end = s
+                .video_tracks
+                .iter()
+                .chain(s.audio_tracks.iter())
+                .flat_map(|t| t.clips.iter())
+                .map(|c| c.end())
+                .max()
+                .unwrap_or(Tick(0));
+            (sid, (Tick(0), end), None, Tick(0), None)
+        } else {
+            return ToolResult::error("supply one of sequence_id / clip_id");
+        }
+    };
+    if span.1 <= span.0 {
+        return err_code(
+            "TickOutOfRange",
+            "target range is empty (no content to caption)",
+        );
+    }
+
+    // Validate provider choice synchronously for a clean start-time error.
+    let choice = match provider.as_str() {
+        "mock" => {
+            let Some(text) = args.mock_transcript.clone() else {
+                return err_code(
+                    "InvalidRequest",
+                    "provider=\"mock\" requires mock_transcript (the deterministic offline transcript)",
+                );
+            };
+            TranscribeChoice::Mock(text)
+        }
+        "hosted" => {
+            let Some(cfg) = hosted_transcription_from_env() else {
+                return err_code(
+                    "ProviderAuthError",
+                    "no hosted transcription provider configured — set PHOTONIC_TRANSCRIBE_URL (+ PHOTONIC_TRANSCRIBE_TOKEN), or use provider=\"mock\" with mock_transcript",
+                );
+            };
+            if source_range.is_none() || audio_path.is_none() {
+                return err_code(
+                    "InvalidRequest",
+                    "hosted transcription needs a file-backed clip audio source — pass clip_id of an imported video/audio asset",
+                );
+            }
+            TranscribeChoice::Hosted(cfg)
+        }
+        other => {
+            return err_code(
+                "InvalidRequest",
+                format!("unknown provider {other:?} — use \"hosted\" or \"mock\""),
+            )
+        }
+    };
+
+    // Resolve or create the destination caption track.
+    let (track_id, created_track): (TrackId, Option<Box<CaptionTrack>>) = {
+        let doc = state.document.lock().await;
+        let p = doc.timeline.as_ref().unwrap();
+        match args.track_id {
+            Some(tid) if find_caption_track(p, tid).is_some() => (tid, None),
+            Some(_) => return ToolResult::error("track_id is not a caption track"),
+            None => {
+                let ct = CaptionTrack::new(args.name.clone().unwrap_or_else(|| "Captions".into()));
+                (ct.id, Some(Box::new(ct)))
+            }
+        }
+    };
+
+    let (job_id, cancel) = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .start("auto_caption");
+    let jobs = std::sync::Arc::clone(&state.video_jobs);
+    let document = std::sync::Arc::clone(&state.document);
+    let history = std::sync::Arc::clone(&state.history);
+    let language_hint = args.language_hint.clone();
+
+    std::thread::spawn(move || {
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Running {
+                progress: 0.1,
+                message: "transcribing".into(),
+            },
+        );
+        let cancel_tok = captions::CancelToken::new();
+        if cancel.load(Ordering::Relaxed) {
+            set_job_status(&jobs, job_id, JobStatus::Cancelled);
+            return;
+        }
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (words_result, hosted) = match choice {
+            TranscribeChoice::Mock(text) => {
+                let prov = captions::MockTranscriptionProvider::fixture(&text, span.0, span.1);
+                use captions::TranscriptionProvider;
+                (
+                    prov.transcribe(
+                        captions::TranscriptionRequest {
+                            audio_path: std::path::PathBuf::from("mock.wav"),
+                            language_hint,
+                            model: None,
+                        },
+                        tx,
+                        cancel_tok,
+                    ),
+                    false,
+                )
+            }
+            TranscribeChoice::Hosted(cfg) => {
+                let tools = match ffmpeg_locate::locate() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        set_job_status(
+                            &jobs,
+                            job_id,
+                            JobStatus::Failed {
+                                error_code: "FfmpegUnavailable".into(),
+                                message: format!("ffmpeg not found ({e})"),
+                            },
+                        );
+                        return;
+                    }
+                };
+                let wav = std::env::temp_dir().join(format!("photonic-mcp-autocap-{job_id}.wav"));
+                if let Err(e) = captions::extract::extract_audio_48k_mono(
+                    &tools,
+                    &audio_path.unwrap(),
+                    &wav,
+                    source_range,
+                ) {
+                    set_job_status(
+                        &jobs,
+                        job_id,
+                        JobStatus::Failed {
+                            error_code: "ExtractFailed".into(),
+                            message: e.to_string(),
+                        },
+                    );
+                    return;
+                }
+                let prov = captions::HostedTranscriptionProvider::new(cfg);
+                use captions::TranscriptionProvider;
+                let r = prov.transcribe(
+                    captions::TranscriptionRequest {
+                        audio_path: wav.clone(),
+                        language_hint,
+                        model: None,
+                    },
+                    tx,
+                    cancel_tok,
+                );
+                let _ = std::fs::remove_file(&wav);
+                (r, true)
+            }
+        };
+
+        let mut words = match words_result {
+            Ok(r) => r.words,
+            Err(e) => {
+                set_job_status(
+                    &jobs,
+                    job_id,
+                    JobStatus::Failed {
+                        error_code: provider_error_code(&e).into(),
+                        message: e.to_string(),
+                    },
+                );
+                return;
+            }
+        };
+        // Hosted adapters return audio-relative ticks (06 §2.2, §3.4: the
+        // offset mapping is the caller's job); shift them to the clip's
+        // sequence position. The mock fixture is already absolute.
+        if hosted {
+            for w in &mut words {
+                w.start = w.start + place_offset;
+                w.end = w.end + place_offset;
+            }
+        }
+        let cues = captions::group_words_into_cues(&words, &captions::GroupingParams::default());
+        let cue_count = cues.len();
+
+        let bulk = TimelineCmd::CaptionEdit(CaptionCmd::BulkInsertCues {
+            track: track_id,
+            cues,
+            replace_range: None,
+            replaced: Vec::new(),
+            created_track,
+        });
+        {
+            let mut doc = document.blocking_lock();
+            let cmd = {
+                let p = doc.timeline.as_ref();
+                match p {
+                    Some(p) => with_active_seq(p, seq_id, vec![bulk]),
+                    None => {
+                        set_job_status(
+                            &jobs,
+                            job_id,
+                            JobStatus::Failed {
+                                error_code: "NoProject".into(),
+                                message: "timeline project vanished".into(),
+                            },
+                        );
+                        return;
+                    }
+                }
+            };
+            let mut hist = history.blocking_lock();
+            hist.execute_discrete(cmd, &mut doc);
+            hist.schedule_mcp_checkpoint("auto_caption".to_string());
+        }
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Done {
+                result: json!({ "track_id": track_id, "cue_count": cue_count }),
+            },
+        );
+    });
+
+    ToolResult::text("auto-caption job started — poll get_job_status")
+        .with_data(json!({ "job_id": job_id, "track_id": track_id }))
+}
+
+pub async fn add_caption_track(state: &AppState, args: AddCaptionTrackArgs) -> ToolResult {
+    tracing::debug!("tool: add_caption_track {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if !p.sequences.contains_key(&args.sequence_id) {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    }
+    let track = CaptionTrack::new(args.name.unwrap_or_else(|| "Captions".into()));
+    let track_id = track.id;
+    let bulk = TimelineCmd::CaptionEdit(CaptionCmd::BulkInsertCues {
+        track: track_id,
+        cues: Vec::new(),
+        replace_range: None,
+        replaced: Vec::new(),
+        created_track: Some(Box::new(track)),
+    });
+    let cmd = with_active_seq(p, args.sequence_id, vec![bulk]);
+    history.execute_discrete(cmd, &mut doc);
+    ToolResult::text("Added caption track").with_data(json!({ "track_id": track_id }))
+}
+
+pub async fn remove_caption_track(state: &AppState, args: RemoveCaptionTrackArgs) -> ToolResult {
+    tracing::debug!("tool: remove_caption_track {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((_, ct)) = find_caption_track(p, args.track_id) else {
+        return ToolResult::error(format!("caption track {} not found", args.track_id));
+    };
+    let inserted_ids: Vec<CueId> = ct.cues.iter().map(|c| c.id).collect();
+    // The committed core has no undoable RemoveCaptionTrack: caption tracks are
+    // created/removed only as side effects of bulk cue insertion (06 §3.6).
+    // `UndoBulkInsert{remove_track}` removes the track structurally; its inverse
+    // is `None`, so this participates in history as a checkpoint but is not a
+    // fine-grained undo step (documented in the tool description).
+    let cmd = TimelineCmd::CaptionEdit(CaptionCmd::UndoBulkInsert {
+        track: args.track_id,
+        inserted_ids,
+        restored: Vec::new(),
+        remove_track: true,
+    });
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Removed caption track")
+}
+
+pub async fn get_caption_track(state: &AppState, args: GetCaptionTrackArgs) -> ToolResult {
+    tracing::debug!("tool: get_caption_track {}", args.track_id);
+    let doc = state.document.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, ct)) = find_caption_track(p, args.track_id) else {
+        return ToolResult::error(format!("caption track {} not found", args.track_id));
+    };
+    ToolResult::text(format!(
+        "caption track \"{}\" — {} cue(s)",
+        ct.name,
+        ct.cues.len()
+    ))
+    .with_data(json!({ "sequence_id": seq_id, "track": ct }))
+}
+
+/// Build `CaptionWord`s from explicit per-word timing, or distribute `text`
+/// proportionally across `[start, end)` (§2.2 fallback math).
+fn build_caption_words(
+    words: Option<Vec<CaptionWordArg>>,
+    text: Option<String>,
+    start: Tick,
+    end: Tick,
+    fr: FrameRate,
+) -> Result<Vec<CaptionWord>, ToolResult> {
+    if let Some(ws) = words {
+        let mut out = Vec::with_capacity(ws.len());
+        for w in ws {
+            let s = resolve_tick(
+                w.start_ticks,
+                w.start_tc.as_deref(),
+                w.start_seconds,
+                Some(fr),
+            )?;
+            let e = resolve_tick(w.end_ticks, w.end_tc.as_deref(), w.end_seconds, Some(fr))?;
+            out.push(CaptionWord::new(w.text, s, e));
+        }
+        Ok(out)
+    } else if let Some(t) = text {
+        Ok(
+            captions::proportional::distribute_words_proportionally(&t, start, end)
+                .into_iter()
+                .map(|tw| CaptionWord::new(tw.text, tw.start, tw.end))
+                .collect(),
+        )
+    } else {
+        Err(ToolResult::error(
+            "supply `words` (per-word timing) or `text`",
+        ))
+    }
+}
+
+pub async fn set_caption_cue(state: &AppState, args: SetCaptionCueArgs) -> ToolResult {
+    tracing::debug!("tool: set_caption_cue {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, ct)) = find_caption_track(p, args.track_id) else {
+        return ToolResult::error(format!("caption track {} not found", args.track_id));
+    };
+    let fr = p.sequences.get(&seq_id).unwrap().frame_rate;
+    let has_start =
+        args.start_ticks.is_some() || args.start_tc.is_some() || args.start_seconds.is_some();
+    let has_end = args.end_ticks.is_some() || args.end_tc.is_some() || args.end_seconds.is_some();
+
+    if let Some(cue_id) = args.cue_id {
+        // Edit an existing cue: timing + words in one batch (design rule 4).
+        let Some(cue) = ct.cues.iter().find(|c| c.id == cue_id) else {
+            return ToolResult::error(format!("cue {cue_id} not found on this track"));
+        };
+        let cue = cue.clone();
+        let mut cmds = Vec::new();
+        if has_start || has_end {
+            let start = if has_start {
+                match resolve_tick(
+                    args.start_ticks,
+                    args.start_tc.as_deref(),
+                    args.start_seconds,
+                    Some(fr),
+                ) {
+                    Ok(t) => t,
+                    Err(e) => return e,
+                }
+            } else {
+                cue.start
+            };
+            let end = if has_end {
+                match resolve_tick(
+                    args.end_ticks,
+                    args.end_tc.as_deref(),
+                    args.end_seconds,
+                    Some(fr),
+                ) {
+                    Ok(t) => t,
+                    Err(e) => return e,
+                }
+            } else {
+                cue.end
+            };
+            if end <= start {
+                return err_code("TickOutOfRange", "cue end must be after start");
+            }
+            if (start, end) != (cue.start, cue.end) {
+                cmds.push(TimelineCmd::CaptionEdit(CaptionCmd::RetimeCue {
+                    track: args.track_id,
+                    cue: cue_id,
+                    old: (cue.start, cue.end),
+                    new: (start, end),
+                }));
+            }
+        }
+        if args.words.is_some() || args.text.is_some() {
+            let new_words = match build_caption_words(args.words, args.text, cue.start, cue.end, fr)
+            {
+                Ok(w) => w,
+                Err(e) => return e,
+            };
+            cmds.push(TimelineCmd::CaptionEdit(CaptionCmd::SetCueText {
+                track: args.track_id,
+                cue: cue_id,
+                old_words: cue.words.clone(),
+                new_words,
+            }));
+        }
+        if cmds.is_empty() {
+            return ToolResult::error("nothing to change — supply timing, words, or text");
+        }
+        history.execute_discrete(batch_or_single(cmds), &mut doc);
+        let note = args
+            .position_override
+            .map(|_| "position_override is only settable on cue creation in v1 — ignored")
+            .unwrap_or("");
+        ToolResult::text("Updated caption cue").with_data(json!({ "cue_id": cue_id, "note": note }))
+    } else {
+        // Create a new cue on the (already-existing) track.
+        if !has_start || !has_end {
+            return ToolResult::error("creating a cue requires both start and end");
+        }
+        let start = match resolve_tick(
+            args.start_ticks,
+            args.start_tc.as_deref(),
+            args.start_seconds,
+            Some(fr),
+        ) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let end = match resolve_tick(
+            args.end_ticks,
+            args.end_tc.as_deref(),
+            args.end_seconds,
+            Some(fr),
+        ) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        if end <= start {
+            return err_code("TickOutOfRange", "cue end must be after start");
+        }
+        let words = match build_caption_words(args.words, args.text, start, end, fr) {
+            Ok(w) => w,
+            Err(e) => return e,
+        };
+        let mut cue = CaptionCue::new(start, end, words);
+        cue.position_override = args.position_override;
+        let cue_id = cue.id;
+        let cmd = TimelineCmd::CaptionEdit(CaptionCmd::BulkInsertCues {
+            track: args.track_id,
+            cues: vec![cue],
+            replace_range: None,
+            replaced: Vec::new(),
+            created_track: None,
+        });
+        history.execute_discrete(Command::Timeline(cmd), &mut doc);
+        ToolResult::text("Added caption cue").with_data(json!({ "cue_id": cue_id }))
+    }
+}
+
+pub async fn split_caption_cue(state: &AppState, args: SplitCaptionCueArgs) -> ToolResult {
+    tracing::debug!("tool: split_caption_cue {}", args.cue_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id, cue)) = find_cue(p, args.cue_id) else {
+        return ToolResult::error(format!("cue {} not found", args.cue_id));
+    };
+    let fr = p.sequences.get(&seq_id).unwrap().frame_rate;
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    // Split before the first word that starts at/after `at`.
+    let idx = cue.words.iter().take_while(|w| w.start < at).count();
+    if idx == 0 || idx >= cue.words.len() {
+        return err_code(
+            "TickOutOfRange",
+            "split point must fall strictly between two words of the cue",
+        );
+    }
+    let new_cue_id = CueId::new();
+    let cmd = TimelineCmd::CaptionEdit(CaptionCmd::SplitCue {
+        track: track_id,
+        cue: args.cue_id,
+        at_word_index: idx,
+        new_cue_id,
+    });
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Split caption cue").with_data(json!({ "new_cue_id": new_cue_id }))
+}
+
+pub async fn merge_caption_cues(state: &AppState, args: MergeCaptionCuesArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: merge_caption_cues {} + {}",
+        args.cue_id_a,
+        args.cue_id_b
+    );
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((_, track_a, cue_a)) = find_cue(p, args.cue_id_a) else {
+        return ToolResult::error(format!("cue {} not found", args.cue_id_a));
+    };
+    let cue_a = cue_a.clone();
+    let Some((_, track_b, cue_b)) = find_cue(p, args.cue_id_b) else {
+        return ToolResult::error(format!("cue {} not found", args.cue_id_b));
+    };
+    if track_a != track_b {
+        return ToolResult::error("merge requires both cues on the same caption track");
+    }
+    let cmd = TimelineCmd::CaptionEdit(CaptionCmd::MergeCues {
+        track: track_a,
+        a: args.cue_id_a,
+        b: args.cue_id_b,
+        old_a: Box::new(cue_a),
+        old_b: Box::new(cue_b.clone()),
+    });
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Merged caption cues")
+}
+
+pub async fn set_caption_word(state: &AppState, args: SetCaptionWordArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: set_caption_word {}[{}]",
+        args.cue_id,
+        args.word_index
+    );
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id, cue)) = find_cue(p, args.cue_id) else {
+        return ToolResult::error(format!("cue {} not found", args.cue_id));
+    };
+    let fr = p.sequences.get(&seq_id).unwrap().frame_rate;
+    if args.word_index >= cue.words.len() {
+        return ToolResult::error(format!("word index {} out of range", args.word_index));
+    }
+    let old_words = cue.words.clone();
+    let mut new_words = old_words.clone();
+    {
+        let w = &mut new_words[args.word_index];
+        if let Some(t) = args.text {
+            w.text = t;
+        }
+        let has_start =
+            args.start_ticks.is_some() || args.start_tc.is_some() || args.start_seconds.is_some();
+        let has_end =
+            args.end_ticks.is_some() || args.end_tc.is_some() || args.end_seconds.is_some();
+        if has_start {
+            match resolve_tick(
+                args.start_ticks,
+                args.start_tc.as_deref(),
+                args.start_seconds,
+                Some(fr),
+            ) {
+                Ok(t) => w.start = t,
+                Err(e) => return e,
+            }
+        }
+        if has_end {
+            match resolve_tick(
+                args.end_ticks,
+                args.end_tc.as_deref(),
+                args.end_seconds,
+                Some(fr),
+            ) {
+                Ok(t) => w.end = t,
+                Err(e) => return e,
+            }
+        }
+    }
+    let cmd = TimelineCmd::CaptionEdit(CaptionCmd::SetCueText {
+        track: track_id,
+        cue: args.cue_id,
+        old_words,
+        new_words,
+    });
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Updated caption word")
+}
+
+fn merge_caption_style(
+    base: &CaptionStyle,
+    arg: &CaptionStyleArg,
+) -> Result<CaptionStyle, ToolResult> {
+    let mut s = base.clone();
+    if let Some(f) = &arg.font_family {
+        s.font_family = f.clone();
+    }
+    if let Some(v) = arg.font_size {
+        s.font_size = v;
+    }
+    if let Some(v) = arg.weight {
+        s.weight = v;
+    }
+    if let Some(hex) = &arg.fill {
+        s.fill = Color::from_hex(hex)
+            .ok_or_else(|| ToolResult::error(format!("invalid fill color {hex:?}")))?;
+    }
+    if let Some(pos) = arg.position {
+        s.position = pos;
+    }
+    if let Some(v) = arg.max_width {
+        s.max_width = v;
+    }
+    Ok(s)
+}
+
+pub async fn set_caption_style(state: &AppState, args: SetCaptionStyleArgs) -> ToolResult {
+    tracing::debug!("tool: set_caption_style");
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    // Resolve the owning track from track_id or the cue.
+    let track_id = if let Some(t) = args.track_id {
+        t
+    } else if let Some(cue) = args.cue_id {
+        match find_cue(p, cue) {
+            Some((_, t, _)) => t,
+            None => return ToolResult::error(format!("cue {cue} not found")),
+        }
+    } else {
+        return ToolResult::error("supply track_id (track scope) or cue_id (cue/word scope)");
+    };
+    let Some((_, ct)) = find_caption_track(p, track_id) else {
+        return ToolResult::error(format!("caption track {track_id} not found"));
+    };
+
+    let (target, old, base): (StyleTarget, Option<CaptionStyle>, CaptionStyle) =
+        match (args.cue_id, args.word_index) {
+            (Some(cue_id), Some(wi)) => {
+                let Some(c) = ct.cues.iter().find(|c| c.id == cue_id) else {
+                    return ToolResult::error(format!("cue {cue_id} not found on this track"));
+                };
+                let Some(w) = c.words.get(wi) else {
+                    return ToolResult::error(format!("word index {wi} out of range"));
+                };
+                let base = w
+                    .style_override
+                    .clone()
+                    .or_else(|| c.style_override.clone())
+                    .unwrap_or_else(|| ct.style.clone());
+                (
+                    StyleTarget::Word(cue_id, wi),
+                    w.style_override.clone(),
+                    base,
+                )
+            }
+            (Some(cue_id), None) => {
+                let Some(c) = ct.cues.iter().find(|c| c.id == cue_id) else {
+                    return ToolResult::error(format!("cue {cue_id} not found on this track"));
+                };
+                let base = c.style_override.clone().unwrap_or_else(|| ct.style.clone());
+                (StyleTarget::Cue(cue_id), c.style_override.clone(), base)
+            }
+            (None, _) => (StyleTarget::Track, Some(ct.style.clone()), ct.style.clone()),
+        };
+
+    let new: Option<CaptionStyle> = if args.clear && !matches!(target, StyleTarget::Track) {
+        None
+    } else {
+        let arg = args.style.unwrap_or_default();
+        match merge_caption_style(&base, &arg) {
+            Ok(s) => Some(s),
+            Err(e) => return e,
+        }
+    };
+
+    let cmd = TimelineCmd::CaptionEdit(CaptionCmd::SetStyle {
+        track: track_id,
+        target,
+        old: old.map(Box::new),
+        new: new.map(Box::new),
+    });
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Updated caption style")
+}
+
+fn caption_format_from(path: &str, explicit: Option<&str>) -> Option<String> {
+    if let Some(f) = explicit {
+        return Some(f.to_ascii_lowercase());
+    }
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+}
+
+pub async fn import_captions(state: &AppState, args: ImportCaptionsArgs) -> ToolResult {
+    tracing::debug!("tool: import_captions {}", args.track_id);
+    let content = match std::fs::read_to_string(&args.path) {
+        Ok(c) => c,
+        Err(e) => return ToolResult::error(format!("could not read {}: {e}", args.path)),
+    };
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((_, ct)) = find_caption_track(p, args.track_id) else {
+        return ToolResult::error(format!("caption track {} not found", args.track_id));
+    };
+    let track_name = ct.name.clone();
+    let fmt = caption_format_from(&args.path, args.format.as_deref());
+    let (cues, notes) = match fmt.as_deref() {
+        Some("srt") => match captions::interchange::srt::parse_srt(&content) {
+            Ok((c, s)) => (c, s.notes),
+            Err(e) => return ToolResult::error(format!("SRT parse error: {e}")),
+        },
+        Some("vtt") => match captions::interchange::vtt::parse_vtt(&content) {
+            Ok((c, s)) => (c, s.notes),
+            Err(e) => return ToolResult::error(format!("VTT parse error: {e}")),
+        },
+        Some("ass") => match captions::interchange::ass::parse_ass(&content, &track_name) {
+            Ok(r) => (r.track.cues, r.summary.notes),
+            Err(e) => return ToolResult::error(format!("ASS parse error: {e}")),
+        },
+        other => {
+            return ToolResult::error(format!(
+                "unknown/unsupported caption format {other:?} — use srt | vtt | ass"
+            ))
+        }
+    };
+    let count = cues.len();
+    let cmd = TimelineCmd::CaptionEdit(CaptionCmd::BulkInsertCues {
+        track: args.track_id,
+        cues,
+        replace_range: None,
+        replaced: Vec::new(),
+        created_track: None,
+    });
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text(format!("Imported {count} caption cue(s)"))
+        .with_data(json!({ "cues_imported": count, "notes": notes }))
+}
+
+pub async fn export_captions(state: &AppState, args: ExportCaptionsArgs) -> ToolResult {
+    tracing::debug!("tool: export_captions {}", args.track_id);
+    let doc = state.document.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((_, ct)) = find_caption_track(p, args.track_id) else {
+        return ToolResult::error(format!("caption track {} not found", args.track_id));
+    };
+    let fmt = caption_format_from(&args.path, args.format.as_deref());
+    let (text, notes) = match fmt.as_deref() {
+        Some("srt") => (captions::interchange::srt::write_srt(&ct.cues), Vec::new()),
+        Some("vtt") => (
+            captions::interchange::vtt::write_vtt(&ct.cues, true),
+            Vec::new(),
+        ),
+        Some("ass") => {
+            let (t, summary) = captions::interchange::ass::write_ass(ct);
+            (t, summary.notes)
+        }
+        other => {
+            return ToolResult::error(format!(
+                "unknown/unsupported caption format {other:?} — use srt | vtt | ass"
+            ))
+        }
+    };
+    if let Err(e) = std::fs::write(&args.path, text) {
+        return ToolResult::error(format!("could not write {}: {e}", args.path));
+    }
+    ToolResult::text(format!(
+        "Exported {} cue(s) to {}",
+        ct.cues.len(),
+        args.path
+    ))
+    .with_data(json!({ "path": args.path, "notes": notes }))
+}
+
+// ─── TTS (10 §3.9) ───────────────────────────────────────────────────────────
+
+fn hosted_tts_from_env() -> Option<captions::HostedTtsConfig> {
+    let base_url = std::env::var("PHOTONIC_TTS_URL").ok()?;
+    let auth = std::env::var("PHOTONIC_TTS_TOKEN")
+        .ok()
+        .map(|t| ("Authorization".to_string(), format!("Bearer {t}")));
+    let path =
+        std::env::var("PHOTONIC_TTS_PATH").unwrap_or_else(|_| "/v1/audio/speech".to_string());
+    let voices_path =
+        std::env::var("PHOTONIC_TTS_VOICES_PATH").unwrap_or_else(|_| "/v1/voices".to_string());
+    Some(captions::HostedTtsConfig {
+        base_url,
+        auth_header: auth,
+        synthesize_shape: captions::TtsEndpointShape::OpenAiCompatible { path },
+        voices_path,
+        extra_timeout: Duration::from_secs(0),
+    })
+}
+
+enum TtsChoice {
+    Mock,
+    Hosted(captions::HostedTtsConfig),
+}
+
+pub async fn generate_voiceover(state: &AppState, args: GenerateVoiceoverArgs) -> ToolResult {
+    tracing::debug!("tool: generate_voiceover");
+    if args.text.trim().is_empty() {
+        return ToolResult::error("text must not be empty");
+    }
+    let provider = args
+        .provider
+        .clone()
+        .unwrap_or_else(|| "hosted".to_string());
+    let (seq_id, fr) = {
+        let doc = state.document.lock().await;
+        let Some(p) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        let Some(seq_id) = locate_track(p, args.track_id) else {
+            return ToolResult::error(format!("track {} not found", args.track_id));
+        };
+        (seq_id, p.sequences.get(&seq_id).unwrap().frame_rate)
+    };
+    let start = match resolve_tick(
+        args.start_ticks,
+        args.start_tc.as_deref(),
+        args.start_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let choice = match provider.as_str() {
+        "mock" => TtsChoice::Mock,
+        "hosted" => match hosted_tts_from_env() {
+            Some(cfg) => TtsChoice::Hosted(cfg),
+            None => {
+                return err_code(
+                    "ProviderAuthError",
+                    "no hosted TTS provider configured — set PHOTONIC_TTS_URL (+ PHOTONIC_TTS_TOKEN), or use provider=\"mock\"",
+                )
+            }
+        },
+        other => return err_code("InvalidRequest", format!("unknown provider {other:?}")),
+    };
+    let voice = args
+        .voice
+        .clone()
+        .unwrap_or_else(|| "mock-voice".to_string());
+
+    let (job_id, cancel) = state
+        .video_jobs
+        .lock()
+        .expect("job registry poisoned")
+        .start("generate_voiceover");
+    let jobs = std::sync::Arc::clone(&state.video_jobs);
+    let document = std::sync::Arc::clone(&state.document);
+    let history = std::sync::Arc::clone(&state.history);
+    let text = args.text.clone();
+    let track_id = args.track_id;
+    let also_caption = args.also_caption;
+    let caption_track_id = args.caption_track_id;
+
+    std::thread::spawn(move || {
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Running {
+                progress: 0.2,
+                message: "synthesizing".into(),
+            },
+        );
+        if cancel.load(Ordering::Relaxed) {
+            set_job_status(&jobs, job_id, JobStatus::Cancelled);
+            return;
+        }
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let req = captions::TtsRequest {
+            text: text.clone(),
+            voice,
+            params: std::collections::HashMap::new(),
+        };
+        use captions::TtsProvider;
+        let result = match choice {
+            TtsChoice::Mock => captions::MockTtsProvider::default().synthesize(
+                req,
+                tx,
+                captions::CancelToken::new(),
+            ),
+            TtsChoice::Hosted(cfg) => captions::HostedTtsProvider::new(cfg).synthesize(
+                req,
+                tx,
+                captions::CancelToken::new(),
+            ),
+        };
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => {
+                set_job_status(
+                    &jobs,
+                    job_id,
+                    JobStatus::Failed {
+                        error_code: provider_error_code(&e).into(),
+                        message: e.to_string(),
+                    },
+                );
+                return;
+            }
+        };
+        // Persist the synthesized WAV in the proxy/sidecar cache dir and import
+        // it as a file-backed audio asset.
+        let duration_secs = captions::wav::read_wav_info(&result.audio)
+            .map(|i| i.duration_secs())
+            .unwrap_or(0.0);
+        let dur_ticks = tick_from_seconds_f64(duration_secs).max(Tick(1));
+        let cache_dir = video_proxy::proxy_cache_dir(None);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let wav_path = cache_dir.join(format!("tts-{job_id}.wav"));
+        if let Err(e) = std::fs::write(&wav_path, &result.audio) {
+            set_job_status(
+                &jobs,
+                job_id,
+                JobStatus::Failed {
+                    error_code: "WriteFailed".into(),
+                    message: format!("could not write voiceover audio: {e}"),
+                },
+            );
+            return;
+        }
+        let asset = photonic_core::timeline::MediaAsset::from_file(AssetKind::Audio, wav_path);
+        let asset_id = asset.id;
+        let clip = Clip::new(ClipSource::Asset { asset: asset_id }, start, dur_ticks);
+        let clip_id = clip.id;
+
+        // Optional word-level captions from the provider's own alignment.
+        let caption_cues: Vec<CaptionCue> = if also_caption {
+            match &result.word_timings {
+                Some(words) => {
+                    let shifted: Vec<captions::TranscribedWord> = words
+                        .iter()
+                        .map(|w| captions::TranscribedWord {
+                            text: w.text.clone(),
+                            start: w.start + start,
+                            end: w.end + start,
+                            confidence: w.confidence,
+                        })
+                        .collect();
+                    captions::group_words_into_cues(&shifted, &captions::GroupingParams::default())
+                }
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut doc = document.blocking_lock();
+        let cmd = {
+            let Some(p) = doc.timeline.as_ref() else {
+                set_job_status(
+                    &jobs,
+                    job_id,
+                    JobStatus::Failed {
+                        error_code: "NoProject".into(),
+                        message: "timeline project vanished".into(),
+                    },
+                );
+                return;
+            };
+            let ins = match ops::insert_clip(p, seq_id, track_id, clip) {
+                Ok(c) => c,
+                Err(e) => {
+                    drop(doc);
+                    set_job_status(
+                        &jobs,
+                        job_id,
+                        JobStatus::Failed {
+                            error_code: "InsertFailed".into(),
+                            message: format!("could not place voiceover clip: {e}"),
+                        },
+                    );
+                    return;
+                }
+            };
+            let mut cmds = vec![ops::add_asset(asset), ins];
+            let mut cap_track: Option<TrackId> = None;
+            if !caption_cues.is_empty() {
+                let (ctrack, created) =
+                    match caption_track_id.and_then(|t| find_caption_track(p, t).map(|_| t)) {
+                        Some(t) => (t, None),
+                        None => {
+                            let ct = CaptionTrack::new("Voiceover captions");
+                            (ct.id, Some(Box::new(ct)))
+                        }
+                    };
+                cap_track = Some(ctrack);
+                cmds.push(TimelineCmd::CaptionEdit(CaptionCmd::BulkInsertCues {
+                    track: ctrack,
+                    cues: caption_cues.clone(),
+                    replace_range: None,
+                    replaced: Vec::new(),
+                    created_track: created,
+                }));
+            }
+            let _ = cap_track;
+            with_active_seq(p, seq_id, cmds)
+        };
+        let mut hist = history.blocking_lock();
+        hist.execute_discrete(cmd, &mut doc);
+        hist.schedule_mcp_checkpoint("generate_voiceover".to_string());
+        drop(hist);
+        drop(doc);
+        set_job_status(
+            &jobs,
+            job_id,
+            JobStatus::Done {
+                result: json!({
+                    "asset_id": asset_id,
+                    "clip_id": clip_id,
+                    "duration_ticks": dur_ticks.0,
+                    "captioned": !caption_cues.is_empty(),
+                }),
+            },
+        );
+    });
+
+    ToolResult::text("voiceover job started — poll get_job_status")
+        .with_data(json!({ "job_id": job_id }))
+}
+
+// ─── Grade (10 §3.10) ────────────────────────────────────────────────────────
+
+pub async fn set_grade(state: &AppState, args: SetGradeArgs) -> ToolResult {
+    tracing::debug!("tool: set_grade {}", args.clip_id);
+    let new_grade: Option<Grade> = match args.grade {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match serde_json::from_value::<Grade>(v) {
+            Ok(g) => Some(g),
+            Err(e) => return ToolResult::error(format!(
+                "invalid grade object: {e} — see get_clip output / 07 §1 for the Grade serde shape"
+            )),
+        },
+    };
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(p, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    match ops::set_grade(p, seq_id, track_id, args.clip_id, new_grade) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Updated grade")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn apply_lut(state: &AppState, args: ApplyLutArgs) -> ToolResult {
+    tracing::debug!("tool: apply_lut {}", args.clip_id);
+    // Validate + resolve the LUT file up front (outside the doc lock).
+    let lut_asset: Option<(AssetId, TimelineCmd)> = match &args.lut_path {
+        None => None,
+        Some(path) => {
+            let pb = std::path::PathBuf::from(path);
+            if !pb.exists() {
+                return err_code("AssetOffline", format!("LUT file not found: {path}"));
+            }
+            match std::fs::read_to_string(&pb) {
+                Ok(src) => {
+                    if let Err(e) = photonic_render::parse_cube(&src) {
+                        return ToolResult::error(format!("invalid .cube LUT: {e:?}"));
+                    }
+                }
+                Err(e) => return ToolResult::error(format!("could not read LUT: {e}")),
+            }
+            let asset = photonic_core::timeline::MediaAsset::from_file(AssetKind::Lut3d, pb);
+            let id = asset.id;
+            Some((id, ops::add_asset(asset)))
+        }
+    };
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(p, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let clip = find_clip(p, seq_id, track_id, args.clip_id).unwrap();
+    let mut grade = clip.grade.clone().unwrap_or_default();
+    // Drop any existing LUT op(s) — a clip carries at most one LUT in this tool.
+    grade.ops.retain(|o| o.kind != GradeOpKind::Lut3d);
+    let mut cmds = Vec::new();
+    if let Some((asset_id, add_cmd)) = &lut_asset {
+        cmds.push(add_cmd.clone());
+        let op = GradeOp::new(
+            GradeOpKind::Lut3d,
+            GradeOpParams::Lut3d {
+                asset: *asset_id,
+                intensity: args.intensity.unwrap_or(1.0).clamp(0.0, 1.0),
+                interp: photonic_core::timeline::LutInterp::Trilinear,
+            },
+        );
+        grade.ops.push(op);
+    }
+    let new_grade = if grade.ops.is_empty() {
+        None
+    } else {
+        Some(grade)
+    };
+    match ops::set_grade(p, seq_id, track_id, args.clip_id, new_grade) {
+        Ok(set_cmd) => {
+            cmds.push(set_cmd);
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            if lut_asset.is_some() {
+                ToolResult::text("Applied LUT to clip grade")
+            } else {
+                ToolResult::text("Removed LUT from clip grade")
+            }
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn copy_grade(state: &AppState, args: CopyGradeArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: copy_grade {} -> {} target(s)",
+        args.source_clip_id,
+        args.target_clip_ids.len()
+    );
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((s_seq, s_track)) = locate_clip(p, args.source_clip_id) else {
+        return ToolResult::error(format!("source clip {} not found", args.source_clip_id));
+    };
+    let grade = find_clip(p, s_seq, s_track, args.source_clip_id).and_then(|c| c.grade.clone());
+    let mut cmds = Vec::new();
+    let mut applied = 0usize;
+    for target in &args.target_clip_ids {
+        let Some((seq_id, track_id)) = locate_clip(p, *target) else {
+            return ToolResult::error(format!("target clip {target} not found"));
+        };
+        match ops::set_grade(p, seq_id, track_id, *target, grade.clone()) {
+            Ok(cmd) => {
+                cmds.push(Command::Timeline(cmd));
+                applied += 1;
+            }
+            Err(e) => return map_edit_error(e),
+        }
+    }
+    if cmds.is_empty() {
+        return ToolResult::error("no target clips given");
+    }
+    history.execute_discrete(Command::Batch(cmds), &mut doc);
+    ToolResult::text(format!("Copied grade to {applied} clip(s)"))
+}
+
+fn grade_presets_path() -> Option<std::path::PathBuf> {
+    export_presets::config_dir().map(|d| d.join("grade_presets.json"))
+}
+
+fn load_grade_presets() -> std::collections::BTreeMap<String, Grade> {
+    let Some(path) = grade_presets_path() else {
+        return Default::default();
+    };
+    std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_grade_presets(map: &std::collections::BTreeMap<String, Grade>) -> Result<(), String> {
+    let Some(path) = grade_presets_path() else {
+        return Err("no config directory available".into());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+pub async fn grade_preset(state: &AppState, args: GradePresetArgs) -> ToolResult {
+    tracing::debug!("tool: grade_preset");
+    match args.op {
+        GradePresetOp::List => {
+            let names: Vec<String> = load_grade_presets().into_keys().collect();
+            ToolResult::text(format!("{} grade preset(s)", names.len()))
+                .with_data(json!({ "presets": names }))
+        }
+        GradePresetOp::Save => {
+            let (Some(clip_id), Some(name)) = (args.clip_id, args.name.clone()) else {
+                return ToolResult::error("save requires clip_id and name");
+            };
+            let doc = state.document.lock().await;
+            let Some(p) = doc.timeline.as_ref() else {
+                return ToolResult::error("no timeline project");
+            };
+            let Some((seq_id, track_id)) = locate_clip(p, clip_id) else {
+                return ToolResult::error(format!("clip {clip_id} not found"));
+            };
+            let Some(grade) = find_clip(p, seq_id, track_id, clip_id).and_then(|c| c.grade.clone())
+            else {
+                return ToolResult::error("clip has no grade to save");
+            };
+            drop(doc);
+            let mut map = load_grade_presets();
+            map.insert(name.clone(), grade);
+            if let Err(e) = save_grade_presets(&map) {
+                return ToolResult::error(format!("could not save preset: {e}"));
+            }
+            ToolResult::text(format!("Saved grade preset {name:?}"))
+        }
+        GradePresetOp::Apply => {
+            let (Some(clip_id), Some(name)) = (args.clip_id, args.name.clone()) else {
+                return ToolResult::error("apply requires clip_id and name");
+            };
+            let map = load_grade_presets();
+            let Some(grade) = map.get(&name).cloned() else {
+                return ToolResult::error(format!("no grade preset named {name:?}"));
+            };
+            let mut doc = state.document.lock().await;
+            let mut history = state.history.lock().await;
+            let Some(p) = doc.timeline.as_ref() else {
+                return ToolResult::error("no timeline project");
+            };
+            let Some((seq_id, track_id)) = locate_clip(p, clip_id) else {
+                return ToolResult::error(format!("clip {clip_id} not found"));
+            };
+            match ops::set_grade(p, seq_id, track_id, clip_id, Some(grade)) {
+                Ok(cmd) => {
+                    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+                    ToolResult::text(format!("Applied grade preset {name:?}"))
+                }
+                Err(e) => map_edit_error(e),
+            }
+        }
+    }
+}
+
+pub async fn get_scopes(state: &AppState, args: GetScopesArgs) -> ToolResult {
+    tracing::debug!("tool: get_scopes {}", args.clip_id);
+    // Resolve the clip's owning sequence + tick.
+    let (seq_id, fr) = {
+        let doc = state.document.lock().await;
+        let Some(p) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        let Some((seq_id, _)) = locate_clip(p, args.clip_id) else {
+            return ToolResult::error(format!("clip {} not found", args.clip_id));
+        };
+        (seq_id, p.sequences.get(&seq_id).unwrap().frame_rate)
+    };
+    let t = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let (pixels, w, h) = match render_seq_pixels(state, seq_id, t, args.format_index).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let flat: Vec<f32> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
+    let scopes = photonic_render::scopes::scopes_from_pixels_cpu(&flat, w, h);
+    ToolResult::text(format!("scopes for {w}x{h} frame at tick {}", t.0))
+        .with_data(scopes_json(&scopes, t))
+}
+
+/// Compact, agent-consumable scope payload (07 §5): full histograms plus a
+/// down-sampled luma waveform (per-column brightest populated bin) and a 32×32
+/// vectorscope count grid — "data, not an image" (10 §3.10).
+fn scopes_json(s: &photonic_render::scopes::Scopes, t: Tick) -> serde_json::Value {
+    let h = &s.histogram;
+    // Waveform: for up to 256 sampled columns, the brightest populated bin.
+    let cols = s.waveform.width.max(1);
+    let step = cols.div_ceil(256).max(1);
+    let mut luma_peaks = Vec::new();
+    let mut x = 0;
+    while x < cols {
+        let mut top = 0usize;
+        for bin in (0..s.waveform.bins).rev() {
+            if s.waveform.count(x, bin) > 0 {
+                top = bin;
+                break;
+            }
+        }
+        luma_peaks.push(top as u32);
+        x += step;
+    }
+    // Vectorscope: down-sample the 256×256 grid to 32×32 sums.
+    let vs_size = s.vectorscope.size.max(1);
+    const GRID: usize = 32;
+    let mut vs = vec![0u32; GRID * GRID];
+    for cr in 0..vs_size {
+        for cb in 0..vs_size {
+            let c = s.vectorscope.count(cb, cr);
+            if c > 0 {
+                let gr = cr * GRID / vs_size;
+                let gb = cb * GRID / vs_size;
+                vs[gr * GRID + gb] += c;
+            }
+        }
+    }
+    json!({
+        "tick": t.0,
+        "histogram": {
+            "bins": h.luma.len(),
+            "luma": h.luma.to_vec(), "red": h.red.to_vec(),
+            "green": h.green.to_vec(), "blue": h.blue.to_vec(),
+        },
+        "waveform": {
+            "columns": luma_peaks.len(),
+            "bins": s.waveform.bins,
+            "luma_peaks": luma_peaks,
+        },
+        "vectorscope": { "grid": GRID, "counts": vs },
+        "note": "linear working-space samples (D-09); waveform luma_peaks are 0..255 bin indices, one per sampled column",
+    })
+}
+
+/// Render one frame headlessly and read back its logical RGBA f32 pixels —
+/// the read path `get_scopes` shares with `render_frame_at` (10 §4), factored
+/// so both stay in lock-step. Readonly (design rule 5): the per-call format
+/// override lands on the shadow timeline only.
+async fn render_seq_pixels(
+    state: &AppState,
+    seq_id: SequenceId,
+    t: Tick,
+    format_index: Option<usize>,
+) -> Result<(Vec<[f32; 4]>, u32, u32), ToolResult> {
+    let bridge = engine_bridge(state)?;
+    let (fr, formats, active_format) = sequence_render_info(state, seq_id).await?;
+    if let Some(fi) = format_index {
+        if fi >= formats.len() {
+            return Err(ToolResult::error(format!(
+                "format_index {fi} out of range — sequence has {} format(s)",
+                formats.len()
+            )));
+        }
+    }
+    let fi = format_index
+        .unwrap_or(active_format)
+        .min(formats.len().saturating_sub(1));
+    let (w, h) = (formats[fi].width.max(1), formats[fi].height.max(1));
+    if t.0 < 0 {
+        return Err(err_code("TickOutOfRange", "tick must be >= 0"));
+    }
+    let snapped = fr.frame_start(fr.frame_at(t));
+
+    let _transport = bridge.lock_transport().await;
+    {
+        let mut timeline = state.document.lock().await.timeline.clone();
+        if let Some(p) = timeline.as_mut() {
+            if let Some(s) = p.sequences.get_mut(&seq_id) {
+                s.active_format = fi;
+            }
+        }
+        bridge.sync_timeline(timeline);
+    }
+    if !bridge.wait_engine_synced(Duration::from_secs(10)).await {
+        return Err(ToolResult::error(
+            "engine did not pick up the document snapshot within 10s",
+        ));
+    }
+    let restore = bridge.proxy_mode();
+    bridge
+        .session()
+        .send(EngineCmd::SetProxyMode(ProxyMode::ForceOriginal));
+    let prev = bridge.session().latest_frame();
+    bridge.session().send(EngineCmd::SetActiveSequence(seq_id));
+    bridge.session().send(EngineCmd::Seek(snapped));
+    let frame = bridge
+        .wait_fresh_frame(prev, Duration::from_secs(30), |f| {
+            f.time == snapped && f.sequence == seq_id
+        })
+        .await;
+    bridge.session().send(EngineCmd::SetProxyMode(restore));
+    match frame {
+        Some(frame) => Ok((
+            read_texture_rgba16f(bridge.engine().gpu(), &frame.texture, w, h),
+            w,
+            h,
+        )),
+        None => Err(ToolResult::error(
+            "engine did not produce the requested frame within 30s",
+        )),
+    }
+}
+
+// ─── Node graph (10 §3.11) ───────────────────────────────────────────────────
+
+pub async fn create_clip_composition(
+    state: &AppState,
+    args: CreateClipCompositionArgs,
+) -> ToolResult {
+    tracing::debug!("tool: create_clip_composition {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(p, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    if args.detach {
+        return match ops::detach_clip_composition(p, seq_id, track_id, args.clip_id) {
+            Ok(cmd) => {
+                history.execute_discrete(Command::Timeline(cmd), &mut doc);
+                ToolResult::text("Detached clip composition")
+            }
+            Err(e) => map_edit_error(e),
+        };
+    }
+    if let Some(src) = args.graph_id {
+        if !p.graphs.contains_key(&src) {
+            return err_code(
+                "GraphTypeMismatch",
+                format!("graph {src} not found to paste"),
+            );
+        }
+        return match ops::paste_clip_composition(p, src, seq_id, track_id, args.clip_id) {
+            Ok(cmds) => {
+                let new_id = cmds.iter().find_map(|c| match c {
+                    TimelineCmd::AddGraph { graph } => Some(graph.id),
+                    _ => None,
+                });
+                history.execute_discrete(
+                    Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+                    &mut doc,
+                );
+                ToolResult::text("Pasted clip composition").with_data(json!({ "graph_id": new_id }))
+            }
+            Err(e) => map_edit_error(e),
+        };
+    }
+    match ops::create_clip_composition(p, seq_id, track_id, args.clip_id) {
+        Ok(cmds) => {
+            let new_id = cmds.iter().find_map(|c| match c {
+                TimelineCmd::AddGraph { graph } => Some(graph.id),
+                _ => None,
+            });
+            history.execute_discrete(
+                Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+                &mut doc,
+            );
+            ToolResult::text("Created clip composition").with_data(json!({ "graph_id": new_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+fn map_graph_error(e: EditError) -> ToolResult {
+    match e {
+        EditError::WouldCreateCycle => err_code(
+            "CycleDetected",
+            "edge would create a cycle in the node graph",
+        ),
+        EditError::NoGraph(id) => err_code(
+            "GraphTypeMismatch",
+            format!("graph {id} or a referenced node not found"),
+        ),
+        other => map_edit_error(other),
+    }
+}
+
+pub async fn add_graph_node(state: &AppState, args: AddGraphNodeArgs) -> ToolResult {
+    tracing::debug!("tool: add_graph_node {}", args.graph_id);
+    let op: GraphOp = match serde_json::from_value(args.op) {
+        Ok(o) => o,
+        Err(e) => {
+            return ToolResult::error(format!(
+                "invalid graph op: {e} — e.g. {{\"op\":\"blur\"}} (08 §2)"
+            ))
+        }
+    };
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if !p.graphs.contains_key(&args.graph_id) {
+        return err_code(
+            "GraphTypeMismatch",
+            format!("graph {} not found", args.graph_id),
+        );
+    }
+    let node = GraphNode::new(op);
+    let node_id = node.id;
+    let pos = args
+        .pos
+        .map(|[x, y]| NodePos { x, y })
+        .unwrap_or(NodePos { x: 0.0, y: 0.0 });
+    let cmd = graph_ops::add_node(args.graph_id, node, pos);
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Added graph node").with_data(json!({ "node_id": node_id }))
+}
+
+pub async fn remove_graph_node(state: &AppState, args: RemoveGraphNodeArgs) -> ToolResult {
+    tracing::debug!("tool: remove_graph_node {}", args.node_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    match graph_ops::remove_node(p, args.graph_id, args.node_id) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Removed graph node")
+        }
+        Err(e) => map_graph_error(e),
+    }
+}
+
+pub async fn add_graph_edge(state: &AppState, args: AddGraphEdgeArgs) -> ToolResult {
+    tracing::debug!("tool: add_graph_edge {}", args.graph_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let from = (args.from.node_id, OutPort(args.from.port.unwrap_or(0)));
+    let to = (args.to.node_id, InPort(args.to.port.unwrap_or(0)));
+    match graph_ops::add_edge(p, args.graph_id, from, to) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Added graph edge")
+        }
+        Err(e) => map_graph_error(e),
+    }
+}
+
+pub async fn remove_graph_edge(state: &AppState, args: RemoveGraphEdgeArgs) -> ToolResult {
+    tracing::debug!("tool: remove_graph_edge {}", args.graph_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(g) = p.graphs.get(&args.graph_id) else {
+        return err_code(
+            "GraphTypeMismatch",
+            format!("graph {} not found", args.graph_id),
+        );
+    };
+    let Some(edge) = g.edges.get(args.edge_index).copied() else {
+        return ToolResult::error(format!(
+            "edge_index {} out of range — graph has {} edge(s)",
+            args.edge_index,
+            g.edges.len()
+        ));
+    };
+    let cmd = graph_ops::remove_edge(args.graph_id, edge);
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Removed graph edge")
+}
+
+pub async fn set_graph_node_param(state: &AppState, args: SetGraphNodeParamArgs) -> ToolResult {
+    tracing::debug!("tool: set_graph_node_param {}", args.node_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(g) = p.graphs.get(&args.graph_id) else {
+        return err_code(
+            "GraphTypeMismatch",
+            format!("graph {} not found", args.graph_id),
+        );
+    };
+    let Some(node) = g.nodes.get(&args.node_id) else {
+        return err_code(
+            "GraphTypeMismatch",
+            format!("node {} not found", args.node_id),
+        );
+    };
+    let mut new_params: GraphNodeParams = node.params.base.clone();
+    new_params.0.set(args.path.as_str(), args.value);
+    match graph_ops::set_node_param(p, args.graph_id, args.node_id, new_params) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Updated graph node param")
+        }
+        Err(e) => map_graph_error(e),
+    }
+}
+
+pub async fn set_project_graph(state: &AppState, args: SetProjectGraphArgs) -> ToolResult {
+    tracing::debug!("tool: set_project_graph");
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if args.clear {
+        let cmd = TimelineCmd::SetProjectGraph {
+            old: p.project_graph,
+            new: None,
+        };
+        history.execute_discrete(Command::Timeline(cmd), &mut doc);
+        return ToolResult::text("Cleared project graph");
+    }
+    if let Some(gid) = args.graph_id {
+        if !p.graphs.contains_key(&gid) {
+            return err_code("GraphTypeMismatch", format!("graph {gid} not found"));
+        }
+        let cmd = TimelineCmd::SetProjectGraph {
+            old: p.project_graph,
+            new: Some(gid),
+        };
+        history.execute_discrete(Command::Timeline(cmd), &mut doc);
+        return ToolResult::text("Set project graph").with_data(json!({ "graph_id": gid }));
+    }
+    // Create a fresh empty project graph.
+    let cmds = ops::set_project_graph(p, None);
+    let new_id = cmds.iter().find_map(|c| match c {
+        TimelineCmd::AddGraph { graph } => Some(graph.id),
+        _ => None,
+    });
+    history.execute_discrete(
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+        &mut doc,
+    );
+    ToolResult::text("Created project graph").with_data(json!({ "graph_id": new_id }))
+}
+
+pub async fn get_graph(state: &AppState, args: GetGraphArgs) -> ToolResult {
+    tracing::debug!("tool: get_graph {}", args.graph_id);
+    let doc = state.document.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(g) = p.graphs.get(&args.graph_id) else {
+        return err_code(
+            "GraphTypeMismatch",
+            format!("graph {} not found", args.graph_id),
+        );
+    };
+    let has_output = g.nodes.values().any(|n| matches!(n.op, GraphOp::Output));
+    let has_cycle = g.has_cycle();
+    let mut diagnostics = Vec::new();
+    if has_cycle {
+        diagnostics.push("graph contains a cycle".to_string());
+    }
+    if !has_output {
+        diagnostics.push("graph has no Output node".to_string());
+    }
+    ToolResult::text(format!(
+        "graph \"{}\" — {} node(s), {} edge(s){}",
+        g.name,
+        g.nodes.len(),
+        g.edges.len(),
+        if diagnostics.is_empty() {
+            ""
+        } else {
+            " (has diagnostics)"
+        }
+    ))
+    .with_data(json!({
+        "graph": g,
+        "diagnostics": diagnostics,
+        "compiles": diagnostics.is_empty(),
+    }))
+}
+
+// ─── Audio (10 §3.12) ────────────────────────────────────────────────────────
+
+pub async fn set_clip_audio(state: &AppState, args: SetClipAudioArgs) -> ToolResult {
+    tracing::debug!("tool: set_clip_audio {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(p, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    // AudioCmd set-prop ops no-op when the clip has no ClipAudio container yet
+    // (there is no committed "create ClipAudio" command); ensure it exists so
+    // the value edits below take effect. The zero-value default init is
+    // observationally equivalent to absent, so undoing the value edits is exact.
+    let need_init = find_clip(p, seq_id, track_id, args.clip_id)
+        .map(|c| c.audio.is_none())
+        .unwrap_or(false);
+    if need_init {
+        if let Some(c) = doc
+            .timeline
+            .as_mut()
+            .and_then(|p| p.sequences.get_mut(&seq_id))
+            .and_then(|s| {
+                s.video_tracks
+                    .iter_mut()
+                    .chain(s.audio_tracks.iter_mut())
+                    .find(|t| t.id == track_id)
+            })
+            .and_then(|t| t.clips.iter_mut().find(|c| c.id == args.clip_id))
+        {
+            c.audio = Some(ClipAudio::new());
+        }
+    }
+    let p = doc.timeline.as_ref().unwrap();
+    let clip = find_clip(p, seq_id, track_id, args.clip_id).unwrap();
+    let audio = clip.audio.clone().unwrap_or_default();
+    let mut cmds: Vec<TimelineCmd> = Vec::new();
+    if let Some(gain) = args.gain_db {
+        let old = audio.params.base;
+        let new = ClipAudioParams { gain_db: gain };
+        if new != old {
+            cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetClipAudioProp {
+                clip: args.clip_id,
+                old,
+                new,
+            }));
+        }
+    }
+    let shape = args.fade_shape.unwrap_or(FadeShape::EqualPower);
+    if let Some(ft) = args.fade_in_ticks {
+        let new = (ft > 0).then_some(AudioFade {
+            duration: Tick(ft),
+            shape,
+        });
+        cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetClipFade {
+            clip: args.clip_id,
+            edge: FadeEdge::In,
+            old: audio.fade_in,
+            new,
+        }));
+    }
+    if let Some(ft) = args.fade_out_ticks {
+        let new = (ft > 0).then_some(AudioFade {
+            duration: Tick(ft),
+            shape,
+        });
+        cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetClipFade {
+            clip: args.clip_id,
+            edge: FadeEdge::Out,
+            old: audio.fade_out,
+            new,
+        }));
+    }
+    if let Some(cm) = args.channel_map {
+        if cm != audio.channel_map {
+            cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetChannelMap {
+                clip: args.clip_id,
+                old: audio.channel_map,
+                new: cm,
+            }));
+        }
+    }
+    if cmds.is_empty() && !need_init {
+        return ToolResult::error(
+            "nothing to change — supply gain_db / fade_*_ticks / channel_map",
+        );
+    }
+    if need_init {
+        let mut hist2 = history;
+        hist2.schedule_mcp_checkpoint("set_clip_audio");
+        if !cmds.is_empty() {
+            hist2.execute_discrete(batch_or_single(cmds), &mut doc);
+        }
+    } else {
+        history.execute_discrete(batch_or_single(cmds), &mut doc);
+    }
+    ToolResult::text("Updated clip audio")
+}
+
+pub async fn set_track_audio(state: &AppState, args: SetTrackAudioArgs) -> ToolResult {
+    tracing::debug!("tool: set_track_audio {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(p, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let need_init = p
+        .sequences
+        .get(&seq_id)
+        .and_then(|s| s.track(args.track_id))
+        .map(|t| t.audio.is_none())
+        .unwrap_or(false);
+    if need_init {
+        if let Some(t) = doc
+            .timeline
+            .as_mut()
+            .and_then(|p| p.sequences.get_mut(&seq_id))
+            .and_then(|s| {
+                s.video_tracks
+                    .iter_mut()
+                    .chain(s.audio_tracks.iter_mut())
+                    .find(|t| t.id == args.track_id)
+            })
+        {
+            t.audio = Some(TrackAudio::new());
+        }
+    }
+    let p = doc.timeline.as_ref().unwrap();
+    let audio = p
+        .sequences
+        .get(&seq_id)
+        .and_then(|s| s.track(args.track_id))
+        .and_then(|t| t.audio.clone())
+        .unwrap_or_default();
+    let mut cmds: Vec<TimelineCmd> = Vec::new();
+    if args.volume_db.is_some() || args.pan.is_some() {
+        let old = audio.params.base;
+        let new = TrackAudioParams {
+            volume_db: args.volume_db.unwrap_or(old.volume_db),
+            pan: args.pan.unwrap_or(old.pan),
+        };
+        if new != old {
+            cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetTrackAudioProp {
+                track: args.track_id,
+                old,
+                new,
+            }));
+        }
+    }
+    if args.muted.is_some() || args.solo.is_some() {
+        let old = (audio.mute, audio.solo);
+        let new = (
+            args.muted.unwrap_or(audio.mute),
+            args.solo.unwrap_or(audio.solo),
+        );
+        if new != old {
+            cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetTrackMuteSolo {
+                track: args.track_id,
+                old,
+                new,
+            }));
+        }
+    }
+    if need_init {
+        history.schedule_mcp_checkpoint("set_track_audio");
+    }
+    if !cmds.is_empty() {
+        history.execute_discrete(batch_or_single(cmds), &mut doc);
+    } else if !need_init {
+        return ToolResult::error("nothing to change — supply volume_db / pan / muted / solo");
+    }
+    ToolResult::text("Updated track audio")
+}
+
+pub async fn audio_fx(state: &AppState, args: AudioFxArgs) -> ToolResult {
+    tracing::debug!("tool: audio_fx {}", args.track_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq_id) = locate_track(p, args.track_id) else {
+        return ToolResult::error(format!("track {} not found", args.track_id));
+    };
+    let need_init = p
+        .sequences
+        .get(&seq_id)
+        .and_then(|s| s.track(args.track_id))
+        .map(|t| t.audio.is_none())
+        .unwrap_or(false);
+    if need_init {
+        if let Some(t) = doc
+            .timeline
+            .as_mut()
+            .and_then(|p| p.sequences.get_mut(&seq_id))
+            .and_then(|s| {
+                s.video_tracks
+                    .iter_mut()
+                    .chain(s.audio_tracks.iter_mut())
+                    .find(|t| t.id == args.track_id)
+            })
+        {
+            t.audio = Some(TrackAudio::new());
+        }
+        history.schedule_mcp_checkpoint("audio_fx");
+    }
+    let owner = FxOwner::Track(args.track_id);
+    let p = doc.timeline.as_ref().unwrap();
+    let chain_len = p
+        .sequences
+        .get(&seq_id)
+        .and_then(|s| s.track(args.track_id))
+        .and_then(|t| t.audio.as_ref())
+        .map(|a| a.fx_chain.len())
+        .unwrap_or(0);
+    let cmd = match args.op {
+        AudioFxOp::Add => {
+            let Some(kind) = args.kind else {
+                return ToolResult::error(
+                    "audio_fx op=add requires kind (eq|compressor|limiter|gate)",
+                );
+            };
+            let index = args.index.unwrap_or(chain_len).min(chain_len);
+            TimelineCmd::AudioEdit(AudioCmd::AddAudioFx {
+                owner,
+                index,
+                unit: AudioFxUnit::new(kind),
+            })
+        }
+        AudioFxOp::Remove => {
+            let Some(index) = args.index else {
+                return ToolResult::error("audio_fx op=remove requires index");
+            };
+            let unit = p
+                .sequences
+                .get(&seq_id)
+                .and_then(|s| s.track(args.track_id))
+                .and_then(|t| t.audio.as_ref())
+                .and_then(|a| a.fx_chain.get(index))
+                .cloned();
+            let Some(unit) = unit else {
+                return ToolResult::error(format!("fx index {index} out of range"));
+            };
+            TimelineCmd::AudioEdit(AudioCmd::RemoveAudioFx { owner, index, unit })
+        }
+        AudioFxOp::Reorder => {
+            let Some(new_order) = args.new_order.clone() else {
+                return ToolResult::error("audio_fx op=reorder requires new_order");
+            };
+            if new_order.len() != chain_len {
+                return ToolResult::error("new_order length must match the fx chain length");
+            }
+            let old_order: Vec<usize> = (0..chain_len).collect();
+            TimelineCmd::AudioEdit(AudioCmd::ReorderAudioFx {
+                owner,
+                old_order,
+                new_order,
+            })
+        }
+    };
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text("Updated audio fx chain")
+}
+
+pub async fn set_master_bus(state: &AppState, args: SetMasterBusArgs) -> ToolResult {
+    tracing::debug!("tool: set_master_bus {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = p.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let master = seq.audio_master.clone();
+    let mut cmds: Vec<TimelineCmd> = Vec::new();
+    if let Some(v) = args.volume_db {
+        let old = master.params.base;
+        let new = MasterBusParams { volume_db: v };
+        if new != old {
+            cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetMasterBusProp {
+                old,
+                new,
+            }));
+        }
+    }
+    if let Some(l) = &args.loudness {
+        let new = match l.to_ascii_lowercase().as_str() {
+            "streaming" => Some(LoudnessTarget::streaming()),
+            "broadcast" => Some(LoudnessTarget::broadcast()),
+            "none" => None,
+            other => {
+                return ToolResult::error(format!(
+                    "unknown loudness target {other:?} — use streaming | broadcast | none"
+                ))
+            }
+        };
+        if new != master.loudness_target {
+            cmds.push(TimelineCmd::AudioEdit(AudioCmd::SetLoudnessTarget {
+                old: master.loudness_target,
+                new,
+            }));
+        }
+    }
+    if cmds.is_empty() {
+        return ToolResult::error("nothing to change — supply volume_db and/or loudness");
+    }
+    // Master-bus edits resolve against the active sequence (01 §10 apply);
+    // apply with the target sequence active, restoring the prior one.
+    let cmd = with_active_seq(p, args.sequence_id, cmds);
+    history.execute_discrete(cmd, &mut doc);
+    ToolResult::text("Updated master bus")
+}
+
+pub async fn get_audio_meters(state: &AppState, args: GetAudioMetersArgs) -> ToolResult {
+    tracing::debug!("tool: get_audio_meters {}", args.sequence_id);
+    let doc = state.document.lock().await;
+    let Some(p) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if !p.sequences.contains_key(&args.sequence_id) {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    }
+    // Live per-track/master peak+RMS meters live inside the interactive audio
+    // mixer's `StereoMeter`s (09 §5), which the headless MCP engine bridge does
+    // not run — the shadow-document engine renders video without a cpal output
+    // graph. No committed surface exposes them here, so this is NotSupportedV1.
+    err_code(
+        "NotSupportedV1",
+        "live audio meters require the interactive audio mixer, which the headless MCP engine bridge does not run",
+    )
+}
+
+pub async fn get_waveform(state: &AppState, args: GetWaveformArgs) -> ToolResult {
+    tracing::debug!("tool: get_waveform");
+    let (path, hash): (std::path::PathBuf, Option<String>) = {
+        let doc = state.document.lock().await;
+        let Some(p) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        let asset_id = if let Some(a) = args.asset_id {
+            a
+        } else if let Some(clip_id) = args.clip_id {
+            let Some((s, t)) = locate_clip(p, clip_id) else {
+                return ToolResult::error(format!("clip {clip_id} not found"));
+            };
+            match find_clip(p, s, t, clip_id).map(|c| &c.source) {
+                Some(ClipSource::Asset { asset }) | Some(ClipSource::Vector { asset }) => *asset,
+                _ => return ToolResult::error("clip has no media asset for a waveform"),
+            }
+        } else {
+            return ToolResult::error("supply asset_id or clip_id");
+        };
+        let Some(a) = p.media.assets.get(&asset_id) else {
+            return ToolResult::error(format!("asset {asset_id} not found"));
+        };
+        match &a.source {
+            photonic_core::timeline::AssetSource::File { path, .. } => {
+                (path.clone(), a.content_hash.clone())
+            }
+            _ => return ToolResult::error("asset is not file-backed"),
+        }
+    };
+    if !path.exists() {
+        return err_code(
+            "AssetOffline",
+            format!("file not found: {}", path.display()),
+        );
+    }
+    let resolution = args.resolution.unwrap_or(512).clamp(1, 8192);
+    let cache_dir = video_proxy::proxy_cache_dir(None);
+
+    // Prefer a cached pyramid; otherwise decode + build one and cache it.
+    let hash = match hash {
+        Some(h) => h,
+        None => match video_probe::content_hash(&path) {
+            Ok(h) => h,
+            Err(e) => return ToolResult::error(format!("content hash failed: {e}")),
+        },
+    };
+    let pyramid = match photonic_video::audio::waveform::load_from_dir(&cache_dir, &hash) {
+        Ok(Some(p)) => p,
+        _ => {
+            let tools = match ffmpeg_locate::locate() {
+                Ok(t) => t,
+                Err(e) => {
+                    return err_code(
+                        "FfmpegUnavailable",
+                        format!("ffmpeg not found ({e}); cannot decode audio for a waveform"),
+                    )
+                }
+            };
+            let mut src = match photonic_video::playback::pcm::FfmpegPcmSource::spawn(
+                &tools,
+                &path,
+                Tick(0),
+                48_000,
+            ) {
+                Ok(s) => s,
+                Err(e) => return ToolResult::error(format!("audio decode spawn failed: {e}")),
+            };
+            let pyr = photonic_video::audio::waveform::build_pyramid(&mut src, hash.clone());
+            let _ = photonic_video::audio::waveform::save_to_dir(&pyr, &cache_dir);
+            pyr
+        }
+    };
+
+    // Summarize the coarsest level down to `resolution` buckets/channel.
+    let Some(level) = pyramid.levels.last() else {
+        return ToolResult::text("waveform is empty").with_data(json!({
+            "channels": pyramid.channels, "buckets": [],
+        }));
+    };
+    let channels: Vec<serde_json::Value> = level
+        .channels
+        .iter()
+        .map(|buckets| {
+            let n = buckets.len();
+            if n <= resolution {
+                buckets
+                    .iter()
+                    .map(|b| json!([b.min, b.max, b.rms]))
+                    .collect::<Vec<_>>()
+            } else {
+                (0..resolution)
+                    .map(|i| {
+                        let b = &buckets[i * n / resolution];
+                        json!([b.min, b.max, b.rms])
+                    })
+                    .collect::<Vec<_>>()
+            }
+        })
+        .map(serde_json::Value::Array)
+        .collect();
+    ToolResult::text(format!(
+        "waveform: {} channel(s), {} source frame(s)",
+        pyramid.channels, pyramid.total_frames
+    ))
+    .with_data(json!({
+        "channels": pyramid.channels,
+        "source_sample_rate": pyramid.source_sample_rate,
+        "total_frames": pyramid.total_frames,
+        "bucket_format": "[min, max, rms]",
+        "resolution": resolution,
+        "waveform": channels,
+    }))
+}
+
+// ─── Title templates (05 §4b) ────────────────────────────────────────────────
+
+pub async fn list_title_templates(_state: &AppState, _args: ListTitleTemplatesArgs) -> ToolResult {
+    tracing::debug!("tool: list_title_templates");
+    // The shipped vector title-template library (05 §4b, ~8–10 built-ins) is a
+    // P6 deliverable not yet committed to this repo; no registry exists to read.
+    ToolResult::text("no title templates available (the shipped library lands in P6)")
+        .with_data(json!({ "templates": [] }))
+}
+
+pub async fn insert_title_template(
+    _state: &AppState,
+    _args: InsertTitleTemplateArgs,
+) -> ToolResult {
+    tracing::debug!("tool: insert_title_template");
+    err_code(
+        "NotSupportedV1",
+        "the vector title-template library is not shipped in this build (05 §4b, P6) — nothing to insert",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4380,6 +6689,40 @@ mod tests {
         "list_export_presets",
         "save_export_preset",
         "delete_export_preset",
+        // P4+ slice: captions / tts / grade / graph / audio / titles
+        "auto_caption",
+        "add_caption_track",
+        "remove_caption_track",
+        "get_caption_track",
+        "set_caption_cue",
+        "split_caption_cue",
+        "merge_caption_cues",
+        "set_caption_word",
+        "set_caption_style",
+        "import_captions",
+        "export_captions",
+        "generate_voiceover",
+        "set_grade",
+        "apply_lut",
+        "copy_grade",
+        "grade_preset",
+        "get_scopes",
+        "create_clip_composition",
+        "add_graph_node",
+        "remove_graph_node",
+        "add_graph_edge",
+        "remove_graph_edge",
+        "set_graph_node_param",
+        "set_project_graph",
+        "get_graph",
+        "set_clip_audio",
+        "set_track_audio",
+        "audio_fx",
+        "set_master_bus",
+        "get_audio_meters",
+        "get_waveform",
+        "list_title_templates",
+        "insert_title_template",
     ];
 
     #[test]
@@ -4877,5 +7220,449 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&src);
+    }
+
+    // ═══ P4+ slice tests (captions / tts / grade / graph / audio / titles) ═══
+
+    async fn poll_job(state: &AppState, job_id: &Value) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let r = call(state, "get_job_status", json!({ "job_id": job_id })).await;
+            let d = data(&r);
+            let s = d["status"]["state"].as_str().unwrap_or("?").to_string();
+            if s != "queued" && s != "running" {
+                return d;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job did not finish: {d}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    // ── Captions family E2E (10 §9.1) ────────────────────────────────────────
+    #[tokio::test]
+    async fn family_captions() {
+        let state = test_state();
+        let (seq_id, _) = create_seq_and_track(&state, "video").await;
+
+        let r = call(
+            &state,
+            "add_caption_track",
+            json!({ "sequence_id": seq_id, "name": "English" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_caption_track: {r:?}");
+        let track_id = data(&r)["track_id"].clone();
+
+        // Create a cue from plain text (words distributed proportionally).
+        let r = call(
+            &state,
+            "set_caption_cue",
+            json!({ "track_id": track_id, "start_ticks": 0, "end_ticks": 1000, "text": "hello world" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_caption_cue create: {r:?}");
+        let cue_id = data(&r)["cue_id"].clone();
+
+        let r = call(&state, "get_caption_track", json!({ "track_id": track_id })).await;
+        assert_ne!(r.is_error, Some(true), "get_caption_track: {r:?}");
+        let cues = data(&r)["track"]["cues"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0]["words"].as_array().unwrap().len(), 2);
+
+        // Edit a word's text.
+        let r = call(
+            &state,
+            "set_caption_word",
+            json!({ "cue_id": cue_id, "word_index": 1, "text": "there" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_caption_word: {r:?}");
+
+        // Track-scope style.
+        let r = call(
+            &state,
+            "set_caption_style",
+            json!({ "track_id": track_id, "style": { "font_size": 60.0, "fill": "#ffcc00" } }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_caption_style: {r:?}");
+
+        // Split then merge.
+        let r = call(
+            &state,
+            "split_caption_cue",
+            json!({ "cue_id": cue_id, "at_ticks": 500 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "split_caption_cue: {r:?}");
+        let new_cue_id = data(&r)["new_cue_id"].clone();
+        let r = call(&state, "get_caption_track", json!({ "track_id": track_id })).await;
+        assert_eq!(data(&r)["track"]["cues"].as_array().unwrap().len(), 2);
+
+        let r = call(
+            &state,
+            "merge_caption_cues",
+            json!({ "cue_id_a": cue_id, "cue_id_b": new_cue_id }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "merge_caption_cues: {r:?}");
+
+        // Export → import round trip through SRT.
+        let srt =
+            std::env::temp_dir().join(format!("photonic-mcp-cap-{}.srt", uuid::Uuid::new_v4()));
+        let r = call(
+            &state,
+            "export_captions",
+            json!({ "track_id": track_id, "path": srt.to_string_lossy() }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "export_captions: {r:?}");
+        assert!(srt.exists());
+
+        let r = call(
+            &state,
+            "add_caption_track",
+            json!({ "sequence_id": seq_id, "name": "Imported" }),
+        )
+        .await;
+        let track2 = data(&r)["track_id"].clone();
+        let r = call(
+            &state,
+            "import_captions",
+            json!({ "track_id": track2, "path": srt.to_string_lossy() }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "import_captions: {r:?}");
+        assert!(data(&r)["cues_imported"].as_u64().unwrap() >= 1);
+
+        let r = call(
+            &state,
+            "remove_caption_track",
+            json!({ "track_id": track2 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "remove_caption_track: {r:?}");
+
+        let _ = std::fs::remove_file(&srt);
+    }
+
+    // ── auto_caption via the MockTranscriptionProvider (10 §9.1) ──────────────
+    #[tokio::test]
+    async fn auto_caption_mock_job() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "video").await;
+        insert_solid_clip(&state, &track_id, 0, TICKS_PER_SECOND * 4).await;
+
+        let r = call(
+            &state,
+            "auto_caption",
+            json!({
+                "sequence_id": seq_id, "provider": "mock",
+                "mock_transcript": "Hello there. This is a test transcript.",
+                "name": "Auto"
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "auto_caption: {r:?}");
+        let job_id = data(&r)["job_id"].clone();
+        let cap_track = data(&r)["track_id"].clone();
+
+        let d = poll_job(&state, &job_id).await;
+        assert_eq!(d["status"]["state"], "done", "auto_caption failed: {d}");
+        assert!(d["status"]["result"]["cue_count"].as_u64().unwrap() >= 1);
+
+        let r = call(
+            &state,
+            "get_caption_track",
+            json!({ "track_id": cap_track }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "get_caption_track: {r:?}");
+        let cues = data(&r)["track"]["cues"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!cues.is_empty(), "expected transcribed cues");
+    }
+
+    // ── generate_voiceover via the MockTtsProvider (10 §9.1, §9.4) ────────────
+    #[tokio::test]
+    async fn generate_voiceover_mock_job() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "audio").await;
+
+        let r = call(
+            &state,
+            "generate_voiceover",
+            json!({
+                "text": "Welcome to the show", "track_id": track_id,
+                "start_ticks": 0, "provider": "mock", "voice": "mock-voice"
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "generate_voiceover: {r:?}");
+        let job_id = data(&r)["job_id"].clone();
+
+        let d = poll_job(&state, &job_id).await;
+        assert_eq!(d["status"]["state"], "done", "voiceover failed: {d}");
+        assert!(!d["status"]["result"]["clip_id"].is_null());
+        assert!(d["status"]["result"]["duration_ticks"].as_i64().unwrap() > 0);
+
+        let r = call(&state, "list_clips", json!({ "track_id": track_id })).await;
+        assert_eq!(
+            data(&r)["clips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            1,
+            "voiceover clip should be placed"
+        );
+    }
+
+    // ── Grade family E2E (10 §9.1) ───────────────────────────────────────────
+    #[tokio::test]
+    async fn family_grade() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "video").await;
+        let clip_a = insert_solid_clip(&state, &track_id, 0, 1000).await;
+        let clip_b = insert_solid_clip(&state, &track_id, 1000, 1000).await;
+
+        // Set a (bypassed) grade, then confirm it round-trips.
+        let r = call(
+            &state,
+            "set_grade",
+            json!({ "clip_id": clip_a, "grade": { "ops": [], "bypass": true } }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_grade: {r:?}");
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_a })).await;
+        assert_eq!(data(&r)["clip"]["grade"]["bypass"], json!(true));
+
+        // Save → list → apply a preset.
+        let r = call(
+            &state,
+            "grade_preset",
+            json!({ "op": "save", "clip_id": clip_a, "name": "photonic_mcp_test_preset" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "grade_preset save: {r:?}");
+        let r = call(&state, "grade_preset", json!({ "op": "list" })).await;
+        assert!(data(&r)["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n == "photonic_mcp_test_preset"));
+        let r = call(
+            &state,
+            "grade_preset",
+            json!({ "op": "apply", "clip_id": clip_b, "name": "photonic_mcp_test_preset" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "grade_preset apply: {r:?}");
+
+        // copy_grade onto b (again) — one batch.
+        let r = call(
+            &state,
+            "copy_grade",
+            json!({ "source_clip_id": clip_a, "target_clip_ids": [clip_b] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "copy_grade: {r:?}");
+
+        // apply_lut: a missing file is AssetOffline; null removes cleanly.
+        let r = call(
+            &state,
+            "apply_lut",
+            json!({ "clip_id": clip_a, "lut_path": "/no/such/lut.cube" }),
+        )
+        .await;
+        assert_eq!(data(&r)["error_code"], json!("AssetOffline"));
+        let r = call(&state, "apply_lut", json!({ "clip_id": clip_a })).await;
+        assert_ne!(r.is_error, Some(true), "apply_lut remove: {r:?}");
+
+        // Clear the grade.
+        let r = call(
+            &state,
+            "set_grade",
+            json!({ "clip_id": clip_a, "grade": null }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_grade clear: {r:?}");
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_a })).await;
+        assert!(data(&r)["clip"]["grade"].is_null());
+        let _ = seq_id;
+    }
+
+    // ── Node-graph family E2E (10 §9.1) ──────────────────────────────────────
+    #[tokio::test]
+    async fn family_graph() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "video").await;
+        let clip_id = insert_solid_clip(&state, &track_id, 0, 1000).await;
+
+        let r = call(
+            &state,
+            "create_clip_composition",
+            json!({ "clip_id": clip_id }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "create_clip_composition: {r:?}");
+        let graph_id = data(&r)["graph_id"].clone();
+
+        // Read the seeded ClipIn / Output ids.
+        let r = call(&state, "get_graph", json!({ "graph_id": graph_id })).await;
+        assert_ne!(r.is_error, Some(true), "get_graph: {r:?}");
+        let nodes = data(&r)["graph"]["nodes"].clone();
+        let node_by_op = |op: &str| -> Value {
+            nodes
+                .as_object()
+                .unwrap()
+                .iter()
+                .find(|(_, n)| n["op"]["op"] == op)
+                .map(|(id, _)| Value::String(id.clone()))
+                .unwrap_or(Value::Null)
+        };
+        let clip_in = node_by_op("clip_in");
+        let output = node_by_op("output");
+        assert!(!clip_in.is_null() && !output.is_null());
+        assert_eq!(data(&r)["compiles"], json!(true));
+
+        // Add a blur node and connect ClipIn -> blur (legal, acyclic).
+        let r = call(
+            &state,
+            "add_graph_node",
+            json!({ "graph_id": graph_id, "op": { "op": "blur" }, "pos": [120.0, 40.0] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_graph_node: {r:?}");
+        let blur = data(&r)["node_id"].clone();
+
+        let r = call(
+            &state,
+            "add_graph_edge",
+            json!({ "graph_id": graph_id, "from": { "node_id": clip_in }, "to": { "node_id": blur } }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_graph_edge: {r:?}");
+
+        // A back-edge Output -> ClipIn is a cycle → CycleDetected.
+        let r = call(
+            &state,
+            "add_graph_edge",
+            json!({ "graph_id": graph_id, "from": { "node_id": output }, "to": { "node_id": clip_in } }),
+        )
+        .await;
+        assert_eq!(data(&r)["error_code"], json!("CycleDetected"));
+
+        // Param edit.
+        let r = call(
+            &state,
+            "set_graph_node_param",
+            json!({ "graph_id": graph_id, "node_id": blur, "path": "params.radius", "value": { "t": "float", "v": 8.0 } }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_graph_node_param: {r:?}");
+
+        // Remove the blur node.
+        let r = call(
+            &state,
+            "remove_graph_node",
+            json!({ "graph_id": graph_id, "node_id": blur }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "remove_graph_node: {r:?}");
+
+        // Fresh project graph.
+        let r = call(&state, "set_project_graph", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "set_project_graph: {r:?}");
+        assert!(!data(&r)["graph_id"].is_null());
+    }
+
+    // ── Audio family E2E (10 §9.1) ───────────────────────────────────────────
+    #[tokio::test]
+    async fn family_audio() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "audio").await;
+        let clip_id = insert_solid_clip(&state, &track_id, 0, 2000).await;
+
+        let r = call(
+            &state,
+            "set_clip_audio",
+            json!({ "clip_id": clip_id, "gain_db": -3.0, "fade_in_ticks": 200, "fade_out_ticks": 200 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_clip_audio: {r:?}");
+
+        let r = call(
+            &state,
+            "set_track_audio",
+            json!({ "track_id": track_id, "volume_db": -6.0, "pan": 0.25, "muted": true }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_track_audio: {r:?}");
+
+        let r = call(
+            &state,
+            "audio_fx",
+            json!({ "track_id": track_id, "op": "add", "kind": "compressor" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "audio_fx add: {r:?}");
+        let r = call(
+            &state,
+            "audio_fx",
+            json!({ "track_id": track_id, "op": "remove", "index": 0 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "audio_fx remove: {r:?}");
+
+        let r = call(
+            &state,
+            "set_master_bus",
+            json!({ "sequence_id": seq_id, "volume_db": -1.0, "loudness": "streaming" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_master_bus: {r:?}");
+
+        // Meters are NotSupportedV1 in the headless bridge.
+        let r = call(&state, "get_audio_meters", json!({ "sequence_id": seq_id })).await;
+        assert_eq!(data(&r)["error_code"], json!("NotSupportedV1"));
+
+        // A generator clip has no media asset for a waveform.
+        let r = call(&state, "get_waveform", json!({ "clip_id": clip_id })).await;
+        assert_eq!(r.is_error, Some(true), "solid-color clip has no waveform");
+    }
+
+    // ── Title templates: empty catalog + NotSupportedV1 insert (05 §4b) ──────
+    #[tokio::test]
+    async fn title_templates_are_flagged_p6() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "video").await;
+
+        let r = call(&state, "list_title_templates", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "list_title_templates: {r:?}");
+        assert_eq!(
+            data(&r)["templates"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+
+        let r = call(
+            &state,
+            "insert_title_template",
+            json!({ "template": "lower_third", "track_id": track_id, "start_ticks": 0 }),
+        )
+        .await;
+        assert_eq!(data(&r)["error_code"], json!("NotSupportedV1"));
     }
 }

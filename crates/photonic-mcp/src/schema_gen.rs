@@ -5692,6 +5692,454 @@ pub fn tool_list() -> Value {
                 "properties": { "name": { "type": "string" } },
                 "required": ["name"]
             }
+        },
+
+        // ── Video domain, P4+ slice (10-mcp-tools.md §3.8 captions, §3.9 tts,
+        // §3.10 grade, §3.11 node graph, §3.12 audio; 05 §4b title templates).
+        // Captions (10 §3.8)
+        {
+            "name": "auto_caption",
+            "description": "Transcribe audio into word-level caption cues (CAP-009; async job — poll get_job_status). Supply clip_id (transcribe that clip's asset) or sequence_id. provider defaults to the configured hosted service (set PHOTONIC_TRANSCRIBE_URL/PHOTONIC_TRANSCRIBE_TOKEN); pass provider=\"mock\" with mock_transcript for a deterministic offline/CI run. On completion inserts grouped cues on a new or existing caption track.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "clip_id": { "type": "string" },
+                    "track_id": { "type": "string", "description": "Existing caption track to append to; omit to create one." },
+                    "provider": { "type": "string", "enum": ["hosted","mock"], "description": "Default hosted." },
+                    "language_hint": { "type": "string" },
+                    "mock_transcript": { "type": "string", "description": "provider=mock only: the deterministic transcript distributed across the target range." },
+                    "name": { "type": "string", "description": "Name for a newly-created caption track." }
+                }
+            }
+        },
+        {
+            "name": "add_caption_track",
+            "description": "Add an empty caption track to a sequence (06 §3.6). Undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "remove_caption_track",
+            "description": "Remove a caption track and all its cues. STRUCTURAL: the committed core has no undoable caption-track removal (tracks are created/removed as side effects of bulk cue insertion, 06 §3.6), so this schedules a history checkpoint but is not a fine-grained undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "track_id": { "type": "string" } },
+                "required": ["track_id"]
+            }
+        },
+        {
+            "name": "get_caption_track",
+            "description": "Full cue + word + style dump for one caption track (folds list_caption_cues).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "track_id": { "type": "string" } },
+                "required": ["track_id"]
+            }
+        },
+        {
+            "name": "set_caption_cue",
+            "description": "Create a cue (omit cue_id) or edit one (pass cue_id: timing via RetimeCue, text/words via SetCueText, one undo step). `words` (explicit per-word timing) beats `text` (distributed proportionally). position_override is only honored on creation in v1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "cue_id": { "type": "string", "description": "Omit to create a new cue." },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string" },
+                    "start_seconds": { "type": "number" },
+                    "end_ticks": { "type": "integer" },
+                    "end_tc": { "type": "string" },
+                    "end_seconds": { "type": "number" },
+                    "text": { "type": "string" },
+                    "words": { "type": "array", "items": { "type": "object" }, "description": "[{text, start_ticks|start_tc|start_seconds, end_*}]" },
+                    "position_override": { "type": "array", "items": { "type": "number" }, "description": "Normalized [x, y]." }
+                },
+                "required": ["track_id"]
+            }
+        },
+        {
+            "name": "split_caption_cue",
+            "description": "Split a cue at a tick — between the two words straddling it (CaptionCmd::SplitCue). Returns the new cue id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cue_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["cue_id"]
+            }
+        },
+        {
+            "name": "merge_caption_cues",
+            "description": "Merge two cues on the same caption track into one (CaptionCmd::MergeCues).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cue_id_a": { "type": "string" },
+                    "cue_id_b": { "type": "string" }
+                },
+                "required": ["cue_id_a","cue_id_b"]
+            }
+        },
+        {
+            "name": "set_caption_word",
+            "description": "Edit one word's text and/or timing (CAP-010), committed as a SetCueText over the cue's word list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cue_id": { "type": "string" },
+                    "word_index": { "type": "integer" },
+                    "text": { "type": "string" },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string" },
+                    "start_seconds": { "type": "number" },
+                    "end_ticks": { "type": "integer" },
+                    "end_tc": { "type": "string" },
+                    "end_seconds": { "type": "number" }
+                },
+                "required": ["cue_id","word_index"]
+            }
+        },
+        {
+            "name": "set_caption_style",
+            "description": "Set the track-default style (track_id), a cue override (cue_id), or a word override (cue_id + word_index). Supplied style fields merge onto the current effective style (01 §7 cascade word→cue→track); `clear` removes a cue/word override.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "cue_id": { "type": "string" },
+                    "word_index": { "type": "integer" },
+                    "clear": { "type": "boolean" },
+                    "style": { "type": "object", "description": "{font_family?, font_size?, weight?, fill? (#hex), position? [x,y], max_width?}" }
+                }
+            }
+        },
+        {
+            "name": "import_captions",
+            "description": "Import SRT/VTT/ASS subtitles onto an existing caption track (06 §7). Format inferred from the file extension when omitted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "path": { "type": "string" },
+                    "format": { "type": "string", "enum": ["srt","vtt","ass"] }
+                },
+                "required": ["track_id","path"]
+            }
+        },
+        {
+            "name": "export_captions",
+            "description": "Export a caption track to SRT/VTT/ASS (06 §7). Format inferred from the file extension when omitted. No document mutation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "path": { "type": "string" },
+                    "format": { "type": "string", "enum": ["srt","vtt","ass"] }
+                },
+                "required": ["track_id","path"]
+            }
+        },
+
+        // TTS (10 §3.9)
+        {
+            "name": "generate_voiceover",
+            "description": "Synthesize speech and place it as an audio clip sized to the returned audio (CAP-011; async job — poll get_job_status). provider defaults to the configured hosted TTS (PHOTONIC_TTS_URL/PHOTONIC_TTS_TOKEN); pass provider=\"mock\" for deterministic offline synthesis. also_caption adds word-level captions from the provider's alignment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" },
+                    "track_id": { "type": "string" },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string" },
+                    "start_seconds": { "type": "number" },
+                    "voice": { "type": "string" },
+                    "provider": { "type": "string", "enum": ["hosted","mock"] },
+                    "also_caption": { "type": "boolean" },
+                    "caption_track_id": { "type": "string" }
+                },
+                "required": ["text","track_id"]
+            }
+        },
+
+        // Grade (10 §3.10)
+        {
+            "name": "set_grade",
+            "description": "Replace or clear a clip's color grade (07 §1). `grade` is a full Grade object {ops:[...], bypass}; omit or pass null to clear.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "grade": { "type": ["object","null"], "description": "Full Grade serde shape; null clears." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "apply_lut",
+            "description": "Attach a 3D LUT (.cube) to the clip's grade stack, importing it as a LUT asset (07 §3.8). Omit/null lut_path to remove the LUT. Replaces any existing LUT on the clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "lut_path": { "type": "string", "description": "Path to a .cube LUT; omit/null removes." },
+                    "intensity": { "type": "number", "description": "0..1 blend, default 1.0." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "copy_grade",
+            "description": "Copy one clip's grade (incl. LUT reference) onto N target clips as a single undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_clip_id": { "type": "string" },
+                    "target_clip_ids": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["source_clip_id","target_clip_ids"]
+            }
+        },
+        {
+            "name": "grade_preset",
+            "description": "Save the current clip grade as a named app-level preset, apply a preset to a clip, or list preset names. op: save (clip_id+name) | apply (clip_id+name) | list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["save","apply","list"] },
+                    "clip_id": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["op"]
+            }
+        },
+        {
+            "name": "get_scopes",
+            "description": "Waveform/vectorscope/histogram data for a clip at a tick (07 §5) — data, not an image (the UI/agent renders it). Renders the frame headlessly (requires a GPU adapter, else EngineUnavailable). Returns full luma/RGB histograms, a down-sampled luma waveform, and a 32x32 vectorscope grid.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" },
+                    "format_index": { "type": "integer" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+
+        // Node graph (10 §3.11)
+        {
+            "name": "create_clip_composition",
+            "description": "Instantiate a per-clip node composition (D-06): a fresh ClipIn→Output graph bound to the clip (default), a deep-clone paste of an existing graph_id, or detach=true to revert the clip to its plain source. Returns the new graph_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "graph_id": { "type": "string", "description": "Paste a deep-clone of this existing graph." },
+                    "detach": { "type": "boolean", "description": "Revert the clip to its plain source." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "add_graph_node",
+            "description": "Add a node to a graph (08 §2). `op` is a GraphOp in serde shape, e.g. {\"op\":\"blur\"}, {\"op\":\"solid_color\"}, {\"op\":\"merge\",\"mode\":\"normal\"}, {\"op\":\"grade\",\"grade\":{...}}. Returns node_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "graph_id": { "type": "string" },
+                    "op": { "type": "object", "description": "GraphOp serde shape (08 §2)." },
+                    "pos": { "type": "array", "items": { "type": "number" }, "description": "Editor [x, y]." }
+                },
+                "required": ["graph_id","op"]
+            }
+        },
+        {
+            "name": "remove_graph_node",
+            "description": "Remove a node and its incident edges from a graph (undoable).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "graph_id": { "type": "string" },
+                    "node_id": { "type": "string" }
+                },
+                "required": ["graph_id","node_id"]
+            }
+        },
+        {
+            "name": "add_graph_edge",
+            "description": "Connect one node's output port to another's input port. Cycle-checked at edit time (01 §8) — fails clean with error_code CycleDetected, never panics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "graph_id": { "type": "string" },
+                    "from": { "type": "object", "description": "{node_id, port?} — output port, default 0." },
+                    "to": { "type": "object", "description": "{node_id, port?} — input port, default 0." }
+                },
+                "required": ["graph_id","from","to"]
+            }
+        },
+        {
+            "name": "remove_graph_edge",
+            "description": "Remove the edge at `edge_index` in the graph's edge list (see get_graph for indices).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "graph_id": { "type": "string" },
+                    "edge_index": { "type": "integer" }
+                },
+                "required": ["graph_id","edge_index"]
+            }
+        },
+        {
+            "name": "set_graph_node_param",
+            "description": "Set one PropPath under a node's params (08 §6.4). value is a PropValue, e.g. {\"t\":\"float\",\"v\":12.0}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "graph_id": { "type": "string" },
+                    "node_id": { "type": "string" },
+                    "path": { "type": "string" },
+                    "value": { "type": "object" }
+                },
+                "required": ["graph_id","node_id","path","value"]
+            }
+        },
+        {
+            "name": "set_project_graph",
+            "description": "Set the project graph to an existing arena graph (graph_id), clear it (clear=true), or create a fresh empty project graph (omit both). Spliced after the active-sequence output (02 §2). Returns graph_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "graph_id": { "type": "string" },
+                    "clear": { "type": "boolean" }
+                }
+            }
+        },
+        {
+            "name": "get_graph",
+            "description": "Full node/edge/param dump for a graph, plus structural diagnostics (cycle / missing Output) and a compiles flag.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "graph_id": { "type": "string" } },
+                "required": ["graph_id"]
+            }
+        },
+
+        // Audio (10 §3.12)
+        {
+            "name": "set_clip_audio",
+            "description": "Per-clip audio (01 §5): gain trim, fades, channel map. A fade_*_ticks of 0 clears that fade; a positive value sets it. Auto-initializes the clip's ClipAudio container if absent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "gain_db": { "type": "number" },
+                    "fade_in_ticks": { "type": "integer", "description": "0 clears; >0 sets." },
+                    "fade_out_ticks": { "type": "integer" },
+                    "fade_shape": { "type": "string", "enum": ["linear","equal_power","log","s_curve"] },
+                    "channel_map": { "type": "string", "enum": ["as_source","mono_downmix","stereo_lr","channel_swap"] }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_track_audio",
+            "description": "Per-track fader/pan/mute/solo (09 §4). Auto-initializes the track's TrackAudio container if absent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "volume_db": { "type": "number", "description": "-inf..+12, default 0." },
+                    "pan": { "type": "number", "description": "-1 (L)..1 (R)." },
+                    "muted": { "type": "boolean" },
+                    "solo": { "type": "boolean" }
+                },
+                "required": ["track_id"]
+            }
+        },
+        {
+            "name": "audio_fx",
+            "description": "Add/remove/reorder an EQ/compressor/limiter/gate unit in a track's pre-fader fx chain (09 §4). op: add (kind, index?) | remove (index) | reorder (new_order).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string" },
+                    "op": { "type": "string", "enum": ["add","remove","reorder"] },
+                    "kind": { "type": "string", "enum": ["eq","compressor","limiter","gate"] },
+                    "index": { "type": "integer" },
+                    "new_order": { "type": "array", "items": { "type": "integer" } }
+                },
+                "required": ["track_id","op"]
+            }
+        },
+        {
+            "name": "set_master_bus",
+            "description": "Sequence master bus level and export loudness normalization (09 §4/§6.5). loudness: streaming (-14 LUFS) | broadcast (-23 LUFS) | none.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "volume_db": { "type": "number" },
+                    "loudness": { "type": "string", "enum": ["streaming","broadcast","none"] }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "get_audio_meters",
+            "description": "Current/peak levels per track + master (09 §5). Live meters live inside the interactive audio mixer, which the headless MCP engine bridge does not run — returns NotSupportedV1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence_id": { "type": "string" } },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "get_waveform",
+            "description": "Decoded waveform peak-pyramid summary for an asset or clip's asset (09 §8), sidecar-cached by content hash (01 §9); built via the ffmpeg audio decoder on a cache miss. Returns per-channel [min, max, rms] peak buckets (not an image). Supply asset_id or clip_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_id": { "type": "string" },
+                    "clip_id": { "type": "string" },
+                    "resolution": { "type": "integer", "description": "Target peak buckets per channel, default 512." }
+                }
+            }
+        },
+
+        // Title templates (05 §4b)
+        {
+            "name": "list_title_templates",
+            "description": "List available vector title/lower-third templates (05 §4b). The shipped built-in library is a P6 deliverable not yet present in this build, so this returns an empty catalog.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "insert_title_template",
+            "description": "Insert a vector title template onto the timeline as an embedded VectorDoc clip (05 §4b). The template library is not shipped in this build (P6) — returns NotSupportedV1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "template": { "type": "string" },
+                    "track_id": { "type": "string" },
+                    "start_ticks": { "type": "integer" },
+                    "start_tc": { "type": "string" },
+                    "start_seconds": { "type": "number" },
+                    "text_overrides": { "type": "object" }
+                },
+                "required": ["template","track_id"]
+            }
         }
     ])
 }

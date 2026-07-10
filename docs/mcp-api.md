@@ -3,11 +3,11 @@
 <!-- GENERATED FILE — do not edit by hand. -->
 <!-- Regenerate with: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md -->
 
-This document lists all **376** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
+This document lists all **409** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
 
 ## Tools
 
-[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`cancel_job`](#cancel-job), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_export_preset`](#delete-export-preset), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_sequence`](#export-sequence), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`generate_proxies`](#generate-proxies), [`get_artboard_margins`](#get-artboard-margins), [`get_canvas_overview`](#get-canvas-overview), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_engine_status`](#get-engine-status), [`get_job_status`](#get-job-status), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_selection`](#get-selection), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_presets`](#list-export-presets), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pause`](#pause), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play`](#play), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`probe_media`](#probe-media), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_proxy`](#remove-proxy), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`render_frame_at`](#render-frame-at), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_export_preset`](#save-export-preset), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`seek`](#seek), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_character_metrics`](#set-character-metrics), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_loop_range`](#set-loop-range), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_proxy_mode`](#set-proxy-mode), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`step`](#step), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transcode_media`](#transcode-media), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
+[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_caption_track`](#add-caption-track), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_graph_edge`](#add-graph-edge), [`add_graph_node`](#add-graph-node), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_lut`](#apply-lut), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`audio_fx`](#audio-fx), [`auto_caption`](#auto-caption), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`cancel_job`](#cancel-job), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_grade`](#copy-grade), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_clip_composition`](#create-clip-composition), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_export_preset`](#delete-export-preset), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_captions`](#export-captions), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_sequence`](#export-sequence), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`generate_proxies`](#generate-proxies), [`generate_voiceover`](#generate-voiceover), [`get_artboard_margins`](#get-artboard-margins), [`get_audio_meters`](#get-audio-meters), [`get_canvas_overview`](#get-canvas-overview), [`get_caption_track`](#get-caption-track), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_engine_status`](#get-engine-status), [`get_graph`](#get-graph), [`get_job_status`](#get-job-status), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_scopes`](#get-scopes), [`get_selection`](#get-selection), [`get_waveform`](#get-waveform), [`grade_preset`](#grade-preset), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_captions`](#import-captions), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_clip`](#insert-clip), [`insert_title_template`](#insert-title-template), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_presets`](#list-export-presets), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_title_templates`](#list-title-templates), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_caption_cues`](#merge-caption-cues), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pause`](#pause), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play`](#play), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`probe_media`](#probe-media), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_caption_track`](#remove-caption-track), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_graph_edge`](#remove-graph-edge), [`remove_graph_node`](#remove-graph-node), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_proxy`](#remove-proxy), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`render_frame_at`](#render-frame-at), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_export_preset`](#save-export-preset), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`seek`](#seek), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_caption_cue`](#set-caption-cue), [`set_caption_style`](#set-caption-style), [`set_caption_word`](#set-caption-word), [`set_character_metrics`](#set-character-metrics), [`set_clip_audio`](#set-clip-audio), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_grade`](#set-grade), [`set_graph_node_param`](#set-graph-node-param), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_loop_range`](#set-loop-range), [`set_master_bus`](#set-master-bus), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_project_graph`](#set-project-graph), [`set_proxy_mode`](#set-proxy-mode), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_audio`](#set-track-audio), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_caption_cue`](#split-caption-cue), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`step`](#step), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transcode_media`](#transcode-media), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
 
 ---
 
@@ -38,6 +38,15 @@ Returns the new `annotation_id` UUID.
 | `text` | string | yes | The comment or design note (required, non-empty). |
 | `author` | string | no | Optional author identity, e.g. "claude" or "design-reviewer". |
 | `node_id` | string | no | UUID of the node to annotate. Omit to create a document-level annotation. |
+
+## `add_caption_track`
+
+Add an empty caption track to a sequence (06 §3.6). Undoable.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+| `name` | string | no |  |
 
 ## `add_color_swatch`
 
@@ -123,6 +132,26 @@ Save a named export configuration to the document. Profiles store format and qua
 | `precision` | integer | no | SVG-only: coordinate decimal precision (default: 4). |
 | `semantic_ids` | boolean | no | SVG-only: emit semantic id attributes (default: true). |
 | `width` | integer | no | Raster-only: output pixel width. |
+
+## `add_graph_edge`
+
+Connect one node's output port to another's input port. Cycle-checked at edit time (01 §8) — fails clean with error_code CycleDetected, never panics.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `from` | object | yes | {node_id, port?} — output port, default 0. |
+| `graph_id` | string | yes |  |
+| `to` | object | yes | {node_id, port?} — input port, default 0. |
+
+## `add_graph_node`
+
+Add a node to a graph (08 §2). `op` is a GraphOp in serde shape, e.g. {"op":"blur"}, {"op":"solid_color"}, {"op":"merge","mode":"normal"}, {"op":"grade","grade":{...}}. Returns node_id.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `graph_id` | string | yes |  |
+| `op` | object | yes | GraphOp serde shape (08 §2). |
+| `pos` | array<number> | no | Editor [x, y]. |
 
 ## `add_guide`
 
@@ -287,6 +316,16 @@ Arrange the direct children of a Group node in a CSS-grid-style layout: left-to-
 | `gap_y` | number | no | Vertical gap between rows in document units. Default: 8.0. |
 | `padding` | number | no | Offset from origin before placing the first cell. Default: 0.0. |
 
+## `apply_lut`
+
+Attach a 3D LUT (.cube) to the clip's grade stack, importing it as a LUT asset (07 §3.8). Omit/null lut_path to remove the LUT. Replaces any existing LUT on the clip.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `intensity` | number | no | 0..1 blend, default 1.0. |
+| `lut_path` | string | no | Path to a .cube LUT; omit/null removes. |
+
 ## `apply_paragraph_style`
 
 Apply a named paragraph style to one or more text nodes. Only defined attributes are changed.
@@ -357,6 +396,32 @@ Apply a named width profile to path nodes — sets stroke.width to the profile a
 | --- | --- | --- | --- |
 | `name` | string | yes | Name of the width profile to apply. |
 | `node_ids` | array<string> | yes | Node UUIDs or names to apply the profile to. |
+
+## `audio_fx`
+
+Add/remove/reorder an EQ/compressor/limiter/gate unit in a track's pre-fader fx chain (09 §4). op: add (kind, index?) | remove (index) | reorder (new_order).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `op` | enum (`add`, `remove`, `reorder`) | yes |  |
+| `track_id` | string | yes |  |
+| `index` | integer | no |  |
+| `kind` | enum (`eq`, `compressor`, `limiter`, `gate`) | no |  |
+| `new_order` | array<integer> | no |  |
+
+## `auto_caption`
+
+Transcribe audio into word-level caption cues (CAP-009; async job — poll get_job_status). Supply clip_id (transcribe that clip's asset) or sequence_id. provider defaults to the configured hosted service (set PHOTONIC_TRANSCRIBE_URL/PHOTONIC_TRANSCRIBE_TOKEN); pass provider="mock" with mock_transcript for a deterministic offline/CI run. On completion inserts grouped cues on a new or existing caption track.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | no |  |
+| `language_hint` | string | no |  |
+| `mock_transcript` | string | no | provider=mock only: the deterministic transcript distributed across the target range. |
+| `name` | string | no | Name for a newly-created caption track. |
+| `provider` | enum (`hosted`, `mock`) | no | Default hosted. |
+| `sequence_id` | string | no |  |
+| `track_id` | string | no | Existing caption track to append to; omit to create one. |
 
 ## `auto_name_nodes`
 
@@ -669,6 +734,15 @@ Copy fill, stroke, and/or opacity from one source node to one or more target nod
 | `copy_opacity` | boolean | no | Copy opacity. Default: true. |
 | `copy_stroke` | boolean | no | Copy stroke. Default: true. |
 
+## `copy_grade`
+
+Copy one clip's grade (incl. LUT reference) onto N target clips as a single undo step.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source_clip_id` | string | yes |  |
+| `target_clip_ids` | array<string> | yes |  |
+
 ## `copy_nodes_to_clipboard`
 
 Copy one or more nodes (and all their descendants) into the session clipboard ring.
@@ -779,6 +853,16 @@ Save a named character style to the document. Capture from a source text node or
 | `letter_spacing` | number | no |  |
 | `line_height` | number | no | Multiplier e.g. 1.5 = 150%. |
 | `source_node_id` | string | no | Capture font/color from this text node (UUID or name). Explicit args override captured values. |
+
+## `create_clip_composition`
+
+Instantiate a per-clip node composition (D-06): a fresh ClipIn→Output graph bound to the clip (default), a deep-clone paste of an existing graph_id, or detach=true to revert the clip to its plain source. Returns the new graph_id.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `detach` | boolean | no | Revert the clip to its plain source. |
+| `graph_id` | string | no | Paste a deep-clone of this existing graph. |
 
 ## `create_cross`
 
@@ -1594,6 +1678,16 @@ Export the complete in-memory MCP audit log as a JSON array (oldest first). Incl
 
 _No parameters._
 
+## `export_captions`
+
+Export a caption track to SRT/VTT/ASS (06 §7). Format inferred from the file extension when omitted. No document mutation.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | string | yes |  |
+| `track_id` | string | yes |  |
+| `format` | enum (`srt`, `vtt`, `ass`) | no |  |
+
 ## `export_design_tokens`
 
 Extract the document's design vocabulary — unique solid fill colors, stroke colors, font families, font sizes, and stroke widths — and return them as structured design tokens.
@@ -1805,18 +1899,42 @@ Flip/mirror nodes horizontally or vertically around their bounding box center. P
 
 ## `generate_proxies`
 
-Batch-generate editing proxies (02 §6). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1: the engine/proxy module has not landed and the evaluator decodes originals regardless of ProxyMode (proxies are never required for correctness, CAP-014).
+Batch-generate editing proxies (02 §6; async job — poll get_job_status, cancellable). Transcodes each file-backed video asset to a half-res, all-intra H.264/MP4 proxy via the ffmpeg sidecar, stored in the sidecar cache dir keyed by content hash and attached to MediaAsset.proxy (status pending→ready). ForceProxy then decodes the proxy where present. Reuses a cached proxy unless force=true. Proxies are never required for correctness (CAP-014).
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `asset_ids` | array<string> | yes |  |
 | `force` | boolean | no |  |
 
+## `generate_voiceover`
+
+Synthesize speech and place it as an audio clip sized to the returned audio (CAP-011; async job — poll get_job_status). provider defaults to the configured hosted TTS (PHOTONIC_TTS_URL/PHOTONIC_TTS_TOKEN); pass provider="mock" for deterministic offline synthesis. also_caption adds word-level captions from the provider's alignment.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `text` | string | yes |  |
+| `track_id` | string | yes |  |
+| `also_caption` | boolean | no |  |
+| `caption_track_id` | string | no |  |
+| `provider` | enum (`hosted`, `mock`) | no |  |
+| `start_seconds` | number | no |  |
+| `start_tc` | string | no |  |
+| `start_ticks` | integer | no |  |
+| `voice` | string | no |  |
+
 ## `get_artboard_margins`
 
 Return the current artboard safe-area margin values (top, right, bottom, left in document units). Read-only.
 
 _No parameters._
+
+## `get_audio_meters`
+
+Current/peak levels per track + master (09 §5). Live meters live inside the interactive audio mixer, which the headless MCP engine bridge does not run — returns NotSupportedV1.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
 
 ## `get_canvas_overview`
 
@@ -1825,6 +1943,14 @@ Return a compact spatial map of all visible nodes: bounding box, layer, kind, an
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `include_hidden` | boolean | no | When true, include hidden nodes in the overview. Default: false. |
+
+## `get_caption_track`
+
+Full cue + word + style dump for one caption track (folds list_caption_cues).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `track_id` | string | yes |  |
 
 ## `get_clip`
 
@@ -1885,6 +2011,14 @@ Engine status snapshot (EngineStatus, 02 §1): playhead tick, playing flag, drop
 | --- | --- | --- | --- |
 | `sequence_id` | string | no | Informational — the engine session is a per-process singleton (10 §2). |
 
+## `get_graph`
+
+Full node/edge/param dump for a graph, plus structural diagnostics (cycle / missing Output) and a compiles flag.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `graph_id` | string | yes |  |
+
 ## `get_job_status`
 
 Poll an async job (export/probe/transcode — one registry, 10 §6). States: queued | running {progress, message} | done {result} | failed {error_code, message} | cancelled. Terminal jobs are retained 10 minutes, then evicted (JobNotFound).
@@ -1942,11 +2076,43 @@ Return the list of recently used fill and stroke colors for this document, order
 
 _No parameters._
 
+## `get_scopes`
+
+Waveform/vectorscope/histogram data for a clip at a tick (07 §5) — data, not an image (the UI/agent renders it). Renders the frame headlessly (requires a GPU adapter, else EngineUnavailable). Returns full luma/RGB histograms, a down-sampled luma waveform, and a 32x32 vectorscope grid.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `at_seconds` | number | no |  |
+| `at_tc` | string | no |  |
+| `at_ticks` | integer | no |  |
+| `format_index` | integer | no |  |
+
 ## `get_selection`
 
 Return the current selection — list of selected node IDs with name, kind, visibility, and lock state. Read-only.
 
 _No parameters._
+
+## `get_waveform`
+
+Decoded waveform peak-pyramid summary for an asset or clip's asset (09 §8), sidecar-cached by content hash (01 §9); built via the ffmpeg audio decoder on a cache miss. Returns per-channel [min, max, rms] peak buckets (not an image). Supply asset_id or clip_id.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | no |  |
+| `clip_id` | string | no |  |
+| `resolution` | integer | no | Target peak buckets per channel, default 512. |
+
+## `grade_preset`
+
+Save the current clip grade as a named app-level preset, apply a preset to a clip, or list preset names. op: save (clip_id+name) | apply (clip_id+name) | list.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `op` | enum (`save`, `apply`, `list`) | yes |  |
+| `clip_id` | string | no |  |
+| `name` | string | no |  |
 
 ## `gradient_fill`
 
@@ -1988,6 +2154,16 @@ Useful for engraving style, technical drawing shading, woodcut effects, and deco
 | `spacing` | number | no | Spacing between lines (default: 5) |
 | `stroke_width` | number | no | Line width (default: 1) |
 
+## `import_captions`
+
+Import SRT/VTT/ASS subtitles onto an existing caption track (06 §7). Format inferred from the file extension when omitted.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | string | yes |  |
+| `track_id` | string | yes |  |
+| `format` | enum (`srt`, `vtt`, `ass`) | no |  |
+
 ## `import_design_tokens`
 
 Counterpart to export_design_tokens: register named color swatches from a design-tokens payload so brand colors can be referenced by name (via apply_color_swatch) instead of hard-coded into every fill/gradient. Accepts CSS custom properties (:root { --brand-primary: #2f56cf }), flat or nested JSON, and Style Dictionary ({ "value": "#hex" }) — auto-detected. Hex values are normalized; existing swatches with the same name are updated. When the brand palette shifts, re-importing re-themes everything referencing those swatches.
@@ -2025,6 +2201,19 @@ Insert a new clip on a track. Time args follow ticks > tc > seconds precedence (
 | `start_seconds` | number | no |  |
 | `start_tc` | string | no | HH:MM:SS:FF or HH:MM:SS;FF |
 | `start_ticks` | integer | no |  |
+
+## `insert_title_template`
+
+Insert a vector title template onto the timeline as an embedded VectorDoc clip (05 §4b). The template library is not shipped in this build (P6) — returns NotSupportedV1.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `template` | string | yes |  |
+| `track_id` | string | yes |  |
+| `start_seconds` | number | no |  |
+| `start_tc` | string | no |  |
+| `start_ticks` | integer | no |  |
+| `text_overrides` | object | no |  |
 
 ## `inspect_node`
 
@@ -2302,6 +2491,12 @@ List all named symbols defined in the document, including master node names and 
 
 _No parameters._
 
+## `list_title_templates`
+
+List available vector title/lower-third templates (05 §4b). The shipped built-in library is a P6 deliverable not yet present in this build, so this returns an empty catalog.
+
+_No parameters._
+
 ## `list_variables`
 
 List all named document variables and their current values.
@@ -2428,6 +2623,15 @@ Measure a path's total arc length, anchor count, segment count, bounding box, an
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_id` | string | yes | Path node UUID or name |
+
+## `merge_caption_cues`
+
+Merge two cues on the same caption track into one (CaptionCmd::MergeCues).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cue_id_a` | string | yes |  |
+| `cue_id_b` | string | yes |  |
 
 ## `merge_layers`
 
@@ -2797,6 +3001,14 @@ Remove a media bin. Assets/child bins referencing it are left untouched (a dangl
 | --- | --- | --- | --- |
 | `bin_id` | string | yes |  |
 
+## `remove_caption_track`
+
+Remove a caption track and all its cues. STRUCTURAL: the committed core has no undoable caption-track removal (tracks are created/removed as side effects of bulk cue insertion, 06 §3.6), so this schedules a history checkpoint but is not a fine-grained undo step.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `track_id` | string | yes |  |
+
 ## `remove_clip`
 
 Remove a clip. ripple=true also shifts every later clip on the track left by the removed clip's duration (one undo step). Supports undo.
@@ -2856,6 +3068,24 @@ Remove the fill from selected nodes (set to none/transparent).
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | no | Node IDs. Empty = use selection. |
 
+## `remove_graph_edge`
+
+Remove the edge at `edge_index` in the graph's edge list (see get_graph for indices).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `edge_index` | integer | yes |  |
+| `graph_id` | string | yes |  |
+
+## `remove_graph_node`
+
+Remove a node and its incident edges from a graph (undoable).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `graph_id` | string | yes |  |
+| `node_id` | string | yes |  |
+
 ## `remove_guide`
 
 Remove a specific ruler guide by its UUID. Returns an error if the guide is locked.
@@ -2888,7 +3118,7 @@ Remove a sequence marker by id. Supports undo.
 
 ## `remove_proxy`
 
-Delete generated proxy files, reverting assets to original-only (05 §2.3). NOT IMPLEMENTED in this build — returns error_code NotSupportedV1 (see generate_proxies).
+Detach the proxy from each asset and delete its cached proxy file, reverting assets to original-only (05 §2.3). Assets then decode originals regardless of ProxyMode until regenerated (see generate_proxies).
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -3281,6 +3511,52 @@ Assign a path node (child of the group) as the blend spine for a group node. The
 | `group_id` | string | yes | UUID or name of the group node to configure as a blend. |
 | `path_id` | string | yes | UUID or name of the path node to use as the blend spine. |
 
+## `set_caption_cue`
+
+Create a cue (omit cue_id) or edit one (pass cue_id: timing via RetimeCue, text/words via SetCueText, one undo step). `words` (explicit per-word timing) beats `text` (distributed proportionally). position_override is only honored on creation in v1.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `track_id` | string | yes |  |
+| `cue_id` | string | no | Omit to create a new cue. |
+| `end_seconds` | number | no |  |
+| `end_tc` | string | no |  |
+| `end_ticks` | integer | no |  |
+| `position_override` | array<number> | no | Normalized [x, y]. |
+| `start_seconds` | number | no |  |
+| `start_tc` | string | no |  |
+| `start_ticks` | integer | no |  |
+| `text` | string | no |  |
+| `words` | array<object> | no | [{text, start_ticks\|start_tc\|start_seconds, end_*}] |
+
+## `set_caption_style`
+
+Set the track-default style (track_id), a cue override (cue_id), or a word override (cue_id + word_index). Supplied style fields merge onto the current effective style (01 §7 cascade word→cue→track); `clear` removes a cue/word override.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clear` | boolean | no |  |
+| `cue_id` | string | no |  |
+| `style` | object | no | {font_family?, font_size?, weight?, fill? (#hex), position? [x,y], max_width?} |
+| `track_id` | string | no |  |
+| `word_index` | integer | no |  |
+
+## `set_caption_word`
+
+Edit one word's text and/or timing (CAP-010), committed as a SetCueText over the cue's word list.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cue_id` | string | yes |  |
+| `word_index` | integer | yes |  |
+| `end_seconds` | number | no |  |
+| `end_tc` | string | no |  |
+| `end_ticks` | integer | no |  |
+| `start_seconds` | number | no |  |
+| `start_tc` | string | no |  |
+| `start_ticks` | integer | no |  |
+| `text` | string | no |  |
+
 ## `set_character_metrics`
 
 Set advanced node-level character metrics on a text node: baseline shift and super/subscript position. baseline_shift is in document units (positive raises text above the baseline, negative lowers it). script_position is 'normal', 'superscript' (renders smaller and raised), or 'subscript' (renders smaller and lowered). Both fields are optional — pass only those you want to change. Applies to the whole node (per-character ranges are not yet supported). Supports undo.
@@ -3290,6 +3566,19 @@ Set advanced node-level character metrics on a text node: baseline shift and sup
 | `node_id` | string | yes | Text node ID or name. |
 | `baseline_shift` | number | no | Baseline shift in document units (positive = up). Default: unchanged. |
 | `script_position` | enum (`normal`, `superscript`, `subscript`) | no | Script position. Default: unchanged. |
+
+## `set_clip_audio`
+
+Per-clip audio (01 §5): gain trim, fades, channel map. A fade_*_ticks of 0 clears that fade; a positive value sets it. Auto-initializes the clip's ClipAudio container if absent.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `channel_map` | enum (`as_source`, `mono_downmix`, `stereo_lr`, `channel_swap`) | no |  |
+| `fade_in_ticks` | integer | no | 0 clears; >0 sets. |
+| `fade_out_ticks` | integer | no |  |
+| `fade_shape` | enum (`linear`, `equal_power`, `log`, `s_curve`) | no |  |
+| `gain_db` | number | no |  |
 
 ## `set_clip_prop`
 
@@ -3360,6 +3649,26 @@ Set the font weight (100–900) on a text node. Common values: 400 = Regular, 70
 | `node_id` | string | yes | Text node ID (UUID or name). |
 | `weight` | integer | yes | Font weight (100=Thin, 400=Regular, 700=Bold, 900=Black). |
 
+## `set_grade`
+
+Replace or clear a clip's color grade (07 §1). `grade` is a full Grade object {ops:[...], bypass}; omit or pass null to clear.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clip_id` | string | yes |  |
+| `grade` | object \| null | no | Full Grade serde shape; null clears. |
+
+## `set_graph_node_param`
+
+Set one PropPath under a node's params (08 §6.4). value is a PropValue, e.g. {"t":"float","v":12.0}.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `graph_id` | string | yes |  |
+| `node_id` | string | yes |  |
+| `path` | string | yes |  |
+| `value` | object | yes |  |
+
 ## `set_keyframe`
 
 Upsert one keyframe on a PropertyTrack (creates the track if absent), creating animation. target=clip_transform needs only clip_id; target=clip_effect also needs effect_index. P2 scope: clip transform + clip-effect params only (grade/audio/graph-node targets land with their domains). Supports undo.
@@ -3402,6 +3711,16 @@ Set or clear the playback loop range (EngineCmd::SetLoop). Session state only �
 | --- | --- | --- | --- |
 | `sequence_id` | string | yes |  |
 | `range` | object \| null | no | {start_ticks\|start_tc\|start_seconds, end_ticks\|end_tc\|end_seconds}; null clears the loop. |
+
+## `set_master_bus`
+
+Sequence master bus level and export loudness normalization (09 §4/§6.5). loudness: streaming (-14 LUFS) | broadcast (-23 LUFS) | none.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sequence_id` | string | yes |  |
+| `loudness` | enum (`streaming`, `broadcast`, `none`) | no |  |
+| `volume_db` | number | no |  |
 
 ## `set_node_prompt`
 
@@ -3479,6 +3798,15 @@ Set paragraph-level text options on a text node: spacing before paragraphs, spac
 | `indent` | number | no | First-line indent in document units. Default: unchanged. |
 | `spacing_after` | number | no | Space after each paragraph in document units. Default: unchanged. |
 | `spacing_before` | number | no | Space before each paragraph in document units. Default: unchanged. |
+
+## `set_project_graph`
+
+Set the project graph to an existing arena graph (graph_id), clear it (clear=true), or create a fresh empty project graph (omit both). Spliced after the active-sequence output (02 §2). Returns graph_id.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `clear` | boolean | no |  |
+| `graph_id` | string | no |  |
 
 ## `set_proxy_mode`
 
@@ -3563,6 +3891,18 @@ Place a text node along a path spine (Type on a Path). The text flows along the 
 | `path_node_id` | string | yes | Path node ID (UUID or name) to use as the text spine. |
 | `text_node_id` | string | yes | Text node ID (UUID or name) to place on the path. |
 | `offset` | number | no | Start offset along the path in document units. Default: 0.0. |
+
+## `set_track_audio`
+
+Per-track fader/pan/mute/solo (09 §4). Auto-initializes the track's TrackAudio container if absent.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `track_id` | string | yes |  |
+| `muted` | boolean | no |  |
+| `pan` | number | no | -1 (L)..1 (R). |
+| `solo` | boolean | no |  |
+| `volume_db` | number | no | -inf..+12, default 0. |
 
 ## `set_track_prop`
 
@@ -3658,6 +3998,17 @@ Round the position (translation) of one or more nodes to the nearest integer coo
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_ids` | array<string> | yes | IDs of nodes to snap to integer pixel coordinates |
+
+## `split_caption_cue`
+
+Split a cue at a tick — between the two words straddling it (CaptionCmd::SplitCue). Returns the new cue id.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cue_id` | string | yes |  |
+| `at_seconds` | number | no |  |
+| `at_tc` | string | no |  |
+| `at_ticks` | integer | no |  |
 
 ## `split_clip`
 

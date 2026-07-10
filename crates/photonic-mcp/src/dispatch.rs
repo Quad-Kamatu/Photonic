@@ -2423,6 +2423,151 @@ pub(crate) async fn dispatch_tool_inner(
             Ok(ToolOutput::readonly(handlers::video::delete_export_preset(state, a).await))
         }
 
+        // ── Video domain, P4+ slice (10-mcp-tools.md §3.8–§3.12, 05 §4b) ────────
+        // Captions (10 §3.8)
+        "auto_caption" => {
+            let a: AutoCaptionArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::auto_caption(state, a).await))
+        }
+        "add_caption_track" => {
+            let a: AddCaptionTrackArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::add_caption_track(state, a).await))
+        }
+        "remove_caption_track" => {
+            let a: RemoveCaptionTrackArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::remove_caption_track(state, a).await))
+        }
+        "get_caption_track" => {
+            let a: GetCaptionTrackArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::get_caption_track(state, a).await))
+        }
+        "set_caption_cue" => {
+            let a: SetCaptionCueArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_caption_cue(state, a).await))
+        }
+        "split_caption_cue" => {
+            let a: SplitCaptionCueArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::split_caption_cue(state, a).await))
+        }
+        "merge_caption_cues" => {
+            let a: MergeCaptionCuesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::merge_caption_cues(state, a).await))
+        }
+        "set_caption_word" => {
+            let a: SetCaptionWordArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_caption_word(state, a).await))
+        }
+        "set_caption_style" => {
+            let a: SetCaptionStyleArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_caption_style(state, a).await))
+        }
+        "import_captions" => {
+            let a: ImportCaptionsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::import_captions(state, a).await))
+        }
+        "export_captions" => {
+            let a: ExportCaptionsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::export_captions(state, a).await))
+        }
+
+        // TTS (10 §3.9). Job start touches no document; the worker commits.
+        "generate_voiceover" => {
+            let a: GenerateVoiceoverArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::generate_voiceover(state, a).await))
+        }
+
+        // Grade (10 §3.10)
+        "set_grade" => {
+            let a: SetGradeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_grade(state, a).await))
+        }
+        "apply_lut" => {
+            let a: ApplyLutArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::apply_lut(state, a).await))
+        }
+        "copy_grade" => {
+            let a: CopyGradeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::copy_grade(state, a).await))
+        }
+        "grade_preset" => {
+            let a: GradePresetArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::grade_preset(state, a).await))
+        }
+        "get_scopes" => {
+            let a: GetScopesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::get_scopes(state, a).await))
+        }
+
+        // Node graph (10 §3.11)
+        "create_clip_composition" => {
+            let a: CreateClipCompositionArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::create_clip_composition(state, a).await))
+        }
+        "add_graph_node" => {
+            let a: AddGraphNodeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::add_graph_node(state, a).await))
+        }
+        "remove_graph_node" => {
+            let a: RemoveGraphNodeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::remove_graph_node(state, a).await))
+        }
+        "add_graph_edge" => {
+            let a: AddGraphEdgeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::add_graph_edge(state, a).await))
+        }
+        "remove_graph_edge" => {
+            let a: RemoveGraphEdgeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::remove_graph_edge(state, a).await))
+        }
+        "set_graph_node_param" => {
+            let a: SetGraphNodeParamArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_graph_node_param(state, a).await))
+        }
+        "set_project_graph" => {
+            let a: SetProjectGraphArgs = serde_json::from_value(args).unwrap_or(SetProjectGraphArgs { graph_id: None, clear: false });
+            Ok(ToolOutput::mutating(handlers::video::set_project_graph(state, a).await))
+        }
+        "get_graph" => {
+            let a: GetGraphArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::get_graph(state, a).await))
+        }
+
+        // Audio (10 §3.12)
+        "set_clip_audio" => {
+            let a: SetClipAudioArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_clip_audio(state, a).await))
+        }
+        "set_track_audio" => {
+            let a: SetTrackAudioArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_track_audio(state, a).await))
+        }
+        "audio_fx" => {
+            let a: AudioFxArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::audio_fx(state, a).await))
+        }
+        "set_master_bus" => {
+            let a: SetMasterBusArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::set_master_bus(state, a).await))
+        }
+        "get_audio_meters" => {
+            let a: GetAudioMetersArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(handlers::video::get_audio_meters(state, a).await))
+        }
+        "get_waveform" => {
+            let a: GetWaveformArgs = serde_json::from_value(args).unwrap_or(GetWaveformArgs { asset_id: None, clip_id: None, resolution: None });
+            Ok(ToolOutput::readonly(handlers::video::get_waveform(state, a).await))
+        }
+
+        // Title templates (05 §4b)
+        "list_title_templates" => {
+            let a: ListTitleTemplatesArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(handlers::video::list_title_templates(state, a).await))
+        }
+        "insert_title_template" => {
+            let a: InsertTitleTemplateArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(handlers::video::insert_title_template(state, a).await))
+        }
+
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }

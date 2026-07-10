@@ -23,6 +23,7 @@ clap = { workspace = true }
 mlua = { workspace = true }
 image = { workspace = true }
 base64 = "0.22"
+crossbeam-channel = "0.5"
 regex = "1"
 anyhow = { workspace = true }
 thiserror = { workspace = true }

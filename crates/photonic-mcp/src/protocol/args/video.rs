@@ -16,8 +16,9 @@
 //! `timeline/ops.rs` fn, which does take explicit ids.
 
 use photonic_core::timeline::{
-    AssetId, BinId, ClipId, ClipTransform, FrameRate, Interp, MarkerId, PropValue, SequenceFormat,
-    SequenceId, TrackId, TrackKind, TransitionKind, TransitionParams,
+    AssetId, BinId, ChannelMap, ClipId, ClipTransform, CueId, FadeShape, FrameRate, GraphId,
+    GraphNodeId, Interp, MarkerId, PropValue, SequenceFormat, SequenceId, TrackId, TrackKind,
+    TransitionKind, TransitionParams,
 };
 use serde::Deserialize;
 
@@ -767,4 +768,463 @@ pub struct SaveExportPresetArgs {
 #[derive(Debug, Deserialize)]
 pub struct DeleteExportPresetArgs {
     pub name: String,
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// P4+ slice: captions (§3.8), tts (§3.9), grade (§3.10), node graph (§3.11),
+// audio (§3.12), title templates (05 §4b). Time-valued fields follow design
+// rule 3 (ticks > tc > seconds), resolved against the owning sequence's frame
+// rate by the shared `resolve_tick` helper in `handlers/video.rs`.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─── Captions (10 §3.8) ─────────────────────────────────────────────────────
+
+/// One word with its own timing (CAP-009/010). Times resolve against the
+/// target track's owning sequence frame rate.
+#[derive(Debug, Deserialize)]
+pub struct CaptionWordArg {
+    pub text: String,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_ticks: Option<i64>,
+    #[serde(default)]
+    pub end_tc: Option<String>,
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
+}
+
+/// Hosted transcription (D-04) → word-level cues (CAP-009). Async job (§6).
+/// Supply exactly one of `sequence_id` / `clip_id`. `provider` defaults to the
+/// configured hosted service; pass `"mock"` with `mock_transcript` for a
+/// deterministic offline/CI run against the `MockTranscriptionProvider`.
+#[derive(Debug, Deserialize)]
+pub struct AutoCaptionArgs {
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    /// Existing caption track to append to; omit to create a new one.
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    /// `"hosted"` (default) or `"mock"`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub language_hint: Option<String>,
+    /// Offline/CI only: with `provider="mock"`, the deterministic transcript
+    /// distributed proportionally across the target range.
+    #[serde(default)]
+    pub mock_transcript: Option<String>,
+    /// Name for a newly-created caption track.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddCaptionTrackArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveCaptionTrackArgs {
+    pub track_id: TrackId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetCaptionTrackArgs {
+    pub track_id: TrackId,
+}
+
+/// Text/timing/position for one cue; creates a new cue when `cue_id` is
+/// omitted. `words` (explicit per-word timing) takes precedence over `text`
+/// (distributed proportionally across `[start, end)`).
+#[derive(Debug, Deserialize)]
+pub struct SetCaptionCueArgs {
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub cue_id: Option<CueId>,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_ticks: Option<i64>,
+    #[serde(default)]
+    pub end_tc: Option<String>,
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub words: Option<Vec<CaptionWordArg>>,
+    /// Normalized sequence coords `[x, y]`.
+    #[serde(default)]
+    pub position_override: Option<[f32; 2]>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SplitCaptionCueArgs {
+    pub cue_id: CueId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergeCaptionCuesArgs {
+    pub cue_id_a: CueId,
+    pub cue_id_b: CueId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetCaptionWordArgs {
+    pub cue_id: CueId,
+    pub word_index: usize,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_ticks: Option<i64>,
+    #[serde(default)]
+    pub end_tc: Option<String>,
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
+}
+
+/// Partial caption style — only supplied fields change; the rest inherit the
+/// current effective style at the chosen scope (01 §7 cascade word→cue→track).
+#[derive(Debug, Deserialize, Default)]
+pub struct CaptionStyleArg {
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub font_size: Option<f32>,
+    #[serde(default)]
+    pub weight: Option<u16>,
+    /// `#rrggbb` / `#rrggbbaa`.
+    #[serde(default)]
+    pub fill: Option<String>,
+    /// Normalized position `[x, y]`.
+    #[serde(default)]
+    pub position: Option<[f32; 2]>,
+    /// Normalized max width.
+    #[serde(default)]
+    pub max_width: Option<f32>,
+}
+
+/// Scope precedence: `word_index`+`cue_id` = word, `cue_id` = cue, else track.
+#[derive(Debug, Deserialize)]
+pub struct SetCaptionStyleArgs {
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    #[serde(default)]
+    pub cue_id: Option<CueId>,
+    #[serde(default)]
+    pub word_index: Option<usize>,
+    /// Clear the cue/word style override (no effect at track scope).
+    #[serde(default)]
+    pub clear: bool,
+    #[serde(default)]
+    pub style: Option<CaptionStyleArg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportCaptionsArgs {
+    pub track_id: TrackId,
+    pub path: String,
+    /// `srt` | `vtt` | `ass`; inferred from the file extension when omitted.
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportCaptionsArgs {
+    pub track_id: TrackId,
+    pub path: String,
+    /// `srt` | `vtt` | `ass`; inferred from the file extension when omitted.
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+// ─── TTS (10 §3.9) ───────────────────────────────────────────────────────────
+
+/// Submit text to the configured TTS provider (D-04); on completion inserts an
+/// audio clip sized to the returned audio (CAP-011). Async job (§6).
+#[derive(Debug, Deserialize)]
+pub struct GenerateVoiceoverArgs {
+    pub text: String,
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub voice: Option<String>,
+    /// `"hosted"` (default) or `"mock"`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Also add word-level captions from the provider's alignment (06 §6).
+    #[serde(default)]
+    pub also_caption: bool,
+    /// Existing caption track for `also_caption`; a new one is created when
+    /// omitted.
+    #[serde(default)]
+    pub caption_track_id: Option<TrackId>,
+}
+
+// ─── Grade (10 §3.10) ────────────────────────────────────────────────────────
+
+/// Full `Grade` replace/patch; `grade` omitted or `null` clears the grade.
+#[derive(Debug, Deserialize)]
+pub struct SetGradeArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub grade: Option<serde_json::Value>,
+}
+
+/// Attach (or, with `lut_path` omitted/`null`, remove) a 3D LUT as part of the
+/// clip's grade stack.
+#[derive(Debug, Deserialize)]
+pub struct ApplyLutArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub lut_path: Option<String>,
+    /// 0..1 blend, default 1.0.
+    #[serde(default)]
+    pub intensity: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CopyGradeArgs {
+    pub source_clip_id: ClipId,
+    pub target_clip_ids: Vec<ClipId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradePresetOp {
+    Save,
+    Apply,
+    List,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GradePresetArgs {
+    pub op: GradePresetOp,
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetScopesArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    #[serde(default)]
+    pub format_index: Option<usize>,
+}
+
+// ─── Node graph (10 §3.11) ───────────────────────────────────────────────────
+
+/// Instantiate a per-clip composition (D-06). `detach` reverts the clip to its
+/// plain source; an explicit `graph_id` pastes a deep-clone of that graph;
+/// otherwise a fresh `ClipIn → Output` composition is created.
+#[derive(Debug, Deserialize)]
+pub struct CreateClipCompositionArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub graph_id: Option<GraphId>,
+    #[serde(default)]
+    pub detach: bool,
+}
+
+/// `op` is a `GraphOp` in its serde shape, e.g. `{"op":"blur"}`,
+/// `{"op":"solid_color"}`, `{"op":"merge","mode":"normal"}` (08 §2).
+#[derive(Debug, Deserialize)]
+pub struct AddGraphNodeArgs {
+    pub graph_id: GraphId,
+    pub op: serde_json::Value,
+    /// Editor position `[x, y]`; default `[0, 0]`.
+    #[serde(default)]
+    pub pos: Option<[f32; 2]>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveGraphNodeArgs {
+    pub graph_id: GraphId,
+    pub node_id: GraphNodeId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GraphPortArg {
+    pub node_id: GraphNodeId,
+    /// Port index; default 0 (primary).
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddGraphEdgeArgs {
+    pub graph_id: GraphId,
+    pub from: GraphPortArg,
+    pub to: GraphPortArg,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveGraphEdgeArgs {
+    pub graph_id: GraphId,
+    pub edge_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetGraphNodeParamArgs {
+    pub graph_id: GraphId,
+    pub node_id: GraphNodeId,
+    pub path: String,
+    pub value: PropValue,
+}
+
+/// `graph_id` sets the project graph to an existing arena graph; `clear`
+/// removes it; omit both to create a fresh empty project graph.
+#[derive(Debug, Deserialize)]
+pub struct SetProjectGraphArgs {
+    #[serde(default)]
+    pub graph_id: Option<GraphId>,
+    #[serde(default)]
+    pub clear: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetGraphArgs {
+    pub graph_id: GraphId,
+}
+
+// ─── Audio (10 §3.12) ────────────────────────────────────────────────────────
+
+/// Per-clip audio (01 §5 `ClipAudio`). A `fade_*_ticks` of `0` clears that
+/// fade; a positive value sets it.
+#[derive(Debug, Deserialize)]
+pub struct SetClipAudioArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub gain_db: Option<f64>,
+    #[serde(default)]
+    pub fade_in_ticks: Option<i64>,
+    #[serde(default)]
+    pub fade_out_ticks: Option<i64>,
+    #[serde(default)]
+    pub fade_shape: Option<FadeShape>,
+    #[serde(default)]
+    pub channel_map: Option<ChannelMap>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetTrackAudioArgs {
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub volume_db: Option<f64>,
+    #[serde(default)]
+    pub pan: Option<f64>,
+    #[serde(default)]
+    pub muted: Option<bool>,
+    #[serde(default)]
+    pub solo: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioFxOp {
+    Add,
+    Remove,
+    Reorder,
+}
+
+/// Add/remove/reorder an EQ/compressor/limiter/gate unit in a track's pre-fader
+/// fx chain (09 §4).
+#[derive(Debug, Deserialize)]
+pub struct AudioFxArgs {
+    pub track_id: TrackId,
+    pub op: AudioFxOp,
+    /// Required for `add`: `eq` | `compressor` | `limiter` | `gate`.
+    #[serde(default)]
+    pub kind: Option<photonic_core::timeline::AudioFxKind>,
+    /// Insertion (add) or removal index; default = end for add.
+    #[serde(default)]
+    pub index: Option<usize>,
+    /// Required for `reorder`: the new chain order as source indices.
+    #[serde(default)]
+    pub new_order: Option<Vec<usize>>,
+}
+
+/// Master bus level/loudness (09 §4). `loudness`: `streaming` | `broadcast` |
+/// `none`.
+#[derive(Debug, Deserialize)]
+pub struct SetMasterBusArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub volume_db: Option<f64>,
+    #[serde(default)]
+    pub loudness: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetAudioMetersArgs {
+    pub sequence_id: SequenceId,
+}
+
+/// Decoded waveform peak-pyramid summary for an asset or clip's asset (09 §8,
+/// sidecar-cached per 01 §9). Supply exactly one of `asset_id` / `clip_id`.
+#[derive(Debug, Deserialize)]
+pub struct GetWaveformArgs {
+    #[serde(default)]
+    pub asset_id: Option<AssetId>,
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    /// Target number of peak buckets in the response, default 512.
+    #[serde(default)]
+    pub resolution: Option<usize>,
+}
+
+// ─── Title templates (05 §4b) ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListTitleTemplatesArgs {}
+
+#[derive(Debug, Deserialize)]
+pub struct InsertTitleTemplateArgs {
+    pub template: String,
+    pub track_id: TrackId,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub start_tc: Option<String>,
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub text_overrides: Option<std::collections::HashMap<String, String>>,
 }
