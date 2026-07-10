@@ -5,6 +5,7 @@
 //! height-drag (`height_px` is a persisted-but-non-undoable UI field, 04 §2.3).
 
 use super::ops_bridge;
+use egui_phosphor::regular as ph;
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{ops, Sequence, SequenceId, TrackId, TrackKind, TrackSettings};
@@ -67,7 +68,7 @@ pub(crate) fn draw_header(
     seq_id: SequenceId,
     row: TrackRow,
 ) {
-    let (name, enabled, locked, solo) = {
+    let (name, enabled, locked, solo, sync_lock) = {
         let Some(t) = doc
             .timeline
             .as_ref()
@@ -77,7 +78,7 @@ pub(crate) fn draw_header(
             return;
         };
         let solo = t.audio.as_ref().is_some_and(|a| a.solo);
-        (t.name.clone(), t.enabled, t.locked, solo)
+        (t.name.clone(), t.enabled, t.locked, solo, t.sync_lock)
     };
 
     let painter = ui.painter_at(rect);
@@ -142,10 +143,58 @@ pub(crate) fn draw_header(
         ops_bridge::toggle_locked(doc, history, seq_id, row.id);
     }
 
+    // Sync-lock toggle (14-nle-parity M-9): ripple/insert edits are meant to
+    // shift every sync-locked track together (the ripple-propagation itself
+    // is a reported seam — see `toggle_sync_lock`'s doc). Mirrors the lock
+    // button's "·" (off) / glyph (on) language.
+    let sync_rect = egui::Rect::from_min_size(
+        egui::pos2(lock_rect.right() + 2.0, top),
+        egui::vec2(btn, btn),
+    );
+    if ui
+        .put(
+            sync_rect,
+            egui::Button::new(if sync_lock {
+                ph::ARROWS_CLOCKWISE
+            } else {
+                "·"
+            })
+            .small(),
+        )
+        .on_hover_text("Sync lock — ripple/insert edits shift sync-locked tracks together")
+        .clicked()
+    {
+        toggle_sync_lock(doc, history, seq_id, row.id);
+    }
+
+    // Track display (wrench) menu (14-nle-parity M-10): per-track height
+    // presets. Right-aligned so it never collides with the name label.
+    let wrench_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - pad - btn, top),
+        egui::vec2(btn, btn),
+    );
+    let wrench_resp = ui
+        .put(wrench_rect, egui::Button::new(ph::WRENCH).small())
+        .on_hover_text("Track display");
+    let wrench_popup_id = wrench_resp.id.with("track_display_popup");
+    if wrench_resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(wrench_popup_id));
+    }
+    egui::popup::popup_below_widget(
+        ui,
+        wrench_popup_id,
+        &wrench_resp,
+        egui::PopupCloseBehavior::CloseOnClick,
+        |ui| {
+            ui.set_min_width(140.0);
+            track_display_menu(ui, doc, seq_id, row);
+        },
+    );
+
     // Name label / inline rename.
     let name_rect = egui::Rect::from_min_max(
-        egui::pos2(lock_rect.right() + 4.0, top),
-        egui::pos2(rect.right() - pad, top + btn),
+        egui::pos2(sync_rect.right() + 4.0, top),
+        egui::pos2(wrench_rect.left() - 4.0, top + btn),
     );
     let editing = ui
         .data(|d| d.get_temp::<(TrackId, String)>(rename_id()))
@@ -230,6 +279,37 @@ fn header_menu(
     }
 }
 
+/// Per-track height presets shown by the wrench popup (14-nle-parity M-10)
+/// `(display name, height_px)`. Bounds match `ops_bridge::set_track_height`'s
+/// own clamp (`28.0..=240.0`).
+const TRACK_HEIGHT_PRESETS: &[(&str, f32)] = &[
+    ("Small", 36.0),
+    ("Medium", 64.0),
+    ("Large", 120.0),
+    ("Extra large", 200.0),
+];
+
+/// Track display (wrench) menu contents (14-nle-parity M-10): height
+/// presets, applied through the same non-undoable `set_track_height` path
+/// the drag handle uses (04 §2.3's sanctioned direct-write exception).
+///
+/// A full "toggle thumbnails/waveforms/track-name display" wrench menu per
+/// M-10's spec text would need a per-track visibility field on `Track`
+/// (`photonic-core/src/timeline/sequence.rs`) — out of this story's
+/// territory, so scoped here to what's achievable against the existing
+/// model: height presets. Reported as a seam for a follow-up story.
+fn track_display_menu(ui: &mut egui::Ui, doc: &mut Document, seq_id: SequenceId, row: TrackRow) {
+    ui.label(egui::RichText::new("Track height").weak().small());
+    for (name, h) in TRACK_HEIGHT_PRESETS {
+        if ui
+            .selectable_label((row.height - h).abs() < 1.0, *name)
+            .clicked()
+        {
+            ops_bridge::set_track_height(doc, seq_id, row.id, *h);
+        }
+    }
+}
+
 /// Add-Video / Add-Audio track controls, drawn at the bottom of the header
 /// column (04 §2.6). Returns the height consumed.
 pub(crate) fn draw_add_controls(
@@ -292,6 +372,37 @@ fn toggle_solo(
     };
     audio.solo = !audio.solo;
     if let Ok(cmd) = ops::set_track_prop(p, seq_id, track, settings) {
+        history.execute_discrete(Command::Timeline(cmd), doc);
+    }
+}
+
+/// Flip a track's `Track::sync_lock` bit (14-nle-parity M-9, the header-toggle
+/// half). `ops::toggle_sync_lock` is already a complete, pre-built op (unlike
+/// solo above, it needs no local snapshot/edit dance), so this is a thin
+/// call — but still bypasses `ops_bridge.rs` directly for the same territory
+/// reason `toggle_solo` documents above: no `pub(crate) fn toggle_sync_lock`
+/// wrapper exists there, and this story's territory doesn't reach that file.
+///
+/// **Reported seam:** the ripple-propagation this toggle is *meant* to
+/// drive — "ripple/insert edits shift every sync-locked track together" (14
+/// §M-9) — does not exist yet. `ops_bridge::ripple_trim`/`ripple_delete`
+/// only ever shift the target clip's own track (`ops_bridge.rs`'s
+/// `expand_link_group_*` module note documents the same gap for link
+/// groups). Wiring that needs a change to those functions in `ops_bridge.rs`,
+/// out of this story's territory (`clips.rs`/`mod.rs`/`tracks.rs` only) — a
+/// follow-up story should thread `sync_lock` through `ripple_trim`/
+/// `ripple_delete`/the future insert/overwrite ops the same way link groups
+/// are expanded today.
+fn toggle_sync_lock(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    track: TrackId,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmd) = ops::toggle_sync_lock(p, seq_id, track) {
         history.execute_discrete(Command::Timeline(cmd), doc);
     }
 }

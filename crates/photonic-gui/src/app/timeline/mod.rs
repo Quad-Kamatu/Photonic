@@ -7,6 +7,19 @@
 //! intent→`ops`→`CommandHistory` sink). Every mutation flows through
 //! `ops_bridge`; the panel itself never touches `doc.timeline` directly (the one
 //! sanctioned exception, `height_px`, lives in `ops_bridge::set_track_height`).
+//!
+//! **Documented exception:** `link_selected_clips`/`unlink_selected_clips`
+//! below (14-nle-parity gap #8's creation half) call
+//! `photonic_core::timeline::ops::{set_clip_prop, unlink_clip}` directly
+//! rather than through `ops_bridge.rs` — that file's own `link_group` module
+//! note explicitly defers this ("link groups can only be established
+//! directly against `TimelineProject`... outside this story's territory"
+//! until a story lands to do it), and this story's territory is
+//! `{clips.rs, mod.rs, tracks.rs}` only, which doesn't reach `ops_bridge.rs`
+//! to add the wrapper. Mirrors the same bypass `tracks.rs::toggle_solo` /
+//! `toggle_sync_lock` already establish for the identical constraint. A
+//! follow-up pass should promote these into `ops_bridge.rs` to restore the
+//! "sole sink" invariant.
 
 pub mod clips;
 pub mod interact;
@@ -21,9 +34,10 @@ use super::PhotonicApp;
 use interact::{DragKind, DragState, Marquee};
 use layout::{EDGE_ZONE_PX, RULER_HEIGHT_PX, SNAP_THRESHOLD_PX, ZOOM_STEP};
 use photonic_core::document::Document;
-use photonic_core::history::CommandHistory;
+use photonic_core::history::{Command, CommandHistory};
+use photonic_core::timeline::clip::LinkGroupId;
 use photonic_core::timeline::{
-    ClipId, ClipTiming, FrameRate, Sequence, SequenceId, Tick, TrackId, TrackKind,
+    ops, ClipId, ClipTiming, FrameRate, Sequence, SequenceId, Tick, TrackId, TrackKind,
 };
 
 const TOOLBAR_H: f32 = 24.0;
@@ -116,6 +130,10 @@ impl PhotonicApp {
 
         let colors = lane_colors(ui);
         let mut hits: Vec<interact::HitCandidate> = Vec::new();
+        // Global per-frame egui-texture registration budget for clip
+        // thumbnails (spec 15 §4), threaded through every `paint_lane` call
+        // below so the cap is shared across all visible lanes, not per-lane.
+        let mut thumb_budget = clips::ThumbnailBudget::new(clips::DEFAULT_THUMBNAIL_BUDGET);
         {
             // Clip the painter to the lanes rect so scrolled rows don't overflow.
             let lane_painter = ui.painter_at(lanes_rect);
@@ -155,6 +173,16 @@ impl PhotonicApp {
                         lane_rect,
                         &selection,
                         &colors,
+                        // Seam (spec 15): no live `ThumbnailCache`/`WaveformCache`
+                        // is constructed anywhere yet — that needs a field on
+                        // `PhotonicApp`/`EngineBridge` (`app/mod.rs`,
+                        // `app/engine.rs`), outside this story's territory.
+                        // `paint_lane` is fully wired to consume one the moment
+                        // it exists; until then this is exactly today's
+                        // flat-fill-only behavior.
+                        None,
+                        None,
+                        &mut thumb_budget,
                     );
                     for pc in painted {
                         // Automation-lane indicator (04 §4.1): keyframe diamonds
@@ -623,6 +651,9 @@ fn lane_colors(ui: &egui::Ui) -> clips::LaneColors {
         transition: v.warn_fg_color,
         offline: v.error_fg_color,
         locked_hatch: v.weak_text_color().gamma_multiply(0.5),
+        sync_lock_seam: v.hyperlink_color,
+        waveform_fill: v.weak_text_color().gamma_multiply(0.8),
+        waveform_rms: v.text_color().gamma_multiply(0.6),
     }
 }
 
@@ -770,7 +801,17 @@ fn self_interact(
     // ── Context menu ────────────────────────────────────────────────────────
     let menu_target = resp.hover_pos().and_then(hit_at).map(|(t, c, _, _)| (t, c));
     let ph = *playhead;
-    resp.context_menu(|ui| clip_context_menu(ui, doc, history, seq_id, menu_target, ph));
+    resp.context_menu(|ui| {
+        clip_context_menu(
+            ui,
+            doc,
+            history,
+            seq_id,
+            menu_target,
+            ph,
+            selection.as_slice(),
+        )
+    });
 }
 
 fn apply_selection(selection: &mut Vec<ClipId>, clip: ClipId, mods: egui::Modifiers) {
@@ -1064,6 +1105,7 @@ fn commit_drag(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn clip_context_menu(
     ui: &mut egui::Ui,
     doc: &mut Document,
@@ -1071,6 +1113,7 @@ fn clip_context_menu(
     seq_id: SequenceId,
     target: Option<(TrackId, ClipId)>,
     playhead: Tick,
+    selection: &[ClipId],
 ) {
     let Some((track, clip)) = target else {
         ui.label("No clip");
@@ -1146,10 +1189,175 @@ fn clip_context_menu(
         }
     });
     ui.separator();
+    // Link Clips / Unlink (14-nle-parity gap #8's creation half). Acts on the
+    // current multi-selection when the right-clicked clip is part of it
+    // (right-click any selected clip to act on the whole group, matching
+    // reference-NLE convention), else on just the hovered clip alone.
+    let link_targets = context_targets(selection, clip);
+    let can_link = link_targets.len() >= 2;
+    if ui
+        .add_enabled(can_link, egui::Button::new("Link Clips"))
+        .on_hover_text("Group the selected clips so a future move carries them together")
+        .clicked()
+    {
+        link_selected_clips(doc, history, seq_id, &link_targets);
+        ui.close_menu();
+    }
+    let any_linked = clips_have_link_group(doc, seq_id, &link_targets);
+    if ui
+        .add_enabled(any_linked, egui::Button::new("Unlink"))
+        .clicked()
+    {
+        unlink_selected_clips(doc, history, seq_id, &link_targets);
+        ui.close_menu();
+    }
+    ui.separator();
     ui.add_enabled(false, egui::Button::new("Add transition in"))
         .on_disabled_hover_text("P6");
     ui.add_enabled(false, egui::Button::new("Add transition out"))
         .on_disabled_hover_text("P6");
     ui.add_enabled(false, egui::Button::new("Open as node composition"))
         .on_disabled_hover_text("P8");
+}
+
+/// Resolve a right-click on `target` to the set of clip ids an action should
+/// apply to: the whole multi-selection when `target` is part of it (so
+/// right-clicking any selected clip acts on the group), else just `target`
+/// alone.
+fn context_targets(selection: &[ClipId], target: ClipId) -> Vec<ClipId> {
+    if selection.contains(&target) {
+        selection.to_vec()
+    } else {
+        vec![target]
+    }
+}
+
+/// Resolve clip ids to their `(TrackId, ClipId)` within `seq_id`, scanning
+/// every track once. An id that doesn't resolve (stale selection) is skipped.
+fn resolve_clip_locations(
+    doc: &Document,
+    seq_id: SequenceId,
+    ids: &[ClipId],
+) -> Vec<(TrackId, ClipId)> {
+    let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for t in seq.tracks() {
+        for c in &t.clips {
+            if ids.contains(&c.id) {
+                out.push((t.id, c.id));
+            }
+        }
+    }
+    out
+}
+
+/// Whether any of `ids` currently belongs to a link group (gates the
+/// "Unlink" menu entry).
+fn clips_have_link_group(doc: &Document, seq_id: SequenceId, ids: &[ClipId]) -> bool {
+    let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+        return false;
+    };
+    seq.tracks()
+        .flat_map(|t| t.clips.iter())
+        .any(|c| ids.contains(&c.id) && c.link_group.is_some())
+}
+
+/// Link every clip in `ids` into one link group (14-nle-parity §M-2's
+/// "creation half" — see the module-doc exception at the top of this file for
+/// why this calls `ops::set_clip_prop` directly rather than through
+/// `ops_bridge.rs`). Reuses an existing group if any targeted clip already
+/// belongs to one (mirroring `ops::link_clips`'s own resolution for a pair,
+/// extended to N clips — calling `link_clips` itself repeatedly wouldn't
+/// work here since each call reads the *original*, not-yet-applied project
+/// state, so a 3rd+ clip would mint its own group instead of joining the
+/// first pair's). One undo step; a no-op below 2 resolved clips.
+fn link_selected_clips(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    ids: &[ClipId],
+) {
+    let locations = resolve_clip_locations(doc, seq_id, ids);
+    if locations.len() < 2 {
+        return;
+    }
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Some(seq) = p.sequences.get(&seq_id) else {
+        return;
+    };
+    let mut group = None;
+    for &(track, clip) in &locations {
+        if let Some(g) = seq
+            .track(track)
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+            .and_then(|c| c.link_group)
+        {
+            group = Some(g);
+            break;
+        }
+    }
+    let group = group.unwrap_or_else(LinkGroupId::new);
+    let mut cmds = Vec::new();
+    for &(track, clip) in &locations {
+        let Some(c) = seq
+            .track(track)
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+        else {
+            continue;
+        };
+        if c.link_group == Some(group) {
+            continue; // already in the target group
+        }
+        let mut new = c.clone();
+        new.link_group = Some(group);
+        if let Ok(cmd) = ops::set_clip_prop(p, seq_id, track, new) {
+            cmds.push(cmd);
+        }
+    }
+    if !cmds.is_empty() {
+        let batch = cmds.into_iter().map(Command::Timeline).collect();
+        history.execute_discrete(Command::Batch(batch), doc);
+    }
+}
+
+/// Unlink every clip in `ids` that currently belongs to a link group (clips
+/// with no group are skipped rather than emitting a no-op command). One undo
+/// step covering however many clips actually change.
+fn unlink_selected_clips(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    ids: &[ClipId],
+) {
+    let locations = resolve_clip_locations(doc, seq_id, ids);
+    if locations.is_empty() {
+        return;
+    }
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Some(seq) = p.sequences.get(&seq_id) else {
+        return;
+    };
+    let mut cmds = Vec::new();
+    for (track, clip) in locations {
+        let is_linked = seq
+            .track(track)
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+            .is_some_and(|c| c.link_group.is_some());
+        if !is_linked {
+            continue;
+        }
+        if let Ok(cmd) = ops::unlink_clip(p, seq_id, track, clip) {
+            cmds.push(cmd);
+        }
+    }
+    if !cmds.is_empty() {
+        let batch = cmds.into_iter().map(Command::Timeline).collect();
+        history.execute_discrete(Command::Batch(batch), doc);
+    }
 }
