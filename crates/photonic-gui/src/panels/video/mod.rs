@@ -24,6 +24,7 @@ pub(crate) mod clip_inspector;
 pub(crate) mod color_page;
 pub(crate) mod effects_browser;
 pub(crate) mod export_dialog;
+pub(crate) mod keyframe_editor;
 pub(crate) mod node_editor;
 
 /// Which sub-section of the right-drawer Color Controls group is active

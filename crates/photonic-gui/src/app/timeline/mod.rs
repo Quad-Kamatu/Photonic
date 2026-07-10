@@ -164,6 +164,19 @@ impl PhotonicApp {
                         &colors,
                     );
                     for pc in painted {
+                        // Automation-lane indicator (04 §4.1): keyframe diamonds
+                        // along an animated clip's body, painted by the keyframe
+                        // editor module so the two surfaces stay in sync.
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == pc.clip) {
+                            crate::panels::video::keyframe_editor::paint_clip_automation(
+                                &lane_painter,
+                                &view,
+                                lanes_rect.left(),
+                                clip,
+                                pc.rect,
+                                colors.selected_stroke,
+                            );
+                        }
                         hits.push(HitClip {
                             track: row.id,
                             clip: pc.clip,
@@ -287,6 +300,20 @@ impl PhotonicApp {
             content_rect,
             lane_left,
             colors.selected_stroke,
+        );
+
+        // Keyframe / curve editor (04 §4.1, 01 §6): a floating editor that
+        // auto-targets the selected clip. Invoked from here — the one video-mode
+        // draw path that already holds `doc`, `history`, the playhead, and the
+        // live selection — so it needs no `app/mod.rs` call-site wiring. Every
+        // edit flows through a pure core keyframe op → `CommandHistory`.
+        crate::panels::video::keyframe_editor::draw_window(
+            ui.ctx(),
+            doc,
+            history,
+            &mut self.keyframe_editor_target,
+            &selection,
+            playhead,
         );
 
         // Write session state back.
