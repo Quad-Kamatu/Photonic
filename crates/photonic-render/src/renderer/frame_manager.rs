@@ -11,7 +11,9 @@ impl PhotonicRenderer {
         self.view.screen_height = height;
         self.surface_config.width = width;
         self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.surface_config);
+        }
         let (msaa_texture, msaa_view) =
             create_msaa_texture(&self.device, self.surface_format, width, height);
         self.msaa_texture = msaa_texture;
@@ -39,10 +41,12 @@ impl PhotonicRenderer {
     /// Callers may append further render passes (e.g. egui) to `handle.encoder`
     /// before calling `finish_frame`.
     pub fn begin_frame(&self, vertices: &[Vertex], indices: &[u32]) -> Option<FrameHandle> {
-        let surface_texture = match self.surface.get_current_texture() {
+        // Windowless (offscreen) renderers never present — see `new_offscreen`.
+        let surface = self.surface.as_ref()?;
+        let surface_texture = match surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.surface_config);
+                surface.configure(&self.device, &self.surface_config);
                 return None;
             }
             Err(e) => {

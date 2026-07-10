@@ -61,7 +61,10 @@ pub struct FrameHandle {
 // ─── Main renderer ───────────────────────────────────────────────────────────
 
 pub struct PhotonicRenderer {
-    pub(crate) surface: wgpu::Surface<'static>,
+    /// `None` for a windowless (offscreen-only) renderer built via
+    /// [`PhotonicRenderer::new_offscreen`] — it renders only through
+    /// `capture_png` and never presents a swapchain frame.
+    pub(crate) surface: Option<wgpu::Surface<'static>>,
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pub(crate) surface_config: wgpu::SurfaceConfiguration,
@@ -198,18 +201,7 @@ impl PhotonicRenderer {
             .await
             .expect("No suitable GPU adapter found");
 
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("photonic_device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: Default::default(),
-                },
-                None,
-            )
-            .await
-            .expect("Failed to create wgpu device");
+        let (device, queue) = Self::request_device(&adapter).await;
 
         let caps = surface.get_capabilities(&adapter);
         // Prefer a non-sRGB linear format so egui doesn't double-gamma-correct.
@@ -238,6 +230,103 @@ impl PhotonicRenderer {
         };
         surface.configure(&device, &surface_config);
 
+        Self::assemble(
+            device,
+            queue,
+            Some(surface),
+            surface_config,
+            surface_format,
+            width,
+            height,
+            document,
+            capture_rx,
+        )
+    }
+
+    /// Construct a **windowless** renderer that draws only to offscreen textures
+    /// (via `capture_png`). No surface is created, so `begin_frame`/`render`
+    /// present nothing — the real GPU pipeline (`render_scene`) still runs, which
+    /// is what lets tests and headless captures exercise it. Returns `None` when
+    /// no GPU adapter is available (e.g. CI without a GPU) so callers skip cleanly.
+    pub async fn new_offscreen(
+        width: u32,
+        height: u32,
+        document: Arc<Mutex<Document>>,
+        capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
+    ) -> Option<Self> {
+        let width = width.max(1);
+        let height = height.max(1);
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await?;
+        let (device, queue) = Self::request_device(&adapter).await;
+
+        // Linear (non-sRGB) RGBA: readback needs no channel swap and blending
+        // matches the windowed path's preferred format.
+        let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        Some(Self::assemble(
+            device,
+            queue,
+            None,
+            surface_config,
+            surface_format,
+            width,
+            height,
+            document,
+            capture_rx,
+        ))
+    }
+
+    async fn request_device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {
+        adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("photonic_device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: Default::default(),
+                },
+                None,
+            )
+            .await
+            .expect("Failed to create wgpu device")
+    }
+
+    /// Build all pipelines, textures and per-frame state from an already-acquired
+    /// device/queue. Shared by the windowed ([`new`](Self::new)) and offscreen
+    /// ([`new_offscreen`](Self::new_offscreen)) constructors.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: Option<wgpu::Surface<'static>>,
+        surface_config: wgpu::SurfaceConfiguration,
+        surface_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        document: Arc<Mutex<Document>>,
+        capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
+    ) -> Self {
         // Camera bind group
         let camera_bgl = create_camera_bind_group_layout(&device);
         let initial_cam = CameraUniform::from_viewport(0.0, 0.0, 1.0, width, height);

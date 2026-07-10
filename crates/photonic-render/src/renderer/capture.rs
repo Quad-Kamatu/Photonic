@@ -19,8 +19,16 @@ impl PhotonicRenderer {
         }
     }
 
+    /// Build this frame's geometry and render it to an offscreen texture, returning
+    /// the RGBA8 PNG bytes. Drives the real windowed pipeline (`render_scene`) with
+    /// no surface — used by headless captures and tests.
+    pub(crate) fn render_capture(&mut self) -> Vec<u8> {
+        let (verts, idxs) = self.update();
+        self.capture_png(&verts, &idxs)
+    }
+
     /// Render to an offscreen texture, read back pixels, encode as PNG.
-    fn capture_png(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
+    pub(crate) fn capture_png(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
         let w = self.width;
         let h = self.height;
 
@@ -233,6 +241,59 @@ impl PhotonicRenderer {
         img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap_or_default();
         png
+    }
+}
+
+#[cfg(test)]
+mod offscreen_tests {
+    use super::*;
+    use photonic_core::{
+        color::Color,
+        node::{PathNode, SceneNode, SceneNodeKind},
+        path::PathData,
+        style::Fill,
+        Document,
+    };
+
+    /// Build a windowless renderer over `doc` at `w×h`, or `None` if this machine
+    /// has no GPU adapter (so tests skip cleanly on headless CI).
+    pub(crate) fn offscreen(doc: Document, w: u32, h: u32) -> Option<PhotonicRenderer> {
+        // The capture channel is unused here (we call `render_capture` directly),
+        // so dropping the sender is harmless.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        pollster::block_on(PhotonicRenderer::new_offscreen(
+            w,
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(doc)),
+            rx,
+        ))
+    }
+
+    /// Stage 0 smoke test: the windowless renderer drives the real GPU pipeline
+    /// and reads pixels back. A red rect filling a 20×20 doc → red at the centre.
+    #[test]
+    fn offscreen_renderer_reads_back_a_shape() {
+        let mut doc = Document::new("smoke", 20.0, 20.0);
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        doc.add_node(node, None);
+        let Some(mut r) = offscreen(doc, 20, 20) else {
+            eprintln!("no GPU adapter — skipping offscreen smoke test");
+            return;
+        };
+        let png = r.render_capture();
+        let img = image::load_from_memory(&png).expect("png").to_rgba8();
+        let p = img.get_pixel(10, 10).0;
+        assert!(
+            p[0] > 180 && p[1] < 70 && p[2] < 70,
+            "offscreen capture should show the red rect at centre, got {p:?}"
+        );
     }
 }
 
