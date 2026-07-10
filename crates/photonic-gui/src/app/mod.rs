@@ -2731,7 +2731,7 @@ impl PhotonicApp {
             .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Photonic v0.1").weak());
+                    ui.label(RichText::new(concat!("Photonic v", env!("CARGO_PKG_VERSION"))).weak());
                     // Isolation Mode indicator.
                     if let Some(iso_id) = self.isolated_group {
                         ui.separator();
