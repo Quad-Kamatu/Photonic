@@ -3658,8 +3658,12 @@ impl PhotonicApp {
                 }
 
                 // ── Cursor coordinate overlay (Info Panel) ───────────────────
+                // Vector-editing affordance only: in video mode this same canvas
+                // rect is the program monitor, whose bottom edge holds the
+                // transport/player controls (04 §3.2). Painting the X/Y readout
+                // there covered the players — so it is drawn in Vector mode only.
                 if let Some(cursor_screen) = ui.input(|i| i.pointer.hover_pos()) {
-                    if rect.contains(cursor_screen) {
+                    if self.mode == AppMode::Vector && rect.contains(cursor_screen) {
                         let (cx, cy) =
                             view.screen_to_canvas(cursor_screen.x as f64, cursor_screen.y as f64);
                         let coord_text = format!("  X: {:.1}  Y: {:.1}  ", cx, cy);
