@@ -1,8 +1,10 @@
 //! `RightDrawerGroup::AudioMixer` panel (04 §4.1) — channel strips per audio
 //! track + a master strip: vertical dB fader, equal-power pan knob, dual
 //! peak/RMS meter with clip LED, mute/solo (solo-safe), a per-strip `AudioFxUnit`
-//! rack with kind-specific editors, and expandable automation lanes. Normative
-//! UI: 09 §8 + 13 §11. Interior owned by 09-audio-mixer.md.
+//! rack with kind-specific editors, and expandable automation lanes, plus a
+//! prominent stereo (L/R) peak+RMS master-bus output meter with clip LEDs
+//! (Gap M-7, [`master_output_meter`]). Normative UI: 09 §8 + 13 §11. Interior
+//! owned by 09-audio-mixer.md.
 //!
 //! ## Wiring seam (reported, not silently faked)
 //!
@@ -18,7 +20,14 @@
 //!
 //! 1. `EngineSession`/`EngineStatus` (02 §1) do **not** surface `audio::mixer`'s
 //!    `StereoMeter` taps to the GUI — `get_audio_meters` (10 §3.12 / 13 §11.6)
-//!    does not exist yet, so live fader/master meters cannot be polled.
+//!    does not exist yet, so live fader/master meters cannot be polled. This
+//!    also covers Gap M-7 (the master-bus output meter, [`master_output_meter`]):
+//!    it is built prominent/stereo/peak+RMS/clip-LED per spec and reads the
+//!    best-available value (the panned, ballistics-smoothed synthetic level
+//!    already driving every other meter here), but the real tap it wants —
+//!    `Mixer::output_meter()`'s `Arc<StereoMeter>`, sampled post
+//!    `MasterBusParams.volume_db` — is unreachable for the same reason: no
+//!    engine handle reaches this function.
 //! 2. `audio::mixer`'s `fx_chain` is *an inert pass-through* (see that module's
 //!    doc + `audio/dsp/mod.rs`): the DSP units in `audio/dsp` are not connected
 //!    into the mixer graph, so added fx are not audible yet (the audio-dsp-wiring
@@ -59,6 +68,9 @@ const CLIP_DB: f32 = -0.3;
 const FADER_H: f32 = 116.0;
 const METER_W: f32 = 9.0;
 const STRIP_W: f32 = 88.0;
+/// Master-bus output meter (Gap M-7) bar height — taller than [`FADER_H`]'s
+/// per-track meters so the final mix level is prominent at a glance.
+const MASTER_METER_H: f32 = FADER_H + 24.0;
 
 // Meter three-stop gradient (13 §11.7 — the one DESIGN.md exception where a
 // status gradient is appropriate, since a meter is a continuous status signal):
@@ -139,6 +151,14 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
+/// Linear amplitude gain → dB, floored so a near-zero gain (e.g. a hard-panned
+/// channel's opposite side) doesn't produce `-inf`/NaN through `log10`. Used
+/// to split a mono synthetic level across L/R by the real equal-power pan
+/// gain (09 §4) when driving the master output meter's stereo image.
+fn lin_to_db(gain: f32) -> f32 {
+    20.0 * gain.max(1e-6).log10()
+}
+
 /// Peak/RMS meter ballistics + clip latch (13 §11.1/§11.4). Fed a per-block
 /// level in dB each frame; models fast-peak attack, slow release, ~300ms RMS,
 /// and a peak-hold marker.
@@ -192,6 +212,41 @@ impl MeterState {
     }
 }
 
+/// Two independent [`MeterState`] ballistics tracks (L/R) for the
+/// master-bus output meter (Gap M-7: prominent, stereo, peak+RMS, clip LED).
+/// `Mixer::output_meter()` (`photonic_video::audio::mixer`) is the real
+/// engine-side tap this mirrors — see [`master_output_meter`]'s doc for why
+/// this panel can't poll it yet.
+#[derive(Clone, Default)]
+struct StereoMeterState {
+    l: MeterState,
+    r: MeterState,
+}
+
+impl StereoMeterState {
+    fn update(&mut self, level_l_db: f32, level_r_db: f32, dt: f32) {
+        self.l.update(level_l_db, dt);
+        self.r.update(level_r_db, dt);
+    }
+
+    /// Either channel currently latched red (13 §11.4) — drives the numeric
+    /// peak readout's color; each bar's own LED is still the click target.
+    fn clipped(&self) -> bool {
+        self.l.clip || self.r.clip
+    }
+
+    /// The louder channel's instantaneous peak, for the numeric dB readout.
+    fn peak_db(&self) -> f32 {
+        self.l.peak_db.max(self.r.peak_db)
+    }
+
+    /// Coarse L/R average RMS, for the master strip's rolling-loudness
+    /// readout (already labelled "approx — export authoritative" there).
+    fn rms_avg_db(&self) -> f32 {
+        (self.l.rms_db + self.r.rms_db) * 0.5
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Preview model (egui temp memory) — real core types, local until the seam.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -215,7 +270,7 @@ enum FxSel {
 struct PreviewMixer {
     strips: Vec<MixerStrip>,
     master: MasterBus,
-    master_meter: MeterState,
+    master_meter: StereoMeterState,
     open_fx: Option<FxSel>,
 }
 
@@ -252,7 +307,7 @@ impl PreviewMixer {
         PreviewMixer {
             strips: vec![dialogue, music, sfx],
             master: MasterBus::new(),
-            master_meter: MeterState::default(),
+            master_meter: StereoMeterState::default(),
             open_fx: None,
         }
     }
@@ -357,7 +412,8 @@ pub(crate) fn draw_audio_mixer(ui: &mut Ui, vid: &mut VideoPanelUi) {
         .map(|s| (s.audio.mute, s.audio.solo))
         .collect();
     let audible = resolve_audible(&flags);
-    let mut master_level = FLOOR_DB as f32;
+    let mut master_l = FLOOR_DB as f32;
+    let mut master_r = FLOOR_DB as f32;
     for (i, s) in model.strips.iter_mut().enumerate() {
         let lvl = if audible[i] {
             synthetic_level_db(i as f32, t, s.audio.params.base.volume_db)
@@ -365,11 +421,19 @@ pub(crate) fn draw_audio_mixer(ui: &mut Ui, vid: &mut VideoPanelUi) {
             FLOOR_DB as f32
         };
         s.meter.update(lvl, dt);
-        master_level = master_level.max(lvl);
+        // Split the (still-synthetic) level across L/R by each strip's real
+        // equal-power pan gain (09 §4), so the master output meter's stereo
+        // image at least tracks live pan/mute/solo control state honestly —
+        // only the per-block level number itself is simulated (module doc's
+        // wiring-seam note).
+        let (gain_l, gain_r) = pan_law(s.audio.params.base.pan);
+        master_l = master_l.max(lvl + lin_to_db(gain_l));
+        master_r = master_r.max(lvl + lin_to_db(gain_r));
     }
-    let master_level =
-        (master_level + model.master.params.base.volume_db as f32 + 2.0).min(CEIL_DB as f32);
-    model.master_meter.update(master_level, dt);
+    let headroom = model.master.params.base.volume_db as f32 + 2.0;
+    let master_l = (master_l + headroom).min(CEIL_DB as f32);
+    let master_r = (master_r + headroom).min(CEIL_DB as f32);
+    model.master_meter.update(master_l, master_r, dt);
     // Keep meters animating while the drawer is visible.
     ui.ctx().request_repaint();
 
@@ -529,7 +593,7 @@ fn channel_strip(
 fn master_strip(
     ui: &mut Ui,
     master: &mut MasterBus,
-    meter: &mut MeterState,
+    meter: &mut StereoMeterState,
     pending: &mut Vec<AudioCmd>,
     open_fx: &mut Option<FxSel>,
 ) {
@@ -539,12 +603,14 @@ fn master_strip(
         |ui| {
             header_row(ui, "Master", false, false, |_| {});
 
+            // Gap M-7: the prominent stereo output meter, standalone above the
+            // fader (not squeezed beside it like the per-track strips) so it
+            // reads as the mix's final, authoritative level.
+            master_output_meter(ui, meter);
+            ui.add_space(4.0);
+
             let mut db = master.params.base.volume_db;
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                draw_meter(ui, meter);
-                changed |= fader(ui, &mut db).changed();
-            });
+            let mut changed = fader(ui, &mut db).changed();
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut db)
@@ -564,7 +630,7 @@ fn master_strip(
 
             // Live integrated-loudness readout (09 §8 / 13 §11.1) — an
             // approximate rolling estimate; the export value is authoritative.
-            let lufs = approx_lufs(meter.rms_db);
+            let lufs = approx_lufs(meter.rms_avg_db());
             ui.label(
                 egui::RichText::new(format!("{lufs:.1} LUFS"))
                     .monospace()
@@ -723,13 +789,20 @@ fn pan_knob(ui: &mut Ui, pan: &mut f64) -> Response {
 /// Dual peak/RMS meter with a clickable clip-indicator LED stacked above the
 /// bar (13 §11.1/§11.4). The LED latches red above -0.3 dBTP; click resets it.
 fn draw_meter(ui: &mut Ui, meter: &mut MeterState) {
+    draw_meter_sized(ui, meter, FADER_H);
+}
+
+/// [`draw_meter`] at an explicit bar height — factored out so the master-bus
+/// output meter (Gap M-7) can render a taller bar than the per-track strips
+/// for prominence, without duplicating the LED/fill/peak-hold painting.
+fn draw_meter_sized(ui: &mut Ui, meter: &mut MeterState, height: f32) {
     ui.vertical(|ui| {
         // Clip LED (top): click to clear a latched clip.
         let (led, led_resp) = ui.allocate_exact_size(vec2(METER_W, 6.0), Sense::click());
         if led_resp.clicked() {
             meter.clip = false;
         }
-        let (rect, _) = ui.allocate_exact_size(vec2(METER_W, FADER_H), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(METER_W, height), Sense::hover());
 
         let vis = ui.visuals();
         let led_color = if meter.clip {
@@ -759,6 +832,61 @@ fn draw_meter(ui: &mut Ui, meter: &mut MeterState) {
         painter.line_segment(
             [pos2(rect.left(), y), pos2(rect.right(), y)],
             Stroke::new(1.0, hold_col),
+        );
+    });
+}
+
+/// Prominent master-bus output meter (Gap M-7, 13 §11.1/§11.4): stereo (L/R)
+/// peak+RMS bars — each with its own clickable clip LED — under an "OUTPUT"
+/// label and above a numeric peak-dB readout, deliberately taller/wider
+/// (`MASTER_METER_H`, two bars) than the single per-track strip meters so the
+/// final mix level reads at a glance without hunting.
+///
+/// ## Reading this against the real engine
+///
+/// The engine-side equivalent is `audio::mixer::Mixer::output_meter()`
+/// (`photonic-video`): a lock-free `Arc<StereoMeter>` sampled post
+/// `MasterBusParams.volume_db` — the exact "Output" tap this widget wants.
+/// It is not reachable here: `draw_audio_mixer(ui, &mut VideoPanelUi)` is
+/// called with no engine handle (see this module's top doc, "Wiring seam"),
+/// and `EngineSession`/`EngineStatus` don't surface any `StereoMeter` to the
+/// GUI yet regardless (`get_audio_meters` doesn't exist, 10 §3.12 / 13
+/// §11.6). So this renders the best-available value: the same honestly
+/// simulated-and-labelled ballistics pass already driving every other meter
+/// in this file (`draw_audio_mixer`'s per-frame update, panned per-strip by
+/// real pan-law gain — see its call site). Swapping to
+/// `mixer.output_meter().peak()`/`.rms()` once that seam closes is a
+/// same-shape `[f32; 2]`-per-frame feed into [`StereoMeterState::update`];
+/// no widget change.
+fn master_output_meter(ui: &mut Ui, meter: &mut StereoMeterState) {
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new("OUTPUT")
+                .small()
+                .strong()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.horizontal(|ui| {
+            draw_meter_sized(ui, &mut meter.l, MASTER_METER_H);
+            ui.add_space(3.0);
+            draw_meter_sized(ui, &mut meter.r, MASTER_METER_H);
+        });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("L").small().weak());
+            ui.add_space(METER_W - 2.0);
+            ui.label(egui::RichText::new("R").small().weak());
+        });
+        let peak = egui::RichText::new(fmt_db(meter.peak_db() as f64))
+            .monospace()
+            .small()
+            .strong();
+        let peak = if meter.clipped() {
+            peak.color(METER_HIGH)
+        } else {
+            peak
+        };
+        ui.label(peak).on_hover_text(
+            "Master output peak (louder channel) — click a clip LED to clear its latch",
         );
     });
 }
@@ -1220,6 +1348,33 @@ mod tests {
         // Latch persists even as the level drops.
         m.update(-40.0, 0.5);
         assert!(m.clip);
+    }
+
+    #[test]
+    fn lin_to_db_matches_known_points() {
+        assert!(approx(lin_to_db(1.0), 0.0));
+        // Equal-power center pan gain (0.707) is -3.01 dB per channel.
+        assert!(approx(lin_to_db(std::f32::consts::FRAC_1_SQRT_2), -3.0103));
+        // Near-zero gain floors instead of producing -inf/NaN.
+        assert!(lin_to_db(0.0).is_finite());
+    }
+
+    #[test]
+    fn stereo_meter_state_tracks_channels_independently() {
+        let mut m = StereoMeterState::default();
+        assert!(!m.clipped());
+        m.update(-6.0, -20.0, 0.016);
+        assert!(approx(m.l.peak_db, -6.0));
+        assert!(approx(m.r.peak_db, -20.0));
+        // Louder channel wins the numeric peak readout.
+        assert!(approx(m.peak_db(), -6.0));
+        assert!(!m.clipped());
+        // Only the right channel clips; the left LED stays clear, but the
+        // aggregate `clipped()` (driving the numeric readout's color) trips.
+        m.update(-6.0, 0.0, 0.016);
+        assert!(!m.l.clip);
+        assert!(m.r.clip);
+        assert!(m.clipped());
     }
 
     #[test]
