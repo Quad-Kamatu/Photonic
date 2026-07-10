@@ -5,7 +5,32 @@
 //! activation, …). The palette and any keymap-driven shortcut both route through
 //! it, so a remapped key and a palette click run identical code paths.
 use super::*;
+use crate::app::timeline::ops_bridge;
 use crate::commands::{self, CommandId};
+use photonic_core::timeline::{ops, Clip, Sequence, SequenceId, TrackKind};
+
+/// One clip captured on the timeline clipboard (Ctrl+C / Ctrl+X, NLE parity
+/// QW-3). Holds a full clone of the source clip — grade, effects, trim, speed
+/// and transform all preserved — plus the kind of track it came from so paste
+/// can target a compatible lane. Positions are stored source-relative: paste
+/// maps the earliest clip's start onto the playhead and keeps the rest at their
+/// original offsets.
+#[derive(Clone)]
+pub(crate) struct ClipboardClip {
+    pub clip: Clip,
+    pub kind: TrackKind,
+}
+
+/// Occupied `[start, end)` clip spans on one track (paste overlap-avoidance).
+type Spans = Vec<(Tick, Tick)>;
+/// A candidate paste track: id, kind, and its currently-occupied spans.
+type PasteTrack = (TrackId, TrackKind, Spans);
+/// A clipboard entry reduced to what the paste planner needs: kind, source
+/// start, duration.
+type PasteEntry = (TrackKind, Tick, Tick);
+/// One planned paste placement: `(clipboard entry index, track index, new
+/// start)`.
+type Placement = (usize, usize, Tick);
 
 /// Sanitize a node name into a safe file stem (lowercase alnum + dashes).
 fn sanitize_stem(name: &str) -> String {
@@ -178,6 +203,21 @@ impl PhotonicApp {
             "video.prev_edit_point" => self.timeline_prev_edit_point(doc),
             "video.next_edit_point" => self.timeline_next_edit_point(doc),
             "video.split_at_playhead" => self.timeline_split_at_playhead(doc, history),
+            // ── Clip editing (NLE parity QW-1 / QW-3 / QW-4) ──────────────────
+            // Delete/ripple-delete/copy/cut/paste of the timeline selection and
+            // marker-at-playhead. Each routes through `ops_bridge` (or, for
+            // paste's property-preserving insert, `ops::insert_clip`) so every
+            // edit is a real undoable timeline command.
+            "video.delete_clip" => self.timeline_delete_selection(doc, history, false),
+            "video.ripple_delete" => self.timeline_delete_selection(doc, history, true),
+            "video.copy" => {
+                self.timeline_copy_selection(doc);
+            }
+            "video.cut" => self.timeline_cut_selection(doc, history),
+            "video.paste" => {
+                self.timeline_paste_clipboard(doc, history);
+            }
+            "video.add_marker" => self.timeline_add_marker_at_playhead(doc, history),
             "video.toggle_snap" => self.timeline_toggle_snap(),
             "video.zoom_in" => self.timeline_zoom_in(),
             "video.zoom_out" => self.timeline_zoom_out(),
@@ -810,5 +850,345 @@ mod ungroup_all_tests {
         let (doc, _outer, leaves, _z) = nested_doc();
         let (cmds, planned) = plan_ungroup_all(&doc, leaves[0]);
         assert!(cmds.is_empty() && planned.is_empty());
+    }
+}
+
+// ── Timeline clip editing (NLE parity QW-1 / QW-3 / QW-4) ────────────────────
+//
+// Delete/copy/cut/paste of the timeline selection + marker-at-playhead. Every
+// mutation routes through `ops_bridge` (the sanctioned intent→ops→history
+// bridge) so it lands as a real undoable timeline command; paste additionally
+// uses `ops::insert_clip` directly (like `monitor.rs::ensure_timeline_project`)
+// because there is no asset-agnostic "insert this exact clip" bridge helper and
+// paste must preserve the copied clip's grade/effects/trim.
+impl PhotonicApp {
+    /// Resolve `timeline_selection` (clip ids) to concrete `(track, clip)` pairs
+    /// on the active sequence, in timeline order.
+    fn resolve_timeline_selection(
+        &self,
+        doc: &Document,
+        seq_id: SequenceId,
+    ) -> Vec<(TrackId, ClipId)> {
+        match doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) {
+            Some(s) => resolve_selection_in(s, &self.timeline_selection),
+            None => Vec::new(),
+        }
+    }
+
+    /// Delete the timeline-selected clip(s) (`Delete`/`Backspace`, QW-1). With
+    /// `ripple`, downstream clips on the same track shift left to close the gap
+    /// (`Shift+Delete`); otherwise the clips are lifted and leave a gap. No-op on
+    /// an empty selection or missing timeline.
+    pub(crate) fn timeline_delete_selection(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        ripple: bool,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let targets = self.resolve_timeline_selection(doc, seq_id);
+        if targets.is_empty() {
+            return;
+        }
+        for (track, clip) in &targets {
+            if ripple {
+                ops_bridge::ripple_delete(doc, history, seq_id, *track, *clip);
+            } else {
+                ops_bridge::remove_clip(doc, history, seq_id, *track, *clip);
+            }
+        }
+        // Drop the now-gone clips from the selection.
+        self.timeline_selection
+            .retain(|id| !targets.iter().any(|(_, c)| c == id));
+    }
+
+    /// Copy the timeline-selected clip(s) into `timeline_clipboard` (`Ctrl+C`,
+    /// QW-3), full-cloned with their source track kind. Returns `true` if
+    /// anything was copied.
+    pub(crate) fn timeline_copy_selection(&mut self, doc: &Document) -> bool {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return false;
+        };
+        let Some(s) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+            return false;
+        };
+        let mut buf: Vec<ClipboardClip> = Vec::new();
+        for t in s.tracks() {
+            for c in &t.clips {
+                if self.timeline_selection.contains(&c.id) {
+                    buf.push(ClipboardClip {
+                        clip: c.clone(),
+                        kind: t.kind,
+                    });
+                }
+            }
+        }
+        if buf.is_empty() {
+            return false;
+        }
+        self.timeline_clipboard = buf;
+        true
+    }
+
+    /// Cut = copy + ripple-delete (`Ctrl+X`, QW-3). No-op if the selection is
+    /// empty (nothing copied → nothing deleted).
+    pub(crate) fn timeline_cut_selection(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        if self.timeline_copy_selection(doc) {
+            self.timeline_delete_selection(doc, history, true);
+        }
+    }
+
+    /// Paste the clipboard at the playhead (`Ctrl+V`, QW-3): each clip lands on
+    /// the first compatible-kind track with room, at `playhead + (its source
+    /// start − earliest source start)` so a multi-clip paste keeps its spacing.
+    /// Committed as one undo step; the pasted clips become the new selection.
+    /// Returns `true` if at least one clip was inserted.
+    pub(crate) fn timeline_paste_clipboard(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) -> bool {
+        if self.timeline_clipboard.is_empty() {
+            return false;
+        }
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return false;
+        };
+        let anchor = self
+            .timeline_clipboard
+            .iter()
+            .map(|e| e.clip.start)
+            .min()
+            .unwrap_or(Tick::ZERO);
+        let playhead = self.playhead;
+
+        // Candidate tracks (id + kind + occupied spans), in timeline order.
+        let cand: Vec<PasteTrack> = {
+            let Some(s) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+                return false;
+            };
+            s.tracks()
+                .map(|t| {
+                    (
+                        t.id,
+                        t.kind,
+                        t.clips.iter().map(|c| (c.start, c.end())).collect(),
+                    )
+                })
+                .collect()
+        };
+
+        let entries: Vec<PasteEntry> = self
+            .timeline_clipboard
+            .iter()
+            .map(|e| (e.kind, e.clip.start, e.clip.duration))
+            .collect();
+        let tracks_for_plan: Vec<(TrackKind, Spans)> = cand
+            .iter()
+            .map(|(_, k, spans)| (*k, spans.clone()))
+            .collect();
+        let placements = plan_paste_placements(&entries, playhead, anchor, &tracks_for_plan);
+        if placements.is_empty() {
+            return false;
+        }
+
+        let mut cmds: Vec<Command> = Vec::new();
+        let mut new_sel: Vec<ClipId> = Vec::new();
+        {
+            let Some(p) = doc.timeline.as_ref() else {
+                return false;
+            };
+            for (ei, ti, start) in &placements {
+                let track_id = cand[*ti].0;
+                let mut clip = self.timeline_clipboard[*ei].clip.clone();
+                clip.id = ClipId::new();
+                clip.start = *start;
+                let new_id = clip.id;
+                if let Ok(cmd) = ops::insert_clip(p, seq_id, track_id, clip) {
+                    cmds.push(Command::Timeline(cmd));
+                    new_sel.push(new_id);
+                }
+            }
+        }
+        if cmds.is_empty() {
+            return false;
+        }
+        history.execute_discrete(Command::Batch(cmds), doc);
+        self.timeline_selection = new_sel;
+        true
+    }
+
+    /// Add a marker at the playhead on the active sequence (`M`, QW-4).
+    pub(crate) fn timeline_add_marker_at_playhead(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::add_marker(doc, history, seq_id, self.playhead, "Marker");
+    }
+}
+
+/// Resolve selected clip ids to `(track, clip)` pairs on `seq`, in timeline
+/// order (video lanes then audio, each in clip order). Pure core of
+/// [`PhotonicApp::resolve_timeline_selection`], split out for testing.
+fn resolve_selection_in(seq: &Sequence, selection: &[ClipId]) -> Vec<(TrackId, ClipId)> {
+    let mut out = Vec::new();
+    for t in seq.tracks() {
+        for c in &t.clips {
+            if selection.contains(&c.id) {
+                out.push((t.id, c.id));
+            }
+        }
+    }
+    out
+}
+
+/// True if the half-open spans `[a0, a1)` and `[b0, b1)` overlap.
+fn spans_overlap(a0: Tick, a1: Tick, b0: Tick, b1: Tick) -> bool {
+    a0 < b1 && b0 < a1
+}
+
+/// Plan where clipboard clips land on paste. Each entry's new start is
+/// `playhead + (src_start − anchor)` (source-relative, clamped ≥ 0), so a
+/// multi-clip paste keeps its spacing and the earliest clip lands on the
+/// playhead. For each entry in order, the first track of a matching kind with
+/// room — no overlap against existing spans or already-placed pastes — is
+/// chosen; entries that fit nowhere are skipped. Returns `(entry index, track
+/// index into `tracks`, new start)`.
+fn plan_paste_placements(
+    entries: &[PasteEntry],
+    playhead: Tick,
+    anchor: Tick,
+    tracks: &[(TrackKind, Spans)],
+) -> Vec<Placement> {
+    let mut occ: Vec<Spans> = tracks.iter().map(|(_, s)| s.clone()).collect();
+    let mut out: Vec<Placement> = Vec::new();
+    for (ei, (kind, src_start, dur)) in entries.iter().enumerate() {
+        let raw = playhead + (*src_start - anchor);
+        let start = if raw.0 < 0 { Tick::ZERO } else { raw };
+        let end = start + *dur;
+        for (ti, (tkind, _)) in tracks.iter().enumerate() {
+            if tkind != kind {
+                continue;
+            }
+            let fits = occ[ti]
+                .iter()
+                .all(|(s0, s1)| !spans_overlap(start, end, *s0, *s1));
+            if fits {
+                occ[ti].push((start, end));
+                out.push((ei, ti, start));
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod clip_edit_tests {
+    use super::*;
+    use photonic_core::timeline::{ClipSource, FrameRate, Track};
+
+    fn clip_at(start: i64, dur: i64) -> Clip {
+        Clip::new(ClipSource::Adjustment, Tick(start), Tick(dur))
+    }
+
+    fn seq_with_clips() -> (Sequence, TrackId, TrackId, Vec<ClipId>) {
+        let mut seq = Sequence::new("s", FrameRate::FPS_30, 1920, 1080);
+        let mut v = Track::new(TrackKind::Video, "V1");
+        let mut a = Track::new(TrackKind::Audio, "A1");
+        let vc0 = clip_at(0, 100);
+        let vc1 = clip_at(200, 100);
+        let ac0 = clip_at(50, 100);
+        let ids = vec![vc0.id, vc1.id, ac0.id];
+        v.clips.push(vc0);
+        v.clips.push(vc1);
+        a.clips.push(ac0);
+        let (vid, aid) = (v.id, a.id);
+        seq.video_tracks.push(v);
+        seq.audio_tracks.push(a);
+        (seq, vid, aid, ids)
+    }
+
+    #[test]
+    fn resolve_selection_maps_ids_to_track_clip_pairs_in_order() {
+        let (seq, vid, aid, ids) = seq_with_clips();
+        // Select the second video clip and the audio clip.
+        let sel = vec![ids[2], ids[1]];
+        let res = resolve_selection_in(&seq, &sel);
+        // Video lanes come before audio; within a lane, clip order is preserved.
+        assert_eq!(res, vec![(vid, ids[1]), (aid, ids[2])]);
+    }
+
+    #[test]
+    fn resolve_selection_ignores_unknown_ids_and_empty_selection() {
+        let (seq, _vid, _aid, _ids) = seq_with_clips();
+        assert!(resolve_selection_in(&seq, &[]).is_empty());
+        assert!(resolve_selection_in(&seq, &[ClipId::new()]).is_empty());
+    }
+
+    #[test]
+    fn paste_single_clip_lands_at_playhead() {
+        // One video clip copied from start=200; anchor is its own start, so it
+        // pastes exactly at the playhead regardless of its original position.
+        let entries = [(TrackKind::Video, Tick(200), Tick(100))];
+        let tracks = [(TrackKind::Video, Vec::new())];
+        let out = plan_paste_placements(&entries, Tick(1000), Tick(200), &tracks);
+        assert_eq!(out, vec![(0, 0, Tick(1000))]);
+    }
+
+    #[test]
+    fn paste_preserves_relative_spacing_across_clips() {
+        // Two clips at 200 and 500 (gap 300) paste at playhead 1000 keeping the
+        // gap: first at 1000, second at 1300. Anchor = earliest start (200).
+        let entries = [
+            (TrackKind::Video, Tick(200), Tick(100)),
+            (TrackKind::Video, Tick(500), Tick(100)),
+        ];
+        let tracks = [(TrackKind::Video, Vec::new())];
+        let out = plan_paste_placements(&entries, Tick(1000), Tick(200), &tracks);
+        assert_eq!(out, vec![(0, 0, Tick(1000)), (1, 0, Tick(1300))]);
+    }
+
+    #[test]
+    fn paste_skips_kind_mismatch_and_finds_next_fitting_track() {
+        // An audio entry must skip the video track and land on the audio one.
+        let entries = [(TrackKind::Audio, Tick(0), Tick(100))];
+        let tracks = [
+            (TrackKind::Video, Vec::new()),
+            (TrackKind::Audio, Vec::new()),
+        ];
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks);
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_overflows_to_second_track_when_first_is_occupied() {
+        // Playhead lands the clip over an existing span on V1 → it goes to V2.
+        let entries = [(TrackKind::Video, Tick(0), Tick(100))];
+        let tracks = [
+            (TrackKind::Video, vec![(Tick(450), Tick(600))]),
+            (TrackKind::Video, Vec::new()),
+        ];
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks);
+        assert_eq!(out, vec![(0, 1, Tick(500))]);
+    }
+
+    #[test]
+    fn paste_is_skipped_when_no_track_has_room() {
+        let entries = [(TrackKind::Video, Tick(0), Tick(100))];
+        // The only video track is fully blocked across the paste span.
+        let tracks = [(TrackKind::Video, vec![(Tick(400), Tick(700))])];
+        let out = plan_paste_placements(&entries, Tick(500), Tick(0), &tracks);
+        assert!(out.is_empty());
     }
 }

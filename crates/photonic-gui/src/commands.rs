@@ -426,6 +426,39 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Split Clip at Playhead",
         default: Some(KeyBinding::plain(Key::S)),
     },
+    // Clip editing (NLE parity QW-1/QW-3/QW-4). Delete/Backspace both remove the
+    // timeline selection — Backspace is handled as a second hardwired
+    // accelerator in `app/monitor.rs` since the keymap holds one binding per id.
+    CommandDef {
+        id: "video.delete_clip",
+        label: "Delete Selected Clip",
+        default: Some(KeyBinding::plain(Key::Delete)),
+    },
+    CommandDef {
+        id: "video.ripple_delete",
+        label: "Ripple Delete Selected Clip",
+        default: Some(KeyBinding::shift(Key::Delete)),
+    },
+    CommandDef {
+        id: "video.copy",
+        label: "Copy Clip",
+        default: Some(KeyBinding::ctrl(Key::C)),
+    },
+    CommandDef {
+        id: "video.cut",
+        label: "Cut Clip",
+        default: Some(KeyBinding::ctrl(Key::X)),
+    },
+    CommandDef {
+        id: "video.paste",
+        label: "Paste Clip at Playhead",
+        default: Some(KeyBinding::ctrl(Key::V)),
+    },
+    CommandDef {
+        id: "video.add_marker",
+        label: "Add Marker at Playhead",
+        default: Some(KeyBinding::plain(Key::M)),
+    },
     CommandDef {
         id: "video.toggle_snap",
         label: "Toggle Timeline Snapping",

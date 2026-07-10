@@ -420,20 +420,28 @@ impl PhotonicApp {
         let format = active_format(doc);
         let painter = ui.painter_at(rect);
 
-        // Reserve a top strip for the aspect/frame bar (CAP-012) and a bottom
-        // strip for the transport bar (04 §3.2). The video image sits between.
+        // Reserve a top strip for the aspect/frame bar (CAP-012), a thin scrub
+        // strip and a transport bar (04 §3.2, QW-5) at the bottom. The video
+        // image sits between the format bar and the scrubber.
         const FORMAT_H: f32 = 30.0;
+        const SCRUB_H: f32 = 16.0;
         const TRANSPORT_H: f32 = 40.0;
         let format_rect = egui::Rect::from_min_max(
             rect.min,
             egui::pos2(rect.max.x, (rect.min.y + FORMAT_H).min(rect.max.y)),
         );
+        let transport_top = (rect.max.y - TRANSPORT_H).max(format_rect.max.y);
+        let scrub_top = (transport_top - SCRUB_H).max(format_rect.max.y);
         let content_rect = egui::Rect::from_min_max(
             egui::pos2(rect.min.x, format_rect.max.y),
-            egui::pos2(rect.max.x, (rect.max.y - TRANSPORT_H).max(format_rect.max.y)),
+            egui::pos2(rect.max.x, scrub_top),
+        );
+        let scrub_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, scrub_top),
+            egui::pos2(rect.max.x, transport_top),
         );
         let transport_rect =
-            egui::Rect::from_min_max(egui::pos2(rect.min.x, content_rect.max.y), rect.max);
+            egui::Rect::from_min_max(egui::pos2(rect.min.x, transport_top), rect.max);
 
         // Background + letterbox/pillarbox bars (04 §3.3).
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 12, 14));
@@ -534,6 +542,7 @@ impl PhotonicApp {
             }
         }
 
+        self.draw_monitor_scrubber(ui, scrub_rect, doc);
         self.draw_transport_bar(ui, transport_rect, doc, history);
         self.draw_format_bar(ui, format_rect, doc, history);
         self.draw_video_shortcut_sheet(ctx);
@@ -670,6 +679,15 @@ impl PhotonicApp {
 
                 ui.separator();
                 if ui
+                    .button(ph::BOOKMARK_SIMPLE)
+                    .on_hover_text("Add Marker at Playhead (M)")
+                    .clicked()
+                {
+                    self.timeline_add_marker_at_playhead(doc, history);
+                }
+
+                ui.separator();
+                if ui
                     .selectable_label(self.monitor_safe_area, ph::CROP)
                     .on_hover_text("Safe-area guides")
                     .clicked()
@@ -678,6 +696,59 @@ impl PhotonicApp {
                 }
             });
         });
+    }
+
+    /// Program-monitor scrub bar (NLE parity QW-5): a thin draggable position
+    /// strip under the picture, spanning the whole sequence. Click/drag seeks
+    /// the single shared `self.playhead` (frame-snapped, like the timeline
+    /// ruler) — writing here updates the same playhead the ruler reads, so
+    /// there is never a second playhead.
+    fn draw_monitor_scrubber(&mut self, ui: &mut egui::Ui, rect: egui::Rect, doc: &Document) {
+        let end = sequence_end_tick(doc);
+        let painter = ui.painter_at(rect);
+        let visuals = ui.visuals();
+
+        // A centered groove with a small horizontal margin so the playhead
+        // handle never clips at the extremes.
+        const MARGIN_X: f32 = 6.0;
+        let track_left = rect.left() + MARGIN_X;
+        let track_width = (rect.width() - 2.0 * MARGIN_X).max(1.0);
+        let cy = rect.center().y;
+        let groove = egui::Rect::from_min_max(
+            egui::pos2(track_left, cy - 2.0),
+            egui::pos2(track_left + track_width, cy + 2.0),
+        );
+        painter.rect_filled(groove, 2.0, visuals.faint_bg_color);
+
+        // No content yet → an inert groove (nothing to scrub).
+        if end.0 <= 0 {
+            return;
+        }
+
+        let accent = visuals.selection.stroke.color;
+        let head_x = scrub_tick_to_x(self.playhead, track_left, track_width, end);
+        let filled = egui::Rect::from_min_max(
+            egui::pos2(track_left, cy - 2.0),
+            egui::pos2(head_x, cy + 2.0),
+        );
+        painter.rect_filled(filled, 2.0, accent);
+        painter.circle_filled(egui::pos2(head_x, cy), 5.0, accent);
+
+        // Click/drag anywhere on the strip seeks (frame-snapped).
+        let resp = ui.interact(
+            rect,
+            ui.id().with("monitor_scrubber"),
+            egui::Sense::click_and_drag(),
+        );
+        if resp.clicked() || resp.dragged() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let fr = active_frame_rate(doc);
+                self.playhead = scrub_x_to_tick(pos.x, track_left, track_width, end, fr);
+            }
+        }
+        if resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+        }
     }
 
     /// Video-mode keyboard dispatch (04 §5.1) — the sibling block to the
@@ -708,6 +779,12 @@ impl PhotonicApp {
             "video.set_in",
             "video.set_out",
             "video.split_at_playhead",
+            "video.delete_clip",
+            "video.ripple_delete",
+            "video.copy",
+            "video.cut",
+            "video.paste",
+            "video.add_marker",
             "video.toggle_snap",
             "video.zoom_in",
             "video.zoom_out",
@@ -720,6 +797,28 @@ impl PhotonicApp {
                 self.dispatch_command(id, doc, history);
             }
         }
+        // Backspace is a second hardwired delete accelerator alongside the
+        // remappable `video.delete_clip`/`video.ripple_delete` (Delete /
+        // Shift+Delete) — the keymap holds only one binding per command, so the
+        // NLE-standard Backspace-to-delete is matched here like the `?` sheet
+        // key below. Shift = ripple; other modifiers are ignored so it never
+        // collides with a text edit or a chorded shortcut.
+        let backspace_delete = ctx.input(|i| {
+            i.key_pressed(egui::Key::Backspace)
+                && !i.modifiers.ctrl
+                && !i.modifiers.command
+                && !i.modifiers.mac_cmd
+                && !i.modifiers.alt
+        });
+        if backspace_delete {
+            let ripple = ctx.input(|i| i.modifiers.shift);
+            let id = if ripple {
+                "video.ripple_delete"
+            } else {
+                "video.delete_clip"
+            };
+            self.dispatch_command(id, doc, history);
+        }
         // `?` opens the shortcut sheet (04 §1.2) — not a rebindable CommandId,
         // matching the existing Escape/palette-open pattern of a few hardcoded
         // global keys elsewhere in this file.
@@ -731,6 +830,27 @@ impl PhotonicApp {
             self.show_video_shortcut_sheet = true;
         }
     }
+}
+
+/// Map a tick in `[0, end]` to an x within `[left, left + width]` for the
+/// monitor scrub bar (QW-5). Clamps to the track; `end <= 0` pins to the left.
+fn scrub_tick_to_x(t: Tick, left: f32, width: f32, end: Tick) -> f32 {
+    if end.0 <= 0 {
+        return left;
+    }
+    let frac = (t.0 as f32 / end.0 as f32).clamp(0.0, 1.0);
+    left + frac * width
+}
+
+/// Map a pointer x to a frame-snapped tick in `[0, end]` for the monitor scrub
+/// bar (QW-5). Inverse of [`scrub_tick_to_x`], then snapped to the frame grid.
+fn scrub_x_to_tick(x: f32, left: f32, width: f32, end: Tick, fr: FrameRate) -> Tick {
+    if width <= 0.0 || end.0 <= 0 {
+        return Tick::ZERO;
+    }
+    let frac = ((x - left) / width).clamp(0.0, 1.0);
+    let raw = Tick((frac as f64 * end.0 as f64).round() as i64);
+    fr.snap(raw).clamp(Tick::ZERO, end)
 }
 
 /// Action-safe (90%) / title-safe (80%) guide rectangles (04 §3.3).
@@ -811,6 +931,9 @@ impl PhotonicApp {
                             ("Shift+← / Shift+→", "Previous / next edit point"),
                             ("I / O", "Set in / out point"),
                             ("S", "Split clip at playhead"),
+                            ("Del / Backspace", "Delete selected clip (Shift = ripple)"),
+                            ("Ctrl+C / X / V", "Copy / cut / paste clip"),
+                            ("M", "Add marker at playhead"),
                             ("N", "Toggle snapping"),
                             ("?", "Show this sheet again"),
                         ];
@@ -824,5 +947,48 @@ impl PhotonicApp {
         if !open {
             self.show_video_shortcut_sheet = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod scrubber_tests {
+    use super::*;
+
+    #[test]
+    fn tick_to_x_maps_endpoints_and_midpoint() {
+        // 0 → left, end → right, half → middle.
+        assert_eq!(scrub_tick_to_x(Tick(0), 100.0, 200.0, Tick(1000)), 100.0);
+        assert_eq!(scrub_tick_to_x(Tick(1000), 100.0, 200.0, Tick(1000)), 300.0);
+        assert_eq!(scrub_tick_to_x(Tick(500), 100.0, 200.0, Tick(1000)), 200.0);
+    }
+
+    #[test]
+    fn tick_to_x_clamps_out_of_range_and_handles_empty() {
+        // Past the end clamps to the right edge; empty sequence pins to left.
+        assert_eq!(scrub_tick_to_x(Tick(5000), 0.0, 200.0, Tick(1000)), 200.0);
+        assert_eq!(scrub_tick_to_x(Tick(500), 40.0, 200.0, Tick(0)), 40.0);
+    }
+
+    #[test]
+    fn x_to_tick_is_frame_snapped_and_clamped() {
+        let fr = FrameRate::FPS_30;
+        // One second of content.
+        let end = Tick(30 * TICKS_PER_SECOND);
+        // Clicking left of the track clamps to 0.
+        assert_eq!(scrub_x_to_tick(-50.0, 0.0, 300.0, end, fr), Tick::ZERO);
+        // Clicking past the right edge clamps to the (frame-snapped) end.
+        let right = scrub_x_to_tick(9999.0, 0.0, 300.0, end, fr);
+        assert!(right <= end);
+        assert_eq!(right, fr.snap(right), "result must sit on a frame boundary");
+        // A mid-track click snaps to a frame boundary and stays in range.
+        let mid = scrub_x_to_tick(150.0, 0.0, 300.0, end, fr);
+        assert_eq!(mid, fr.snap(mid));
+        assert!(mid > Tick::ZERO && mid < end);
+    }
+
+    #[test]
+    fn x_to_tick_handles_degenerate_track_width() {
+        let fr = FrameRate::FPS_30;
+        assert_eq!(scrub_x_to_tick(10.0, 0.0, 0.0, Tick(1000), fr), Tick::ZERO);
     }
 }

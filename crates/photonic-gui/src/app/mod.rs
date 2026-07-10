@@ -1249,6 +1249,12 @@ pub struct PhotonicApp {
     /// and across open documents (the snapshot is detached from the source doc).
     pub gui_clipboard: GuiClipboard,
 
+    /// Clips copied (Ctrl+C) / cut (Ctrl+X) in video mode, held in-process for
+    /// Ctrl+V paste-at-playhead. Session-wide (not per-tab), mirroring
+    /// `gui_clipboard`; each entry is a full clone of the clip (grade/effects/
+    /// trim preserved) plus its source track kind. (NLE parity QW-3.)
+    pub(crate) timeline_clipboard: Vec<command_center::ClipboardClip>,
+
     // ── Composition Analysis ──────────────────────────────────────────────────
     /// Latest findings from the composition analyzer (shown in the GUI panel).
     pub composition_findings: Vec<String>,
@@ -1686,6 +1692,7 @@ impl Default for PhotonicApp {
             magic_wand_attribute: SelectSameAttr::FillColor,
             magic_wand_tolerance: 0.05,
             gui_clipboard: GuiClipboard::default(),
+            timeline_clipboard: Vec::new(),
         }
     }
 }
