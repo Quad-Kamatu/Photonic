@@ -29,8 +29,8 @@ use egui_phosphor::regular as ph;
 use photonic_core::timeline::clip::SpeedKey;
 use photonic_core::timeline::{
     ops, prop_registry, Clip, ClipId, EffectKind, PropTargetKind, PropValue, Ratio, SequenceId,
-    SpeedMap, Tick, TimelineProject, TrackId, Transition, TransitionKind, TransitionParams,
-    TICKS_PER_SECOND,
+    SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition, TransitionKind,
+    TransitionParams, TICKS_PER_SECOND,
 };
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
@@ -81,6 +81,15 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     draw_transform_section(ui, ctx, project, seq_id, track_id, clip, &mut action);
     draw_speed_section(ui, project, seq_id, track_id, clip, &mut action);
     draw_reframe_section(
+        ui,
+        project,
+        seq_id,
+        track_id,
+        clip,
+        active_format,
+        &mut action,
+    );
+    draw_level_horizon_section(
         ui,
         project,
         seq_id,
@@ -564,6 +573,116 @@ fn draw_reframe_section(
                     set_clip_discrete(project, seq, track, new_clip, action);
                 }
             });
+        });
+}
+
+// ── Level horizon (18 DJI parity D-5) ───────────────────────────────────────
+
+fn draw_level_horizon_section(
+    ui: &mut Ui,
+    project: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: &Clip,
+    active_format: usize,
+    action: &mut Option<PanelAction>,
+) {
+    let Some(sequence) = project.sequences.get(&seq) else {
+        return;
+    };
+    if sequence.track(track).map(|t| t.kind) != Some(TrackKind::Video) {
+        return;
+    }
+    let format = sequence
+        .formats
+        .get(active_format)
+        .unwrap_or_else(|| sequence.format());
+
+    egui::CollapsingHeader::new("Level Horizon")
+        .default_open(false)
+        .id_salt("clip_inspector_level_horizon")
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Applies to active format: {} ({} x {})",
+                    format.name, format.width, format.height
+                ))
+                .color(MUTED)
+                .small(),
+            )
+            .on_hover_text(
+                "This correction creates or updates only the active format's reframe override.",
+            );
+
+            let effective = clip
+                .reframe
+                .get(&active_format)
+                .copied()
+                .unwrap_or(clip.transform.base);
+            let mut correction_degrees =
+                crate::app::reframe::normalized_horizon_degrees(effective.rotation)
+                    .unwrap_or(0.0);
+            ui.horizontal(|ui| {
+                let label = ui.label("Correction");
+                let changed = ui
+                    .add(
+                        egui::DragValue::new(&mut correction_degrees)
+                            .speed(0.1)
+                            .fixed_decimals(2)
+                            .range(-180.0..=180.0)
+                            .suffix(" deg"),
+                    )
+                    .labelled_by(label.id)
+                    .on_hover_text(
+                        "Roll correction for the active format, shown in degrees. Zero applies no correction.",
+                    )
+                    .changed();
+                if changed && correction_degrees.is_finite() {
+                    let mut new_t = effective;
+                    new_t.rotation = correction_degrees.clamp(-180.0, 180.0).to_radians();
+                    let mut new_clip = clip.clone();
+                    new_clip.reframe.insert(active_format, new_t);
+                    set_clip_coalesced(project, seq, track, new_clip, action);
+                }
+            });
+
+            let centered = crate::app::reframe::horizon_auto_crop_is_centered(
+                format.width as f64,
+                format.height as f64,
+                &effective,
+            );
+            let crop_scales = crate::app::reframe::horizon_auto_crop_scales(
+                format.width as f64,
+                format.height as f64,
+                &effective,
+            );
+            let needs_crop = crop_scales.is_some_and(|(scale_x, scale_y)| {
+                (scale_x - effective.scale_x).abs() > f64::EPSILON
+                    || (scale_y - effective.scale_y).abs() > f64::EPSILON
+            });
+            let crop_tooltip = if !centered {
+                "Auto-crop requires zero X/Y translation and an anchor at the active format's center."
+            } else if crop_scales.is_none() {
+                "Auto-crop requires a finite correction angle and positive finite X/Y scales."
+            } else if !needs_crop {
+                "The current scale already hides the rotated corners."
+            } else {
+                "Raises both scales by the smallest shared multiplier needed to hide the rotated corners."
+            };
+            let crop_response = ui
+                .add_enabled(needs_crop, egui::Button::new("Auto-crop to hide corners"))
+                .on_hover_text(crop_tooltip);
+            if let (true, Some((scale_x, scale_y))) = (crop_response.clicked(), crop_scales) {
+                let mut new_t = effective;
+                // A shared multiplier preserves intentional X/Y scale ratios;
+                // only scale changes, so position, anchor, opacity, and the
+                // user's correction angle remain exactly as entered.
+                new_t.scale_x = scale_x;
+                new_t.scale_y = scale_y;
+                let mut new_clip = clip.clone();
+                new_clip.reframe.insert(active_format, new_t);
+                set_clip_discrete(project, seq, track, new_clip, action);
+            }
         });
 }
 

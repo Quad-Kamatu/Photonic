@@ -530,7 +530,8 @@ pub struct SetClipPropArgs {
     pub clip_id: ClipId,
     #[serde(default)]
     pub name: Option<String>,
-    /// Full base transform replace (pos/scale/rotation/anchor/opacity).
+    /// Full base transform replace (pos/scale/rotation/anchor/opacity). Omitted
+    /// `anchor_space` defaults to the v4 `center_offset` convention.
     #[serde(default)]
     pub transform: Option<ClipTransform>,
     /// Per-`SequenceFormat` static override.

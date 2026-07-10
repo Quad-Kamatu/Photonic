@@ -516,6 +516,22 @@ fn integ_ease(interp: &Interp, ua: f64, ub: f64) -> f64 {
 
 /// Animatable clip transform (01 §5/§6). Field names match the `prop_registry`
 /// `transform.*` paths.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorSpace {
+    /// Anchor coordinates are absolute output-frame pixels (legacy v3 files).
+    Absolute,
+    /// Anchor coordinates are offsets from the output-frame center.
+    #[default]
+    CenterOffset,
+}
+
+impl AnchorSpace {
+    fn is_center_offset(&self) -> bool {
+        *self == Self::CenterOffset
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClipTransform {
     pub x: f64,
@@ -523,6 +539,8 @@ pub struct ClipTransform {
     pub scale_x: f64,
     pub scale_y: f64,
     pub rotation: f64,
+    #[serde(default, skip_serializing_if = "AnchorSpace::is_center_offset")]
+    pub anchor_space: AnchorSpace,
     pub anchor_x: f64,
     pub anchor_y: f64,
     pub opacity: f64,
@@ -536,6 +554,7 @@ impl Default for ClipTransform {
             scale_x: 1.0,
             scale_y: 1.0,
             rotation: 0.0,
+            anchor_space: AnchorSpace::CenterOffset,
             anchor_x: 0.0,
             anchor_y: 0.0,
             opacity: 1.0,
@@ -649,6 +668,31 @@ pub enum WipeDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_transform_defaults_to_center_offset_and_round_trips() {
+        let transform = ClipTransform::default();
+        assert_eq!(transform.anchor_space, AnchorSpace::CenterOffset);
+
+        let json = serde_json::to_string(&transform).unwrap();
+        assert!(!json.contains("anchor_space"));
+        assert_eq!(
+            serde_json::from_str::<ClipTransform>(&json).unwrap(),
+            transform
+        );
+
+        let legacy = ClipTransform {
+            anchor_space: AnchorSpace::Absolute,
+            anchor_x: 12.0,
+            ..transform
+        };
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(legacy_json.contains("\"anchor_space\":\"absolute\""));
+        assert_eq!(
+            serde_json::from_str::<ClipTransform>(&legacy_json).unwrap(),
+            legacy
+        );
+    }
 
     #[test]
     fn clip_end_and_overlap() {

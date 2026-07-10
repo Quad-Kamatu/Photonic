@@ -62,7 +62,7 @@ pub struct CacheStats {
     pub resident_bytes: u64,
 }
 
-/// Bound on the "rendered" tracking set. A stale entry (its texture LRU-evicted)
+/// Bound on the "rendered" tracking map. A stale entry (its texture LRU-evicted)
 /// is only ever a small `u128` leak — gated correctness comes from
 /// [`TexturePool::contains`] — so an occasional clear on overflow is harmless.
 const RENDERED_CAP: usize = 16_384;
@@ -70,8 +70,8 @@ const RENDERED_CAP: usize = 16_384;
 /// Content-hash → rendered working-texture cache (02 §5).
 pub struct NodeCache {
     pool: TexturePool<ArcWgpuAllocator>,
-    /// Hashes whose pooled texture holds valid rendered content.
-    rendered: std::collections::HashSet<ContentHash>,
+    /// Exact logical descriptors whose pooled texture holds rendered content.
+    rendered: std::collections::HashMap<ContentHash, TextureDesc>,
     hits: u64,
     misses: u64,
 }
@@ -80,7 +80,7 @@ impl NodeCache {
     pub fn new(device: Arc<wgpu::Device>, budget_bytes: u64) -> Self {
         NodeCache {
             pool: TexturePool::new(ArcWgpuAllocator::new(device), budget_bytes),
-            rendered: std::collections::HashSet::new(),
+            rendered: std::collections::HashMap::new(),
             hits: 0,
             misses: 0,
         }
@@ -91,7 +91,7 @@ impl NodeCache {
     /// holds rendered content; when `false` the caller must render into it and
     /// then call [`mark_rendered`](Self::mark_rendered).
     pub fn lookup_or_alloc(&mut self, hash: ContentHash, desc: TextureDesc) -> (Arc<wgpu::Texture>, bool) {
-        let valid = self.rendered.contains(&hash) && self.pool.contains(hash);
+        let valid = self.rendered.get(&hash) == Some(&desc) && self.pool.contains_desc(hash, desc);
         let tex = self.pool.get_or_alloc(hash, desc).clone();
         if valid {
             self.hits += 1;
@@ -106,7 +106,9 @@ impl NodeCache {
         if self.rendered.len() >= RENDERED_CAP {
             self.rendered.clear();
         }
-        self.rendered.insert(hash);
+        if let Some(desc) = self.pool.desc(hash) {
+            self.rendered.insert(hash, desc);
+        }
     }
 
     /// Pin the currently-displayed output tick so scrub/step never re-evaluates
@@ -123,7 +125,7 @@ impl NodeCache {
     /// 03 §3.4 exception 2). Called between frames only.
     pub fn invalidate_matching(&mut self, pred: impl Fn(ContentHash) -> bool) {
         self.pool.evict_matching(&pred);
-        self.rendered.retain(|h| !pred(*h));
+        self.rendered.retain(|h, _| !pred(*h));
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -192,5 +194,18 @@ mod tests {
         cache.invalidate_matching(|c| c.0 == 0x10);
         let (_t, valid) = cache.lookup_or_alloc(h(0x10), desc(64, 64));
         assert!(!valid, "invalidated entry re-renders");
+    }
+
+    #[test]
+    fn same_hash_different_same_bucket_desc_is_not_valid() {
+        let Some(device) = try_device() else {
+            eprintln!("no GPU adapter; skipping NodeCache descriptor test");
+            return;
+        };
+        let mut cache = NodeCache::new(device, 64 * 1024 * 1024);
+        cache.lookup_or_alloc(h(0x20), desc(11, 7));
+        cache.mark_rendered(h(0x20));
+        let (_texture, valid) = cache.lookup_or_alloc(h(0x20), desc(12, 8));
+        assert!(!valid, "logical descriptor changes must force a re-render");
     }
 }

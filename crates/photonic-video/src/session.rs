@@ -50,7 +50,7 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{compile, Quality};
-use crate::graph::eval::{Evaluator, GpuContext, GpuFrameSource};
+use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
 use crate::graph::ir::{FrameGraph, IrOp};
 use crate::media::ffmpeg_locate::{locate, FfmpegTools};
 use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
@@ -620,7 +620,7 @@ struct MediaSources {
     sources: HashMap<(AssetId, bool), Option<VideoSourceEntry>>,
     /// Uploaded working textures keyed by decoded pts — scrub back/forward
     /// over the same frames skips the GPU upload.
-    uploads: HashMap<(AssetId, Tick, bool), Arc<wgpu::Texture>>,
+    uploads: HashMap<(AssetId, Tick, bool), GpuFrame>,
 }
 
 /// Upload-cache entry cap: ~a ring's worth per couple of assets; wholesale
@@ -721,7 +721,7 @@ impl GpuFrameSource for MediaSources {
         asset: AssetId,
         src_time: Tick,
         proxy: bool,
-    ) -> Option<Arc<wgpu::Texture>> {
+    ) -> Option<GpuFrame> {
         self.ensure_source(asset, proxy);
         let entry = self.sources.get_mut(&(asset, proxy))?.as_mut()?;
 
@@ -745,7 +745,7 @@ impl GpuFrameSource for MediaSources {
 
         let key = (asset, frame.pts, proxy);
         if let Some(cached) = self.uploads.get(&key) {
-            return Some(Arc::clone(cached));
+            return Some(cached.clone());
         }
         let converted = convert_yuv_planes_to_working(
             gpu.device(),
@@ -753,15 +753,20 @@ impl GpuFrameSource for MediaSources {
             &frame.planes.as_yuv_planes(),
             colorimetry,
         );
-        let texture = Arc::new(pad_to_pool_bucket(gpu, converted));
+        let (width, height) = (converted.width(), converted.height());
+        let texture = GpuFrame::new(
+            Arc::new(pad_to_pool_bucket(gpu, converted)),
+            width,
+            height,
+        );
         if self.uploads.len() >= UPLOAD_CACHE_CAP {
             self.uploads.clear();
         }
-        self.uploads.insert(key, Arc::clone(&texture));
+        self.uploads.insert(key, texture.clone());
         Some(texture)
     }
 
-    fn still_texture(&mut self, _gpu: &GpuContext, _asset: AssetId) -> Option<Arc<wgpu::Texture>> {
+    fn still_texture(&mut self, _gpu: &GpuContext, _asset: AssetId) -> Option<GpuFrame> {
         // Seam: DecodeStill via `RasterImage::from_encoded`, uploaded once and
         // cached by asset (02 §3) — the stills story. Transparent until then.
         None
@@ -774,7 +779,7 @@ impl GpuFrameSource for MediaSources {
         _key: VectorStateKey,
         _w: u32,
         _h: u32,
-    ) -> Option<Arc<wgpu::Texture>> {
+    ) -> Option<GpuFrame> {
         // Seam: RasterVector via `HeadlessRenderer::render_rgba_with_opts`,
         // cached by `VectorStateKey` (02 §3) — the vector-frames story.
         None
@@ -783,18 +788,10 @@ impl GpuFrameSource for MediaSources {
 
 /// Pad a source upload to the texture pool's 64px size bucket (03 §3.4).
 ///
-/// The evaluator's pooled node-result textures are allocated at **bucket**
-/// size (e.g. a 320×180 sequence renders into 320×192 textures) and its blit/
-/// merge passes sample normalized `uv` over the *whole* physical texture —
-/// exact texel-center identity only holds when producer and consumer share
-/// the same physical dimensions. Source uploads come out of
-/// `convert_yuv_planes_to_working` at exact media size, so without this pad a
-/// same-size blit would resample (vertically stretch 180 → 192). Copying the
-/// content into the top-left of a bucket-sized, zero-initialized texture makes
-/// every pass in the chain a pixel-exact identity map; the logical region is
-/// what `Output`/readback consume. (The evaluator-side alternative — logical-
-/// size-aware sampling — belongs to graph/eval and is out of this story's
-/// territory.)
+/// Source uploads share the pool's physical bucket convention, while
+/// [`GpuFrame`] carries the native logical width and height separately. The
+/// evaluator normalizes that logical region to the canvas with explicit texel
+/// loads, so padding never participates in sampling.
 fn pad_to_pool_bucket(gpu: &GpuContext, src: wgpu::Texture) -> wgpu::Texture {
     let (w, h) = (src.width(), src.height());
     let bucket = crate::graph::ir::TextureDesc {

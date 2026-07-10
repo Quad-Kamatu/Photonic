@@ -28,8 +28,8 @@ use std::collections::{HashMap, HashSet};
 use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
-    self, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack, CaptionWord,
-    Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp, GradeOpKind,
+    self, AnchorSpace, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack,
+    CaptionWord, Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp, GradeOpKind,
     GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode,
     LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
     TextClipContent, TimelineProject, TrackKind, TransitionKind,
@@ -633,7 +633,7 @@ fn build_clip_chain(
     let mut cur = source;
     cur = b.push(
         IrOp::Transform2D {
-            mat: clip_transform_matrix(&xf),
+            mat: clip_transform_matrix(&xf, format),
             sampling: Sampling::Bilinear,
         },
         vec![(cur, OutPort::default())],
@@ -1568,6 +1568,7 @@ fn eval_clip_transform(anim: &AnimProps<ClipTransform>, t: Tick) -> ClipTransfor
         scale_x: eval_prop_f64(anim, "transform.scale_x", base.scale_x, t),
         scale_y: eval_prop_f64(anim, "transform.scale_y", base.scale_y, t),
         rotation: eval_prop_f64(anim, "transform.rotation", base.rotation, t),
+        anchor_space: base.anchor_space,
         anchor_x: eval_prop_f64(anim, "transform.anchor_x", base.anchor_x, t),
         anchor_y: eval_prop_f64(anim, "transform.anchor_y", base.anchor_y, t),
         opacity: eval_prop_f64(anim, "transform.opacity", base.opacity, t),
@@ -1618,12 +1619,17 @@ fn eval_node_color(anim: &AnimProps<GraphNodeParams>, path: &str, default: Color
 
 // ── Transforms & color ────────────────────────────────────────────────────────
 
-/// Build a 3×3 affine from an evaluated [`ClipTransform`]: translate about the
-/// anchor, rotate, scale, un-anchor, then position. Opacity is not geometric —
-/// it drives the fold `Merge` opacity, not this matrix. (Exact reframe/anchor
-/// pixel semantics finalize with the UI story; identity in / identity out here.)
-fn clip_transform_matrix(t: &ClipTransform) -> Mat3 {
-    let anchor = Vec2::new(t.anchor_x as f32, t.anchor_y as f32);
+/// Build a 3×3 affine from an evaluated [`ClipTransform`]. Center-offset anchors
+/// are relative to the output-frame center; legacy absolute anchors are raw
+/// output pixels. x/y are output-pixel translation offsets. Opacity drives
+/// `Merge` and is not geometric.
+fn clip_transform_matrix(t: &ClipTransform, format: &SequenceFormat) -> Mat3 {
+    let frame_center = Vec2::new(format.width as f32 * 0.5, format.height as f32 * 0.5);
+    let anchor_value = Vec2::new(t.anchor_x as f32, t.anchor_y as f32);
+    let anchor = match t.anchor_space {
+        AnchorSpace::Absolute => anchor_value,
+        AnchorSpace::CenterOffset => frame_center + anchor_value,
+    };
     let pos = Vec2::new(t.x as f32, t.y as f32);
     let scale = Vec2::new(t.scale_x as f32, t.scale_y as f32);
     Mat3::from_translation(pos)
@@ -2000,6 +2006,108 @@ mod tests {
 
     fn solid_clip(color: Color, start: i64, dur: i64) -> Clip {
         Clip::new(ClipSource::SolidColor { color }, Tick(start), Tick(dur))
+    }
+
+    fn assert_point_close(actual: Vec2, expected: Vec2) {
+        assert!(
+            (actual - expected).length() < 1e-4,
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn default_clip_transform_matrix_is_identity() {
+        let format = SequenceFormat::new("test", 320, 180);
+        assert_eq!(
+            clip_transform_matrix(&ClipTransform::default(), &format),
+            Mat3::IDENTITY
+        );
+    }
+
+    #[test]
+    fn zero_anchor_rotation_preserves_frame_center() {
+        let transform = ClipTransform {
+            rotation: 0.4,
+            ..ClipTransform::default()
+        };
+        let format = SequenceFormat::new("test", 320, 180);
+        let center = Vec2::new(160.0, 90.0);
+        assert_point_close(
+            clip_transform_matrix(&transform, &format).transform_point2(center),
+            center,
+        );
+    }
+
+    #[test]
+    fn clip_position_offsets_frame_center() {
+        let transform = ClipTransform {
+            x: 12.0,
+            y: -7.0,
+            ..ClipTransform::default()
+        };
+        let format = SequenceFormat::new("test", 320, 180);
+        let center = Vec2::new(160.0, 90.0);
+        assert_point_close(
+            clip_transform_matrix(&transform, &format).transform_point2(center),
+            center + Vec2::new(12.0, -7.0),
+        );
+    }
+
+    #[test]
+    fn nonzero_anchor_is_relative_to_frame_center() {
+        let transform = ClipTransform {
+            rotation: 0.4,
+            anchor_x: 20.0,
+            anchor_y: -10.0,
+            ..ClipTransform::default()
+        };
+        let format = SequenceFormat::new("test", 320, 180);
+        let pivot = Vec2::new(180.0, 80.0);
+        assert_point_close(
+            clip_transform_matrix(&transform, &format).transform_point2(pivot),
+            pivot,
+        );
+    }
+
+    #[test]
+    fn absolute_anchor_preserves_legacy_top_left_pivot() {
+        let transform = ClipTransform {
+            rotation: 0.4,
+            anchor_space: AnchorSpace::Absolute,
+            anchor_x: 0.0,
+            anchor_y: 0.0,
+            ..ClipTransform::default()
+        };
+        let format = SequenceFormat::new("test", 320, 180);
+        let top_left = Vec2::ZERO;
+        assert_point_close(
+            clip_transform_matrix(&transform, &format).transform_point2(top_left),
+            top_left,
+        );
+        let center = Vec2::new(160.0, 90.0);
+        assert!(
+            (clip_transform_matrix(&transform, &format).transform_point2(center) - center).length()
+                > 1.0
+        );
+    }
+
+    #[test]
+    fn animated_transform_preserves_anchor_space() {
+        let mut anim = AnimProps::new(ClipTransform {
+            anchor_space: AnchorSpace::Absolute,
+            ..ClipTransform::default()
+        });
+        let mut track = timeline::PropertyTrack::new("transform.anchor_x");
+        track.insert_keyframe(timeline::Keyframe::new(
+            Tick(0),
+            PropValue::Float(4.0),
+            timeline::Interp::Linear,
+        ));
+        anim.tracks.push(track);
+        assert_eq!(
+            eval_clip_transform(&anim, Tick(0)).anchor_space,
+            AnchorSpace::Absolute
+        );
     }
 
     #[test]

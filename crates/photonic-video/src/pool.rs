@@ -36,6 +36,7 @@ pub trait TextureAllocator {
 struct Entry<T> {
     texture: T,
     bucket: (u32, u32),
+    desc: TextureDesc,
     last_used: u64,
 }
 
@@ -90,6 +91,17 @@ impl<A: TextureAllocator> TexturePool<A> {
         self.entries.contains_key(&hash)
     }
 
+    /// Whether `hash` is resident for this exact logical descriptor. Physical
+    /// bucket equality is insufficient because downstream sampling uses the
+    /// logical width and height.
+    pub fn contains_desc(&self, hash: ContentHash, desc: TextureDesc) -> bool {
+        self.entries.get(&hash).is_some_and(|entry| entry.desc == desc)
+    }
+
+    pub(crate) fn desc(&self, hash: ContentHash) -> Option<TextureDesc> {
+        self.entries.get(&hash).map(|entry| entry.desc)
+    }
+
     fn tick(&mut self) -> u64 {
         self.clock += 1;
         self.clock
@@ -103,9 +115,15 @@ impl<A: TextureAllocator> TexturePool<A> {
     /// least-recently-used **unpinned** entry) and allocate.
     pub fn get_or_alloc(&mut self, hash: ContentHash, desc: TextureDesc) -> &A::Texture {
         let now = self.tick();
-        if let Some(entry) = self.entries.get_mut(&hash) {
-            entry.last_used = now;
+        if self.contains_desc(hash, desc) {
+            self.entries.get_mut(&hash).unwrap().last_used = now;
             return &self.entries[&hash].texture;
+        }
+        if let Some(entry) = self.entries.remove(&hash) {
+            // A caller may still hold the old texture handle. Do not recycle it
+            // into the replacement and overwrite a frame that is on screen.
+            self.used_bytes -= bucket_bytes(entry.bucket);
+            drop(entry.texture);
         }
 
         let bucket = desc.bucket();
@@ -123,6 +141,7 @@ impl<A: TextureAllocator> TexturePool<A> {
             Entry {
                 texture,
                 bucket,
+                desc,
                 last_used: now,
             },
         );
@@ -264,6 +283,32 @@ mod tests {
         assert_eq!(first, again, "same hash returns the same texture");
         assert_eq!(pool.allocator.allocations, 1, "no second allocation");
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn same_hash_different_bucket_replaces_texture() {
+        let mut pool = TexturePool::new(MockAllocator::default(), 10 * 1024 * 1024);
+        let first = *pool.get_or_alloc(h(1), desc(64, 64));
+        let resized = *pool.get_or_alloc(h(1), desc(65, 65));
+        assert_ne!(
+            first, resized,
+            "a different bucket cannot reuse the resident texture"
+        );
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn same_hash_same_bucket_tracks_exact_logical_desc() {
+        let mut pool = TexturePool::new(MockAllocator::default(), 10 * 1024 * 1024);
+        let first = *pool.get_or_alloc(h(2), desc(11, 7));
+        assert!(pool.contains_desc(h(2), desc(11, 7)));
+        let resized = *pool.get_or_alloc(h(2), desc(12, 8));
+        assert_ne!(
+            first, resized,
+            "descriptor replacement must not overwrite a texture still held by a caller"
+        );
+        assert!(!pool.contains_desc(h(2), desc(11, 7)));
+        assert!(pool.contains_desc(h(2), desc(12, 8)));
     }
 
     #[test]

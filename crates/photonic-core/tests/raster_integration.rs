@@ -21,9 +21,9 @@ fn raster_node_survives_v2_json_roundtrip() {
     let id = doc.add_node(node, None);
 
     assert_eq!(doc.format_version, CURRENT_FORMAT_VERSION);
-    // v3 added the additive `timeline` field (video editor, 01 §2); raster nodes
-    // are unaffected and still round-trip.
-    assert_eq!(CURRENT_FORMAT_VERSION, 3);
+    // v4 made video clip anchor coordinates explicit; raster nodes are
+    // unaffected and still round-trip.
+    assert_eq!(CURRENT_FORMAT_VERSION, 4);
 
     let json = doc.to_json().unwrap();
     assert!(json.contains("\"type\": \"raster\"") || json.contains("\"type\":\"raster\""));
@@ -44,7 +44,7 @@ fn raster_node_survives_v2_json_roundtrip() {
 #[test]
 fn v1_document_migrates_to_current() {
     // A minimal v1 doc with no raster nodes should load and migrate forward
-    // through the whole chain (v1→v2→v3) to the current version.
+    // through the whole chain (v1→v2→v3→v4) to the current version.
     let mut doc = Document::new("t", 32.0, 32.0);
     doc.format_version = 1;
     let json = doc.to_json().unwrap();

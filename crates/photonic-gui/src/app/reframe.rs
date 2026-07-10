@@ -28,7 +28,7 @@ use egui::{Pos2, Rect, Vec2};
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
-    ops, Clip, ClipId, ClipTransform, SequenceFormat, TrackId,
+    ops, AnchorSpace, Clip, ClipId, ClipTransform, SequenceFormat, TrackId,
 };
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x6E, 0x56, 0xCF); // `primary`
@@ -100,6 +100,78 @@ pub(crate) fn scale_from_corner_drag(
 pub(crate) fn rotation_from_handle_drag(center: Pos2, pointer_pos: Pos2) -> f64 {
     let v = pointer_pos - center;
     v.y.atan2(v.x) as f64 + std::f64::consts::FRAC_PI_2
+}
+
+/// A finite stored rotation expressed as an equivalent value in [-180, 180).
+pub(crate) fn normalized_horizon_degrees(rotation_rad: f64) -> Option<f64> {
+    rotation_rad
+        .is_finite()
+        .then(|| (rotation_rad.to_degrees() + 180.0).rem_euclid(360.0) - 180.0)
+}
+
+const CENTERED_EPSILON: f64 = 1e-9;
+
+/// Auto-crop is exact only when translation is zero and the anchor resolves to
+/// the frame center. Tiny serialization noise is accepted.
+pub(crate) fn horizon_auto_crop_is_centered(
+    width: f64,
+    height: f64,
+    transform: &ClipTransform,
+) -> bool {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return false;
+    }
+    let expected_anchor = match transform.anchor_space {
+        AnchorSpace::Absolute => (width * 0.5, height * 0.5),
+        AnchorSpace::CenterOffset => (0.0, 0.0),
+    };
+    [
+        transform.x,
+        transform.y,
+        transform.anchor_x - expected_anchor.0,
+        transform.anchor_y - expected_anchor.1,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value.abs() <= CENTERED_EPSILON)
+}
+
+/// The smallest shared scale multiplier that hides corners after horizon
+/// rotation, preserving any intentional X/Y scale ratio.
+pub(crate) fn horizon_auto_crop_scales(
+    width: f64,
+    height: f64,
+    transform: &ClipTransform,
+) -> Option<(f64, f64)> {
+    if !horizon_auto_crop_is_centered(width, height, transform)
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || !transform.rotation.is_finite()
+        || !transform.scale_x.is_finite()
+        || !transform.scale_y.is_finite()
+        || transform.scale_x <= 0.0
+        || transform.scale_y <= 0.0
+    {
+        return None;
+    }
+
+    let aspect = width / height;
+    if !aspect.is_finite() || aspect <= 0.0 {
+        return None;
+    }
+    let cos = transform.rotation.cos().abs();
+    let sin = transform.rotation.sin().abs();
+    let need_x = cos + sin / aspect;
+    let need_y = cos + aspect * sin;
+    let multiplier = 1.0_f64
+        .max(need_x / transform.scale_x)
+        .max(need_y / transform.scale_y);
+    let scales = (
+        transform.scale_x * multiplier,
+        transform.scale_y * multiplier,
+    );
+    (multiplier.is_finite() && scales.0.is_finite() && scales.1.is_finite()).then_some(scales)
 }
 
 fn nominal_half_size(format: &SequenceFormat, scale: f32, t: &ClipTransform) -> Vec2 {
@@ -410,6 +482,114 @@ mod tests {
         let pointer = Pos2::new(50.0, 0.0);
         let r = rotation_from_handle_drag(center, pointer);
         assert!((r - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn horizon_degrees_normalize_equivalent_turns() {
+        assert_eq!(
+            normalized_horizon_degrees(270_f64.to_radians()),
+            Some(-90.0)
+        );
+        assert_eq!(
+            normalized_horizon_degrees((-270_f64).to_radians()),
+            Some(90.0)
+        );
+        assert_eq!(normalized_horizon_degrees(f64::NAN), None);
+    }
+
+    #[test]
+    fn horizon_crop_handles_nonuniform_scale_exactly() {
+        let transform = ClipTransform {
+            scale_x: 1.0,
+            scale_y: 2.0,
+            rotation: 10_f64.to_radians(),
+            ..ClipTransform::default()
+        };
+        let (scale_x, scale_y) = horizon_auto_crop_scales(1920.0, 1080.0, &transform).unwrap();
+        let aspect = 16.0 / 9.0;
+        let expected_multiplier =
+            transform.rotation.cos().abs() + transform.rotation.sin().abs() / aspect;
+        assert!((scale_x - expected_multiplier).abs() < 1e-12);
+        assert!((scale_y - 2.0 * expected_multiplier).abs() < 1e-12);
+    }
+
+    #[test]
+    fn horizon_crop_is_idempotent() {
+        let mut transform = ClipTransform {
+            rotation: 0.2,
+            ..ClipTransform::default()
+        };
+        let first = horizon_auto_crop_scales(1920.0, 1080.0, &transform).unwrap();
+        transform.scale_x = first.0;
+        transform.scale_y = first.1;
+        assert_eq!(
+            horizon_auto_crop_scales(1920.0, 1080.0, &transform),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn horizon_crop_rejects_invalid_geometry() {
+        let mut transform = ClipTransform::default();
+        transform.scale_x = 0.0;
+        assert_eq!(horizon_auto_crop_scales(1920.0, 1080.0, &transform), None);
+        transform.scale_x = 1.0;
+        transform.rotation = f64::NAN;
+        assert_eq!(horizon_auto_crop_scales(1920.0, 1080.0, &transform), None);
+        transform.rotation = 0.2;
+        assert_eq!(horizon_auto_crop_scales(0.0, 1080.0, &transform), None);
+    }
+
+    #[test]
+    fn horizon_crop_rejects_offset_and_anchor_geometry() {
+        for field in 0..4 {
+            let mut transform = ClipTransform::default();
+            match field {
+                0 => transform.x = 0.01,
+                1 => transform.y = -0.01,
+                2 => transform.anchor_x = 0.01,
+                _ => transform.anchor_y = -0.01,
+            }
+            assert!(!horizon_auto_crop_is_centered(1920.0, 1080.0, &transform));
+            assert_eq!(horizon_auto_crop_scales(1920.0, 1080.0, &transform), None);
+        }
+    }
+
+    #[test]
+    fn horizon_crop_resolves_center_for_each_anchor_space() {
+        let center_offset = ClipTransform::default();
+        assert!(horizon_auto_crop_is_centered(
+            1920.0,
+            1080.0,
+            &center_offset
+        ));
+
+        let legacy_centered = ClipTransform {
+            anchor_space: AnchorSpace::Absolute,
+            anchor_x: 960.0,
+            anchor_y: 540.0,
+            ..ClipTransform::default()
+        };
+        assert!(horizon_auto_crop_is_centered(
+            1920.0,
+            1080.0,
+            &legacy_centered
+        ));
+        assert!(horizon_auto_crop_scales(1920.0, 1080.0, &legacy_centered).is_some());
+
+        let legacy_top_left = ClipTransform {
+            anchor_space: AnchorSpace::Absolute,
+            ..ClipTransform::default()
+        };
+        assert!(!horizon_auto_crop_is_centered(
+            1920.0,
+            1080.0,
+            &legacy_top_left
+        ));
+        assert_eq!(
+            horizon_auto_crop_scales(1920.0, 1080.0, &legacy_top_left),
+            None
+        );
     }
 }
 

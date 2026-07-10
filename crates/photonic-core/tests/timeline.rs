@@ -1435,7 +1435,7 @@ fn fully_populated_project_round_trips() {
 // ── Migration: v2 files load unchanged ──────────────────────────────────────
 
 #[test]
-fn v2_document_loads_as_v3_without_timeline() {
+fn v2_document_loads_as_current_without_timeline() {
     use photonic_core::migration::{detect_version, run_migrations};
 
     // A v2 document is the current serialization minus `timeline`, with
@@ -1446,11 +1446,15 @@ fn v2_document_loads_as_v3_without_timeline() {
     obj.remove("timeline");
     assert_eq!(detect_version(&value), 2);
 
-    // Migrate forward to current (3) and deserialize.
-    let out = run_migrations(&mut value, 3).unwrap();
-    assert_eq!(out, 3, "v2 must migrate to v3");
+    // Migrate forward to the current version and deserialize.
+    let out = run_migrations(
+        &mut value,
+        photonic_core::document::CURRENT_FORMAT_VERSION,
+    )
+    .unwrap();
+    assert_eq!(out, 4, "v2 must migrate through v3 to v4");
     let doc: Document = serde_json::from_value(value).unwrap();
-    assert_eq!(doc.format_version, 3);
+    assert_eq!(doc.format_version, 4);
     assert!(doc.timeline.is_none(), "v2 file must load with no timeline");
     assert_eq!(doc.name, "legacy");
 }

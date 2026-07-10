@@ -96,6 +96,9 @@ pub fn solid(width: u32, height: u32, color: LinearColor) -> Image {
 /// `Transform2D`: resample `input` under the affine `mat` (dest ← src via the
 /// inverse), producing a same-sized image. Identity is an exact passthrough.
 pub fn transform2d(input: &Image, mat: Mat3, sampling: Sampling) -> Image {
+    if !transform_matrix_is_valid(mat) {
+        return Image::new(input.width, input.height);
+    }
     if mat == Mat3::IDENTITY {
         return input.clone();
     }
@@ -117,6 +120,16 @@ pub fn transform2d(input: &Image, mat: Mat3, sampling: Sampling) -> Image {
         }
     }
     out
+}
+
+/// Inversion policy shared by the CPU and GPU transform paths. Near-singular
+/// or non-finite matrices render transparent rather than sampling undefined
+/// coordinates.
+pub(crate) fn transform_matrix_is_valid(mat: Mat3) -> bool {
+    let determinant = mat.determinant();
+    mat.to_cols_array().into_iter().all(f32::is_finite)
+        && determinant.is_finite()
+        && determinant.abs() > 1e-8
 }
 
 /// `Resize`: scale `input` to `(w, h)` under `fit` (bilinear). `Stretch` maps the
@@ -274,6 +287,21 @@ mod tests {
         let img = solid(3, 3, LinearColor { r: 0.1, g: 0.2, b: 0.3, a: 1.0 });
         let out = transform2d(&img, Mat3::IDENTITY, Sampling::Bilinear);
         assert_eq!(out, img);
+    }
+
+    #[test]
+    fn singular_transform_is_transparent() {
+        let img = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![premult(1.0, 0.0, 0.0, 1.0); 4],
+        };
+        let out = transform2d(
+            &img,
+            Mat3::from_scale(Vec2::new(0.0, 1.0)),
+            Sampling::Nearest,
+        );
+        assert_eq!(out, Image::new(2, 2));
     }
 
     #[test]

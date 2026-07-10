@@ -104,7 +104,10 @@ impl Guide {
 /// - v2 → v3: introduced the video-editor `timeline` field (01 §2). Additive —
 ///   `timeline` is `Option` + `#[serde(default)]`, so v2 files load untouched;
 ///   the migration is a no-op version bump.
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+/// - v3 → v4: clip anchors gained an explicit coordinate space. The migration
+///   tags existing base and per-format reframe transforms as absolute without
+///   changing their stored values.
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
 
 fn default_format_version() -> u32 {
     CURRENT_FORMAT_VERSION

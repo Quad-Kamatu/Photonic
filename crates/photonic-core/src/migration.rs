@@ -55,7 +55,7 @@ pub trait FormatMigration: Send + Sync {
 
 /// The ordered migration chain. Each entry upgrades version N → N+1.
 pub fn migrations() -> Vec<Box<dyn FormatMigration>> {
-    vec![Box::new(V1ToV2), Box::new(V2ToV3)]
+    vec![Box::new(V1ToV2), Box::new(V2ToV3), Box::new(V3ToV4)]
 }
 
 /// v1 → v2: the `Raster` node kind was added. The change is purely additive —
@@ -87,6 +87,64 @@ impl FormatMigration for V2ToV3 {
         3
     }
     fn migrate(&self, _value: &mut Value) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// v3 → v4: clip anchors became explicitly center-relative. Existing v3
+/// values were authored as absolute output-frame pixels, so preserve their
+/// numeric values and tag both base and per-format reframe transforms.
+struct V3ToV4;
+impl FormatMigration for V3ToV4 {
+    fn from_version(&self) -> u32 {
+        3
+    }
+    fn to_version(&self) -> u32 {
+        4
+    }
+    fn migrate(&self, value: &mut Value) -> Result<(), String> {
+        let root = value.as_object_mut().ok_or("document is not an object")?;
+        let Some(sequences) = root
+            .get_mut("timeline")
+            .and_then(Value::as_object_mut)
+            .and_then(|timeline| timeline.get_mut("sequences"))
+            .and_then(Value::as_object_mut)
+        else {
+            return Ok(());
+        };
+
+        for sequence in sequences.values_mut().filter_map(Value::as_object_mut) {
+            for track_key in ["video_tracks", "audio_tracks"] {
+                let Some(tracks) = sequence.get_mut(track_key).and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                for clip in tracks
+                    .iter_mut()
+                    .filter_map(Value::as_object_mut)
+                    .filter_map(|track| track.get_mut("clips"))
+                    .filter_map(Value::as_array_mut)
+                    .flatten()
+                    .filter_map(Value::as_object_mut)
+                {
+                    if let Some(base) = clip
+                        .get_mut("transform")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|transform| transform.get_mut("base"))
+                        .and_then(Value::as_object_mut)
+                    {
+                        base.entry("anchor_space")
+                            .or_insert_with(|| Value::from("absolute"));
+                    }
+                    if let Some(reframes) = clip.get_mut("reframe").and_then(Value::as_object_mut) {
+                        for transform in reframes.values_mut().filter_map(Value::as_object_mut) {
+                            transform
+                                .entry("anchor_space")
+                                .or_insert_with(|| Value::from("absolute"));
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -161,6 +219,74 @@ mod tests {
     fn detect_version_defaults_to_one() {
         assert_eq!(detect_version(&json!({})), 1);
         assert_eq!(detect_version(&json!({"format_version": 3})), 3);
+    }
+
+    #[test]
+    fn v3_to_v4_tags_all_clip_transforms_without_changing_values() {
+        let clip = |anchor_x, keyed| {
+            json!({
+                "transform": {
+                    "base": { "anchor_x": anchor_x, "anchor_y": -7.0 },
+                    "tracks": [{ "path": "transform.anchor_x", "keys": keyed }]
+                },
+                "reframe": {
+                    "0": { "anchor_x": anchor_x + 1.0, "anchor_y": 9.0 }
+                }
+            })
+        };
+        let keys = json!([{ "time": 12, "value": { "t": "float", "v": 42.0 } }]);
+        let mut value = json!({
+            "format_version": 3,
+            "timeline": { "sequences": {
+                "outer": {
+                    "video_tracks": [{ "clips": [clip(10.0, keys.clone())] }],
+                    "audio_tracks": [{ "clips": [clip(20.0, keys.clone())] }]
+                },
+                "nested": {
+                    "video_tracks": [{ "clips": [clip(30.0, keys.clone())] }]
+                }
+            }}
+        });
+
+        let before_keys = value["timeline"]["sequences"]["outer"]["video_tracks"][0]["clips"][0]
+            ["transform"]["tracks"]
+            .clone();
+        assert_eq!(run_migrations(&mut value, 4).unwrap(), 4);
+
+        for (sequence, track, expected) in [
+            ("outer", "video_tracks", 10.0),
+            ("outer", "audio_tracks", 20.0),
+            ("nested", "video_tracks", 30.0),
+        ] {
+            let clip = &value["timeline"]["sequences"][sequence][track][0]["clips"][0];
+            assert_eq!(clip["transform"]["base"]["anchor_space"], "absolute");
+            assert_eq!(clip["transform"]["base"]["anchor_x"], expected);
+            assert_eq!(clip["reframe"]["0"]["anchor_space"], "absolute");
+            assert_eq!(clip["reframe"]["0"]["anchor_x"], expected + 1.0);
+        }
+        assert_eq!(
+            value["timeline"]["sequences"]["outer"]["video_tracks"][0]["clips"][0]["transform"]
+                ["tracks"],
+            before_keys
+        );
+    }
+
+    #[test]
+    fn v3_to_v4_preserves_explicit_anchor_space_and_tolerates_optional_shapes() {
+        let mut value = json!({
+            "format_version": 3,
+            "timeline": { "sequences": {
+                "valid": { "video_tracks": [{ "clips": [{
+                    "transform": { "base": { "anchor_space": "center_offset" } },
+                    "reframe": { "0": { "anchor_space": "center_offset" } }
+                }]}]},
+                "malformed_optional": { "video_tracks": "not-an-array" }
+            }}
+        });
+        assert_eq!(run_migrations(&mut value, 4).unwrap(), 4);
+        let clip = &value["timeline"]["sequences"]["valid"]["video_tracks"][0]["clips"][0];
+        assert_eq!(clip["transform"]["base"]["anchor_space"], "center_offset");
+        assert_eq!(clip["reframe"]["0"]["anchor_space"], "center_offset");
     }
 
     #[test]

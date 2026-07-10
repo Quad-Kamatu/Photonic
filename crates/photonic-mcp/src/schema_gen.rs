@@ -5384,7 +5384,7 @@ pub fn tool_list() -> Value {
                 "properties": {
                     "clip_id": { "type": "string" },
                     "name": { "type": "string" },
-                    "transform": { "type": "object", "description": "Full base-transform replace: {\"x\":0,\"y\":0,\"scale_x\":1,\"scale_y\":1,\"rotation\":0,\"anchor_x\":0,\"anchor_y\":0,\"opacity\":1}" },
+                    "transform": { "type": "object", "description": "Full base-transform replace: {\"x\":0,\"y\":0,\"scale_x\":1,\"scale_y\":1,\"rotation\":0,\"anchor_space\":\"center_offset\",\"anchor_x\":0,\"anchor_y\":0,\"opacity\":1}. anchor_space is optional (center_offset default) or absolute for legacy output-pixel pivots." },
                     "reframe": { "type": "object", "description": "{\"format_index\":N,\"transform\":{...}|null} — null clears the override for that format index." },
                     "enabled": { "type": "boolean" },
                     "color_label": { "type": ["integer","null"], "description": "Organizational swatch-palette index. null clears the label; omit the field entirely to leave it unchanged." }

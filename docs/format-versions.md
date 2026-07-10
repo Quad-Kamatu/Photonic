@@ -22,7 +22,14 @@ deserializing into `Document`.
 
 ## Versions
 
-### v3 — current
+### v4 — current
+
+Added an explicit `anchor_space` to video `ClipTransform`. Newly authored
+transforms use center-relative anchor offsets. The v3→v4 migration preserves
+legacy rendering by tagging every base and per-format reframe transform as
+`absolute` without changing anchor numbers or animation keyframes.
+
+### v3
 
 Added the video-editor `timeline` field on `Document`
 (`Option<timeline::TimelineProject>`, docs/specs/video-editor/01-data-model.md

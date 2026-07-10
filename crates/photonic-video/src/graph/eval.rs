@@ -20,11 +20,10 @@
 //! - `Effect{Invert}` — a real invert pass (08 §3). The other `Effect` kinds
 //!   (Blur/Sharpen/Glow/ChromaKey/LumaKey/MaskShapeGen) stay blit-passthrough
 //!   until their `ResolvedParams` payload finalizes (P5/P7).
-//! - `Transform2D` / `Crop` / `Resize` / `Output` and the passthrough ops — a
-//!   texture blit. **The `Transform2D` matrix is not yet applied on the GPU
-//!   preview path in P3** (identity blit); the exact matrix lives in the CPU
-//!   reference (`eval_cpu`), which is the export-determinism path. The GPU
-//!   matrix-sample pass lands with the transform-gizmo UI story.
+//! - `Transform2D` — inverse-affine nearest/bilinear sampling matching the CPU
+//!   reference's pixel-center and edge-clamp semantics.
+//! - `Crop` / `Resize` / `Output` and the remaining passthrough ops — a texture
+//!   blit.
 
 use std::sync::Arc;
 
@@ -88,9 +87,9 @@ pub trait GpuFrameSource {
         asset: AssetId,
         src_time: Tick,
         proxy: bool,
-    ) -> Option<Arc<wgpu::Texture>>;
+    ) -> Option<GpuFrame>;
 
-    fn still_texture(&mut self, gpu: &GpuContext, asset: AssetId) -> Option<Arc<wgpu::Texture>>;
+    fn still_texture(&mut self, gpu: &GpuContext, asset: AssetId) -> Option<GpuFrame>;
 
     fn vector_texture(
         &mut self,
@@ -99,7 +98,26 @@ pub trait GpuFrameSource {
         key: VectorStateKey,
         w: u32,
         h: u32,
-    ) -> Option<Arc<wgpu::Texture>>;
+    ) -> Option<GpuFrame>;
+}
+
+/// A source texture plus its exact logical dimensions. The physical texture
+/// may be pool-bucket padded; sampling must never infer content bounds from it.
+#[derive(Clone)]
+pub struct GpuFrame {
+    pub texture: Arc<wgpu::Texture>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl GpuFrame {
+    pub fn new(texture: Arc<wgpu::Texture>, width: u32, height: u32) -> Self {
+        Self {
+            texture,
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
 }
 
 /// A source that resolves nothing (transparent everywhere) — for tests /
@@ -107,13 +125,13 @@ pub trait GpuFrameSource {
 pub struct NullFrameSource;
 
 impl GpuFrameSource for NullFrameSource {
-    fn video_texture(&mut self, _: &GpuContext, _: AssetId, _: Tick, _: bool) -> Option<Arc<wgpu::Texture>> {
+    fn video_texture(&mut self, _: &GpuContext, _: AssetId, _: Tick, _: bool) -> Option<GpuFrame> {
         None
     }
-    fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<Arc<wgpu::Texture>> {
+    fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<GpuFrame> {
         None
     }
-    fn vector_texture(&mut self, _: &GpuContext, _: VectorRef, _: VectorStateKey, _: u32, _: u32) -> Option<Arc<wgpu::Texture>> {
+    fn vector_texture(&mut self, _: &GpuContext, _: VectorRef, _: VectorStateKey, _: u32, _: u32) -> Option<GpuFrame> {
         None
     }
 }
@@ -176,26 +194,33 @@ impl Evaluator {
         source: &mut dyn GpuFrameSource,
     ) -> Option<Arc<wgpu::Texture>> {
         let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
-        let mut results: Vec<Option<Arc<wgpu::Texture>>> =
+        let mut results: Vec<Option<GpuFrame>> =
             (0..graph.nodes.len()).map(|_| None).collect();
 
         for (i, node) in graph.nodes.iter().enumerate() {
-            let inputs: Vec<Arc<wgpu::Texture>> = node
+            let inputs: Vec<GpuFrame> = node
                 .inputs
                 .iter()
                 .filter_map(|(id, _)| results[id.0 as usize].clone())
                 .collect();
 
             let out = match &node.op {
-                IrOp::DecodeVideo { asset, src_time, proxy } => source
+                IrOp::DecodeVideo { asset, src_time, proxy } => match source
                     .video_texture(&self.gpu, *asset, *src_time, *proxy)
-                    .unwrap_or_else(|| self.transparent(cw, ch)),
-                IrOp::DecodeStill { asset } => source
-                    .still_texture(&self.gpu, *asset)
-                    .unwrap_or_else(|| self.transparent(cw, ch)),
-                IrOp::RasterVector { vref, doc_state, w, h } => source
+                {
+                    Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
+                    None => self.transparent(cw, ch),
+                },
+                IrOp::DecodeStill { asset } => match source.still_texture(&self.gpu, *asset) {
+                    Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
+                    None => self.transparent(cw, ch),
+                },
+                IrOp::RasterVector { vref, doc_state, w, h } => match source
                     .vector_texture(&self.gpu, *vref, *doc_state, *w, *h)
-                    .unwrap_or_else(|| self.transparent(*w, *h)),
+                {
+                    Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
+                    None => self.transparent(cw, ch),
+                },
                 _ => self.render_cached(node, &inputs, cw, ch),
             };
             results[i] = Some(out);
@@ -210,7 +235,9 @@ impl Evaluator {
             }
         }
         self.cache.pin(out_hash);
-        results[out_node.0 as usize].clone()
+        results[out_node.0 as usize]
+            .clone()
+            .map(|frame| frame.texture)
     }
 
     /// Render a computed (non-source) op into a cached texture, or return the
@@ -218,22 +245,58 @@ impl Evaluator {
     fn render_cached(
         &mut self,
         node: &crate::graph::ir::IrNode,
-        inputs: &[Arc<wgpu::Texture>],
+        inputs: &[GpuFrame],
         cw: u32,
         ch: u32,
-    ) -> Arc<wgpu::Texture> {
+    ) -> GpuFrame {
         let (w, h) = op_size(&node.op, cw, ch);
         let desc = TextureDesc { width: w, height: h };
         let (target, valid) = self.cache.lookup_or_alloc(node.content_hash, desc);
         if valid {
-            return target;
+            return GpuFrame::new(target, w, h);
         }
-        self.render_op(&node.op, inputs, &target);
+        self.render_op(&node.op, inputs, &target, w, h);
         self.cache.mark_rendered(node.content_hash);
-        target
+        GpuFrame::new(target, w, h)
     }
 
-    fn render_op(&self, op: &IrOp, inputs: &[Arc<wgpu::Texture>], target: &wgpu::Texture) {
+    fn normalize_source_cached(
+        &mut self,
+        hash: crate::graph::ir::ContentHash,
+        source: GpuFrame,
+        width: u32,
+        height: u32,
+    ) -> GpuFrame {
+        if source.width == width && source.height == height {
+            return source;
+        }
+        let desc = TextureDesc { width, height };
+        let (target, valid) = self.cache.lookup_or_alloc(hash, desc);
+        if !valid {
+            self.passes.transform(
+                &self.gpu,
+                &source.texture,
+                &target,
+                glam::Mat3::IDENTITY,
+                crate::graph::ir::Sampling::Bilinear,
+                width,
+                height,
+                source.width,
+                source.height,
+            );
+            self.cache.mark_rendered(hash);
+        }
+        GpuFrame::new(target, width, height)
+    }
+
+    fn render_op(
+        &self,
+        op: &IrOp,
+        inputs: &[GpuFrame],
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
         match op {
             IrOp::SolidColor { color } => {
                 self.passes
@@ -241,10 +304,16 @@ impl Evaluator {
             }
             IrOp::Merge { opacity, .. } => match (inputs.first(), inputs.get(1)) {
                 (Some(top), Some(bottom)) => {
-                    self.passes.merge(&self.gpu, top, bottom, *opacity, target);
+                    self.passes.merge(
+                        &self.gpu,
+                        &top.texture,
+                        &bottom.texture,
+                        *opacity,
+                        target,
+                    );
                 }
                 (Some(only), None) | (None, Some(only)) => {
-                    self.passes.blit(&self.gpu, only, target);
+                    self.passes.blit(&self.gpu, &only.texture, target);
                 }
                 (None, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
@@ -272,7 +341,7 @@ impl Evaluator {
             // correct straight-alpha `over` onto the premultiplied linear target.
             IrOp::CaptionOverlay { cue_batch } => {
                 match inputs.first() {
-                    Some(src) => self.passes.blit(&self.gpu, src, target),
+                    Some(src) => self.passes.blit(&self.gpu, &src.texture, target),
                     None => self.passes.fill(&self.gpu, target, [0.0; 4]),
                 }
                 if !cue_batch.cues.is_empty() {
@@ -289,7 +358,21 @@ impl Evaluator {
             // Real effect kernel: Invert (08 §3). Other kinds fall through to the
             // blit passthrough below until their `ResolvedParams` payload lands.
             IrOp::Effect { kind: EffectKind::Invert, .. } => match inputs.first() {
-                Some(src) => self.passes.invert(&self.gpu, src, target),
+                Some(src) => self.passes.invert(&self.gpu, &src.texture, target),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Transform2D { mat, sampling } => match inputs.first() {
+                Some(src) => self.passes.transform(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    *mat,
+                    *sampling,
+                    logical_w,
+                    logical_h,
+                    src.width,
+                    src.height,
+                ),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
             // Real grade kernel: run the resolved stack through the WGSL twins of
@@ -301,24 +384,24 @@ impl Evaluator {
                     let graded = photonic_render::apply_grade_stack_gpu(
                         self.gpu.device(),
                         self.gpu.queue(),
-                        src,
+                        &src.texture,
                         ops,
                     );
                     self.passes.blit(&self.gpu, &graded, target);
                 }
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
-            // Blit passthrough for Transform2D (matrix seam), Crop, Resize,
-            // Output, empty Grade, and the marker filter/color ops.
+            // Blit passthrough for Crop, Resize, Output, empty Grade, and the
+            // marker filter/color ops.
             _ => match inputs.first() {
-                Some(src) => self.passes.blit(&self.gpu, src, target),
+                Some(src) => self.passes.blit(&self.gpu, &src.texture, target),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
         }
     }
 
     /// A cached transparent texture of size `(w, h)` (fresh, filled once).
-    fn transparent(&mut self, w: u32, h: u32) -> Arc<wgpu::Texture> {
+    fn transparent(&mut self, w: u32, h: u32) -> GpuFrame {
         // Key transparents in a reserved high-bit namespace so fillers never
         // collide with real content hashes (xxh3 fills the low 120 bits; the top
         // byte 0xFE is reserved here).
@@ -330,7 +413,7 @@ impl Evaluator {
             self.passes.fill(&self.gpu, &tex, [0.0; 4]);
             self.cache.mark_rendered(hash);
         }
-        tex
+        GpuFrame::new(tex, w, h)
     }
 }
 
@@ -349,6 +432,8 @@ struct Passes {
     fill_bgl: wgpu::BindGroupLayout,
     blit_pipeline: wgpu::RenderPipeline,
     blit_bgl: wgpu::BindGroupLayout,
+    transform_pipeline: wgpu::RenderPipeline,
+    transform_bgl: wgpu::BindGroupLayout,
     /// `Effect{Invert}` (08 §3): shares the blit bind-group layout (tex + sampler).
     invert_pipeline: wgpu::RenderPipeline,
     merge_pipeline: wgpu::RenderPipeline,
@@ -406,6 +491,18 @@ impl Passes {
         );
         let blit_pipeline = make_pipeline(device, &blit_bgl, &blit_src, "fs");
 
+        // Transform2D: explicit textureLoad sampling avoids sampler-dependent
+        // coordinate and padding behavior. The uniform stores three inverse
+        // affine columns, sampling mode, and logical canvas/source dimensions.
+        let transform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("transform_bgl"),
+            entries: &[tex_entry(0), uniform_entry(1)],
+        });
+        let transform_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct T {{ c0: vec4<f32>, c1: vec4<f32>, c2: vec4<f32>, info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> u: T;\nfn at(p: vec2<i32>) -> vec4<f32> {{\n  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n}}\nfn nearest(p: vec2<f32>) -> vec4<f32> {{ return at(vec2<i32>(floor(p))); }}\nfn bilinear(p: vec2<f32>) -> vec4<f32> {{\n  let q = p - vec2<f32>(0.5);\n  let p0f = floor(q);\n  let p0 = vec2<i32>(p0f);\n  let f = q - p0f;\n  let p00 = at(p0);\n  let p10 = at(p0 + vec2<i32>(1, 0));\n  let p01 = at(p0 + vec2<i32>(0, 1));\n  let p11 = at(p0 + vec2<i32>(1, 1));\n  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  if (pos.x >= u.info.x || pos.y >= u.info.y) {{ return vec4<f32>(0.0); }}\n  let canvas_src = u.c0.xy * pos.x + u.c1.xy * pos.y + u.c2.xy;\n  let src = canvas_src * u.info.zw / u.info.xy;\n  if (u.c0.w > 0.5) {{ return nearest(src); }}\n  return bilinear(src);\n}}\n"
+        );
+        let transform_pipeline = make_pipeline(device, &transform_bgl, &transform_src, "fs");
+
         // Invert (08 §3): invert straight (unpremult) color, keep alpha, then
         // re-premultiply — the WGSL twin of `ops::invert`. Reuses the blit BGL.
         let invert_src = format!(
@@ -428,6 +525,8 @@ impl Passes {
             fill_bgl,
             blit_pipeline,
             blit_bgl,
+            transform_pipeline,
+            transform_bgl,
             invert_pipeline,
             merge_pipeline,
             merge_bgl,
@@ -471,6 +570,68 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.blit_pipeline, &bind, target);
+    }
+
+    fn transform(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        mat: glam::Mat3,
+        sampling: crate::graph::ir::Sampling,
+        logical_w: u32,
+        logical_h: u32,
+        source_w: u32,
+        source_h: u32,
+    ) {
+        if !crate::graph::ops::transform_matrix_is_valid(mat) {
+            self.fill(gpu, target, [0.0; 4]);
+            return;
+        }
+        let inverse = mat.inverse().to_cols_array();
+        let uniform = [
+            inverse[0],
+            inverse[1],
+            inverse[2],
+            if matches!(sampling, crate::graph::ir::Sampling::Nearest) {
+                1.0
+            } else {
+                0.0
+            },
+            inverse[3],
+            inverse[4],
+            inverse[5],
+            0.0,
+            inverse[6],
+            inverse[7],
+            inverse[8],
+            0.0,
+            logical_w as f32,
+            logical_h as f32,
+            source_w as f32,
+            source_h as f32,
+        ];
+        let buffer = gpu.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("transform_uniform"),
+            contents: bytemuck::cast_slice(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let view = src.create_view(&Default::default());
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("transform_bg"),
+            layout: &self.transform_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.transform_pipeline, &bind, target);
     }
 
     /// `Effect{Invert}` pass — same bind group as `blit` (tex + sampler), the
@@ -734,12 +895,288 @@ fn f16_to_f32(bits: u16) -> f32 {
 mod tests {
     use super::*;
     use crate::graph::compile::{compile, Quality};
+    use crate::graph::eval_cpu::FrameProvider;
+    use crate::graph::ir::{ContentHash, IrNode, IrNodeId, OutPort, Sampling};
+    use crate::graph::ops::Image;
     use photonic_core::timeline::{
         CaptionCue, CaptionStyle, CaptionTrack, CaptionWord, Clip, ClipSource, FrameRate,
         KaraokeMode, KaraokeStyle, Sequence, SequenceId, TextClipContent, TimelineProject, Track,
         TrackKind,
     };
     use photonic_core::Color;
+
+    struct PatternSource {
+        frame: GpuFrame,
+    }
+
+    struct PatternCpuSource {
+        image: Image,
+    }
+
+    impl FrameProvider for PatternCpuSource {
+        fn decode_video(&mut self, _: AssetId, _: Tick, _: bool, _: u32, _: u32) -> Image {
+            self.image.clone()
+        }
+        fn decode_still(&mut self, _: AssetId, _: u32, _: u32) -> Image {
+            self.image.clone()
+        }
+        fn raster_vector(
+            &mut self,
+            _: VectorRef,
+            _: VectorStateKey,
+            _: u32,
+            _: u32,
+        ) -> Image {
+            self.image.clone()
+        }
+    }
+
+    impl GpuFrameSource for PatternSource {
+        fn video_texture(
+            &mut self,
+            _: &GpuContext,
+            _: AssetId,
+            _: Tick,
+            _: bool,
+        ) -> Option<GpuFrame> {
+            Some(self.frame.clone())
+        }
+        fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<GpuFrame> {
+            Some(self.frame.clone())
+        }
+        fn vector_texture(
+            &mut self,
+            _: &GpuContext,
+            _: VectorRef,
+            _: VectorStateKey,
+            _: u32,
+            _: u32,
+        ) -> Option<GpuFrame> {
+            Some(self.frame.clone())
+        }
+    }
+
+    fn patterned_image(width: u32, height: u32) -> Image {
+        let mut image = Image::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                image.pixels[(y * width + x) as usize] = [
+                    (x % 2) as f32,
+                    (y % 2) as f32,
+                    ((x + 2 * y) % 3 == 0) as u8 as f32,
+                    1.0,
+                ];
+            }
+        }
+        image
+    }
+
+    fn upload_pattern(gpu: &GpuContext, image: &Image) -> Arc<wgpu::Texture> {
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("transform_test_pattern"),
+            size: wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut half = Vec::with_capacity(image.pixels.len() * 4);
+        for pixel in &image.pixels {
+            for channel in pixel {
+                half.push(if *channel == 0.0 { 0u16 } else { 0x3c00u16 });
+            }
+        }
+        gpu.queue().write_texture(
+            texture.as_image_copy(),
+            bytemuck::cast_slice(&half),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width * 8),
+                rows_per_image: Some(image.height),
+            },
+            wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Arc::new(texture)
+    }
+
+    #[test]
+    fn transform2d_pattern_gpu_matches_cpu_for_bilinear_and_nearest() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter; skipping GPU transform parity");
+            return;
+        };
+        let image = patterned_image(11, 7);
+        let mat = glam::Mat3::from_translation(glam::Vec2::new(1.25, -0.75))
+            * glam::Mat3::from_angle(0.23)
+            * glam::Mat3::from_scale(glam::Vec2::new(1.2, 0.8));
+
+        for (index, sampling) in [Sampling::Bilinear, Sampling::Nearest]
+            .into_iter()
+            .enumerate()
+        {
+            let graph = FrameGraph {
+                nodes: vec![
+                    IrNode {
+                        op: IrOp::DecodeStill {
+                            asset: AssetId::new(),
+                        },
+                        inputs: vec![],
+                        content_hash: ContentHash(100 + index as u128),
+                    },
+                    IrNode {
+                        op: IrOp::Transform2D { mat, sampling },
+                        inputs: vec![(IrNodeId(0), OutPort::default())],
+                        content_hash: ContentHash(200 + index as u128),
+                    },
+                ],
+                output: Some(IrNodeId(1)),
+            };
+            let mut source = PatternSource {
+                frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
+            };
+            let mut evaluator = Evaluator::new(gpu.clone());
+            let output = evaluator
+                .evaluate(&graph, (image.width, image.height), &mut source)
+                .expect("transform output");
+            let actual = read_texture_rgba16f(&gpu, &output, image.width, image.height);
+            let expected = crate::graph::ops::transform2d(&image, mat, sampling);
+            for (pixel_index, (gpu_pixel, cpu_pixel)) in
+                actual.iter().zip(&expected.pixels).enumerate()
+            {
+                for channel in 0..4 {
+                    assert!(
+                        (gpu_pixel[channel] - cpu_pixel[channel]).abs() < 2e-3,
+                        "{sampling:?} pixel {pixel_index} channel {channel}: GPU {} vs CPU {}",
+                        gpu_pixel[channel],
+                        cpu_pixel[channel]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transform2d_native_source_gpu_matches_canvas_normalized_cpu() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter; skipping native-source transform parity");
+            return;
+        };
+        let image = patterned_image(7, 5);
+        let (canvas_w, canvas_h) = (11, 9);
+        let mat = glam::Mat3::from_translation(glam::Vec2::new(0.75, -0.5))
+            * glam::Mat3::from_angle(0.17)
+            * glam::Mat3::from_scale(glam::Vec2::new(1.1, 0.85));
+
+        for (index, sampling) in [Sampling::Bilinear, Sampling::Nearest]
+            .into_iter()
+            .enumerate()
+        {
+            let graph = FrameGraph {
+                nodes: vec![
+                    IrNode {
+                        op: IrOp::DecodeStill {
+                            asset: AssetId::new(),
+                        },
+                        inputs: vec![],
+                        content_hash: ContentHash(300 + index as u128),
+                    },
+                    IrNode {
+                        op: IrOp::Transform2D { mat, sampling },
+                        inputs: vec![(IrNodeId(0), OutPort::default())],
+                        content_hash: ContentHash(400 + index as u128),
+                    },
+                    IrNode {
+                        op: IrOp::Output {
+                            w: canvas_w,
+                            h: canvas_h,
+                        },
+                        inputs: vec![(IrNodeId(1), OutPort::default())],
+                        content_hash: ContentHash(500 + index as u128),
+                    },
+                ],
+                output: Some(IrNodeId(2)),
+            };
+            let mut cpu_source = PatternCpuSource {
+                image: image.clone(),
+            };
+            let expected = crate::graph::eval_cpu::evaluate(
+                &graph,
+                (canvas_w, canvas_h),
+                &mut cpu_source,
+            );
+            let mut gpu_source = PatternSource {
+                frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
+            };
+            let mut evaluator = Evaluator::new(gpu.clone());
+            let output = evaluator
+                .evaluate(&graph, (canvas_w, canvas_h), &mut gpu_source)
+                .expect("transform output");
+            let actual = read_texture_rgba16f(&gpu, &output, canvas_w, canvas_h);
+            for (pixel_index, (gpu_pixel, cpu_pixel)) in
+                actual.iter().zip(&expected.pixels).enumerate()
+            {
+                for channel in 0..4 {
+                    assert!(
+                        (gpu_pixel[channel] - cpu_pixel[channel]).abs() < 2e-3,
+                        "{sampling:?} pixel {pixel_index} channel {channel}: GPU {} vs CPU {}",
+                        gpu_pixel[channel],
+                        cpu_pixel[channel]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn singular_transform_gpu_is_transparent() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter; skipping singular transform policy");
+            return;
+        };
+        let image = patterned_image(7, 5);
+        let graph = FrameGraph {
+            nodes: vec![
+                IrNode {
+                    op: IrOp::DecodeStill {
+                        asset: AssetId::new(),
+                    },
+                    inputs: vec![],
+                    content_hash: ContentHash(600),
+                },
+                IrNode {
+                    op: IrOp::Transform2D {
+                        mat: glam::Mat3::from_scale(glam::Vec2::new(0.0, 1.0)),
+                        sampling: Sampling::Nearest,
+                    },
+                    inputs: vec![(IrNodeId(0), OutPort::default())],
+                    content_hash: ContentHash(601),
+                },
+            ],
+            output: Some(IrNodeId(1)),
+        };
+        let mut source = PatternSource {
+            frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
+        };
+        let mut evaluator = Evaluator::new(gpu.clone());
+        let output = evaluator
+            .evaluate(&graph, (image.width, image.height), &mut source)
+            .expect("transform output");
+        let actual = read_texture_rgba16f(&gpu, &output, image.width, image.height);
+        assert!(
+            actual.iter().all(|pixel| *pixel == [0.0; 4]),
+            "singular GPU transform must be transparent"
+        );
+    }
 
     #[test]
     fn solid_graph_gpu_matches_cpu_reference() {

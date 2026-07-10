@@ -171,6 +171,12 @@ pub enum ClipSource {
 }
 ```
 
+`ClipTransform.anchor_space` makes anchor coordinates unambiguous. New v4
+transforms use `CenterOffset`, where `(0, 0)` is the output-frame center;
+`Absolute` stores legacy output-pixel pivots. The v3→v4 document migration tags
+existing base and per-format reframe transforms as `Absolute` without changing
+their numeric values or keyframes.
+
 ### 5.1 Speed
 
 ```rust

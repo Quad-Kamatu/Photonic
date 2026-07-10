@@ -103,13 +103,19 @@ fn eval_op(
     let in0 = || inputs.first().map(|i| (*i).clone()).unwrap_or_else(|| Image::new(cw, ch));
 
     match op {
-        IrOp::DecodeVideo { asset, src_time, proxy } => {
-            provider.decode_video(*asset, *src_time, *proxy, cw, ch)
+        IrOp::DecodeVideo { asset, src_time, proxy } => normalize_source(
+            provider.decode_video(*asset, *src_time, *proxy, cw, ch),
+            cw,
+            ch,
+        ),
+        IrOp::DecodeStill { asset } => {
+            normalize_source(provider.decode_still(*asset, cw, ch), cw, ch)
         }
-        IrOp::DecodeStill { asset } => provider.decode_still(*asset, cw, ch),
-        IrOp::RasterVector { vref, doc_state, w, h } => {
-            provider.raster_vector(*vref, *doc_state, *w, *h)
-        }
+        IrOp::RasterVector { vref, doc_state, w, h } => normalize_source(
+            provider.raster_vector(*vref, *doc_state, *w, *h),
+            cw,
+            ch,
+        ),
         IrOp::SolidColor { color } => ops::solid(cw, ch, *color),
         IrOp::Transform2D { mat, sampling } => match inputs.first() {
             Some(input) => ops::transform2d(input, *mat, *sampling),
@@ -147,6 +153,14 @@ fn eval_op(
             Some(input) => ops::resize(input, *w, *h, FitMode::Stretch),
             None => Image::new(*w, *h),
         },
+    }
+}
+
+fn normalize_source(image: Image, width: u32, height: u32) -> Image {
+    if image.width == width && image.height == height {
+        image
+    } else {
+        ops::resize(&image, width, height, FitMode::Stretch)
     }
 }
 

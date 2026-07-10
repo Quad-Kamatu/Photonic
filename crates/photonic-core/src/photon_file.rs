@@ -176,4 +176,30 @@ mod tests {
             "malformed history must not block the document"
         );
     }
+
+    #[test]
+    fn v3_document_migrates_but_drops_embedded_history() {
+        let mut value = serde_json::to_value(sample_doc()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.insert("format_version".into(), serde_json::json!(3));
+        obj.insert(
+            "photon_format".into(),
+            serde_json::json!(PHOTON_FORMAT_VERSION),
+        );
+        obj.insert(
+            "photon_history".into(),
+            serde_json::to_value(HistorySnapshot::default()).unwrap(),
+        );
+
+        let (doc, history) = load_photon(&serde_json::to_string(&value).unwrap()).unwrap();
+        assert_eq!(doc.format_version, CURRENT_FORMAT_VERSION);
+        assert!(
+            history.is_none(),
+            "v3 history contains unmigrated documents"
+        );
+        assert_eq!(
+            PHOTON_FORMAT_VERSION, 1,
+            "document migration is independent"
+        );
+    }
 }

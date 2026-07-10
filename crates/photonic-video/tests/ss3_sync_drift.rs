@@ -45,7 +45,7 @@ use photonic_video::export::encoder::AudioStreamSpec;
 use photonic_video::export::presets::built_in_presets;
 use photonic_video::export::render_loop::{export_frames, ExportEvent, Frame, ResolvedExport};
 use photonic_video::graph::compile::{compile, Quality};
-use photonic_video::graph::eval::{read_texture_rgba16f, Evaluator, GpuFrameSource};
+use photonic_video::graph::eval::{read_texture_rgba16f, Evaluator, GpuFrame, GpuFrameSource};
 use photonic_video::media::ffmpeg_locate::{locate_for_test, FfmpegTools};
 use photonic_video::media::keyframe_index::KeyframeIndex;
 use photonic_video::media::probe::probe_details;
@@ -180,7 +180,7 @@ impl GpuFrameSource for LoopFrameSource<'_> {
         asset: AssetId,
         src_time: Tick,
         _proxy: bool,
-    ) -> Option<Arc<wgpu::Texture>> {
+    ) -> Option<GpuFrame> {
         if asset != self.asset {
             return None;
         }
@@ -192,10 +192,11 @@ impl GpuFrameSource for LoopFrameSource<'_> {
             &frame.planes.as_yuv_planes(),
             self.colorimetry,
         );
-        Some(Arc::new(tex))
+        let (width, height) = (tex.width(), tex.height());
+        Some(GpuFrame::new(Arc::new(tex), width, height))
     }
 
-    fn still_texture(&mut self, _gpu: &GpuContext, _asset: AssetId) -> Option<Arc<wgpu::Texture>> {
+    fn still_texture(&mut self, _gpu: &GpuContext, _asset: AssetId) -> Option<GpuFrame> {
         None
     }
 
@@ -206,7 +207,7 @@ impl GpuFrameSource for LoopFrameSource<'_> {
         _key: VectorStateKey,
         _w: u32,
         _h: u32,
-    ) -> Option<Arc<wgpu::Texture>> {
+    ) -> Option<GpuFrame> {
         None
     }
 }

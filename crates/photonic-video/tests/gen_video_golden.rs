@@ -244,8 +244,8 @@ fn case_transform2d_scaled() -> TimelineProject {
     clip.transform.base.scale_x = 0.6;
     clip.transform.base.scale_y = 0.6;
     clip.transform.base.rotation = 0.30; // radians (~17°)
-    clip.transform.base.anchor_x = 40.0; // frame centre for 80×80
-    clip.transform.base.anchor_y = 40.0;
+    clip.transform.base.anchor_x = 0.0; // zero is frame centre
+    clip.transform.base.anchor_y = 0.0;
     v1.clips.push(clip);
     seq.video_tracks.push(v1);
     project.insert_sequence(seq);
