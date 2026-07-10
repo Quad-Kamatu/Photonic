@@ -48,6 +48,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -252,17 +253,27 @@ def main() -> int:
     run.step("import_media (4K-ish stand-in fixture)", s_import_4k_ish)
 
     def s_generate_proxies():
-        # generate_proxies is NOT IMPLEMENTED in this build — the
-        # engine/proxy module (02 §6, 05 §2.3) hasn't landed yet, so it
-        # always reports NotSupportedV1 (handlers/video.rs::generate_proxies).
-        # This step's PASS condition is that documented current-build
-        # behavior, not success — update it once CAP-014 proxy generation
-        # actually lands.
+        # CAP-014 (546260e): generate_proxies runs a real half-res all-intra
+        # transcode as a background job. Start it, poll to completion, then
+        # confirm the asset reports a ready proxy via list_media.
         r = client.tool("generate_proxies", {"asset_ids": [state["asset_id"]]})
-        assert r.is_error, f"expected NotSupportedV1, got success: {r}"
-        assert r.error_code == "NotSupportedV1", f"unexpected error_code: {r}"
+        if r.is_error and r.error_code == "FfmpegUnavailable":
+            raise Skip(f"{r.message} (set PHOTONIC_FFMPEG_DIR or install ffmpeg)")
+        expect_ok(r)
+        job_id = r.data["job_id"]
+        deadline = time.monotonic() + 120
+        while True:
+            status = expect_ok(client.tool("get_job_status", {"job_id": job_id})).data["status"]
+            if status["state"] not in ("queued", "running"):
+                break
+            assert time.monotonic() < deadline, f"proxy job did not finish (last: {status})"
+            time.sleep(0.25)
+        assert status["state"] == "done", f"proxy job ended in {status['state']!r}: {status}"
+        assets = expect_ok(client.tool("list_media", {})).data["assets"]
+        proxied = next(a for a in assets if a["asset_id"] == state["asset_id"])
+        assert proxied["proxy_status"] == "ready", f"proxy not ready: {proxied}"
 
-    run.step("generate_proxies (expected NotSupportedV1)", s_generate_proxies)
+    run.step("generate_proxies (real transcode -> ready)", s_generate_proxies)
 
     def s_toggle_proxy_mode():
         # `set_proxy_mode`'s response echoes the Rust enum's Debug form
