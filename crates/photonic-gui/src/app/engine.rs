@@ -35,6 +35,13 @@
 //! `EngineFrame` is program-out only), so wiring them waits for the decode-
 //! pool / waveform-pyramid follow-up rather than spawning ad-hoc ffmpeg runs
 //! per visible clip here.
+//!
+//! The master-output meter beside the program monitor (`app/monitor.rs`,
+//! NLE-parity Gap G-4) is another documented seam: [`EngineBridge::master_level`]
+//! is the accessor the monitor polls, but it returns `None` today because
+//! neither `EngineSession` nor `EngineStatus` (`photonic_video::session`)
+//! surface a level yet — see that method's doc for the exact shape of the
+//! fix (out of this story's territory, `app/{monitor.rs,engine.rs}` only).
 
 use photonic_core::document::Document;
 use photonic_core::history::CommandHistory;
@@ -48,6 +55,15 @@ pub(crate) struct MonitorTexture {
     pub id: egui::TextureId,
     /// Physical (pool-bucket-padded) size of the presented texture.
     pub physical: (u32, u32),
+}
+
+/// Master-bus output level, `[L, R]` linear amplitude, as
+/// [`EngineBridge::master_level`] would report it once the engine surfaces
+/// one — see that method's doc for the seam this type is shaped to close.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub(crate) struct MasterLevel {
+    pub peak: [f32; 2],
+    pub rms: [f32; 2],
 }
 
 /// Identity of the last-presented frame, so an unchanged frame isn't
@@ -138,6 +154,43 @@ impl EngineBridge {
     /// Wait-free engine status for this frame.
     pub fn status(&self) -> Arc<EngineStatus> {
         self.session.status()
+    }
+
+    /// The engine's real master-bus output level (NLE-parity Gap G-4: the
+    /// slim stereo peak+RMS meter beside the program monitor,
+    /// `app/monitor.rs::draw_master_meter`). Linear peak/RMS amplitude per
+    /// channel `[L, R]` — the same unit
+    /// [`photonic_video::audio::StereoMeter::peak`]/`::rms` publish, so a
+    /// caller converts to dB itself (exactly like
+    /// `panels/video/audio_mixer.rs`'s master strip does).
+    ///
+    /// **Documented seam, not yet closed:** this returns `None` because
+    /// nothing publishes a level here to read. `photonic_video::session`'s
+    /// mixer-feeder thread (`feeder_main`) already builds a real
+    /// `Mixer::output_meter() -> Arc<StereoMeter>` right after
+    /// `Mixer::new(sample_rate)` — but never hands that handle to anything
+    /// the engine thread (let alone `EngineSession`) can reach, and
+    /// `EngineSession` itself exposes only `send`/`latest_frame`/`status`/
+    /// `shutdown`. Closing it is a small, additive change entirely inside
+    /// `photonic-video` (out of this story's territory,
+    /// `app/{monitor.rs,engine.rs}` only):
+    ///   1. Clone `mixer.output_meter()` once in `feeder_main` and publish
+    ///      the `Arc<StereoMeter>` somewhere the engine thread can read it
+    ///      (an `ArcSwapOption<StereoMeter>` set once alongside the existing
+    ///      `frame`/`status` publish points would do it).
+    ///   2. Add a level field to `EngineStatus` (e.g.
+    ///      `pub master_level: Option<([f32; 2], [f32; 2])>` for
+    ///      `(peak, rms)`), populated from that handle each time the engine
+    ///      thread publishes a new status snapshot.
+    ///   3. This method becomes `status.master_level.map(|(peak, rms)|
+    ///      MasterLevel { peak, rms })`.
+    ///
+    /// Until then, callers should treat `None` as "no data" and render
+    /// honestly at the silence floor rather than fabricating motion — see
+    /// `panels/video/audio_mixer.rs`'s own doc comment for the identical
+    /// seam blocking its (currently synthetic) master strip.
+    pub(crate) fn master_level(&self) -> Option<MasterLevel> {
+        None
     }
 
     /// The raw session handle (command sends, frame polls) for hosts/tests.

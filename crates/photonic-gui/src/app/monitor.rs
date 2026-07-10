@@ -117,6 +117,285 @@ impl PhotonicApp {
     }
 }
 
+// ── Master output meter (NLE-parity Gap G-4) ────────────────────────────────
+//
+// A slim stereo (L/R) peak+RMS column with a clip LED, reserved on the right
+// edge of the monitor's content area between the letterboxed image and the
+// panel edge (13 §11.1/§11.4 widget shape). Fed by
+// `engine::EngineBridge::master_level` — the real
+// `photonic_video::audio::Mixer::output_meter()` tap once that method's
+// documented seam closes; until then it honestly settles at the silence
+// floor rather than animating a fabricated level (see that method's doc).
+//
+// The peak/RMS ballistics model (fast peak attack, ~40dB/s release, ~300ms
+// RMS one-pole, 1.2s peak-hold dwell, latched clip LED) and the green→amber→
+// red fill gradient are the same shapes `panels/video/audio_mixer.rs`'s
+// `MeterState`/`StereoMeterState`/`meter_color` use for the mixer drawer's
+// own master strip (same DESIGN.md-named filled-meter exception, same hex
+// values, so both meters read as one instrument) — duplicated here rather
+// than shared because this story's territory is `app/{monitor.rs,engine.rs}`
+// only; hoisting both into one widget module is a follow-up.
+
+/// Meter floor (09 §2's `-inf` mute floor).
+const MASTER_METER_FLOOR_DB: f32 = -60.0;
+/// Meter ceiling (09 §2's `+12`, rounded down to match the mixer's headroom).
+const MASTER_METER_CEIL_DB: f32 = 12.0;
+/// Clip-LED latch threshold (13 §11.1: above -0.3 dBTP).
+const MASTER_METER_CLIP_DB: f32 = -0.3;
+const MASTER_METER_BAR_W: f32 = 7.0;
+const MASTER_METER_BAR_GAP: f32 = 3.0;
+/// Total width reserved for the column (both bars + gap + a little breathing
+/// room either side) — kept slim, per Gap G-4.
+const MASTER_METER_COL_W: f32 = 24.0;
+/// Gap between the letterboxed image and the meter column.
+const MASTER_METER_MARGIN: f32 = 8.0;
+
+// Meter three-stop gradient — the DESIGN.md-named exception (video module,
+// filled meter bars): success(low) → warning(near-clip) → error(clip). Same
+// hex values as `panels/video/audio_mixer.rs`'s gradient.
+const MASTER_METER_LOW: egui::Color32 = egui::Color32::from_rgb(100, 200, 122); // #64C87A
+const MASTER_METER_MID: egui::Color32 = egui::Color32::from_rgb(251, 191, 36); // #FBBF24
+const MASTER_METER_HIGH: egui::Color32 = egui::Color32::from_rgb(248, 113, 113); // #F87171
+
+const MASTER_METER_STATE_ID: &str = "photonic.video_monitor.master_meter_state";
+
+/// Fraction 0..1 of a dB value across the meter's floor..ceiling range.
+fn master_meter_db_to_frac(db: f32) -> f32 {
+    ((db - MASTER_METER_FLOOR_DB) / (MASTER_METER_CEIL_DB - MASTER_METER_FLOOR_DB)).clamp(0.0, 1.0)
+}
+
+fn master_meter_lerp(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+/// Fill color at fill `frac` — knee at ~0.72 so the bar reads green through
+/// nominal, amber approaching clip, red at the top.
+fn master_meter_color(frac: f32) -> egui::Color32 {
+    let f = frac.clamp(0.0, 1.0);
+    if f < 0.72 {
+        master_meter_lerp(MASTER_METER_LOW, MASTER_METER_MID, f / 0.72)
+    } else {
+        master_meter_lerp(MASTER_METER_MID, MASTER_METER_HIGH, (f - 0.72) / 0.28)
+    }
+}
+
+/// Linear amplitude → dB, floored so a near-silent channel doesn't produce
+/// `-inf`/NaN through `log10` (mirrors `panels/video/audio_mixer.rs::lin_to_db`).
+fn master_meter_lin_to_db(gain: f32) -> f32 {
+    20.0 * gain.max(1e-6).log10()
+}
+
+fn fmt_master_db(db: f32) -> String {
+    if db <= MASTER_METER_FLOOR_DB + 0.05 {
+        "-inf".to_string()
+    } else {
+        format!("{db:+.1} dB")
+    }
+}
+
+/// Peak/RMS ballistics for one channel of the master meter.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct MasterMeterChannel {
+    peak_db: f32,
+    rms_db: f32,
+    hold_db: f32,
+    hold_age: f32,
+    /// Latched red until reset by a click (13 §11.4).
+    clip: bool,
+}
+
+impl Default for MasterMeterChannel {
+    fn default() -> Self {
+        MasterMeterChannel {
+            peak_db: MASTER_METER_FLOOR_DB,
+            rms_db: MASTER_METER_FLOOR_DB,
+            hold_db: MASTER_METER_FLOOR_DB,
+            hold_age: 0.0,
+            clip: false,
+        }
+    }
+}
+
+impl MasterMeterChannel {
+    /// `peak_in_db`/`rms_in_db` are the tap's own per-block peak/RMS (or the
+    /// floor, absent a tap); ballistics here only smooth *presentation*
+    /// motion (attack/release, hold dwell) on top of them.
+    fn update(&mut self, peak_in_db: f32, rms_in_db: f32, dt: f32) {
+        let dt = dt.clamp(0.0, 0.1);
+        // Peak: instantaneous attack, ~40 dB/s release (fast VU-like ballistics).
+        if peak_in_db >= self.peak_db {
+            self.peak_db = peak_in_db;
+        } else {
+            self.peak_db = (self.peak_db - 40.0 * dt).max(peak_in_db);
+        }
+        // RMS: one-pole toward the tap's RMS, ~300 ms window.
+        let a = 1.0 - (-dt / 0.3).exp();
+        self.rms_db += (rms_in_db - self.rms_db) * a;
+        // Peak-hold marker: instant raise, 1.2s dwell, then fall to the peak.
+        if self.peak_db >= self.hold_db {
+            self.hold_db = self.peak_db;
+            self.hold_age = 0.0;
+        } else {
+            self.hold_age += dt;
+            if self.hold_age > 1.2 {
+                self.hold_db = (self.hold_db - 20.0 * dt).max(self.peak_db);
+            }
+        }
+        if peak_in_db > MASTER_METER_CLIP_DB {
+            self.clip = true;
+        }
+    }
+}
+
+/// Stereo (L/R) ballistics pair, persisted across frames in egui temp storage
+/// (see [`MonitorZoom`]'s doc above for why: no `PhotonicApp` field — this
+/// story's territory is `app/{monitor.rs,engine.rs}` only).
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+struct MasterMeterState {
+    l: MasterMeterChannel,
+    r: MasterMeterChannel,
+}
+
+impl MasterMeterState {
+    fn update(&mut self, level: Option<engine::MasterLevel>, dt: f32) {
+        let (peak_db, rms_db) = match level {
+            Some(lv) => (
+                [
+                    master_meter_lin_to_db(lv.peak[0]),
+                    master_meter_lin_to_db(lv.peak[1]),
+                ],
+                [
+                    master_meter_lin_to_db(lv.rms[0]),
+                    master_meter_lin_to_db(lv.rms[1]),
+                ],
+            ),
+            // No real tap yet (`EngineBridge::master_level`'s doc) — settle
+            // honestly at the silence floor rather than animating a
+            // fabricated value.
+            None => ([MASTER_METER_FLOOR_DB; 2], [MASTER_METER_FLOOR_DB; 2]),
+        };
+        self.l.update(peak_db[0], rms_db[0], dt);
+        self.r.update(peak_db[1], rms_db[1], dt);
+    }
+
+    fn clipped(&self) -> bool {
+        self.l.clip || self.r.clip
+    }
+
+    /// The louder channel's instantaneous peak, for the numeric hover readout.
+    fn peak_db(&self) -> f32 {
+        self.l.peak_db.max(self.r.peak_db)
+    }
+}
+
+/// One channel's peak(dim)+RMS(bright) fill plus a peak-hold tick.
+fn draw_master_meter_bar(painter: &egui::Painter, rect: egui::Rect, ch: &MasterMeterChannel) {
+    painter.rect_filled(rect, 1.0, egui::Color32::from_gray(26));
+    let peak_frac = master_meter_db_to_frac(ch.peak_db);
+    let rms_frac = master_meter_db_to_frac(ch.rms_db);
+    master_meter_fill(
+        painter,
+        rect,
+        peak_frac,
+        master_meter_color(peak_frac).gamma_multiply(0.5),
+    );
+    master_meter_fill(painter, rect, rms_frac, master_meter_color(rms_frac));
+    // Peak-hold marker line.
+    let hold_frac = master_meter_db_to_frac(ch.hold_db);
+    let y = rect.bottom() - hold_frac * rect.height();
+    painter.line_segment(
+        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+        egui::Stroke::new(1.0, egui::Color32::WHITE),
+    );
+}
+
+fn master_meter_fill(painter: &egui::Painter, rect: egui::Rect, frac: f32, color: egui::Color32) {
+    let h = rect.height() * frac.clamp(0.0, 1.0);
+    let filled = egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - h), rect.max);
+    painter.rect_filled(filled, 1.0, color);
+}
+
+impl PhotonicApp {
+    fn master_meter_state(&self, ctx: &egui::Context) -> MasterMeterState {
+        ctx.data(|d| d.get_temp(egui::Id::new(MASTER_METER_STATE_ID)))
+            .unwrap_or_default()
+    }
+
+    fn set_master_meter_state(&self, ctx: &egui::Context, state: MasterMeterState) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(MASTER_METER_STATE_ID), state));
+    }
+
+    /// Draws the slim stereo peak+RMS column `draw_video_monitor` reserves
+    /// beside the letterboxed image (Gap G-4), fed by
+    /// `EngineBridge::master_level` (real tap once that seam closes — see
+    /// its doc). Advances ballistics every frame (even on engine-less hosts,
+    /// at the floor) so the column's layout never jumps when an engine
+    /// attaches.
+    fn draw_master_meter(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, rect: egui::Rect) {
+        let level = self
+            .engine
+            .as_ref()
+            .and_then(engine::EngineBridge::master_level);
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        let mut state = self.master_meter_state(ctx);
+        state.update(level, dt);
+        self.set_master_meter_state(ctx, state);
+        if self.engine.is_some() {
+            // Keep ballistics animating like the mixer drawer's own meter.
+            ctx.request_repaint();
+        }
+
+        let bars_w = MASTER_METER_BAR_W * 2.0 + MASTER_METER_BAR_GAP;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(2.0);
+                // Clip LED (top): click to clear a latched clip (13 §11.4).
+                let (led_rect, led_resp) =
+                    ui.allocate_exact_size(egui::vec2(bars_w, 6.0), egui::Sense::click());
+                if led_resp.clicked() {
+                    state.l.clip = false;
+                    state.r.clip = false;
+                    self.set_master_meter_state(ctx, state);
+                }
+                let led_color = if state.clipped() {
+                    MASTER_METER_HIGH
+                } else {
+                    egui::Color32::from_gray(50)
+                };
+                ui.painter().rect_filled(led_rect, 2.0, led_color);
+
+                ui.add_space(4.0);
+                let bars_h = (rect.height() - 28.0).max(20.0);
+                let (bars_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(bars_w, bars_h), egui::Sense::hover());
+                let l_rect = egui::Rect::from_min_size(
+                    bars_rect.min,
+                    egui::vec2(MASTER_METER_BAR_W, bars_h),
+                );
+                let r_rect = egui::Rect::from_min_max(
+                    egui::pos2(bars_rect.max.x - MASTER_METER_BAR_W, bars_rect.min.y),
+                    bars_rect.max,
+                );
+                let painter = ui.painter();
+                draw_master_meter_bar(painter, l_rect, &state.l);
+                draw_master_meter_bar(painter, r_rect, &state.r);
+
+                let tap_note = if level.is_some() {
+                    String::new()
+                } else {
+                    " — engine tap pending".to_string()
+                };
+                led_resp.on_hover_text(format!(
+                    "Master output peak {}{tap_note} — click a clip LED to clear its latch",
+                    fmt_master_db(state.peak_db())
+                ));
+            });
+        });
+    }
+}
+
 // ── Mode entry/exit (04 §1.2, §1.3) ─────────────────────────────────────────
 
 impl PhotonicApp {
@@ -426,8 +705,8 @@ impl PhotonicApp {
         } else {
             None
         };
-        let shuttle = self.monitor_playing
-            && (self.monitor_play_reverse || self.monitor_play_speed != 1.0);
+        let shuttle =
+            self.monitor_playing && (self.monitor_play_reverse || self.monitor_play_speed != 1.0);
         let dt = ctx.input(|i| i.unstable_dt as f64).min(0.25);
 
         let bridge = self.engine.as_mut().expect("checked above");
@@ -544,11 +823,31 @@ impl PhotonicApp {
         let transport_rect =
             egui::Rect::from_min_max(egui::pos2(rect.min.x, transport_top), rect.max);
 
+        // Master output meter (Gap G-4): reserve a slim stereo column on the
+        // right edge of the content area, between the letterboxed image and
+        // the panel edge — reserved unconditionally (present even on
+        // engine-less hosts, honestly parked at the silence floor) so the
+        // layout never jumps when an engine attaches.
+        let meter_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                (content_rect.max.x - MASTER_METER_COL_W).max(content_rect.min.x),
+                content_rect.min.y,
+            ),
+            content_rect.max,
+        );
+        let image_area = egui::Rect::from_min_max(
+            content_rect.min,
+            egui::pos2(
+                (meter_rect.min.x - MASTER_METER_MARGIN).max(content_rect.min.x),
+                content_rect.max.y,
+            ),
+        );
+
         // Background + letterbox/pillarbox bars (04 §3.3).
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 12, 14));
         let target_aspect = format.width.max(1) as f32 / format.height.max(1) as f32;
-        let avail_w = content_rect.width().max(1.0);
-        let avail_h = content_rect.height().max(1.0);
+        let avail_w = image_area.width().max(1.0);
+        let avail_h = image_area.height().max(1.0);
 
         // Image zoom (14 §M-5 polish): `Fit` letterboxes into the available
         // area exactly as before; `Actual` shows the frame at native pixels,
@@ -570,8 +869,10 @@ impl PhotonicApp {
         } else {
             // Pan-to-drag, gated to `Actual` so it never competes with the
             // reframe handles' own drag sense over the default Fit view.
+            // Scoped to `image_area` (not `content_rect`) so it doesn't
+            // shadow the meter column's own clip-LED click target.
             let pan_resp = ui.interact(
-                content_rect,
+                image_area,
                 ui.id().with("monitor_pan_drag"),
                 egui::Sense::drag(),
             );
@@ -589,10 +890,11 @@ impl PhotonicApp {
             }
         }
         self.set_monitor_zoom_state(ctx, zoom);
-        let video_rect = egui::Rect::from_center_size(content_rect.center() + zoom.pan, video_size);
-        // Clipped to `content_rect` so a zoomed-in (Actual) frame can't paint
-        // over the format/scrub/transport bars above and below it.
-        let content_painter = ui.painter_at(content_rect);
+        let video_rect = egui::Rect::from_center_size(image_area.center() + zoom.pan, video_size);
+        // Clipped to `image_area` (not `content_rect`) so a zoomed-in
+        // (Actual) frame can't paint over the format/scrub/transport bars
+        // above and below it, nor over the master-meter column beside it.
+        let content_painter = ui.painter_at(image_area);
         content_painter.rect_filled(video_rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
 
         // ── EngineFrame presentation (03 §5) ────────────────────────────────
@@ -646,10 +948,8 @@ impl PhotonicApp {
             let buffering = !drew_frame && status.playing
                 || engine::is_buffering(status.playing, status.playhead, presented_time, tpf, 4);
             if buffering {
-                let spinner_rect = egui::Rect::from_center_size(
-                    video_rect.center(),
-                    egui::vec2(28.0, 28.0),
-                );
+                let spinner_rect =
+                    egui::Rect::from_center_size(video_rect.center(), egui::vec2(28.0, 28.0));
                 ui.put(spinner_rect, egui::Spinner::new().size(26.0));
             } else if !drew_frame && !sequence_has_clips(doc) {
                 // Fresh/empty project — invite the first action instead of a
@@ -680,6 +980,7 @@ impl PhotonicApp {
             }
         }
 
+        self.draw_master_meter(ui, ctx, meter_rect);
         self.draw_monitor_scrubber(ui, scrub_rect, doc);
         self.draw_transport_bar(ui, transport_rect, doc, history);
         self.draw_format_bar(ui, format_rect, doc, history);
@@ -1214,5 +1515,87 @@ mod scrubber_tests {
     fn x_to_tick_handles_degenerate_track_width() {
         let fr = FrameRate::FPS_30;
         assert_eq!(scrub_x_to_tick(10.0, 0.0, 0.0, Tick(1000), fr), Tick::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod master_meter_tests {
+    use super::*;
+
+    #[test]
+    fn db_to_frac_maps_ends_and_clamps() {
+        assert_eq!(master_meter_db_to_frac(MASTER_METER_FLOOR_DB), 0.0);
+        assert_eq!(master_meter_db_to_frac(MASTER_METER_CEIL_DB), 1.0);
+        assert_eq!(master_meter_db_to_frac(MASTER_METER_FLOOR_DB - 40.0), 0.0);
+        assert_eq!(master_meter_db_to_frac(MASTER_METER_CEIL_DB + 40.0), 1.0);
+    }
+
+    #[test]
+    fn meter_color_walks_the_gradient() {
+        assert_eq!(master_meter_color(0.0), MASTER_METER_LOW);
+        assert_eq!(master_meter_color(0.72), MASTER_METER_MID);
+        assert_eq!(master_meter_color(1.0), MASTER_METER_HIGH);
+        // Monotonically loses green as it climbs toward clip.
+        assert!(master_meter_color(0.0).g() >= master_meter_color(0.72).g());
+        assert!(master_meter_color(0.72).g() >= master_meter_color(1.0).g());
+    }
+
+    #[test]
+    fn lin_to_db_floors_near_silence_without_producing_inf_or_nan() {
+        let db = master_meter_lin_to_db(0.0);
+        assert!(db.is_finite());
+        assert!(
+            db < MASTER_METER_FLOOR_DB,
+            "near-zero gain reads well below floor"
+        );
+        // Unity gain is 0 dB.
+        assert!((master_meter_lin_to_db(1.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn channel_peak_attacks_instantly_and_releases_gradually() {
+        let mut ch = MasterMeterChannel::default();
+        ch.update(-3.0, -3.0, 1.0);
+        assert!((ch.peak_db - (-3.0)).abs() < 1e-3, "instant peak attack");
+        // A quieter block afterwards releases at ~40 dB/s, not instantly.
+        ch.update(MASTER_METER_FLOOR_DB, MASTER_METER_FLOOR_DB, 0.05);
+        assert!(ch.peak_db < -3.0 && ch.peak_db > -3.0 - 40.0 * 0.05 - 1e-3);
+    }
+
+    #[test]
+    fn channel_clip_latches_until_explicitly_cleared() {
+        let mut ch = MasterMeterChannel::default();
+        assert!(!ch.clip);
+        ch.update(0.0, 0.0, 0.02);
+        assert!(ch.clip, "level above the clip threshold latches the LED");
+        // Dropping back to silence does not self-clear the latch.
+        ch.update(MASTER_METER_FLOOR_DB, MASTER_METER_FLOOR_DB, 1.0);
+        assert!(ch.clip);
+        ch.clip = false;
+        assert!(!ch.clip);
+    }
+
+    #[test]
+    fn state_with_no_tap_settles_at_the_floor() {
+        let mut state = MasterMeterState::default();
+        for _ in 0..50 {
+            state.update(None, 0.05);
+        }
+        assert!(!state.clipped());
+        assert!((state.peak_db() - MASTER_METER_FLOOR_DB).abs() < 1.0);
+    }
+
+    #[test]
+    fn state_tracks_channels_independently_and_reports_the_louder_peak() {
+        let mut state = MasterMeterState::default();
+        state.update(
+            Some(engine::MasterLevel {
+                peak: [0.5, 0.1],
+                rms: [0.4, 0.05],
+            }),
+            1.0,
+        );
+        assert!(state.l.peak_db > state.r.peak_db);
+        assert_eq!(state.peak_db(), state.l.peak_db);
     }
 }
