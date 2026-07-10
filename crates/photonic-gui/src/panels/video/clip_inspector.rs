@@ -1,8 +1,15 @@
 //! `DrawerGroup::ClipInspector` panel (04 §4.1) — the selected clip's
-//! transform / speed / effects-stack / transition params, the `Clip`/`ClipEffect`
-//! analogue of the vector Inspector. Panel shell owned by 04; widgets source
-//! from `prop_registry` (01 §6.2). Keyframe-editor targeting lives on
-//! [`super::VideoPanelUi::keyframe_editor_target`].
+//! transform / speed / effects-stack / keyframes / transition params, the
+//! `Clip`/`ClipEffect` analogue of the vector Inspector. Panel shell owned by
+//! 04; widgets source from `prop_registry` (01 §6.2).
+//!
+//! The "Keyframes" section ([`draw_keyframes_section`]) docks
+//! [`super::keyframe_editor::draw_embedded`] inline — the single
+//! Effect-Controls surface (14 §G-9) — instead of requiring the separate
+//! floating `egui::Window` (`keyframe_editor.rs::draw_window`). That float
+//! remains available (pop-out button in the section, or a per-field
+//! keyframe-diamond click) for live-playhead scrubbing / the wider
+//! side-by-side layout; both write [`super::VideoPanelUi::keyframe_editor_target`].
 //!
 //! Every mutation here is built as a real `photonic_core::timeline::ops::*`
 //! call (reading `ctx.doc`, never mutating it) and handed to the app via
@@ -15,9 +22,10 @@
 
 use crate::panels::{PanelAction, PropPanelCtx};
 use egui::{Color32, RichText, Ui};
+use egui_phosphor::regular as ph;
 use photonic_core::timeline::{
     ops, prop_registry, Clip, ClipId, EffectKind, PropTargetKind, PropValue, Ratio, SequenceId,
-    SpeedMap, TimelineProject, Tick, Transition, TransitionKind, TransitionParams, TrackId,
+    SpeedMap, Tick, TimelineProject, TrackId, Transition, TransitionKind, TransitionParams,
     TICKS_PER_SECOND,
 };
 
@@ -68,8 +76,17 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
 
     draw_transform_section(ui, ctx, project, seq_id, track_id, clip, &mut action);
     draw_speed_section(ui, project, seq_id, track_id, clip, &mut action);
-    draw_reframe_section(ui, project, seq_id, track_id, clip, active_format, &mut action);
+    draw_reframe_section(
+        ui,
+        project,
+        seq_id,
+        track_id,
+        clip,
+        active_format,
+        &mut action,
+    );
     draw_effects_section(ui, project, seq_id, track_id, clip, &mut action);
+    draw_keyframes_section(ui, ctx, project, clip, &mut action);
     draw_transitions_section(ui, project, seq_id, track_id, clip, &mut action);
 
     if action.is_some() {
@@ -82,10 +99,7 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
 /// `ctx.video.selection` (04 §2.6 session state) carries only `ClipId`s, so
 /// the inspector resolves the owning sequence/track itself — no other panel
 /// exposes this lookup.
-fn locate_clip(
-    project: &TimelineProject,
-    clip_id: ClipId,
-) -> Option<(SequenceId, TrackId, &Clip)> {
+fn locate_clip(project: &TimelineProject, clip_id: ClipId) -> Option<(SequenceId, TrackId, &Clip)> {
     for (seq_id, seq) in &project.sequences {
         for track in seq.tracks() {
             if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
@@ -175,8 +189,7 @@ fn draw_transform_section(
                     changed |= transform_row(ui, "Scale Y", &mut new_t.scale_y, Some(0.0..=1000.0));
                     keyframe_diamond(ui, ctx, clip.id, has_track);
                     ui.end_row();
-                    changed |=
-                        transform_row_suffixed(ui, "Rotation", &mut new_t.rotation, " rad");
+                    changed |= transform_row_suffixed(ui, "Rotation", &mut new_t.rotation, " rad");
                     keyframe_diamond(ui, ctx, clip.id, has_track);
                     ui.end_row();
                     changed |= transform_row(ui, "Anchor X", &mut new_t.anchor_x, None);
@@ -329,8 +342,7 @@ fn draw_reframe_section(
                     ui.end_row();
                     changed |= transform_row(ui, "Scale Y", &mut new_t.scale_y, Some(0.0..=1000.0));
                     ui.end_row();
-                    changed |=
-                        transform_row_suffixed(ui, "Rotation", &mut new_t.rotation, " rad");
+                    changed |= transform_row_suffixed(ui, "Rotation", &mut new_t.rotation, " rad");
                     ui.end_row();
                 });
             if changed {
@@ -480,11 +492,8 @@ fn draw_effects_section(
                     .pointer_latest_pos()
                     .is_some_and(|p| drop_rect.contains(p));
                 if hovering {
-                    ui.painter().rect_stroke(
-                        drop_rect,
-                        3.0,
-                        egui::Stroke::new(1.5, ACCENT),
-                    );
+                    ui.painter()
+                        .rect_stroke(drop_rect, 3.0, egui::Stroke::new(1.5, ACCENT));
                     if ui.input(|i| i.pointer.any_released()) {
                         egui::DragAndDrop::clear_payload(ui.ctx());
                         if let Ok(cmd) = ops::add_effect(
@@ -587,6 +596,50 @@ fn draw_effect_params(
 /// `"params.radius"` → `"radius"` for a compact grid label.
 fn param_short_label(path: &str) -> &str {
     path.rsplit('.').next().unwrap_or(path)
+}
+
+// ── Keyframes (13 §5.2, 14 §G-9 effect-controls unification) ────────────────
+
+/// The docked keyframe/curve editor section — replaces the floating
+/// `egui::Window` as the default, always-visible per-clip Effect-Controls
+/// surface (14 §G-9: "two surfaces for one concept" between this inspector's
+/// fixed Motion/Opacity/Speed fields and the curve editor). The actual
+/// picker + curve drawing is [`super::keyframe_editor::draw_embedded`],
+/// reused verbatim from the floating editor (`keyframe_editor.rs:draw_window`)
+/// rather than reimplemented; this fn is only the section chrome plus a
+/// pop-out button that still opens the float for live-playhead scrubbing or
+/// the wider side-by-side layout (watch-out: "keep the float option").
+fn draw_keyframes_section(
+    ui: &mut Ui,
+    ctx: &mut PropPanelCtx,
+    project: &TimelineProject,
+    clip: &Clip,
+    action: &mut Option<PanelAction>,
+) {
+    egui::CollapsingHeader::new("Keyframes")
+        .default_open(true)
+        .id_salt("clip_inspector_keyframes")
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Transform + effect params, animated over the clip")
+                        .color(MUTED)
+                        .small(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new(ph::ARROW_SQUARE_OUT)).small())
+                        .on_hover_text("Pop out to a floating window (live playhead scrubbing)")
+                        .clicked()
+                    {
+                        *ctx.video.keyframe_editor_target = Some(clip.id);
+                    }
+                });
+            });
+            if let Some(a) = super::keyframe_editor::draw_embedded(ui, project, clip) {
+                *action = Some(a);
+            }
+        });
 }
 
 // ── Transitions (13 §5.1, 08 §2.0b) ─────────────────────────────────────────

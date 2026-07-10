@@ -1,30 +1,48 @@
 //! Keyframe / curve editor (04 §4.1, 01 §6, 13 §5.2/§16) — the editing UI over
 //! the generic [`AnimProps`](photonic_core::timeline::AnimProps) animation system.
 //!
-//! Two surfaces, both owned here:
+//! Three surfaces, all owned here:
 //! - [`draw_window`] — a floating curve editor for the selected clip: an
 //!   animatable-property picker (transform + effect params, 01 §6.2 registry) on
 //!   the left, and a Bezier-capable curve editor (property tracks, Hold/Linear/
 //!   Bezier easing, add/move/delete keyframes) on the right. Enabling AS-3
 //!   motion-graphics: place a `VectorDoc` clip (media pool → timeline) and
-//!   animate its `transform.*` here.
+//!   animate its `transform.*` here. No longer auto-*opens* on a timeline
+//!   selection change (G-9, see [`draw_embedded`]) — it stays wherever the
+//!   user left it and only follows the selection while already open; reached
+//!   via a keyframe-diamond click (`clip_inspector.rs`) or the docked
+//!   section's pop-out button.
+//! - [`draw_embedded`] — the **G-9 effect-controls unification** docked
+//!   counterpart: the same picker + Float curve drawing
+//!   (`draw_prop_picker`/`draw_curve_area`, reused verbatim, not
+//!   reimplemented), laid out as a compact vertical stack instead of a
+//!   floating `egui::Window`, for `clip_inspector.rs`'s "Keyframes"
+//!   collapsible section — the default, always-visible per-clip surface now,
+//!   closing the "two surfaces for one concept" gap (14 §G-9) between the
+//!   fixed Motion/Opacity/Speed fields (`clip_inspector.rs`) and the curve
+//!   editor. `clip_inspector.rs` is `PropPanelCtx`-based (`doc: &Document`, no
+//!   `&mut CommandHistory`), so this returns a `PanelAction` instead of
+//!   committing directly.
 //! - [`paint_clip_automation`] — the timeline automation-lane indicator: keyframe
 //!   diamonds painted along a clip's body so animated clips read at a glance.
 //!
-//! **Every mutation flows through a pure core op → `CommandHistory`** — this
-//! module never touches `doc.timeline` directly. Drag gestures preview a ghost
-//! and commit ONE `execute_discrete` step on release (one undo step per gesture,
-//! the same discipline `app/timeline/ops_bridge.rs` uses for clip drags).
+//! **Every mutation flows through a pure core op → `CommandHistory`**
+//! (`draw_window`) **or a pure core op → `PanelAction`** (`draw_embedded`) —
+//! this module never touches `doc.timeline` directly either way. Drag
+//! gestures preview a ghost and commit ONE step on release (one undo step per
+//! gesture, the same discipline `app/timeline/ops_bridge.rs` uses for clip
+//! drags).
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Shape, Stroke, Vec2};
 use egui_phosphor::regular as ph;
 
 use crate::app::timeline::TimelineView;
+use crate::panels::PanelAction;
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
     anim, ops, prop_registry, AnimTarget, Clip, ClipId, FrameRate, Interp, Keyframe, PropPath,
-    PropTargetKind, PropValue, PropValueKind, PropertyTrack, Tick, TimelineProject,
+    PropTargetKind, PropValue, PropValueKind, PropertyTrack, Tick, TimelineCmd, TimelineProject,
 };
 
 // ── egui memory keys ─────────────────────────────────────────────────────────
@@ -42,11 +60,12 @@ struct EditorState {
     sel_row: usize,
     /// Clip-relative tick of the selected keyframe, if any.
     sel_kf_at: Option<i64>,
-    /// Last timeline selection observed — drives auto-open on selection change.
+    /// Last timeline selection observed — drives `draw_window`'s
+    /// follow-while-open (not auto-open, see its doc comment) on selection
+    /// change.
     last_selection: Option<ClipId>,
     /// Whether `last_selection` has ever been recorded (distinguishes "no
-    /// selection yet" from "deselected", so the editor doesn't auto-open on the
-    /// very first frame before any clip is picked).
+    /// selection yet" from "deselected" on the very first frame).
     seeded: bool,
 }
 
@@ -412,47 +431,31 @@ enum KfAction {
     },
 }
 
-fn commit(
-    history: &mut CommandHistory,
-    doc: &mut Document,
-    cmd: photonic_core::timeline::TimelineCmd,
-) {
+fn commit(history: &mut CommandHistory, doc: &mut Document, cmd: TimelineCmd) {
     history.execute_discrete(Command::Timeline(cmd), doc);
 }
 
-/// Apply one collected [`KfAction`] as a single undo step. Reads the current
-/// project to build the pure command, then commits — never mutates `doc.timeline`
-/// in place.
-fn apply_action(doc: &mut Document, history: &mut CommandHistory, action: KfAction) {
+/// Resolve one [`KfAction`] into the `TimelineCmd`(s) it applies: one for
+/// `Set`/`Remove`/`SetInterp`, two (remove old + set new, mirroring a `Move`
+/// gesture's time change) for a `Move`. Pure — reads `project`, never mutates
+/// it — so both [`apply_action`] (`draw_window`, commits via
+/// `CommandHistory`) and [`kf_actions_to_panel_action`] (`draw_embedded`,
+/// returns a `PanelAction`) build on this one conversion instead of
+/// duplicating the ops-building logic per surface.
+fn kf_action_cmds(project: &TimelineProject, action: KfAction) -> Vec<TimelineCmd> {
     match action {
-        KfAction::Set { target, path, kf } => {
-            let Some(p) = doc.timeline.as_ref() else {
-                return;
-            };
-            let cmd = ops::set_keyframe(p, target, path, kf);
-            commit(history, doc, cmd);
-        }
-        KfAction::Remove { target, path, at } => {
-            let Some(p) = doc.timeline.as_ref() else {
-                return;
-            };
-            if let Ok(cmd) = ops::remove_keyframe(p, target, path, at) {
-                commit(history, doc, cmd);
-            }
-        }
+        KfAction::Set { target, path, kf } => vec![ops::set_keyframe(project, target, path, kf)],
+        KfAction::Remove { target, path, at } => ops::remove_keyframe(project, target, path, at)
+            .into_iter()
+            .collect(),
         KfAction::SetInterp {
             target,
             path,
             at,
             interp,
-        } => {
-            let Some(p) = doc.timeline.as_ref() else {
-                return;
-            };
-            if let Ok(cmd) = ops::set_keyframe_interp(p, target, path, at, interp) {
-                commit(history, doc, cmd);
-            }
-        }
+        } => ops::set_keyframe_interp(project, target, path, at, interp)
+            .into_iter()
+            .collect(),
         KfAction::Move {
             target,
             path,
@@ -460,21 +463,64 @@ fn apply_action(doc: &mut Document, history: &mut CommandHistory, action: KfActi
             kf,
         } => {
             if old_at == kf.at {
-                apply_action(doc, history, KfAction::Set { target, path, kf });
-                return;
+                return kf_action_cmds(project, KfAction::Set { target, path, kf });
             }
             // Move in time = remove the old lane entry + set the new one, as ONE
             // undo step (both built against the pre-move project state).
-            let Some(p) = doc.timeline.as_ref() else {
-                return;
+            let Ok(rm) = ops::remove_keyframe(project, target.clone(), path.clone(), old_at) else {
+                return Vec::new();
             };
-            let Ok(rm) = ops::remove_keyframe(p, target.clone(), path.clone(), old_at) else {
-                return;
-            };
-            let set = ops::set_keyframe(p, target, path, kf);
-            let batch = Command::Batch(vec![Command::Timeline(rm), Command::Timeline(set)]);
+            let set = ops::set_keyframe(project, target, path, kf);
+            vec![rm, set]
+        }
+    }
+}
+
+/// Apply one collected [`KfAction`] as a single undo step against `history`
+/// (the `draw_window` commit path — never mutates `doc.timeline` in place).
+fn apply_action(doc: &mut Document, history: &mut CommandHistory, action: KfAction) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let cmds = kf_action_cmds(p, action);
+    apply_cmds(doc, history, cmds);
+}
+
+/// Commit `cmds` as ONE undo step: a lone command via [`commit`], or a
+/// `Command::Batch` when a gesture (e.g. `Move`) produced more than one —
+/// same one-step-per-gesture discipline the module doc comment promises.
+fn apply_cmds(doc: &mut Document, history: &mut CommandHistory, cmds: Vec<TimelineCmd>) {
+    match cmds.len() {
+        0 => {}
+        1 => commit(history, doc, cmds.into_iter().next().expect("len==1")),
+        _ => {
+            let batch = Command::Batch(cmds.into_iter().map(Command::Timeline).collect());
             history.execute_discrete(batch, doc);
         }
+    }
+}
+
+/// The [`draw_embedded`] counterpart to [`apply_action`]: convert this
+/// frame's collected [`KfAction`]s into a single [`PanelAction`] for the
+/// `PropPanelCtx` boundary (`draw_embedded` has no `&mut CommandHistory` —
+/// see `clip_inspector.rs`'s module doc) instead of committing directly. In
+/// practice at most one `KfAction` fires per frame (a click or a
+/// drag-release), so the batch branch only fires for a `Move` gesture's
+/// remove+set pair.
+fn kf_actions_to_panel_action(
+    project: &TimelineProject,
+    actions: Vec<KfAction>,
+) -> Option<PanelAction> {
+    let mut cmds: Vec<TimelineCmd> = Vec::new();
+    for a in actions {
+        cmds.extend(kf_action_cmds(project, a));
+    }
+    match cmds.len() {
+        0 => None,
+        1 => Some(PanelAction::ClipEditDiscrete(
+            cmds.into_iter().next().expect("len==1"),
+        )),
+        _ => Some(PanelAction::ClipEditBatch(cmds)),
     }
 }
 
@@ -508,13 +554,34 @@ fn save_state(ctx: &egui::Context, st: EditorState) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(STATE_ID), st));
 }
 
+/// Reset the row/keyframe selection when the targeted clip changes, and clamp
+/// `sel_row` to the (possibly shrunk) row list. Shared by [`draw_window`] and
+/// [`draw_embedded`] — both surfaces read the same [`EditorState`] blob (see
+/// `draw_embedded`'s doc comment for why that's correct, not a state-sync
+/// bug), so this keeps "what changed" agreement between them in one place
+/// (13 §5.2).
+fn sync_state_for_clip(st: &mut EditorState, clip_id: ClipId, rows_len: usize) {
+    if st.clip != Some(clip_id) {
+        st.clip = Some(clip_id);
+        st.sel_row = 0;
+        st.sel_kf_at = None;
+    }
+    if st.sel_row >= rows_len {
+        st.sel_row = 0;
+    }
+}
+
 // ── Public: floating curve editor window ─────────────────────────────────────
 
-/// The floating keyframe / curve editor (04 §4.1). Auto-targets the clip
-/// selected in the timeline (opening on selection change); the window's close
-/// button clears the target until a different clip is selected. All state lives
-/// in egui memory + the passed `target` field, so no new `PhotonicApp` fields are
-/// required.
+/// The floating keyframe / curve editor (04 §4.1). No longer auto-*opens* on
+/// a timeline-selection change (G-9 — that job now belongs to the
+/// always-visible [`draw_embedded`] section in `clip_inspector.rs`); it only
+/// *follows* the selection to stay in sync while the user already has it
+/// open (so a popped-out window doesn't go stale showing a deselected clip).
+/// Opened by an explicit `target = Some(clip_id)` write — a keyframe-diamond
+/// click or the docked section's pop-out button (both in `clip_inspector.rs`)
+/// — and the window's close button clears it. All state lives in egui memory
+/// + the passed `target` field, so no new `PhotonicApp` fields are required.
 pub(crate) fn draw_window(
     ctx: &egui::Context,
     doc: &mut Document,
@@ -525,18 +592,16 @@ pub(crate) fn draw_window(
 ) {
     let mut st = load_state(ctx);
 
-    // Auto-open on a timeline-selection change (select a clip → its keyframes
-    // appear; close → stays closed until a different clip is picked).
+    // Follow the timeline selection while already open; never auto-open.
     let sel = selection.first().copied();
     if !st.seeded {
         st.last_selection = sel;
         st.seeded = true;
-        if sel.is_some() {
+    } else if sel != st.last_selection {
+        st.last_selection = sel;
+        if target.is_some() {
             *target = sel;
         }
-    } else if sel != st.last_selection {
-        *target = sel;
-        st.last_selection = sel;
     }
 
     let Some(clip_id) = *target else {
@@ -557,16 +622,8 @@ pub(crate) fn draw_window(
         return;
     };
 
-    if st.clip != Some(clip_id) {
-        st.clip = Some(clip_id);
-        st.sel_row = 0;
-        st.sel_kf_at = None;
-    }
-
     let rows = build_rows(&clip);
-    if st.sel_row >= rows.len() {
-        st.sel_row = 0;
-    }
+    sync_state_for_clip(&mut st, clip_id, rows.len());
 
     let mut actions: Vec<KfAction> = Vec::new();
     let mut open = true;
@@ -591,6 +648,95 @@ pub(crate) fn draw_window(
     for a in actions {
         apply_action(doc, history, a);
     }
+}
+
+// ── Public: docked curve editor (Clip Inspector section, G-9) ───────────────
+
+/// Fixed heights for [`draw_embedded`]'s two stacked regions. `egui`
+/// panels/scroll-areas need an explicit size when nested inside another
+/// panel's own scroll area (the Clip Inspector body already scrolls) — else
+/// `available_size()` reports the (effectively unbounded) remaining scroll
+/// content height and the section balloons to fill it.
+const EMBEDDED_PICKER_HEIGHT: f32 = 110.0;
+const EMBEDDED_CURVE_HEIGHT: f32 = 190.0;
+
+/// `PropPanelCtx` (`clip_inspector.rs`'s boundary) carries no live playhead —
+/// threading one through would touch `panels/mod.rs` + `app/mod.rs`, outside
+/// this story's territory. Returning a tick one before `clip.start` makes
+/// every `playhead_local` call below resolve to "off-clip" deterministically
+/// (no arithmetic overflow risk, unlike an extreme sentinel), so the picker's
+/// live-value column reads `—` instead of a wrong/stale number, and the
+/// add/remove-at-playhead diamond click + playhead marker line are simply
+/// inert — the floating window (which *does* get the real playhead from
+/// `app/timeline/mod.rs`) remains the live-playhead surface; see the pop-out
+/// button in `clip_inspector.rs`'s "Keyframes" section.
+fn no_live_playhead(clip: &Clip) -> Tick {
+    Tick(clip.start.0 - 1)
+}
+
+/// The docked keyframe/curve editor (G-9 effect-controls unification): the
+/// same [`draw_prop_picker`] + [`draw_curve_area`] drawing `draw_window` uses
+/// for its side-by-side floating layout, stacked vertically instead (picker
+/// above curve) to fit the narrow left-rail Clip Inspector. Called from
+/// `clip_inspector.rs`'s "Keyframes" collapsible section for the selected
+/// clip; full curve editing (drag keyframes, Bezier handles, double-click
+/// add, right-click ease/delete, Del key) works exactly as in the floating
+/// window — only the live-playhead value readout and add/remove-at-playhead
+/// diamond are inert here (no playhead at this boundary; see
+/// [`no_live_playhead`]).
+///
+/// Shares [`EditorState`] (egui memory, `STATE_ID`) with `draw_window` rather
+/// than keeping separate state: both surfaces always target the same clip
+/// when the float is open (`draw_window` follows the selection while open,
+/// see its doc comment), so one shared row/keyframe selection is correct —
+/// popping out mid-edit doesn't lose "which property/keyframe was selected".
+pub(crate) fn draw_embedded(
+    ui: &mut egui::Ui,
+    project: &TimelineProject,
+    clip: &Clip,
+) -> Option<PanelAction> {
+    let rows = build_rows(clip);
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("No animatable properties on this clip.")
+                .weak()
+                .small(),
+        );
+        return None;
+    }
+
+    let fps = find_clip_fps(project, clip.id).unwrap_or(FrameRate::FPS_30);
+    let playhead = no_live_playhead(clip);
+
+    let mut st = load_state(ui.ctx());
+    sync_state_for_clip(&mut st, clip.id, rows.len());
+
+    ui.label(
+        egui::RichText::new(
+            "Curve editing is fully live here; live playhead value + add/remove-at-playhead \
+             need the pop-out window.",
+        )
+        .weak()
+        .small(),
+    );
+
+    let mut actions: Vec<KfAction> = Vec::new();
+
+    let picker_w = ui.available_width();
+    ui.allocate_ui(Vec2::new(picker_w, EMBEDDED_PICKER_HEIGHT), |ui| {
+        draw_prop_picker(ui, clip, playhead, &rows, &mut st, &mut actions);
+    });
+
+    ui.separator();
+
+    let curve_w = ui.available_width();
+    ui.allocate_ui(Vec2::new(curve_w, EMBEDDED_CURVE_HEIGHT), |ui| {
+        draw_curve_area(ui, clip, fps, playhead, &rows, &mut st, &mut actions);
+    });
+
+    save_state(ui.ctx(), st);
+
+    kf_actions_to_panel_action(project, actions)
 }
 
 #[allow(clippy::too_many_arguments)]
