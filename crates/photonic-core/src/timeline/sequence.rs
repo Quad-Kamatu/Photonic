@@ -270,6 +270,12 @@ pub struct Track {
     pub enabled: bool,
     #[serde(default)]
     pub locked: bool,
+    /// Sync lock (14 §M-9): when set, ripple/insert edits are meant to shift
+    /// this track in lock-step with the other sync-locked tracks. This is the
+    /// data + toggle half only; the ripple-propagation wiring across sync-locked
+    /// tracks is a later GUI concern.
+    #[serde(default)]
+    pub sync_lock: bool,
     /// volume/pan/solo, fx chain, automation (09).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<TrackAudio>,
@@ -291,6 +297,7 @@ impl Track {
             clips: Vec::new(),
             enabled: true,
             locked: false,
+            sync_lock: false,
             audio: if kind == TrackKind::Audio {
                 Some(TrackAudio::new())
             } else {
@@ -385,6 +392,26 @@ mod tests {
     fn content_end_is_max_clip_end() {
         let s = seq_with(vid_track_with(vec![(0, 100), (100, 50)]));
         assert_eq!(s.content_end(), Tick(150));
+    }
+
+    #[test]
+    fn track_serde_round_trips_including_sync_lock() {
+        let mut t = Track::new(TrackKind::Video, "V1");
+        t.sync_lock = true;
+        t.clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)));
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Track = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+        assert!(back.sync_lock);
+    }
+
+    #[test]
+    fn track_sync_lock_defaults_false_when_absent_in_json() {
+        // A pre-sync-lock serialized track (no `sync_lock` key) still loads.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"V1","kind":"video"}"#;
+        let t: Track = serde_json::from_str(json).unwrap();
+        assert!(!t.sync_lock);
     }
 
     #[test]

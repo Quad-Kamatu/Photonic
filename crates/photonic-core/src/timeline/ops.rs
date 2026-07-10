@@ -265,6 +265,22 @@ pub fn set_track_prop(
     })
 }
 
+/// Toggle a track's sync-lock (14 §M-9). Data + toggle only — the
+/// ripple-propagation across sync-locked tracks is a later GUI concern. Reuses
+/// [`set_track_prop`] (a whole-[`TrackSettings`] diff) so undo/redo rides the
+/// existing `SetTrackProp` path.
+pub fn toggle_sync_lock(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let mut new = TrackSettings::of(t);
+    new.sync_lock = !new.sync_lock;
+    set_track_prop(p, id, track_id, new)
+}
+
 // ── Clips ───────────────────────────────────────────────────────────────────
 
 pub fn insert_clip(
@@ -1332,6 +1348,311 @@ pub fn assign_asset_bin(
     })
 }
 
+// ── 3/4-point editing: insert / overwrite / lift / extract (16 §2, gap L-1) ──
+//
+// The four reference-NLE edit ops. Each is a pure fn returning a batch of the
+// existing timeline primitives (`SplitClip`/`RemoveClip`/`RippleEdit`/
+// `TrimClip`/`InsertClip`) for the caller to wrap in ONE `Command::Batch` (one
+// undo step). The command order is chosen so every intermediate apply-state
+// stays invariant-valid (the debug-time per-command `validate()` in
+// `TimelineCmd::apply`): removes/shrinks precede any insert into freshly-opened
+// space, and multi-clip shifts ride a single atomic `RippleEdit`.
+
+/// New timing for trimming a clip's OUT-point back to `boundary` (shrink; the
+/// clip keeps its `start`/`source_in`).
+fn trim_end_to(c: &Clip, boundary: Tick) -> ClipTiming {
+    ClipTiming {
+        start: c.start,
+        duration: boundary - c.start,
+        source_in: c.source_in,
+    }
+}
+
+/// New timing for trimming a clip's IN-point forward to `boundary` (shrink; the
+/// timeline `start` moves to `boundary` and `source_in` advances by the
+/// speed-scaled delta).
+fn trim_start_to(c: &Clip, boundary: Tick) -> ClipTiming {
+    let delta = boundary - c.start;
+    ClipTiming {
+        start: boundary,
+        duration: c.duration - delta,
+        source_in: c.source_in + c.speed.source_delta(delta),
+    }
+}
+
+/// Reject a source clip whose nested sequence would cycle (mirrors
+/// [`insert_clip`]); a no-op for every other source kind.
+fn reject_nested_cycle(
+    p: &TimelineProject,
+    id: SequenceId,
+    source: &Clip,
+) -> Result<(), EditError> {
+    if let ClipSource::NestedSequence { sequence } = &source.source {
+        if *sequence == id || nests_into(p, *sequence, id) {
+            return Err(EditError::SequenceCycle);
+        }
+    }
+    Ok(())
+}
+
+/// Shared core of lift/overwrite/extract: clear the content in `[rs, re)` on
+/// `t`, then shift every clip that survives at/after `re` by `delta`
+/// (`Tick::ZERO` = leave the gap, for lift/overwrite; `-(re-rs)` = close it, for
+/// extract). Emits removes first, then one atomic `RippleEdit` carrying every
+/// timing change (trims + shifts) with each clip's *original* timing as `old`,
+/// then an `InsertClip` for the tail of a clip that spanned the whole range —
+/// an order in which every intermediate state is invariant-valid.
+fn clear_and_shift(
+    t: &Track,
+    id: SequenceId,
+    track_id: TrackId,
+    rs: Tick,
+    re: Tick,
+    delta: Tick,
+) -> Vec<TimelineCmd> {
+    let mut removes: Vec<TimelineCmd> = Vec::new();
+    let mut changes: Vec<(ClipId, ClipTiming, ClipTiming)> = Vec::new();
+    let mut tail: Option<Clip> = None;
+
+    for c in &t.clips {
+        if c.end() <= rs {
+            continue; // entirely left of the range — untouched
+        }
+        if c.start >= re {
+            // Entirely right of the range — shift wholesale by `delta`.
+            if delta.0 != 0 {
+                let old = ClipTiming::of(c);
+                changes.push((
+                    c.id,
+                    old,
+                    ClipTiming {
+                        start: c.start + delta,
+                        ..old
+                    },
+                ));
+            }
+            continue;
+        }
+        // `c` intersects the range.
+        match (c.start < rs, c.end() > re) {
+            (false, false) => {
+                // Fully inside the range — remove.
+                removes.push(TimelineCmd::RemoveClip {
+                    seq: id,
+                    track: track_id,
+                    clip: Box::new(c.clone()),
+                });
+            }
+            (true, false) => {
+                // Left overhang — trim the OUT-point to `rs` (stays put).
+                changes.push((c.id, ClipTiming::of(c), trim_end_to(c, rs)));
+            }
+            (false, true) => {
+                // Right overhang — trim the IN-point to `re`, then shift by delta.
+                let post = trim_start_to(c, re);
+                changes.push((
+                    c.id,
+                    ClipTiming::of(c),
+                    ClipTiming {
+                        start: post.start + delta,
+                        ..post
+                    },
+                ));
+            }
+            (true, true) => {
+                // Spans the whole range — head stays trimmed to `[start, rs)`;
+                // the tail becomes a fresh clip at `re + delta`.
+                changes.push((c.id, ClipTiming::of(c), trim_end_to(c, rs)));
+                let mut nt = c.clone();
+                nt.id = ClipId::new();
+                nt.transition_in = None;
+                nt.transition_out = None;
+                let post = trim_start_to(c, re);
+                ClipTiming {
+                    start: post.start + delta,
+                    ..post
+                }
+                .apply_to(&mut nt);
+                tail = Some(nt);
+            }
+        }
+    }
+
+    let mut cmds = removes;
+    if !changes.is_empty() {
+        cmds.push(TimelineCmd::RippleEdit {
+            seq: id,
+            track: track_id,
+            changes,
+        });
+    }
+    if let Some(nt) = tail {
+        cmds.push(TimelineCmd::InsertClip {
+            seq: id,
+            track: track_id,
+            clip: Box::new(nt),
+        });
+    }
+    cmds
+}
+
+/// **Insert edit** (3-point, Premiere `,`): open a gap of `source`'s duration at
+/// `at` on `target_track` — splitting any clip straddling `at` and rippling all
+/// clips at/after `at` on that track RIGHT — then drop `source` into the gap.
+/// The track's content grows by the source duration. Returns a batch
+/// (`SplitClip?`, `RippleEdit?`, `InsertClip`) for the caller to wrap in one
+/// undo step.
+pub fn insert_edit(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    at: Tick,
+    source: Clip,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let shift = source.duration;
+    if shift.0 <= 0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    if at.0 < 0 {
+        return Err(EditError::Overlap);
+    }
+    reject_nested_cycle(p, id, &source)?;
+
+    let mut cmds = Vec::new();
+    let mut changes: Vec<(ClipId, ClipTiming, ClipTiming)> = Vec::new();
+
+    // 1. Split a clip straddling `at`; its right half must ripple too.
+    if let Some(c) = t.clips.iter().find(|c| c.start < at && at < c.end()) {
+        let new_clip_id = ClipId::new();
+        cmds.push(TimelineCmd::SplitClip {
+            seq: id,
+            track: track_id,
+            clip: c.id,
+            at,
+            new_clip_id,
+        });
+        // Post-split timing of the right half (mirrors `SplitClip::apply`, which
+        // advances `source_in` by the left-half duration without speed scaling).
+        let right = ClipTiming {
+            start: at,
+            duration: c.end() - at,
+            source_in: c.source_in + (at - c.start).max(Tick::ZERO),
+        };
+        changes.push((
+            new_clip_id,
+            right,
+            ClipTiming {
+                start: at + shift,
+                ..right
+            },
+        ));
+    }
+
+    // 2. Ripple every clip at/after `at` right by the source duration.
+    for other in &t.clips {
+        if other.start >= at {
+            let old = ClipTiming::of(other);
+            changes.push((
+                other.id,
+                old,
+                ClipTiming {
+                    start: other.start + shift,
+                    ..old
+                },
+            ));
+        }
+    }
+    if !changes.is_empty() {
+        cmds.push(TimelineCmd::RippleEdit {
+            seq: id,
+            track: track_id,
+            changes,
+        });
+    }
+
+    // 3. Drop the source clip into the opened gap at `at`.
+    let mut placed = source;
+    placed.start = at;
+    cmds.push(TimelineCmd::InsertClip {
+        seq: id,
+        track: track_id,
+        clip: Box::new(placed),
+    });
+    Ok(cmds)
+}
+
+/// **Overwrite edit** (Premiere `.`): drop `source` at `at` on `target_track`,
+/// replacing whatever it covers — trimming partially-covered clips, removing
+/// fully-covered ones, splitting a clip that spans the region — with NO ripple.
+/// Timeline duration is unchanged unless `source` extends past the old end.
+pub fn overwrite_edit(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    at: Tick,
+    source: Clip,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let dur = source.duration;
+    if dur.0 <= 0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    if at.0 < 0 {
+        return Err(EditError::Overlap);
+    }
+    reject_nested_cycle(p, id, &source)?;
+
+    // Clear `[at, at+dur)` leaving the gap (no ripple), then fill it.
+    let mut cmds = clear_and_shift(t, id, track_id, at, at + dur, Tick::ZERO);
+    let mut placed = source;
+    placed.start = at;
+    cmds.push(TimelineCmd::InsertClip {
+        seq: id,
+        track: track_id,
+        clip: Box::new(placed),
+    });
+    Ok(cmds)
+}
+
+/// **Lift edit** (Premiere `;`): remove the content in `range` on `track`,
+/// leaving a gap (no ripple). Timeline duration is unchanged.
+pub fn lift_edit(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    range: (Tick, Tick),
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let (rs, re) = range;
+    if re <= rs {
+        return Err(EditError::NonPositiveDuration);
+    }
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    Ok(clear_and_shift(t, id, track_id, rs, re, Tick::ZERO))
+}
+
+/// **Extract edit** (Premiere `'`): remove the content in `range` on `track`
+/// AND ripple everything after it LEFT to close the gap (generalizes
+/// [`ripple_delete`]). The track's content shrinks by the range width.
+pub fn extract_edit(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    range: (Tick, Tick),
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let (rs, re) = range;
+    if re <= rs {
+        return Err(EditError::NonPositiveDuration);
+    }
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    // Right-of-range content closes the gap by shifting left by its width.
+    Ok(clear_and_shift(t, id, track_id, rs, re, Tick(rs.0 - re.0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::time::FrameRate;
@@ -1643,5 +1964,415 @@ mod tests {
         assert!(!find_clip(&cleared, seq_id, track_id, clip_id)
             .reframe
             .contains_key(&1));
+    }
+
+    // ── Sync lock (M-9) ──────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_sync_lock_flips_and_is_undo_idempotent() {
+        let (doc, seq_id, track_id, _) = fixture();
+        let project = doc.timeline.as_ref().unwrap();
+        assert!(
+            !project.sequences[&seq_id]
+                .track(track_id)
+                .unwrap()
+                .sync_lock
+        );
+
+        let cmd = toggle_sync_lock(project, seq_id, track_id).unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+
+        let mut on = doc.clone();
+        Command::Timeline(cmd).apply(&mut on);
+        assert!(
+            on.timeline.as_ref().unwrap().sequences[&seq_id]
+                .track(track_id)
+                .unwrap()
+                .sync_lock,
+            "toggle must set sync_lock"
+        );
+
+        // A second toggle flips it back off.
+        let project = on.timeline.as_ref().unwrap();
+        let cmd2 = toggle_sync_lock(project, seq_id, track_id).unwrap();
+        let mut off = on.clone();
+        Command::Timeline(cmd2).apply(&mut off);
+        assert!(
+            !off.timeline.as_ref().unwrap().sequences[&seq_id]
+                .track(track_id)
+                .unwrap()
+                .sync_lock
+        );
+    }
+
+    // ── 3/4-point editing (insert / overwrite / lift / extract) ──────────
+
+    /// A document with one video track carrying `spans` (`(start, dur)` pairs,
+    /// assumed sorted + non-overlapping). Returns the ids to address the track.
+    fn track_fixture(spans: &[(i64, i64)]) -> (Document, SequenceId, TrackId) {
+        let mut project = TimelineProject::new();
+        let mut sequence = Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
+        let mut vtrack = Track::new(TrackKind::Video, "V1");
+        for (start, dur) in spans {
+            vtrack
+                .clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(*start), Tick(*dur)));
+        }
+        let track_id = vtrack.id;
+        sequence.video_tracks.push(vtrack);
+        let seq_id = sequence.id;
+        project.insert_sequence(sequence);
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+        (doc, seq_id, track_id)
+    }
+
+    fn the_track(doc: &Document, seq_id: SequenceId, track_id: TrackId) -> &Track {
+        doc.timeline.as_ref().unwrap().sequences[&seq_id]
+            .track(track_id)
+            .unwrap()
+    }
+
+    /// `(start, duration)` of every clip on the track, in stored order.
+    fn spans_of(doc: &Document, seq_id: SequenceId, track_id: TrackId) -> Vec<(i64, i64)> {
+        the_track(doc, seq_id, track_id)
+            .clips
+            .iter()
+            .map(|c| (c.start.0, c.duration.0))
+            .collect()
+    }
+
+    /// Max clip end on the track (its content length); 0 when empty.
+    fn track_end(doc: &Document, seq_id: SequenceId, track_id: TrackId) -> i64 {
+        the_track(doc, seq_id, track_id)
+            .clips
+            .iter()
+            .map(|c| c.end().0)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn as_batch(cmds: &[TimelineCmd]) -> Command {
+        Command::Batch(cmds.iter().cloned().map(Command::Timeline).collect())
+    }
+
+    fn apply_batch(doc: &Document, cmds: &[TimelineCmd]) -> Document {
+        let mut d = doc.clone();
+        as_batch(cmds).apply(&mut d);
+        d
+    }
+
+    /// A batch (the shape the four edit ops return) round-trips: `apply →
+    /// inverse` restores the pre-state, and `apply → inverse → apply`
+    /// reproduces the post-apply state (undo idempotency).
+    fn assert_batch_undo_roundtrip(doc: &Document, cmds: &[TimelineCmd]) {
+        let before = doc.timeline.clone();
+        let batch = as_batch(cmds);
+
+        let mut d1 = doc.clone();
+        batch.apply(&mut d1);
+        let after_apply = d1.timeline.clone();
+
+        let inv = batch.inverse(&d1).expect("edit batches always invert");
+        let mut d2 = d1.clone();
+        inv.apply(&mut d2);
+        assert_eq!(d2.timeline, before, "inverse did not restore the pre-state");
+
+        let mut d3 = d2.clone();
+        batch.apply(&mut d3);
+        assert_eq!(
+            d3.timeline, after_apply,
+            "apply -> inverse -> apply != apply"
+        );
+    }
+
+    fn validate_ok(doc: &Document, seq_id: SequenceId) {
+        let s = &doc.timeline.as_ref().unwrap().sequences[&seq_id];
+        assert!(s.validate().is_ok(), "invariant broken: {:?}", s.validate());
+    }
+
+    fn adj_clip(dur: i64) -> Clip {
+        Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick(dur))
+    }
+
+    // ── Insert ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn insert_edit_grows_track_by_source_duration() {
+        // `at` straddles the middle clip; the whole track grows by the source.
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100), (200, 100)]);
+        let before_end = track_end(&doc, seq_id, track_id);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = insert_edit(p, seq_id, track_id, Tick(150), adj_clip(50)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        assert_eq!(track_end(&out, seq_id, track_id), before_end + 50);
+        // The split boundary produced a source clip in the opened gap [150,200).
+        assert_eq!(
+            spans_of(&out, seq_id, track_id),
+            vec![(0, 100), (100, 50), (150, 50), (200, 50), (250, 100)]
+        );
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn insert_edit_at_clip_boundary_ripples_without_splitting() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100)]);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = insert_edit(p, seq_id, track_id, Tick(100), adj_clip(40)).unwrap();
+        // No SplitClip — `at` is a cut point, not inside a clip.
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, TimelineCmd::SplitClip { .. })));
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+        assert_eq!(
+            spans_of(&out, seq_id, track_id),
+            vec![(0, 100), (100, 40), (140, 100)]
+        );
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn insert_edit_beyond_content_leaves_a_lead_gap() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100)]);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = insert_edit(p, seq_id, track_id, Tick(300), adj_clip(50)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+        assert_eq!(track_end(&out, seq_id, track_id), 350);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    // ── Overwrite ────────────────────────────────────────────────────────
+
+    #[test]
+    fn overwrite_edit_keeps_duration_and_punches_a_hole() {
+        // Source lands inside one long clip → head + source + tail, same end.
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 300)]);
+        let before_end = track_end(&doc, seq_id, track_id);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = overwrite_edit(p, seq_id, track_id, Tick(100), adj_clip(50)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        assert_eq!(track_end(&out, seq_id, track_id), before_end);
+        assert_eq!(
+            spans_of(&out, seq_id, track_id),
+            vec![(0, 100), (100, 50), (150, 150)]
+        );
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn overwrite_edit_removes_fully_covered_and_trims_neighbours() {
+        let (doc, seq_id, track_id) =
+            track_fixture(&[(0, 100), (100, 100), (200, 100), (300, 100)]);
+        let p = doc.timeline.as_ref().unwrap();
+        // [80, 320) covers clip #2 fully, trims the tail of #1 and head of #4.
+        let cmds = overwrite_edit(p, seq_id, track_id, Tick(80), adj_clip(240)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+        assert_eq!(
+            spans_of(&out, seq_id, track_id),
+            vec![(0, 80), (80, 240), (320, 80)]
+        );
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn overwrite_edit_past_end_extends() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100)]);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = overwrite_edit(p, seq_id, track_id, Tick(50), adj_clip(200)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+        assert_eq!(spans_of(&out, seq_id, track_id), vec![(0, 50), (50, 200)]);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    // ── Lift ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lift_edit_keeps_duration_and_leaves_a_gap() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100), (200, 100)]);
+        let before_end = track_end(&doc, seq_id, track_id);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = lift_edit(p, seq_id, track_id, (Tick(100), Tick(200))).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        assert_eq!(track_end(&out, seq_id, track_id), before_end);
+        // The middle clip is gone; the [100,200) gap remains open.
+        assert_eq!(spans_of(&out, seq_id, track_id), vec![(0, 100), (200, 100)]);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn lift_edit_splits_a_spanning_clip_into_head_and_tail() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 300)]);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = lift_edit(p, seq_id, track_id, (Tick(100), Tick(200))).unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+        assert_eq!(spans_of(&out, seq_id, track_id), vec![(0, 100), (200, 100)]);
+        // Nothing intersects the lifted range.
+        for c in &the_track(&out, seq_id, track_id).clips {
+            assert!(c.end().0 <= 100 || c.start.0 >= 200);
+        }
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    // ── Extract ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_edit_shrinks_track_by_range_width() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100), (200, 100)]);
+        let before_end = track_end(&doc, seq_id, track_id);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = extract_edit(p, seq_id, track_id, (Tick(100), Tick(200))).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        assert_eq!(track_end(&out, seq_id, track_id), before_end - 100);
+        // The gap closed: the third clip slid left into the second's slot.
+        assert_eq!(spans_of(&out, seq_id, track_id), vec![(0, 100), (100, 100)]);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn extract_edit_spanning_clip_closes_the_gap() {
+        // One clip spans the whole range and there is trailing content to slide.
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 300), (300, 100)]);
+        let before_end = track_end(&doc, seq_id, track_id);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = extract_edit(p, seq_id, track_id, (Tick(100), Tick(200))).unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+        assert_eq!(track_end(&out, seq_id, track_id), before_end - 100);
+        assert_eq!(
+            spans_of(&out, seq_id, track_id),
+            vec![(0, 100), (100, 100), (200, 100)]
+        );
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn extract_edit_matches_ripple_delete_for_a_whole_clip_range() {
+        // Extract over exactly one clip's span equals ripple_delete of it.
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100), (200, 100)]);
+        let p = doc.timeline.as_ref().unwrap();
+        let extract = extract_edit(p, seq_id, track_id, (Tick(100), Tick(200))).unwrap();
+        let mid = the_track(&doc, seq_id, track_id).clips[1].id;
+        let ripple = ripple_delete(p, seq_id, track_id, mid).unwrap();
+
+        let a = apply_batch(&doc, &extract);
+        let b = apply_batch(&doc, &ripple);
+        assert_eq!(
+            spans_of(&a, seq_id, track_id),
+            spans_of(&b, seq_id, track_id)
+        );
+    }
+
+    // ── Invariant proptests (sorted / non-overlap / undo) ────────────────
+
+    use proptest::prelude::*;
+
+    /// A random sorted, non-overlapping span set, built by walking a cursor
+    /// forward through random (gap, duration) pairs.
+    fn arb_spans() -> impl Strategy<Value = Vec<(i64, i64)>> {
+        prop::collection::vec((0i64..200, 1i64..200), 0..8).prop_map(|pairs| {
+            let mut cursor = 0i64;
+            let mut spans = Vec::new();
+            for (gap, dur) in pairs {
+                cursor += gap;
+                spans.push((cursor, dur));
+                cursor += dur;
+            }
+            spans
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn insert_edit_preserves_invariants_and_end(
+            spans in arb_spans(),
+            at in 0i64..2500,
+            dur in 1i64..300,
+        ) {
+            let (doc, seq_id, track_id) = track_fixture(&spans);
+            let before_end = track_end(&doc, seq_id, track_id);
+            let p = doc.timeline.as_ref().unwrap();
+            let cmds = insert_edit(p, seq_id, track_id, Tick(at), adj_clip(dur)).unwrap();
+            let out = apply_batch(&doc, &cmds);
+            let s = &out.timeline.as_ref().unwrap().sequences[&seq_id];
+            prop_assert!(s.validate().is_ok(), "invariant broken: {:?}", s.validate());
+            prop_assert_eq!(track_end(&out, seq_id, track_id), before_end.max(at) + dur);
+            assert_batch_undo_roundtrip(&doc, &cmds);
+        }
+
+        #[test]
+        fn overwrite_edit_preserves_invariants_and_end(
+            spans in arb_spans(),
+            at in 0i64..2500,
+            dur in 1i64..300,
+        ) {
+            let (doc, seq_id, track_id) = track_fixture(&spans);
+            let before_end = track_end(&doc, seq_id, track_id);
+            let p = doc.timeline.as_ref().unwrap();
+            let cmds = overwrite_edit(p, seq_id, track_id, Tick(at), adj_clip(dur)).unwrap();
+            let out = apply_batch(&doc, &cmds);
+            let s = &out.timeline.as_ref().unwrap().sequences[&seq_id];
+            prop_assert!(s.validate().is_ok(), "invariant broken: {:?}", s.validate());
+            prop_assert_eq!(track_end(&out, seq_id, track_id), before_end.max(at + dur));
+            assert_batch_undo_roundtrip(&doc, &cmds);
+        }
+
+        #[test]
+        fn lift_edit_preserves_invariants_and_clears_range(
+            spans in arb_spans(),
+            rs in 0i64..2500,
+            width in 1i64..400,
+        ) {
+            let re = rs + width;
+            let (doc, seq_id, track_id) = track_fixture(&spans);
+            let before_end = track_end(&doc, seq_id, track_id);
+            let p = doc.timeline.as_ref().unwrap();
+            let cmds = lift_edit(p, seq_id, track_id, (Tick(rs), Tick(re))).unwrap();
+            let out = apply_batch(&doc, &cmds);
+            let s = &out.timeline.as_ref().unwrap().sequences[&seq_id];
+            prop_assert!(s.validate().is_ok(), "invariant broken: {:?}", s.validate());
+            // Lift never shifts content, so the track can only shorten, never grow.
+            prop_assert!(track_end(&out, seq_id, track_id) <= before_end);
+            // Nothing intersects the lifted (still-open) range.
+            for c in &the_track(&out, seq_id, track_id).clips {
+                prop_assert!(c.end().0 <= rs || c.start.0 >= re);
+            }
+            assert_batch_undo_roundtrip(&doc, &cmds);
+        }
+
+        #[test]
+        fn extract_edit_preserves_invariants_and_shrinks(
+            spans in arb_spans(),
+            rs in 0i64..2500,
+            width in 1i64..400,
+        ) {
+            let re = rs + width;
+            let (doc, seq_id, track_id) = track_fixture(&spans);
+            let before_end = track_end(&doc, seq_id, track_id);
+            let p = doc.timeline.as_ref().unwrap();
+            let cmds = extract_edit(p, seq_id, track_id, (Tick(rs), Tick(re))).unwrap();
+            let out = apply_batch(&doc, &cmds);
+            let s = &out.timeline.as_ref().unwrap().sequences[&seq_id];
+            prop_assert!(s.validate().is_ok(), "invariant broken: {:?}", s.validate());
+            // With content strictly past the range, the gap closes by its width.
+            if re < before_end {
+                prop_assert_eq!(track_end(&out, seq_id, track_id), before_end - width);
+            }
+            assert_batch_undo_roundtrip(&doc, &cmds);
+        }
     }
 }

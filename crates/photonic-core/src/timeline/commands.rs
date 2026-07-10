@@ -71,6 +71,10 @@ pub struct TrackSettings {
     pub name: String,
     pub enabled: bool,
     pub locked: bool,
+    /// Sync lock (14 §M-9) — serde-defaulted so pre-existing serialized
+    /// `SetTrackProp` commands stay loadable.
+    #[serde(default)]
+    pub sync_lock: bool,
     pub height_px: f32,
     pub audio: Option<TrackAudio>,
 }
@@ -81,6 +85,7 @@ impl TrackSettings {
             name: t.name.clone(),
             enabled: t.enabled,
             locked: t.locked,
+            sync_lock: t.sync_lock,
             height_px: t.height_px,
             audio: t.audio.clone(),
         }
@@ -89,6 +94,7 @@ impl TrackSettings {
         t.name = self.name.clone();
         t.enabled = self.enabled;
         t.locked = self.locked;
+        t.sync_lock = self.sync_lock;
         t.height_px = self.height_px;
         t.audio = self.audio.clone();
     }
