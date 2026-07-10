@@ -23,6 +23,10 @@
 use crate::panels::{PanelAction, PropPanelCtx};
 use egui::{Color32, RichText, Ui};
 use egui_phosphor::regular as ph;
+// `SpeedKey` isn't re-exported at `timeline::` root (only `SpeedMap` is);
+// reached via the `clip` submodule directly, same precedent as
+// `app/timeline/mod.rs`'s `use photonic_core::timeline::clip::LinkGroupId`.
+use photonic_core::timeline::clip::SpeedKey;
 use photonic_core::timeline::{
     ops, prop_registry, Clip, ClipId, EffectKind, PropTargetKind, PropValue, Ratio, SequenceId,
     SpeedMap, Tick, TimelineProject, TrackId, Transition, TransitionKind, TransitionParams,
@@ -239,7 +243,35 @@ fn transform_row_suffixed(ui: &mut Ui, label: &str, v: &mut f64, suffix: &str) -
     ui.add(drag).changed()
 }
 
-// ── Speed (13 §5.1, 01 §5.1) ─────────────────────────────────────────────────
+// ── Speed (13 §5.1, 01 §5.1, 14-nle-parity G-11) ─────────────────────────────
+
+/// UI percent + reverse flag → an exact `Ratio` at 1/1000 precision — exact
+/// enough for a UI-driven speed field (01 §5.1's "exact rational" rule
+/// governs storage/eval, not that every possible value must be
+/// keyboard-reachable at infinite precision). Shared by the constant-speed
+/// field and every ramp-point row below.
+fn ratio_from_pct(pct: f64, reversed: bool) -> Ratio {
+    let den: u32 = 1000;
+    let mag = ((pct / 100.0) * den as f64).round().max(1.0) as i32;
+    Ratio::new(if reversed { -mag } else { mag }, den)
+}
+
+/// The piecewise-constant ramp speed in effect at clip-relative tick `t`,
+/// mirroring `photonic_core::timeline::clip`'s private `integrate_ramp`
+/// segment definition (the first key's ratio holds before it, the last key's
+/// after it; an empty ramp is identity). `sorted` must already be sorted by
+/// `at` (every caller here sorts once up front rather than re-sorting per
+/// lookup). Used only to seed a newly-added point with the speed already in
+/// effect there, so adding a point never itself changes existing playback.
+fn ramp_ratio_at(sorted: &[SpeedKey], t: Tick) -> Ratio {
+    sorted
+        .iter()
+        .rev()
+        .find(|k| k.at <= t)
+        .or_else(|| sorted.first())
+        .map(|k| k.ratio)
+        .unwrap_or(Ratio::ONE)
+}
 
 fn draw_speed_section(
     ui: &mut Ui,
@@ -253,35 +285,210 @@ fn draw_speed_section(
         .default_open(false)
         .id_salt("clip_inspector_speed")
         .show(ui, |ui| {
-            let SpeedMap::Constant(r) = clip.speed;
-            let mut pct = r.as_f64().abs() * 100.0;
-            let mut reversed = r.num < 0;
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Speed:");
-                changed |= ui
-                    .add(
+            let mut is_ramped = matches!(clip.speed, SpeedMap::Keyframed { .. });
+            let toggled = ui
+                .checkbox(&mut is_ramped, "Speed ramp (variable speed)")
+                .on_hover_text(
+                    "Off: one constant speed for the whole clip. On: a ramp of \
+                     speed points you add/edit below (G-11).",
+                )
+                .changed();
+            if toggled {
+                let mut new_clip = clip.clone();
+                new_clip.speed = if is_ramped {
+                    // Seed with a single key at tick 0 holding the current
+                    // constant ratio for the whole clip (one key covers
+                    // `(-inf, +inf)` per `integrate_ramp`), so flipping the
+                    // toggle never itself changes existing playback.
+                    let seed = match clip.speed {
+                        SpeedMap::Constant(r) => r,
+                        SpeedMap::Keyframed { .. } => Ratio::ONE,
+                    };
+                    SpeedMap::Keyframed {
+                        keys: vec![SpeedKey::new(Tick::ZERO, seed)],
+                    }
+                } else {
+                    let r = match &clip.speed {
+                        SpeedMap::Keyframed { keys } => {
+                            let mut sorted = keys.clone();
+                            sorted.sort_by_key(|k| k.at.0);
+                            ramp_ratio_at(&sorted, Tick::ZERO)
+                        }
+                        SpeedMap::Constant(r) => *r,
+                    };
+                    SpeedMap::Constant(r)
+                };
+                set_clip_discrete(project, seq, track, new_clip, action);
+            }
+            ui.add_space(2.0);
+            match &clip.speed {
+                SpeedMap::Constant(r) => {
+                    draw_constant_speed_row(ui, *r, project, seq, track, clip, action);
+                }
+                SpeedMap::Keyframed { keys } => {
+                    draw_speed_ramp_editor(ui, keys, project, seq, track, clip, action);
+                }
+            }
+        });
+}
+
+fn draw_constant_speed_row(
+    ui: &mut Ui,
+    r: Ratio,
+    project: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: &Clip,
+    action: &mut Option<PanelAction>,
+) {
+    let mut pct = r.as_f64().abs() * 100.0;
+    let mut reversed = r.num < 0;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Speed:");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut pct)
+                    .speed(1.0)
+                    .range(1.0..=10000.0)
+                    .suffix("%"),
+            )
+            .changed();
+        changed |= ui.checkbox(&mut reversed, "Reverse").changed();
+    });
+    if changed {
+        let mut new_clip = clip.clone();
+        new_clip.speed = SpeedMap::Constant(ratio_from_pct(pct, reversed));
+        set_clip_coalesced(project, seq, track, new_clip, action);
+    }
+}
+
+/// Speed-ramp editor (G-11): one row per keyframe (clip-relative position in
+/// seconds, speed %, reverse, remove), plus "Add point"/"Clear ramp". Kept
+/// deliberately simple per the story's scope — add/remove/drag-the-numeric-
+/// field editing here; full on-clip rubber-band dragging in the timeline
+/// lane is a later story (the badge in `app/timeline/clips.rs` covers the
+/// on-clip cue for now).
+fn draw_speed_ramp_editor(
+    ui: &mut Ui,
+    keys: &[SpeedKey],
+    project: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: &Clip,
+    action: &mut Option<PanelAction>,
+) {
+    ui.label(
+        RichText::new("Piecewise ramp — each point holds its speed until the next point.")
+            .color(MUTED)
+            .small(),
+    );
+    let mut sorted: Vec<SpeedKey> = keys.to_vec();
+    sorted.sort_by_key(|k| k.at.0);
+    let clip_secs = clip.duration.as_seconds_f64().max(0.01);
+
+    // One mutation per frame at most: whichever row/button changed last wins,
+    // same one-write-per-frame shape as every other section in this file.
+    let mut new_keys: Option<Vec<SpeedKey>> = None;
+    let mut discrete = false;
+
+    if sorted.is_empty() {
+        ui.label(
+            RichText::new("No ramp points yet — add one to start shaping the ramp.")
+                .color(MUTED)
+                .small(),
+        );
+    } else {
+        egui::Grid::new(("clip_speed_ramp_grid", clip.id))
+            .num_columns(4)
+            .spacing([4.0, 2.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("At").color(MUTED).small());
+                ui.label(RichText::new("Speed").color(MUTED).small());
+                ui.label(RichText::new("Rev").color(MUTED).small());
+                ui.label("");
+                ui.end_row();
+
+                for (i, key) in sorted.iter().enumerate() {
+                    let mut at_secs = key.at.as_seconds_f64();
+                    let mut pct = key.ratio.as_f64().abs() * 100.0;
+                    let mut reversed = key.ratio.num < 0;
+                    let at_resp = ui.add(
+                        egui::DragValue::new(&mut at_secs)
+                            .speed(0.05)
+                            .range(0.0..=clip_secs)
+                            .suffix("s"),
+                    );
+                    let pct_resp = ui.add(
                         egui::DragValue::new(&mut pct)
                             .speed(1.0)
                             .range(1.0..=10000.0)
                             .suffix("%"),
-                    )
-                    .changed();
-                changed |= ui.checkbox(&mut reversed, "Reverse").changed();
+                    );
+                    let rev_resp = ui.checkbox(&mut reversed, "");
+                    let remove = ui
+                        .add(egui::Button::new(RichText::new(ph::X)).small())
+                        .on_hover_text("Remove point");
+                    if at_resp.changed() || pct_resp.changed() || rev_resp.changed() {
+                        let mut edited = sorted.clone();
+                        edited[i] = SpeedKey::new(
+                            Tick((at_secs * TICKS_PER_SECOND as f64).round() as i64),
+                            ratio_from_pct(pct, reversed),
+                        );
+                        new_keys = Some(edited);
+                    }
+                    if remove.clicked() {
+                        let mut edited = sorted.clone();
+                        edited.remove(i);
+                        new_keys = Some(edited);
+                        discrete = true;
+                    }
+                    ui.end_row();
+                }
             });
-            if changed {
-                // Rational approximation at 1/1000 precision — exact enough
-                // for a UI-driven speed field (01 §5.1's "exact rational" rule
-                // governs storage/eval, not that every possible value must be
-                // keyboard-reachable at infinite precision).
-                let den: u32 = 1000;
-                let mag = ((pct / 100.0) * den as f64).round().max(1.0) as i32;
-                let num = if reversed { -mag } else { mag };
-                let mut new_clip = clip.clone();
-                new_clip.speed = SpeedMap::Constant(Ratio::new(num, den));
-                set_clip_coalesced(project, seq, track, new_clip, action);
+    }
+
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Button::new(RichText::new(format!("{} Add point", ph::PLUS))).small())
+            .clicked()
+        {
+            let mut edited = sorted.clone();
+            let default_at = match sorted.last() {
+                None => Tick(clip.duration.0 / 2),
+                Some(last) => {
+                    let one_sec_later = Tick(last.at.0.saturating_add(TICKS_PER_SECOND));
+                    if one_sec_later < clip.duration {
+                        one_sec_later
+                    } else {
+                        // Clip too short for a full extra second — split the
+                        // remaining gap to the clip's end instead.
+                        Tick((last.at.0 + clip.duration.0) / 2)
+                    }
+                }
             }
-        });
+            .min(clip.duration);
+            let default_ratio = ramp_ratio_at(&sorted, default_at);
+            edited.push(SpeedKey::new(default_at, default_ratio));
+            new_keys = Some(edited);
+            discrete = true;
+        }
+        if !sorted.is_empty() && ui.small_button("Clear ramp").clicked() {
+            new_keys = Some(Vec::new());
+            discrete = true;
+        }
+    });
+
+    if let Some(mut edited) = new_keys {
+        edited.sort_by_key(|k| k.at.0);
+        let mut new_clip = clip.clone();
+        new_clip.speed = SpeedMap::Keyframed { keys: edited };
+        if discrete {
+            set_clip_discrete(project, seq, track, new_clip, action);
+        } else {
+            set_clip_coalesced(project, seq, track, new_clip, action);
+        }
+    }
 }
 
 // ── Reframe (05 §4.2, CAP-012) ───────────────────────────────────────────────
@@ -790,5 +997,34 @@ mod tests {
         clip.effects
             .push(photonic_core::timeline::ClipEffect::new(EffectKind::Blur));
         assert!(clip_has_effects(&clip));
+    }
+
+    #[test]
+    fn ratio_from_pct_round_trips_forward_and_reverse() {
+        assert_eq!(ratio_from_pct(100.0, false), Ratio::new(1000, 1000));
+        assert_eq!(ratio_from_pct(200.0, false), Ratio::new(2000, 1000));
+        assert_eq!(ratio_from_pct(50.0, true), Ratio::new(-500, 1000));
+        // Never zero even at the floor — a 0-speed clip would divide by zero
+        // downstream in `SpeedMap::source_delta`.
+        assert_eq!(ratio_from_pct(0.0, false), Ratio::new(1, 1000));
+    }
+
+    #[test]
+    fn ramp_ratio_at_holds_first_before_and_last_after() {
+        let keys = vec![
+            SpeedKey::new(Tick(1000), Ratio::new(500, 1000)),
+            SpeedKey::new(Tick(3000), Ratio::new(2000, 1000)),
+        ];
+        // Already sorted by `at` — every caller sorts before calling.
+        assert_eq!(ramp_ratio_at(&keys, Tick(0)), Ratio::new(500, 1000));
+        assert_eq!(ramp_ratio_at(&keys, Tick(1000)), Ratio::new(500, 1000));
+        assert_eq!(ramp_ratio_at(&keys, Tick(2000)), Ratio::new(500, 1000));
+        assert_eq!(ramp_ratio_at(&keys, Tick(3000)), Ratio::new(2000, 1000));
+        assert_eq!(ramp_ratio_at(&keys, Tick(9999)), Ratio::new(2000, 1000));
+    }
+
+    #[test]
+    fn ramp_ratio_at_empty_ramp_is_identity() {
+        assert_eq!(ramp_ratio_at(&[], Tick(500)), Ratio::ONE);
     }
 }

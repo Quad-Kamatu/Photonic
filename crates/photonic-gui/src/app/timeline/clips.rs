@@ -18,7 +18,7 @@
 //! exactly today's flat-fill-only behavior.
 use super::layout::TimelineView;
 use photonic_core::timeline::{
-    AssetId, Clip, ClipId, ClipSource, Tick, Track, TrackKind, TICKS_PER_SECOND,
+    AssetId, Clip, ClipId, ClipSource, SpeedMap, Tick, Track, TrackKind, TICKS_PER_SECOND,
 };
 use photonic_video::audio::{PeakBucket, WaveformLevel, WaveformPyramid};
 use photonic_video::{ThumbHandle, ThumbnailCache, WaveformCache};
@@ -88,6 +88,38 @@ pub(crate) const CLIP_LABEL_SWATCHES: &[(&str, egui::Color32)] = &[
 /// rather than panicking on it.
 pub(crate) fn label_color(label: u8) -> Option<egui::Color32> {
     CLIP_LABEL_SWATCHES.get(label as usize).map(|(_, c)| *c)
+}
+
+/// Speed-badge text color (14-nle-parity G-11): reuses the `warning` token
+/// (`DESIGN.md` `#FBBF24`) rather than inventing a new hue — same "functional
+/// data-coding, not chrome" precedent as `CLIP_LABEL_SWATCHES` and the
+/// node-editor port colors. A local const (not a `LaneColors` field) because
+/// this story's territory doesn't reach `app/timeline/mod.rs::lane_colors`,
+/// which is the only place a `LaneColors` value is constructed.
+const SPEED_BADGE_COLOR: egui::Color32 = egui::Color32::from_rgb(0xFB, 0xBF, 0x24);
+
+/// Compact on-clip speed cue text (14-nle-parity G-11): `None` for the
+/// default 100%-forward case and an empty ramp (both read as "no override"),
+/// same "cue absent = default" convention as the FX badge only appearing
+/// when the effect stack is non-empty.
+fn speed_badge_text(clip: &Clip) -> Option<String> {
+    match &clip.speed {
+        SpeedMap::Constant(r) => {
+            let pct = (r.as_f64().abs() * 100.0).round() as i64;
+            let reversed = r.num < 0;
+            if pct == 100 && !reversed {
+                None
+            } else if reversed {
+                Some(format!("R{pct}%"))
+            } else {
+                Some(format!("{pct}%"))
+            }
+        }
+        // Piecewise-constant ramp (`clip.rs`'s `integrate_ramp`): an empty
+        // key list is identity (1×), so it reads as "no override" just like
+        // `Constant(1×)` does above.
+        SpeedMap::Keyframed { keys } => (!keys.is_empty()).then(|| "RAMP".to_string()),
+    }
 }
 
 /// The visible slice of a track's clips for `[first, last]` lane ticks, via the
@@ -649,6 +681,30 @@ pub(crate) fn paint_lane(
         }
     }
 
+    // Speed badge (14-nle-parity G-11): a small text chip in the clip's
+    // bottom-left corner — the opposite corner from the FX badge dot, so the
+    // two cues never collide — when the clip's speed isn't the default 100%
+    // forward. Same immediate-`painter.text` shape as the label loop above
+    // (not batched into `shapes`, which only takes pre-laid-out galleys).
+    for pc in &painted {
+        if pc.rect.width() < 28.0 || pc.rect.height() < 12.0 {
+            continue;
+        }
+        let Some(c) = track.clips.iter().find(|c| c.id == pc.clip) else {
+            continue;
+        };
+        if let Some(text) = speed_badge_text(c) {
+            let text_pos = egui::pos2(pc.rect.left() + 3.0, pc.rect.bottom() - 2.0);
+            painter.text(
+                text_pos,
+                egui::Align2::LEFT_BOTTOM,
+                text,
+                egui::FontId::proportional(9.0),
+                SPEED_BADGE_COLOR,
+            );
+        }
+    }
+
     // Locked-track cue (14-nle-parity QW-2): a diagonal-hatch overlay across
     // the whole lane, drawn last so it reads over clips/labels and empty
     // space alike — lock state is visible independent of what's under it.
@@ -751,6 +807,11 @@ fn clip_label(track: &Track, id: ClipId) -> Option<String> {
             ClipSource::NestedSequence { .. } => "Sequence",
             ClipSource::SolidColor { .. } => "Solid",
             ClipSource::Adjustment => "Adjustment",
+            // `ClipSource::Text` (G-12 title/graphics clips) landed in core
+            // after this match was written — closing the gap here since it's
+            // a compile-blocking non-exhaustive match in this story's own
+            // territory file, not a new feature of this story.
+            ClipSource::Text { .. } => "Title",
         }
         .to_string(),
     )
@@ -772,7 +833,8 @@ fn elide(s: &str, width_px: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photonic_core::timeline::{FrameRate, Ratio, Sequence, SpeedMap};
+    use photonic_core::timeline::clip::SpeedKey;
+    use photonic_core::timeline::{FrameRate, Ratio, Sequence};
 
     fn track_with(spans: &[(i64, i64)]) -> Track {
         let mut t = Track::new(TrackKind::Video, "V1");
@@ -1173,5 +1235,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Speed badge (14-nle-parity G-11) ────────────────────────────────────
+
+    #[test]
+    fn speed_badge_none_for_default_forward_1x() {
+        let clip = Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick::from_seconds(4));
+        assert_eq!(clip.speed, SpeedMap::Constant(Ratio::ONE));
+        assert_eq!(speed_badge_text(&clip), None);
+    }
+
+    #[test]
+    fn speed_badge_shows_percent_for_non_default_constant_speed() {
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick::from_seconds(4));
+        clip.speed = SpeedMap::Constant(Ratio::new(2, 1));
+        assert_eq!(speed_badge_text(&clip), Some("200%".to_string()));
+        clip.speed = SpeedMap::Constant(Ratio::new(1, 2));
+        assert_eq!(speed_badge_text(&clip), Some("50%".to_string()));
+    }
+
+    #[test]
+    fn speed_badge_flags_reverse_even_at_100_percent() {
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick::from_seconds(4));
+        clip.speed = SpeedMap::Constant(Ratio::new(-1, 1));
+        assert_eq!(speed_badge_text(&clip), Some("R100%".to_string()));
+    }
+
+    #[test]
+    fn speed_badge_shows_ramp_for_non_empty_keyframed_speed() {
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick::from_seconds(4));
+        clip.speed = SpeedMap::Keyframed {
+            keys: vec![SpeedKey::new(Tick::ZERO, Ratio::ONE)],
+        };
+        assert_eq!(speed_badge_text(&clip), Some("RAMP".to_string()));
+    }
+
+    #[test]
+    fn speed_badge_none_for_empty_ramp_identity() {
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick::from_seconds(4));
+        clip.speed = SpeedMap::Keyframed { keys: vec![] };
+        assert_eq!(speed_badge_text(&clip), None);
     }
 }
