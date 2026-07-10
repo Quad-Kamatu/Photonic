@@ -1245,6 +1245,7 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         // Sequences / formats / tracks.
         TimelineCmd::AddSequence { .. } => {}
         TimelineCmd::RemoveSequence { .. } => {}
+        TimelineCmd::RenameSequence { .. } => {} // covered in ops::tests (rename_sequence)
         TimelineCmd::SetActiveSequence { .. } => {}
         TimelineCmd::SetActiveFormat { .. } => {}
         TimelineCmd::SetSequenceFormat { .. } => {}

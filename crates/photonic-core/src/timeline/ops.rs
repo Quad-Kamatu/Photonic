@@ -13,7 +13,10 @@
 //! `GroupNodes` batching idiom.
 
 use super::anim::{Interp, Keyframe, PropPath, PropertyTrack};
-use super::clip::{Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, TextClipContent};
+use super::clip::{
+    Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, MulticamAngle, MulticamGroup,
+    TextClipContent,
+};
 use super::commands::{
     AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings,
 };
@@ -22,7 +25,7 @@ use super::graph::NodeGraph;
 use super::ids::*;
 use super::media::MediaBin;
 use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
-use super::time::Tick;
+use super::time::{FrameRate, Tick};
 use std::path::PathBuf;
 
 /// A rejected timeline edit — no command is produced and the document is
@@ -156,6 +159,44 @@ pub fn set_active_sequence(p: &TimelineProject, new: Option<SequenceId>) -> Time
         old: p.active_sequence,
         new,
     }
+}
+
+/// Create a new (empty) sequence and return the command that adds it (17
+/// §G-17). A thin convenience over [`add_sequence`] for the sequence-tab UI:
+/// builds a [`Sequence`] with one `width`×`height` format and appends it,
+/// activating it if the project had none. Undoable via `AddSequence`'s inverse.
+pub fn create_sequence(
+    name: impl Into<String>,
+    frame_rate: FrameRate,
+    width: u32,
+    height: u32,
+) -> TimelineCmd {
+    add_sequence(Sequence::new(name, frame_rate, width, height))
+}
+
+/// Duplicate a sequence (17 §G-17). Deep-clones it with fresh structural ids
+/// (see [`Sequence::duplicate_with_fresh_ids`]) under a `"<name> copy"` name,
+/// then returns the `AddSequence` command that inserts the copy. Undoable.
+pub fn duplicate_sequence(p: &TimelineProject, id: SequenceId) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let mut dup = s.duplicate_with_fresh_ids();
+    dup.name = format!("{} copy", s.name);
+    Ok(add_sequence(dup))
+}
+
+/// Rename a sequence (17 §G-17 tab rename). Undoable via the `RenameSequence`
+/// command (old/new names swapped on inverse).
+pub fn rename_sequence(
+    p: &TimelineProject,
+    id: SequenceId,
+    new_name: impl Into<String>,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    Ok(TimelineCmd::RenameSequence {
+        seq: id,
+        old: s.name.clone(),
+        new: new_name.into(),
+    })
 }
 
 pub fn set_active_format(
@@ -1430,6 +1471,219 @@ pub fn assign_asset_bin(
     })
 }
 
+// ── Multicam (17 §G-20) ─────────────────────────────────────────────────────
+
+/// Consolidate several camera angles into one multicam clip (17 §G-20): attach
+/// a [`MulticamGroup`] to `primary_clip` built from itself (angle 0) plus each
+/// clip in `angle_clips` (its `source`/`source_in`/`name` become angles 1..),
+/// and remove those folded clips. The primary's `source`/`source_in` are
+/// unchanged (they already equal angle 0). Any `angle_clips` entry that names
+/// the primary itself is skipped (a clip can't be its own extra angle).
+/// Returns a batch (`SetClipProp` for the primary + one `RemoveClip` per folded
+/// clip) for the caller to wrap in one undo step.
+pub fn create_multicam_group(
+    p: &TimelineProject,
+    id: SequenceId,
+    primary_track: TrackId,
+    primary_clip: ClipId,
+    angle_clips: &[(TrackId, ClipId)],
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let primary = clip(track(s, primary_track)?, primary_clip)?.clone();
+
+    let mut angles = vec![MulticamAngle::new(
+        primary.name.clone(),
+        primary.source.clone(),
+        primary.source_in,
+    )];
+    let mut removes = Vec::new();
+    for (tk, cid) in angle_clips {
+        if *cid == primary_clip {
+            continue; // the primary is already angle 0
+        }
+        let c = clip(track(s, *tk)?, *cid)?;
+        angles.push(MulticamAngle::new(
+            c.name.clone(),
+            c.source.clone(),
+            c.source_in,
+        ));
+        removes.push(TimelineCmd::RemoveClip {
+            seq: id,
+            track: *tk,
+            clip: Box::new(c.clone()),
+        });
+    }
+
+    let mut new_primary = primary;
+    new_primary.multicam = Some(MulticamGroup { angles, active: 0 });
+
+    let mut cmds = vec![set_clip_prop(p, id, primary_track, new_primary)?];
+    cmds.extend(removes);
+    Ok(cmds)
+}
+
+/// Set the live angle of a multicam clip (17 §G-20). Clamps `angle` to a valid
+/// index and mirrors the chosen angle's `source`/`source_in` onto the clip so a
+/// multicam-unaware consumer still shows the live camera. Returns a
+/// `SetClipProp`. Undoable. Errors ([`EditError::IndexOutOfRange`]) if the clip
+/// carries no (non-empty) multicam group.
+pub fn set_multicam_active_angle(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    angle: usize,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let mut new = clip(t, clip_id)?.clone();
+    let group = new.multicam.as_ref().ok_or(EditError::IndexOutOfRange)?;
+    if group.angles.is_empty() {
+        return Err(EditError::IndexOutOfRange);
+    }
+    let a = angle.min(group.angles.len() - 1);
+    let chosen = group.angles[a].clone();
+    new.multicam.as_mut().unwrap().active = a;
+    new.source = chosen.source;
+    new.source_in = chosen.source_in;
+    set_clip_prop(p, id, track_id, new)
+}
+
+// ── Nested sequences (17 §G-16) & open/breadcrumb (17 §G-17) ─────────────────
+
+/// Wrap the `clip_ids` selection on one track into a new nested sequence (17
+/// §G-16): build a fresh sequence holding a copy of the selected clips (rebased
+/// so the earliest starts at 0), then replace them on the outer track with one
+/// [`ClipSource::NestedSequence`] clip spanning their bounding box. Returns the
+/// new sequence's id plus a batch (`AddSequence`, one `RemoveClip` per selected
+/// clip, then `InsertClip` for the nested clip) for the caller to wrap in one
+/// undo step; the ordering keeps every intermediate apply-state invariant-valid.
+///
+/// Rejects an empty selection ([`EditError::IndexOutOfRange`]), a requested clip
+/// absent from the track ([`EditError::NoClip`]), or a non-selected clip lying
+/// inside the selection's span (which the single replacement clip would overlap
+/// — [`EditError::Overlap`]). Internal gaps *between* selected clips are fine
+/// (they become empty space in the nested sequence). No cycle can arise: the
+/// nested sequence is brand-new and nothing references it yet.
+pub fn create_nested_sequence(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_ids: &[ClipId],
+    name: impl Into<String>,
+) -> Result<(SequenceId, Vec<TimelineCmd>), EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    if clip_ids.is_empty() {
+        return Err(EditError::IndexOutOfRange);
+    }
+    // Any requested id that isn't on this track is an error.
+    if let Some(missing) = clip_ids
+        .iter()
+        .find(|cid| !t.clips.iter().any(|c| c.id == **cid))
+    {
+        return Err(EditError::NoClip(*missing));
+    }
+    let sel_ids: std::collections::HashSet<ClipId> = clip_ids.iter().copied().collect();
+    let selected: Vec<&Clip> = t.clips.iter().filter(|c| sel_ids.contains(&c.id)).collect();
+
+    let min_start = selected.iter().map(|c| c.start).min().unwrap();
+    let max_end = selected.iter().map(|c| c.end()).max().unwrap();
+    // A non-selected clip inside the span would collide with the replacement.
+    if t.clips
+        .iter()
+        .any(|c| !sel_ids.contains(&c.id) && c.start < max_end && min_start < c.end())
+    {
+        return Err(EditError::Overlap);
+    }
+
+    // Build the nested sequence: the selection rebased so `min_start → 0`, on a
+    // fresh single track sized to the outer sequence's active format.
+    let fmt = s.format();
+    let mut inner = Sequence::new(name, s.frame_rate, fmt.width, fmt.height);
+    let mut inner_track = Track::new(t.kind, t.name.clone());
+    for c in &selected {
+        let mut nc = (*c).clone();
+        nc.id = ClipId::new();
+        nc.start = c.start - min_start;
+        inner_track.clips.push(nc);
+    }
+    match t.kind {
+        TrackKind::Video => inner.video_tracks.push(inner_track),
+        TrackKind::Audio => inner.audio_tracks.push(inner_track),
+    }
+    let inner_id = inner.id;
+
+    // Replace the selection with one NestedSequence clip over its bounding box.
+    let mut nested_clip = Clip::new(
+        ClipSource::NestedSequence { sequence: inner_id },
+        min_start,
+        max_end - min_start,
+    );
+    nested_clip.name = inner.name.clone();
+
+    let mut cmds = vec![add_sequence(inner)];
+    for c in &selected {
+        cmds.push(TimelineCmd::RemoveClip {
+            seq: id,
+            track: track_id,
+            clip: Box::new((*c).clone()),
+        });
+    }
+    cmds.push(TimelineCmd::InsertClip {
+        seq: id,
+        track: track_id,
+        clip: Box::new(nested_clip),
+    });
+    Ok((inner_id, cmds))
+}
+
+/// The nested sequence a clip opens into (17 §G-16/G-17 double-click target),
+/// or `None` for a non-nested clip. Pure read.
+pub fn nested_target(c: &Clip) -> Option<SequenceId> {
+    match &c.source {
+        ClipSource::NestedSequence { sequence } => Some(*sequence),
+        _ => None,
+    }
+}
+
+/// The breadcrumb ancestry of `target`: the chain `[root, …, target]` where
+/// each entry nests the next via a [`ClipSource::NestedSequence`] clip (17
+/// §G-17). `target` is always last; a sequence no other sequence nests is its
+/// own root (a single-element chain). Nesting is acyclic (cycle-checked at edit
+/// time) so the walk terminates; a `seen` guard defends against a malformed
+/// cycle regardless. Pure read; the GUI renders it as a clickable trail.
+pub fn sequence_ancestry(p: &TimelineProject, target: SequenceId) -> Vec<SequenceId> {
+    let mut chain = vec![target];
+    let mut current = target;
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(current);
+    while let Some(parent) = nesting_parent(p, current) {
+        if !seen.insert(parent) {
+            break;
+        }
+        chain.push(parent);
+        current = parent;
+    }
+    chain.reverse();
+    chain
+}
+
+/// A sequence that directly nests `child` via a `NestedSequence` clip, if any.
+fn nesting_parent(p: &TimelineProject, child: SequenceId) -> Option<SequenceId> {
+    p.sequences.values().find_map(|s| {
+        let nests = s
+            .video_tracks
+            .iter()
+            .chain(s.audio_tracks.iter())
+            .flat_map(|t| t.clips.iter())
+            .any(|c| {
+                matches!(&c.source, ClipSource::NestedSequence { sequence } if *sequence == child)
+            });
+        nests.then_some(s.id)
+    })
+}
+
 // ── 3/4-point editing: insert / overwrite / lift / extract (16 §2, gap L-1) ──
 //
 // The four reference-NLE edit ops. Each is a pure fn returning a batch of the
@@ -2581,5 +2835,189 @@ mod tests {
             }
             assert_batch_undo_roundtrip(&doc, &cmds);
         }
+    }
+
+    // ── Sequence management (17 §G-17) ────────────────────────────────────
+
+    #[test]
+    fn rename_sequence_is_undo_idempotent() {
+        let (doc, seq_id, _t, _c) = fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = rename_sequence(p, seq_id, "Act 1").unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+
+        let mut applied = doc.clone();
+        Command::Timeline(cmd).apply(&mut applied);
+        assert_eq!(
+            applied.timeline.as_ref().unwrap().sequences[&seq_id].name,
+            "Act 1"
+        );
+    }
+
+    #[test]
+    fn duplicate_sequence_copies_content_with_fresh_ids_and_is_undo_idempotent() {
+        let (doc, seq_id, track_id, _c) = fixture();
+        let orig_clip = the_track(&doc, seq_id, track_id).clips[0].id;
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = duplicate_sequence(p, seq_id).unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+
+        let mut applied = doc.clone();
+        Command::Timeline(cmd).apply(&mut applied);
+        let proj = applied.timeline.as_ref().unwrap();
+        assert_eq!(proj.sequences.len(), 2);
+        let dup = proj.sequences.values().find(|s| s.id != seq_id).unwrap();
+        assert_eq!(dup.name, "Seq copy");
+        // Same clip timing, fresh clip id.
+        assert_eq!(
+            dup.video_tracks[0]
+                .clips
+                .iter()
+                .map(|c| (c.start.0, c.duration.0))
+                .collect::<Vec<_>>(),
+            spans_of(&applied, seq_id, track_id)
+        );
+        assert_ne!(dup.video_tracks[0].clips[0].id, orig_clip);
+    }
+
+    // ── Nested sequences (17 §G-16) ───────────────────────────────────────
+
+    #[test]
+    fn create_nested_sequence_wraps_selection_and_is_undo_idempotent() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100), (200, 100)]);
+        // Nest the first two clips → span [0,200).
+        let ids: Vec<ClipId> = the_track(&doc, seq_id, track_id).clips[..2]
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        let p = doc.timeline.as_ref().unwrap();
+        let (inner_id, cmds) = create_nested_sequence(p, seq_id, track_id, &ids, "Nested").unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+
+        // Outer: one NestedSequence clip [0,200) + the untouched [200,300).
+        assert_eq!(spans_of(&out, seq_id, track_id), vec![(0, 200), (200, 100)]);
+        let outer = the_track(&out, seq_id, track_id);
+        assert!(matches!(
+            outer.clips[0].source,
+            ClipSource::NestedSequence { sequence } if sequence == inner_id
+        ));
+        // Inner: the two clips rebased to start at 0.
+        let inner = &out.timeline.as_ref().unwrap().sequences[&inner_id];
+        assert_eq!(
+            inner.video_tracks[0]
+                .clips
+                .iter()
+                .map(|c| (c.start.0, c.duration.0))
+                .collect::<Vec<_>>(),
+            vec![(0, 100), (100, 100)]
+        );
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn create_nested_sequence_rejects_interior_nonselected_clip() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100), (200, 100)]);
+        // Select the outer two, leaving [100,200) inside the span.
+        let clips = &the_track(&doc, seq_id, track_id).clips;
+        let ids = vec![clips[0].id, clips[2].id];
+        let p = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            create_nested_sequence(p, seq_id, track_id, &ids, "N").unwrap_err(),
+            EditError::Overlap
+        );
+    }
+
+    #[test]
+    fn create_nested_sequence_rejects_empty_selection() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100)]);
+        let p = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            create_nested_sequence(p, seq_id, track_id, &[], "N").unwrap_err(),
+            EditError::IndexOutOfRange
+        );
+    }
+
+    #[test]
+    fn nested_target_and_ancestry() {
+        let (doc, seq_id, track_id) = track_fixture(&[(0, 100), (100, 100)]);
+        let ids: Vec<ClipId> = the_track(&doc, seq_id, track_id)
+            .clips
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        let p = doc.timeline.as_ref().unwrap();
+        let (inner_id, cmds) = create_nested_sequence(p, seq_id, track_id, &ids, "Nested").unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        let nested_clip = &the_track(&out, seq_id, track_id).clips[0];
+        assert_eq!(nested_target(nested_clip), Some(inner_id));
+        let p2 = out.timeline.as_ref().unwrap();
+        assert_eq!(sequence_ancestry(p2, inner_id), vec![seq_id, inner_id]);
+        assert_eq!(sequence_ancestry(p2, seq_id), vec![seq_id]);
+    }
+
+    // ── Multicam (17 §G-20) ───────────────────────────────────────────────
+
+    #[test]
+    fn create_multicam_group_folds_angles_and_is_undo_idempotent() {
+        let (mut doc, seq_id, v_track, primary) = fixture();
+        let (a_track, angle_clip) = add_audio_clip(&mut doc, seq_id);
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds =
+            create_multicam_group(p, seq_id, v_track, primary, &[(a_track, angle_clip)]).unwrap();
+        let out = apply_batch(&doc, &cmds);
+        validate_ok(&out, seq_id);
+
+        // Primary carries a two-angle group; the folded clip is gone.
+        let pc = find_clip(&out, seq_id, v_track, primary);
+        let group = pc.multicam.as_ref().unwrap();
+        assert_eq!(group.angles.len(), 2);
+        assert_eq!(group.active, 0);
+        assert!(the_track(&out, seq_id, a_track).clips.is_empty());
+
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn set_multicam_active_angle_mirrors_source_and_is_undo_idempotent() {
+        let (mut doc, seq_id, v_track, primary) = fixture();
+        let (a_track, angle_clip) = add_audio_clip(&mut doc, seq_id);
+        // Give the angle clip a distinct source so the mirror is observable.
+        let asset = AssetId::new();
+        {
+            let proj = doc.timeline.as_mut().unwrap();
+            let c = proj.sequences.get_mut(&seq_id).unwrap().audio_tracks[0]
+                .clips
+                .iter_mut()
+                .find(|c| c.id == angle_clip)
+                .unwrap();
+            c.source = ClipSource::Asset { asset };
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds =
+            create_multicam_group(p, seq_id, v_track, primary, &[(a_track, angle_clip)]).unwrap();
+        let grouped = apply_batch(&doc, &cmds);
+
+        // Cut to angle 1: the clip's source mirrors that angle.
+        let p2 = grouped.timeline.as_ref().unwrap();
+        let cut = set_multicam_active_angle(p2, seq_id, v_track, primary, 1).unwrap();
+        assert_undo_roundtrip(&grouped, &cut);
+
+        let mut applied = grouped.clone();
+        Command::Timeline(cut).apply(&mut applied);
+        let pc = find_clip(&applied, seq_id, v_track, primary);
+        assert_eq!(pc.multicam.as_ref().unwrap().active, 1);
+        assert!(matches!(pc.source, ClipSource::Asset { asset: a } if a == asset));
+    }
+
+    #[test]
+    fn set_multicam_active_angle_errors_without_group() {
+        let (doc, seq_id, v_track, primary) = fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            set_multicam_active_angle(p, seq_id, v_track, primary, 0).unwrap_err(),
+            EditError::IndexOutOfRange
+        );
     }
 }

@@ -389,6 +389,12 @@ pub enum TimelineCmd {
         order_index: usize,
         was_active: bool,
     },
+    /// Rename a sequence (17 §G-17 tab rename). Old/new names swapped on inverse.
+    RenameSequence {
+        seq: SequenceId,
+        old: String,
+        new: String,
+    },
     SetActiveSequence {
         old: Option<SequenceId>,
         new: Option<SequenceId>,
@@ -1538,6 +1544,7 @@ impl TimelineCmd {
             TimelineCmd::RelinkAsset { .. } => "Relink media".into(),
             TimelineCmd::AddSequence { sequence } => format!("Add sequence \"{}\"", sequence.name),
             TimelineCmd::RemoveSequence { .. } => "Remove sequence".into(),
+            TimelineCmd::RenameSequence { new, .. } => format!("Rename sequence \"{new}\""),
             TimelineCmd::SetActiveSequence { .. } => "Switch sequence".into(),
             TimelineCmd::SetActiveFormat { .. } => "Switch format".into(),
             TimelineCmd::SetSequenceFormat { .. } => "Edit format".into(),
@@ -1645,6 +1652,11 @@ impl TimelineCmd {
                 p.sequence_order.retain(|s| *s != sequence.id);
                 if *was_active {
                     p.active_sequence = p.sequence_order.first().copied();
+                }
+            }
+            TimelineCmd::RenameSequence { seq, new, .. } => {
+                if let Some(s) = p.sequences.get_mut(seq) {
+                    s.name = new.clone();
                 }
             }
             TimelineCmd::SetActiveSequence { new, .. } => p.active_sequence = *new,
@@ -1985,6 +1997,11 @@ impl TimelineCmd {
             },
             TimelineCmd::RemoveSequence { sequence, .. } => TimelineCmd::AddSequence {
                 sequence: sequence.clone(),
+            },
+            TimelineCmd::RenameSequence { seq, old, new } => TimelineCmd::RenameSequence {
+                seq: *seq,
+                old: new.clone(),
+                new: old.clone(),
             },
             TimelineCmd::SetActiveSequence { old, new } => TimelineCmd::SetActiveSequence {
                 old: *new,

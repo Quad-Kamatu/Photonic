@@ -6,7 +6,7 @@
 //! only the clip's *source* op; transform/effects/grade/reframe still apply on
 //! top (02 §2 step 3).
 
-use super::anim::{AnimProps, PropSet};
+use super::anim::{cubic_bezier_ease, AnimProps, Interp, PropSet};
 use super::audio::ClipAudio;
 use super::captions::CaptionStyle;
 use super::effect_kind::{EffectKind, EffectParams};
@@ -68,6 +68,12 @@ pub struct Clip {
     /// is a later story).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_group: Option<LinkGroupId>,
+    /// Groups several camera angles behind this one clip (17 §G-20). When
+    /// `Some`, the clip is a multicam clip: the engine renders
+    /// `multicam.angles[multicam.active]`, and `source`/`source_in` mirror that
+    /// active angle. `None` = an ordinary single-source clip. Serde-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicam: Option<MulticamGroup>,
 }
 
 impl Clip {
@@ -92,6 +98,7 @@ impl Clip {
             enabled: true,
             color_label: None,
             link_group: None,
+            multicam: None,
         }
     }
 
@@ -193,6 +200,51 @@ impl TextClipContent {
     }
 }
 
+/// One camera angle in a [`MulticamGroup`] (17 §G-20): a named source with its
+/// own trim. Grouping several angles behind one clip lets an editor cut between
+/// cameras while keeping a single clip on the timeline; the engine renders the
+/// group's active angle (no render logic here).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MulticamAngle {
+    /// Label for the angle picker (defaults to the folded clip's name).
+    #[serde(default)]
+    pub name: String,
+    pub source: ClipSource,
+    /// Trim into this angle's source media.
+    #[serde(default)]
+    pub source_in: Tick,
+}
+
+impl MulticamAngle {
+    pub fn new(name: impl Into<String>, source: ClipSource, source_in: Tick) -> Self {
+        MulticamAngle {
+            name: name.into(),
+            source,
+            source_in,
+        }
+    }
+}
+
+/// A grouped set of camera angles with one live/active angle (17 §G-20). Held
+/// on a [`Clip`] (`Clip::multicam`); the engine renders `angles[active]`. The
+/// owning clip's `source`/`source_in` mirror the active angle so a
+/// multicam-unaware consumer (timeline thumbnail, older loader) still shows the
+/// live camera. Serde-additive: absent on every pre-multicam clip.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MulticamGroup {
+    pub angles: Vec<MulticamAngle>,
+    /// Index into `angles` of the live camera. Clamped by ops to a valid angle.
+    #[serde(default)]
+    pub active: usize,
+}
+
+impl MulticamGroup {
+    /// The live angle, if `active` is in range.
+    pub fn active_angle(&self) -> Option<&MulticamAngle> {
+        self.angles.get(self.active)
+    }
+}
+
 /// An exact rational speed factor. `num/den`; negative `num` = reverse.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ratio {
@@ -216,17 +268,53 @@ impl Ratio {
 }
 
 /// One control point in a keyframed speed ramp (G-11): at clip-relative
-/// timeline tick `at`, the exact-rational playback speed `ratio` takes effect.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// timeline tick `at`, the playback speed `ratio` takes effect, and `interp`
+/// governs how speed transitions from this key to the *next* key (the segment
+/// leaving this key) — mirroring [`Interp`] on animation keyframes.
+///
+/// - [`Interp::Hold`] (the default) keeps the classic piecewise-constant ramp:
+///   `ratio` holds until the next key, integrating to exact integer source
+///   ticks.
+/// - [`Interp::Linear`] / [`Interp::Bezier`] ramp the speed continuously from
+///   this key's `ratio` to the next key's `ratio`, so a slow-mo→fast-mo ramp
+///   eases smoothly. Because the bezier handles are floats, `SpeedKey`/
+///   `SpeedMap` are no longer `Eq`/`Hash` (nothing keys a map on them).
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpeedKey {
     pub at: Tick,
     pub ratio: Ratio,
+    /// Easing of the segment leaving this key. Serde-defaulted to
+    /// [`Interp::Hold`] and omitted when `Hold`, so pre-existing keyframed
+    /// documents (which carried no easing) stay byte-shape-identical and
+    /// integrate exactly as before.
+    #[serde(default = "hold_interp", skip_serializing_if = "is_hold")]
+    pub interp: Interp,
+}
+
+fn hold_interp() -> Interp {
+    Interp::Hold
+}
+fn is_hold(i: &Interp) -> bool {
+    matches!(i, Interp::Hold)
 }
 
 impl SpeedKey {
+    /// A key whose leaving segment *holds* `ratio` (piecewise-constant — the
+    /// classic exact-integer ramp).
     #[inline]
     pub fn new(at: Tick, ratio: Ratio) -> Self {
-        SpeedKey { at, ratio }
+        SpeedKey {
+            at,
+            ratio,
+            interp: Interp::Hold,
+        }
+    }
+
+    /// A key whose leaving segment *eases* from `ratio` toward the next key's
+    /// ratio with `interp` (`Linear`/`Bezier` for a smooth speed ramp).
+    #[inline]
+    pub fn eased(at: Tick, ratio: Ratio, interp: Interp) -> Self {
+        SpeedKey { at, ratio, interp }
     }
 }
 
@@ -234,12 +322,13 @@ impl SpeedKey {
 /// variable-speed ramp (G-11). Serde-additive: the internal `speed` tag keeps
 /// existing `constant` documents byte-identical, and `keyframed` is a new tag.
 ///
-/// Ramp interpolation is currently piecewise-constant — each key's `ratio`
-/// holds until the next key, and the first/last key's ratio holds before/after
-/// the ramp — which integrates to exact integer source ticks. Eased (bezier)
-/// segments are a later refinement layered on this data (the on-clip rubber
-/// band is a GUI lane); the data shape here already carries the keys.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Ramp interpolation is per-[`SpeedKey`]: a key's segment either *holds* its
+/// ratio (piecewise-constant, integrating to exact integer source ticks — the
+/// default and the classic behavior) or *eases* (linear/bezier) continuously
+/// toward the next key's ratio for a smooth slow-mo→fast-mo ramp. The
+/// all-holds case stays exact (i128 rational arithmetic); an eased ramp
+/// integrates each segment and rounds to the nearest tick.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "speed", rename_all = "snake_case")]
 pub enum SpeedMap {
     Constant(Ratio),
@@ -258,9 +347,11 @@ impl SpeedMap {
     /// Returns the source-time delta only (the caller adds `source_in`).
     ///
     /// - `Constant`: exact rational scale of `dt`.
-    /// - `Keyframed`: the piecewise-constant speed integrated segment-by-segment
-    ///   (∫₀ᵈᵗ speed). Handles negative `dt` (reverse trim) by symmetry and an
-    ///   empty ramp as identity (1×). Exact integer arithmetic (i128 accumulate).
+    /// - `Keyframed`: the speed integrated segment-by-segment (∫₀ᵈᵗ speed).
+    ///   Handles negative `dt` (reverse trim) by symmetry and an empty ramp as
+    ///   identity (1×). All-holds ramps use exact integer arithmetic (i128
+    ///   accumulate); an eased (linear/bezier) ramp integrates in `f64` and
+    ///   rounds to the nearest tick.
     pub fn source_delta(&self, dt: Tick) -> Tick {
         match self {
             SpeedMap::Constant(r) => Tick(scale_ticks(dt.0, *r)),
@@ -275,10 +366,12 @@ fn scale_ticks(len: i64, r: Ratio) -> i64 {
     ((len as i128 * r.num as i128) / r.den.max(1) as i128) as i64
 }
 
-/// Integrate a piecewise-constant speed ramp over `[0, target]` (or `[target, 0]`
-/// when `target < 0`, negating the result). Each key's ratio holds until the
-/// next; the first/last key's ratio holds before/after the ramp. An empty ramp
-/// is identity (1×). Keys need not be pre-sorted.
+/// Integrate a speed ramp over `[0, target]` (or `[target, 0]` when
+/// `target < 0`, negating the result). Each key's segment either holds its
+/// ratio until the next key or eases toward the next key's ratio; the
+/// first/last key's ratio holds before/after the ramp. An empty ramp is
+/// identity (1×). Keys need not be pre-sorted. The all-holds ramp keeps the
+/// classic exact i128 path; any eased segment routes to the `f64` path.
 fn integrate_ramp(keys: &[SpeedKey], target: i64) -> i64 {
     if keys.is_empty() {
         return target;
@@ -288,6 +381,23 @@ fn integrate_ramp(keys: &[SpeedKey], target: i64) -> i64 {
     }
     let mut sorted = keys.to_vec();
     sorted.sort_by_key(|k| k.at.0);
+    let n = sorted.len();
+    // An eased segment needs both a non-hold easing AND a next key to ramp to.
+    let has_ease = sorted
+        .iter()
+        .enumerate()
+        .any(|(i, k)| i + 1 < n && !matches!(k.interp, Interp::Hold));
+    if has_ease {
+        integrate_eased(&sorted, target)
+    } else {
+        integrate_hold(&sorted, target)
+    }
+}
+
+/// Exact piecewise-constant integration (the classic path): each key's ratio
+/// holds until the next; the first/last holds before/after. `sorted` is sorted
+/// by `at`. Exact integer arithmetic (i128 accumulate).
+fn integrate_hold(sorted: &[SpeedKey], target: i64) -> i64 {
     let (lo, hi) = if target >= 0 {
         (0, target)
     } else {
@@ -314,6 +424,94 @@ fn integrate_ramp(keys: &[SpeedKey], target: i64) -> i64 {
         acc = -acc;
     }
     acc as i64
+}
+
+/// `f64` integration for a ramp with at least one eased segment. The speed
+/// before the first key holds at the first ratio, after the last key holds at
+/// the last ratio, and each inter-key segment either holds `r0` or ramps
+/// `r0→r1` following its easing `e(u)` (`speed(t) = r0 + (r1−r0)·e(u)`), so
+/// `∫ speed dt = (b−a)·r0 + (r1−r0)·w·∫ e du` over the clamped sub-interval.
+/// Rounded to the nearest tick.
+fn integrate_eased(sorted: &[SpeedKey], target: i64) -> i64 {
+    let (lo, hi) = if target >= 0 {
+        (0, target)
+    } else {
+        (target, 0)
+    };
+    let n = sorted.len();
+    let mut acc = 0.0_f64;
+
+    // Pre-first-key hold: the first key's ratio for `t < sorted[0].at`.
+    let a = lo;
+    let b = sorted[0].at.0.min(hi);
+    if b > a {
+        acc += (b - a) as f64 * sorted[0].ratio.as_f64();
+    }
+
+    // Inter-key segments `[sorted[i].at, sorted[i+1].at)`.
+    for i in 0..n.saturating_sub(1) {
+        let s0 = sorted[i].at.0;
+        let s1 = sorted[i + 1].at.0;
+        let a = s0.max(lo);
+        let b = s1.min(hi);
+        if b <= a {
+            continue;
+        }
+        let r0 = sorted[i].ratio.as_f64();
+        let w = (s1 - s0) as f64;
+        // Hold segments (and degenerate coincident keys) stay constant at `r0`.
+        if matches!(sorted[i].interp, Interp::Hold) || w <= 0.0 {
+            acc += (b - a) as f64 * r0;
+        } else {
+            let r1 = sorted[i + 1].ratio.as_f64();
+            let ua = (a - s0) as f64 / w;
+            let ub = (b - s0) as f64 / w;
+            let ie = integ_ease(&sorted[i].interp, ua, ub);
+            acc += (b - a) as f64 * r0 + (r1 - r0) * w * ie;
+        }
+    }
+
+    // Post-last-key hold.
+    let a = sorted[n - 1].at.0.max(lo);
+    if hi > a {
+        acc += (hi - a) as f64 * sorted[n - 1].ratio.as_f64();
+    }
+
+    if target < 0 {
+        acc = -acc;
+    }
+    acc.round() as i64
+}
+
+/// Definite integral `∫_{ua}^{ub} e(u) du` of the normalized easing progress
+/// `e(u)` for a ramp segment, with `0 ≤ ua ≤ ub ≤ 1`. `Linear` is closed-form;
+/// `Bezier` uses deterministic composite Simpson sampling of
+/// [`cubic_bezier_ease`] (the ease is smooth and monotone, and the caller
+/// tick-rounds the result). `Hold` never reaches here (its segment is handled
+/// as a constant by [`integrate_eased`]).
+fn integ_ease(interp: &Interp, ua: f64, ub: f64) -> f64 {
+    match interp {
+        Interp::Hold => 0.0,
+        Interp::Linear => (ub * ub - ua * ua) * 0.5,
+        Interp::Bezier {
+            out_handle,
+            in_handle,
+        } => {
+            const N: usize = 64; // even → composite Simpson
+            let h = (ub - ua) / N as f64;
+            if h == 0.0 {
+                return 0.0;
+            }
+            let mut sum = cubic_bezier_ease(*out_handle, *in_handle, ua)
+                + cubic_bezier_ease(*out_handle, *in_handle, ub);
+            for k in 1..N {
+                let u = ua + k as f64 * h;
+                let weight = if k % 2 == 1 { 4.0 } else { 2.0 };
+                sum += weight * cubic_bezier_ease(*out_handle, *in_handle, u);
+            }
+            sum * h / 3.0
+        }
+    }
 }
 
 /// Animatable clip transform (01 §5/§6). Field names match the `prop_registry`
@@ -570,6 +768,105 @@ mod tests {
         );
     }
 
+    // ── Eased speed ramps (G-11 bezier) ──────────────────────────────────
+
+    #[test]
+    fn speed_key_hold_serde_omits_interp() {
+        // A Hold key (the default) must not emit an `interp` field, so existing
+        // keyframed documents stay byte-shape-identical and load unchanged.
+        let j = serde_json::to_string(&SpeedKey::new(Tick(0), Ratio::new(1, 2))).unwrap();
+        assert!(!j.contains("interp"));
+        let back: SpeedKey = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.interp, Interp::Hold);
+    }
+
+    #[test]
+    fn speed_key_eased_serde_roundtrip() {
+        let key = SpeedKey::eased(
+            Tick(10),
+            Ratio::new(3, 1),
+            Interp::Bezier {
+                out_handle: [0.42, 0.0],
+                in_handle: [0.58, 1.0],
+            },
+        );
+        let j = serde_json::to_string(&key).unwrap();
+        assert!(j.contains("interp"));
+        assert!(j.contains("bezier"));
+        let back: SpeedKey = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, key);
+    }
+
+    #[test]
+    fn speed_ramp_linear_ease_averages_endpoints() {
+        // A linear speed ramp from 1× to 3× over [0,100): average speed is 2×,
+        // so 100 timeline ticks map to 200 source ticks; the first half [0,50]
+        // ramps 1×→2× (avg 1.5×) → 75 source ticks.
+        let ramp = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::eased(Tick(0), Ratio::new(1, 1), Interp::Linear),
+                SpeedKey::new(Tick(100), Ratio::new(3, 1)),
+            ],
+        };
+        assert_eq!(ramp.source_delta(Tick(100)), Tick(200));
+        assert_eq!(ramp.source_delta(Tick(50)), Tick(75));
+        // Before the first key the speed holds at 1×; after the last, at 3×.
+        assert_eq!(ramp.source_delta(Tick(-10)), Tick(-10));
+        assert_eq!(ramp.source_delta(Tick(120)), Tick(260));
+    }
+
+    #[test]
+    fn speed_ramp_bezier_identity_matches_linear() {
+        // cubic-bezier(0,0,1,1) is the identity easing → equals a Linear ramp
+        // exactly (Simpson integrates the linear integrand exactly).
+        let ident = Interp::Bezier {
+            out_handle: [0.0, 0.0],
+            in_handle: [1.0, 1.0],
+        };
+        let bez = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::eased(Tick(0), Ratio::new(1, 1), ident),
+                SpeedKey::new(Tick(100), Ratio::new(3, 1)),
+            ],
+        };
+        assert_eq!(bez.source_delta(Tick(100)), Tick(200));
+        assert_eq!(bez.source_delta(Tick(50)), Tick(75));
+    }
+
+    #[test]
+    fn speed_ramp_bezier_symmetric_ease_preserves_total() {
+        // A symmetric ease-in-out (cubic-bezier(0.42,0,0.58,1)) integrates to
+        // 0.5 over [0,1] by symmetry, so the total source advance over the full
+        // ramp equals the linear/average case (200) even though the
+        // instantaneous speed eases in and out.
+        let ease = Interp::Bezier {
+            out_handle: [0.42, 0.0],
+            in_handle: [0.58, 1.0],
+        };
+        let ramp = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::eased(Tick(0), Ratio::new(1, 1), ease),
+                SpeedKey::new(Tick(100), Ratio::new(3, 1)),
+            ],
+        };
+        let d = ramp.source_delta(Tick(100)).0;
+        assert!((d - 200).abs() <= 1, "expected ~200 source ticks, got {d}");
+    }
+
+    #[test]
+    fn speed_ramp_all_hold_stays_on_exact_path() {
+        // A ramp whose keys are all Hold must integrate identically to the
+        // classic exact path (no float rounding) — flipping an eased key back
+        // to Hold restores byte-exact behavior.
+        let exact = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::new(Tick(0), Ratio::new(1, 1)),
+                SpeedKey::new(Tick(50), Ratio::new(2, 1)),
+            ],
+        };
+        assert_eq!(exact.source_delta(Tick(100)), Tick(150));
+    }
+
     // ── Text clips (G-12) ────────────────────────────────────────────────
 
     #[test]
@@ -644,5 +941,66 @@ mod tests {
         assert_eq!(as_uuid, id.0);
         let back: LinkGroupId = serde_json::from_str(&j).unwrap();
         assert_eq!(back, id);
+    }
+
+    // ── Multicam (G-20) ──────────────────────────────────────────────────
+
+    #[test]
+    fn multicam_group_serde_roundtrip() {
+        let group = MulticamGroup {
+            angles: vec![
+                MulticamAngle::new(
+                    "Cam A",
+                    ClipSource::Asset {
+                        asset: AssetId::new(),
+                    },
+                    Tick(0),
+                ),
+                MulticamAngle::new(
+                    "Cam B",
+                    ClipSource::Asset {
+                        asset: AssetId::new(),
+                    },
+                    Tick(30),
+                ),
+            ],
+            active: 1,
+        };
+        let j = serde_json::to_string(&group).unwrap();
+        let back: MulticamGroup = serde_json::from_str(&j).unwrap();
+        assert_eq!(group, back);
+        assert_eq!(back.active_angle().unwrap().name, "Cam B");
+    }
+
+    #[test]
+    fn clip_multicam_defaults_none_and_absent_from_json() {
+        let c = Clip::new(ClipSource::Adjustment, Tick(0), Tick(10));
+        assert_eq!(c.multicam, None);
+        let j = serde_json::to_string(&c).unwrap();
+        assert!(!j.contains("multicam"));
+    }
+
+    #[test]
+    fn clip_with_multicam_serde_roundtrip() {
+        let mut c = Clip::new(
+            ClipSource::Asset {
+                asset: AssetId::new(),
+            },
+            Tick(0),
+            Tick(100),
+        );
+        c.multicam = Some(MulticamGroup {
+            angles: vec![MulticamAngle::new(
+                "A",
+                ClipSource::Asset {
+                    asset: AssetId::new(),
+                },
+                Tick(0),
+            )],
+            active: 0,
+        });
+        let j = serde_json::to_string(&c).unwrap();
+        let back: Clip = serde_json::from_str(&j).unwrap();
+        assert_eq!(c, back);
     }
 }

@@ -4,7 +4,7 @@ use super::audio::{MasterBus, TrackAudio};
 use super::captions::CaptionTrack;
 use super::clip::Clip;
 use super::graph::NodeGraph;
-use super::ids::{GraphId, MarkerId, SequenceId, TrackId};
+use super::ids::{ClipId, CueId, GraphId, MarkerId, SequenceId, TrackId};
 use super::media::MediaPool;
 use super::time::{FrameRate, Tick};
 use crate::Color;
@@ -168,6 +168,46 @@ impl Sequence {
             .iter_mut()
             .chain(self.audio_tracks.iter_mut())
             .find(|t| t.id == id)
+    }
+
+    /// A structural copy of this sequence with brand-new identity — a fresh
+    /// [`SequenceId`] plus fresh ids for every track, clip, marker, caption
+    /// track and cue — so the duplicate addresses cleanly alongside the
+    /// original (the command layer resolves clips/tracks by id across *all*
+    /// sequences and would otherwise hit the first match). Link groups are
+    /// remapped to fresh ids so a linked pair stays linked *within* the copy
+    /// without tying it back to the original. Referenced assets, composition
+    /// graphs and nested sequences are shared (their ids are left untouched).
+    /// The caller renames the copy (see `ops::duplicate_sequence`).
+    pub fn duplicate_with_fresh_ids(&self) -> Sequence {
+        use super::clip::LinkGroupId;
+        let mut dup = self.clone();
+        dup.id = SequenceId::new();
+        let mut link_remap: HashMap<LinkGroupId, LinkGroupId> = HashMap::new();
+        for track in dup
+            .video_tracks
+            .iter_mut()
+            .chain(dup.audio_tracks.iter_mut())
+        {
+            track.id = TrackId::new();
+            for clip in &mut track.clips {
+                clip.id = ClipId::new();
+                if let Some(old) = clip.link_group {
+                    let fresh = *link_remap.entry(old).or_default();
+                    clip.link_group = Some(fresh);
+                }
+            }
+        }
+        for marker in &mut dup.markers {
+            marker.id = MarkerId::new();
+        }
+        for ct in &mut dup.caption_tracks {
+            ct.id = TrackId::new();
+            for cue in &mut ct.cues {
+                cue.id = CueId::new();
+            }
+        }
+        dup
     }
 
     /// The end tick of the last clip across all tracks (sequence content length).
@@ -412,6 +452,35 @@ mod tests {
         let json = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"V1","kind":"video"}"#;
         let t: Track = serde_json::from_str(json).unwrap();
         assert!(!t.sync_lock);
+    }
+
+    #[test]
+    fn duplicate_with_fresh_ids_reassigns_all_structural_ids() {
+        let mut s = seq_with(vid_track_with(vec![(0, 100), (100, 50)]));
+        s.markers.push(Marker::new(Tick(10), "m"));
+        let dup = s.duplicate_with_fresh_ids();
+
+        // Fresh identity everywhere so the copy addresses cleanly alongside
+        // the original.
+        assert_ne!(dup.id, s.id);
+        assert_ne!(dup.video_tracks[0].id, s.video_tracks[0].id);
+        for (a, b) in dup.video_tracks[0]
+            .clips
+            .iter()
+            .zip(&s.video_tracks[0].clips)
+        {
+            assert_ne!(a.id, b.id);
+        }
+        assert_ne!(dup.markers[0].id, s.markers[0].id);
+        // Content (timing) is otherwise identical.
+        let spans = |seq: &Sequence| {
+            seq.video_tracks[0]
+                .clips
+                .iter()
+                .map(|c| (c.start, c.duration))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&dup), spans(&s));
     }
 
     #[test]
