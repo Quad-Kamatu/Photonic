@@ -9,7 +9,12 @@ mod demos;
 use demos::*;
 mod hit_test;
 use hit_test::*;
-pub(crate) mod autosave;
+// `pub` (not `pub(crate)`): CAP-022's crash-recovery integration test
+// (crates/photonic-gui/tests/timeline_recovery.rs) drives the real write/load
+// path via test-only hooks in `autosave.rs`, and external integration test
+// crates can only reach items through a fully `pub` module chain. See the
+// hooks' doc comments in `autosave.rs` for the full rationale.
+pub mod autosave;
 mod close_guard;
 mod command_center;
 mod direct_select;
