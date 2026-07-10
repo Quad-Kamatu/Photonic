@@ -859,6 +859,12 @@ pub struct PhotonicApp {
     pub engine: Option<engine::EngineBridge>,
     /// Media pool drawer state + background import channel (05 §2).
     pub(crate) media_pool_ui: panels::media_pool::MediaPoolUi,
+    /// Session clip-thumbnail + waveform caches feeding the timeline lane
+    /// painter (spec 15 — NLE parity gap 10). `None` until the first video-mode
+    /// paint; `draw_timeline_panel` constructs it lazily and refreshes it each
+    /// frame from the active document's media pool. Session-only (it owns the
+    /// caches' background worker threads and is never serialized).
+    pub(crate) timeline_media: Option<timeline::TimelineMediaCaches>,
 
     // ── Video-mode panel session state (04 §4.1) ────────────────────────────
     // Storage the six video panel stories read/mutate through
@@ -1509,6 +1515,7 @@ impl Default for PhotonicApp {
             initial_mode_checked: false,
             engine: None,
             media_pool_ui: panels::media_pool::MediaPoolUi::default(),
+            timeline_media: None,
             selected_grade_op: None,
             color_page_tab: ColorPageTab::default(),
             scopes_panel_open: false,

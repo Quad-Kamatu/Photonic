@@ -51,6 +51,11 @@ pub(crate) struct LaneColors {
     /// Audio-clip waveform RMS overlay stroke, drawn brighter/narrower inside
     /// the min/max envelope (spec 15 §3 "two-tone with RMS overlay").
     pub waveform_rms: egui::Color32,
+    /// FX-badge dot for a clip that carries an effect stack (14-nle-parity
+    /// §M-8). A functional data-coding hue (same "not chrome" precedent as
+    /// `CLIP_LABEL_SWATCHES`), deliberately distinct from the selection accent
+    /// so an effected clip never reads as a selected one.
+    pub fx_badge: egui::Color32,
 }
 
 /// A painted clip's screen rect, returned for hit-testing in `interact.rs`.
@@ -301,33 +306,29 @@ struct ThumbTextureRegistry {
 const THUMB_TEXTURE_REGISTRY_CAP: usize = 512;
 
 impl ThumbTextureRegistry {
-    /// The egui texture id for `handle`, uploading it now if this is the
-    /// first time this exact thumbnail (by `Arc` identity) has been seen —
-    /// gated by `budget`. Returns `None` on a cold miss over budget or a
-    /// malformed thumbnail; the caller draws the flat fill that frame.
-    fn get_or_insert(
-        &mut self,
-        ctx: &egui::Context,
-        handle: &ThumbHandle,
-        budget: &mut ThumbnailBudget,
-    ) -> Option<egui::TextureId> {
+    /// The egui texture id already resident for `handle` (by `Arc` identity),
+    /// touching its LRU recency. `None` when not yet uploaded — the caller then
+    /// uploads (outside the registry lock — see [`Self::insert`]) and inserts.
+    fn get(&mut self, handle: &ThumbHandle) -> Option<egui::TextureId> {
         let key = Arc::as_ptr(handle) as usize;
         self.clock += 1;
         let clock = self.clock;
-        if let Some((tex, used)) = self.entries.get_mut(&key) {
-            *used = clock;
-            return Some(tex.id());
-        }
-        if handle.width == 0 || handle.height == 0 {
-            return None;
-        }
-        if handle.rgba.len() != handle.width as usize * handle.height as usize * 4 {
-            return None; // malformed — never surfaced by the decode/disk paths, but don't trust blindly
-        }
-        if !budget.take() {
-            return None;
-        }
-        if self.entries.len() >= THUMB_TEXTURE_REGISTRY_CAP {
+        let (tex, used) = self.entries.get_mut(&key)?;
+        *used = clock;
+        Some(tex.id())
+    }
+
+    /// Store an already-uploaded `tex` for `handle`, evicting the
+    /// least-recently-used entry first if at capacity. Returns its texture id.
+    ///
+    /// The upload (`ctx.load_texture`) MUST happen before calling this and
+    /// OUTSIDE the `ctx.data_mut` guard that `with_thumb_registry` holds:
+    /// `load_texture` re-acquires the egui `Context` lock, which is not
+    /// reentrant, so uploading while that guard is held deadlocks.
+    fn insert(&mut self, handle: &ThumbHandle, tex: egui::TextureHandle) -> egui::TextureId {
+        let key = Arc::as_ptr(handle) as usize;
+        self.clock += 1;
+        if !self.entries.contains_key(&key) && self.entries.len() >= THUMB_TEXTURE_REGISTRY_CAP {
             if let Some(victim) = self
                 .entries
                 .iter()
@@ -337,14 +338,9 @@ impl ThumbTextureRegistry {
                 self.entries.remove(&victim);
             }
         }
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [handle.width as usize, handle.height as usize],
-            &handle.rgba,
-        );
-        let tex = ctx.load_texture("timeline-clip-thumb", image, egui::TextureOptions::LINEAR);
         let id = tex.id();
-        self.entries.insert(key, (tex, clock));
-        Some(id)
+        self.entries.insert(key, (tex, self.clock));
+        id
     }
 }
 
@@ -386,9 +382,28 @@ fn paint_thumbnails(
         let Some(handle) = cache.request(asset, slice.source_tick, THUMB_TARGET_HEIGHT_PX) else {
             continue; // miss — background decode enqueued, flat fill shows through
         };
-        let Some(tex_id) = with_thumb_registry(ctx, |reg| reg.get_or_insert(ctx, &handle, budget))
-        else {
-            continue; // over budget this frame — flat fill shows through
+        // Resident already? The registry lock is held only for the lookup. A
+        // cold miss uploads the texture OUTSIDE that lock: `ctx.load_texture`
+        // re-enters the `Context` lock, so uploading inside `with_thumb_registry`
+        // (which holds `ctx.data_mut`) would deadlock the draw thread.
+        let tex_id = if let Some(id) = with_thumb_registry(ctx, |reg| reg.get(&handle)) {
+            id
+        } else {
+            if handle.width == 0 || handle.height == 0 {
+                continue; // malformed — flat fill shows through
+            }
+            if handle.rgba.len() != handle.width as usize * handle.height as usize * 4 {
+                continue; // malformed — never surfaced by decode/disk, but don't trust blindly
+            }
+            if !budget.take() {
+                continue; // over budget this frame — flat fill shows through
+            }
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [handle.width as usize, handle.height as usize],
+                &handle.rgba,
+            );
+            let tex = ctx.load_texture("timeline-clip-thumb", image, egui::TextureOptions::LINEAR);
+            with_thumb_registry(ctx, |reg| reg.insert(&handle, tex))
         };
         let slice_rect = egui::Rect::from_min_max(
             egui::pos2(sx0, visible_rect.top()),
@@ -594,6 +609,19 @@ pub(crate) fn paint_lane(
         }
         if c.transition_out.is_some() {
             shapes.push(edge_triangle(rect, false, colors.transition));
+        }
+
+        // FX badge (14-nle-parity §M-8): a small filled dot in the clip's
+        // bottom-right corner when it carries an effect stack, so effected
+        // clips read at a glance without opening the inspector. Additive over
+        // every state above; `clip_has_effects` is the single shared signal the
+        // inspector exposes so the two surfaces never disagree.
+        if crate::panels::video::clip_inspector::clip_has_effects(c) {
+            let r = 2.5_f32.min(rect.width() * 0.5).min(rect.height() * 0.5);
+            if r > 0.5 {
+                let center = egui::pos2(rect.right() - r - 2.0, rect.bottom() - r - 2.0);
+                shapes.push(egui::Shape::circle_filled(center, r, colors.fx_badge));
+            }
         }
 
         painted.push(PaintedClip { clip: c.id, rect });
@@ -1009,5 +1037,141 @@ mod tests {
         let mut budget = ThumbnailBudget::new(0);
         assert!(!budget.take());
         assert!(budget.exceeded);
+    }
+
+    // ── paint_lane consumes a live cache (spec 15 integration) ───────────────
+
+    /// A `ThumbnailSource` that returns a flat RGBA thumbnail for any request,
+    /// so a primed cache reliably hits — lets the test assert `paint_lane`
+    /// actually uploads a texture when handed `Some(cache)` (the headline wire).
+    struct FlatThumbSource;
+    impl photonic_video::media::ThumbnailSource for FlatThumbSource {
+        fn asset_hash(&self, _asset: AssetId) -> Option<String> {
+            None // memory-only: isolate the test from any on-disk sidecar
+        }
+        fn decode_thumbnail(
+            &self,
+            _asset: AssetId,
+            _source_tick: Tick,
+            target_px: u32,
+        ) -> Option<photonic_video::RgbaThumb> {
+            let side = target_px.max(1);
+            Some(photonic_video::RgbaThumb {
+                width: side,
+                height: side,
+                rgba: vec![180u8; (side * side * 4) as usize],
+            })
+        }
+    }
+
+    fn test_colors() -> LaneColors {
+        let c = egui::Color32::WHITE;
+        LaneColors {
+            clip_fill: c,
+            clip_stroke: c,
+            selected_fill: c,
+            selected_stroke: c,
+            label: c,
+            transition: c,
+            offline: c,
+            locked_hatch: c,
+            sync_lock_seam: c,
+            waveform_fill: c,
+            waveform_rms: c,
+            fx_badge: c,
+        }
+    }
+
+    #[test]
+    fn paint_lane_uploads_a_texture_when_the_cache_has_the_thumbnail() {
+        let asset = AssetId::new();
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset },
+            Tick::ZERO,
+            Tick::from_seconds(2),
+        ));
+        let view = TimelineView::default();
+
+        let dir = std::env::temp_dir().join(format!(
+            "photonic-clips-paintlane-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = ThumbnailCache::new(Arc::new(FlatThumbSource), dir.clone());
+
+        // Prime the cache for exactly the buckets `paint_lane` will request,
+        // then wait for the background decodes so the paint below hits (a live
+        // draw would hit on a later frame; the test collapses that wait).
+        for slice in clip_thumbnail_slices(&track.clips[0], &view, THUMB_SLICE_SPACING_PX) {
+            cache.request(asset, slice.source_tick, THUMB_TARGET_HEIGHT_PX);
+        }
+        cache.block_until_idle();
+        assert!(
+            !cache.is_empty(),
+            "cache should hold at least one thumbnail after priming"
+        );
+
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 40.0));
+        let colors = test_colors();
+
+        // Run inside a real egui frame so fonts (label text) and the texture
+        // manager are live; `paint_lane` registers thumbnails into the ctx's
+        // persistent `ThumbTextureRegistry`.
+        let ctx = egui::Context::default();
+        let mut with_cache_textures = 0usize;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("paint_lane_test"));
+            let painter = egui::Painter::new(ctx.clone(), layer, rect);
+            let mut budget = ThumbnailBudget::new(DEFAULT_THUMBNAIL_BUDGET);
+            let painted = paint_lane(
+                &painter,
+                &view,
+                &track,
+                rect,
+                &[],
+                &colors,
+                Some(&cache),
+                None,
+                &mut budget,
+            );
+            assert_eq!(painted.len(), 1, "the one clip is painted");
+            with_cache_textures = with_thumb_registry(ctx, |r| r.entries.len());
+        });
+        assert!(
+            with_cache_textures >= 1,
+            "paint_lane must upload a thumbnail texture when the cache has data \
+             (got {with_cache_textures})"
+        );
+
+        // Control: a fresh ctx painted with `None` registers nothing — proving
+        // the texture above came from the `Some(cache)` path, not incidental
+        // state (this is exactly the old flat-fill-only behavior).
+        let ctx2 = egui::Context::default();
+        let mut without_cache_textures = 0usize;
+        let _ = ctx2.run(egui::RawInput::default(), |ctx| {
+            let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("paint_lane_none"));
+            let painter = egui::Painter::new(ctx.clone(), layer, rect);
+            let mut budget = ThumbnailBudget::new(DEFAULT_THUMBNAIL_BUDGET);
+            paint_lane(
+                &painter,
+                &view,
+                &track,
+                rect,
+                &[],
+                &colors,
+                None,
+                None,
+                &mut budget,
+            );
+            without_cache_textures = with_thumb_registry(ctx, |r| r.entries.len());
+        });
+        assert_eq!(
+            without_cache_textures, 0,
+            "the None path uploads no textures (flat fill only)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

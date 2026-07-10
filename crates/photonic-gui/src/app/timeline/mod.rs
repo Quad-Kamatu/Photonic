@@ -39,6 +39,20 @@ use photonic_core::timeline::clip::LinkGroupId;
 use photonic_core::timeline::{
     ops, ClipId, ClipTiming, FrameRate, Sequence, SequenceId, Tick, TrackId, TrackKind,
 };
+// Timeline media caches (spec 15 — NLE parity gap 10): the engine-side thumbnail
+// and waveform caches this panel feeds to `clips::paint_lane`.
+use photonic_core::timeline::{AssetId, AssetSource, MediaPool};
+use photonic_video::audio::{build_pyramid, WaveformPyramid};
+use photonic_video::decode::scheduler::{PtsKind, SourceParams};
+use photonic_video::decode::PixFmt;
+use photonic_video::media::{
+    cache_dir_for_project, locate, probe_details, DecodeThumbnailSource, FfmpegTools,
+    KeyframeIndex, PtsIndex, ThumbnailCache, ThumbnailDecodeSpec, WaveformCache, WaveformSource,
+};
+use photonic_video::playback::FfmpegPcmSource;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const TOOLBAR_H: f32 = 24.0;
 const DRAG_ID: &str = "timeline_drag_state";
@@ -76,6 +90,20 @@ impl PhotonicApp {
         let mut playhead = self.playhead;
         let mut selection = std::mem::take(&mut self.timeline_selection);
         let mut snap = self.timeline_snap_enabled;
+
+        // Timeline media caches (spec 15): construct once, then take them out of
+        // `self` for the frame — mirroring the `selection` take above — so the
+        // paint loop can hold `&caches` while `self` is still mutated for the
+        // write-back at the end. Restored just before returning. Refreshed each
+        // frame from the active document's media pool so the background resolver
+        // closures see the current assets without borrowing the document.
+        if self.timeline_media.is_none() {
+            self.timeline_media = Some(TimelineMediaCaches::new(self.current_file.as_deref()));
+        }
+        let media_caches = self.timeline_media.take();
+        if let Some(caches) = media_caches.as_ref() {
+            caches.refresh(&doc.timeline.as_ref().unwrap().media);
+        }
 
         let full = ui.max_rect();
         let toolbar_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TOOLBAR_H));
@@ -173,15 +201,12 @@ impl PhotonicApp {
                         lane_rect,
                         &selection,
                         &colors,
-                        // Seam (spec 15): no live `ThumbnailCache`/`WaveformCache`
-                        // is constructed anywhere yet — that needs a field on
-                        // `PhotonicApp`/`EngineBridge` (`app/mod.rs`,
-                        // `app/engine.rs`), outside this story's territory.
-                        // `paint_lane` is fully wired to consume one the moment
-                        // it exists; until then this is exactly today's
-                        // flat-fill-only behavior.
-                        None,
-                        None,
+                        // Live caches (spec 15): thumbnails sampled across video
+                        // lanes, waveforms across audio lanes. A cache miss, no
+                        // ffmpeg, or a non-file asset leaves the flat fill —
+                        // `paint_lane` handles the per-cache `None` gracefully.
+                        media_caches.as_ref().map(|c| &c.thumbnails),
+                        media_caches.as_ref().map(|c| &c.waveforms),
                         &mut thumb_budget,
                     );
                     for pc in painted {
@@ -354,6 +379,8 @@ impl PhotonicApp {
             self.timeline_snap_enabled = snap;
             self.prefs.timeline_snap_enabled = snap;
         }
+        // Restore the media caches taken at the top of the frame.
+        self.timeline_media = media_caches;
     }
 }
 
@@ -654,6 +681,193 @@ fn lane_colors(ui: &egui::Ui) -> clips::LaneColors {
         sync_lock_seam: v.hyperlink_color,
         waveform_fill: v.weak_text_color().gamma_multiply(0.8),
         waveform_rms: v.text_color().gamma_multiply(0.6),
+        // Fixed teal — a functional data-code hue (like the clip-label
+        // swatches), not the selection violet, so an FX-badged clip never reads
+        // as selected. Legible on both light and dark lane fills.
+        fx_badge: egui::Color32::from_rgb(0x2D, 0xD4, 0xBF),
+    }
+}
+
+// ── Timeline media caches (spec 15 — NLE parity gap 10) ─────────────────────
+//
+// Wave 2 built the engine half (`photonic_video::media::thumbnails`'s
+// `ThumbnailCache`/`WaveformCache`, background-decoded + sidecar-cached) and the
+// draw half (`clips::paint_lane`, which reads a cache and registers egui
+// textures), but the call site below passed `None, None`, so clips rendered
+// flat. This is the connecting tissue: `PhotonicApp` holds one
+// `TimelineMediaCaches` for the session and `draw_timeline_panel` refreshes its
+// asset snapshot from the active document's media pool each frame, then hands
+// the two caches to `paint_lane`. Every path degrades gracefully — no ffmpeg,
+// an unsaved project, a non-file asset, or an in-flight decode all just leave
+// the flat clip fill showing (the caches never block the draw thread).
+
+/// One media-pool asset resolved to what the background cache workers need: an
+/// on-disk path plus its content hash (the sidecar disk-cache key). Held behind
+/// a shared `Mutex` and rebuilt every frame from `TimelineProject::media` so the
+/// `Send + Sync` resolver closures never borrow the document.
+#[derive(Clone)]
+struct ResolvedMedia {
+    path: PathBuf,
+    content_hash: Option<String>,
+}
+
+/// The clip-thumbnail + waveform caches backing the timeline lane painter,
+/// owned by `PhotonicApp` for the session and constructed lazily on first
+/// video-mode paint.
+pub(crate) struct TimelineMediaCaches {
+    thumbnails: ThumbnailCache,
+    waveforms: WaveformCache,
+    /// `AssetId` → resolved path/hash, shared with the resolver closures and
+    /// rebuilt from the active media pool every frame (see [`Self::refresh`]).
+    resolved: Arc<Mutex<HashMap<AssetId, ResolvedMedia>>>,
+}
+
+impl TimelineMediaCaches {
+    /// Build the caches. `project_path` is the open project file, used for the
+    /// sidecar cache dir (`<project>.photon.cache/`); an unsaved project falls
+    /// back to a session temp dir so thumbnails still cache within the run. A
+    /// missing ffmpeg toolchain leaves both sources decode-less: every request
+    /// then misses and the flat fill shows — graceful, never an error.
+    ///
+    /// Constructing spawns the two caches' background worker threads (one each);
+    /// they idle until the first `request` and exit cleanly on drop.
+    pub(crate) fn new(project_path: Option<&Path>) -> Self {
+        let cache_dir = project_path
+            .map(cache_dir_for_project)
+            .unwrap_or_else(|| std::env::temp_dir().join("photonic-timeline-cache"));
+        let tools = locate().ok();
+        let resolved: Arc<Mutex<HashMap<AssetId, ResolvedMedia>>> = Arc::default();
+
+        // Thumbnail decode source. The cache calls the resolver twice per bucket
+        // (once for the disk-key hash, once for the decode), so the per-asset
+        // probe + keyframe build is memoized to run at most once per asset.
+        let thumb_resolved = Arc::clone(&resolved);
+        let thumb_tools = tools.clone();
+        let thumb_memo: Arc<Mutex<HashMap<AssetId, Option<ThumbSpecParts>>>> = Arc::default();
+        let thumb_source = Arc::new(DecodeThumbnailSource::new(move |asset: AssetId| {
+            let tools = thumb_tools.clone()?;
+            if let Some(parts) = thumb_memo.lock().unwrap().get(&asset) {
+                return parts.clone().map(ThumbSpecParts::into_spec);
+            }
+            let media = thumb_resolved.lock().unwrap().get(&asset).cloned();
+            let parts = media.and_then(|m| ThumbSpecParts::build(&tools, &m));
+            thumb_memo.lock().unwrap().insert(asset, parts.clone());
+            parts.map(ThumbSpecParts::into_spec)
+        }));
+        let thumbnails = ThumbnailCache::new(thumb_source, cache_dir.clone());
+
+        // Waveform source: decode the asset's first audio stream once and build
+        // its peak pyramid (the cache persists it to the sidecar and reuses it).
+        let wave_source = Arc::new(PoolWaveformSource {
+            resolved: Arc::clone(&resolved),
+            tools,
+        });
+        let waveforms = WaveformCache::new(wave_source, cache_dir);
+
+        TimelineMediaCaches {
+            thumbnails,
+            waveforms,
+            resolved,
+        }
+    }
+
+    /// Rebuild the asset snapshot from `pool` (clears + re-inserts every
+    /// file-backed asset — cheap for a typical pool). Called once per frame
+    /// before painting lanes so the resolver closures always see the active
+    /// document's media without holding a borrow across the worker threads.
+    fn refresh(&self, pool: &MediaPool) {
+        let mut map = self.resolved.lock().unwrap();
+        map.clear();
+        for (id, asset) in &pool.assets {
+            if let AssetSource::File { path, .. } = &asset.source {
+                map.insert(
+                    *id,
+                    ResolvedMedia {
+                        path: path.clone(),
+                        content_hash: asset.content_hash.clone(),
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// The `Clone`-able parts of a [`ThumbnailDecodeSpec`] (the spec itself is not
+/// `Clone`), memoized per asset and rebuilt into a fresh spec on each resolver
+/// call.
+#[derive(Clone)]
+struct ThumbSpecParts {
+    params: SourceParams,
+    tools: FfmpegTools,
+    content_hash: Option<String>,
+}
+
+impl ThumbSpecParts {
+    /// Probe `media` and build its keyframe/pts model into a decode spec's
+    /// parts, or `None` if the file has no decodable video stream or the probe
+    /// fails (offline, no codec) — the caller then leaves the flat fill. Runs on
+    /// the cache's worker thread (may block on ffmpeg), never the draw thread.
+    fn build(tools: &FfmpegTools, media: &ResolvedMedia) -> Option<ThumbSpecParts> {
+        let details = probe_details(tools, &media.path).ok()?;
+        let video = details.probe.video.clone()?;
+        let keyframes = KeyframeIndex::build(tools, &media.path).ok()?;
+        let pts_kind = if details.is_vfr {
+            PtsKind::Vfr(Arc::new(PtsIndex::build(tools, &media.path).ok()?))
+        } else {
+            PtsKind::Cfr(video.frame_rate)
+        };
+        Some(ThumbSpecParts {
+            params: SourceParams {
+                input: media.path.clone(),
+                width: video.width,
+                height: video.height,
+                pix_fmt: PixFmt::for_alpha(details.has_alpha),
+                pts_kind,
+                keyframes,
+            },
+            tools: tools.clone(),
+            content_hash: media.content_hash.clone(),
+        })
+    }
+
+    fn into_spec(self) -> ThumbnailDecodeSpec {
+        ThumbnailDecodeSpec {
+            params: self.params,
+            tools: self.tools,
+            content_hash: self.content_hash,
+        }
+    }
+}
+
+/// Media-pool-backed [`WaveformSource`]: resolves an asset to its file and
+/// decodes its first audio stream (via ffmpeg) into a peak pyramid on the
+/// cache's worker thread. No audio / no ffmpeg → `None` → the flat fill shows.
+struct PoolWaveformSource {
+    resolved: Arc<Mutex<HashMap<AssetId, ResolvedMedia>>>,
+    tools: Option<FfmpegTools>,
+}
+
+impl WaveformSource for PoolWaveformSource {
+    fn asset_hash(&self, asset: AssetId) -> Option<String> {
+        self.resolved
+            .lock()
+            .unwrap()
+            .get(&asset)?
+            .content_hash
+            .clone()
+    }
+
+    fn build_pyramid(&self, asset: AssetId) -> Option<WaveformPyramid> {
+        /// Waveform decode target rate — 09 §8.1's peak pyramid is rate-agnostic
+        /// (buckets are in samples), so a fixed 48 kHz keeps the bucket math
+        /// deterministic regardless of the source's own rate.
+        const WAVEFORM_SAMPLE_RATE: u32 = 48_000;
+        let tools = self.tools.clone()?;
+        let media = self.resolved.lock().unwrap().get(&asset).cloned()?;
+        let hash = media.content_hash.clone().unwrap_or_default();
+        let mut src =
+            FfmpegPcmSource::spawn(&tools, &media.path, Tick::ZERO, WAVEFORM_SAMPLE_RATE).ok()?;
+        Some(build_pyramid(&mut src, hash))
     }
 }
 
