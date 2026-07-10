@@ -19,8 +19,8 @@ use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
     ops, AssetId, AssetKind, Clip, ClipSource, ClipTiming, FrameRate, Marker, MarkerId,
-    MediaAsset, Sequence, SequenceId, Tick, TimelineCmd, Track, TrackId, TrackKind, TrackSettings,
-    TICKS_PER_SECOND,
+    MediaAsset, Sequence, SequenceFormat, SequenceId, Tick, TimelineCmd, Track, TrackId, TrackKind,
+    TrackSettings, TICKS_PER_SECOND,
 };
 
 /// Push one timeline command as a single, non-folding undo step.
@@ -36,6 +36,58 @@ fn commit_batch(history: &mut CommandHistory, doc: &mut Document, cmds: Vec<Time
     let batch = cmds.into_iter().map(Command::Timeline).collect();
     history.execute_discrete(Command::Batch(batch), doc);
 }
+
+// ── Aspect ratio / sequence format ──────────────────────────────────────────
+
+/// Switch the sequence to the aspect/frame named `name` (`w`×`h`): activate the
+/// existing format if one already matches, otherwise add it and activate it —
+/// one undoable step either way. This is the one-click "make this 9:16 / 1:1 /
+/// 16:9" control behind the monitor's format bar (CAP-012).
+pub(crate) fn switch_to_aspect(
+    history: &mut CommandHistory,
+    doc: &mut Document,
+    seq_id: SequenceId,
+    name: &str,
+    w: u32,
+    h: u32,
+) {
+    let Some(project) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Some(seq) = project.sequences.get(&seq_id) else {
+        return;
+    };
+    // Match an existing format by dimensions (name is cosmetic; the aspect is
+    // what matters), so repeated clicks just re-activate rather than pile up.
+    if let Some(idx) = seq.formats.iter().position(|f| f.width == w && f.height == h) {
+        if seq.active_format != idx {
+            if let Ok(cmd) = ops::set_active_format(project, seq_id, idx) {
+                commit(history, doc, cmd);
+            }
+        }
+        return;
+    }
+    let new_idx = seq.formats.len();
+    let add = ops::add_format(seq_id, SequenceFormat::new(name, w, h));
+    // Add then activate as one undo step.
+    let activate = TimelineCmd::SetActiveFormat {
+        seq: seq_id,
+        old: seq.active_format,
+        new: new_idx,
+    };
+    commit_batch(history, doc, vec![add, activate]);
+}
+
+/// The built-in quick aspect presets shown on the monitor's format bar
+/// (name, width, height). 1080-tall/wide family per 04 §4.1 / CAP-012.
+pub(crate) const ASPECT_PRESETS: &[(&str, u32, u32)] = &[
+    ("16:9", 1920, 1080),
+    ("9:16", 1080, 1920),
+    ("1:1", 1080, 1080),
+    ("4:5", 1080, 1350),
+    ("4:3", 1440, 1080),
+    ("21:9", 2560, 1080),
+];
 
 // ── Project / sequence / track lifecycle ────────────────────────────────────
 
@@ -630,5 +682,52 @@ pub(crate) fn set_work_range(
     };
     if let Ok(cmd) = ops::set_work_range(p, seq, new) {
         commit(history, doc, cmd);
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use photonic_core::timeline::{Sequence, TimelineProject};
+
+    fn doc_with_seq() -> (Document, CommandHistory, SequenceId) {
+        let mut project = TimelineProject::new();
+        let seq = Sequence::new("s", FrameRate::new(30, 1), 1920, 1080); // starts 16:9 @ index 0
+        let seq_id = project.insert_sequence(seq);
+        project.active_sequence = Some(seq_id);
+        let mut doc = Document::new("t", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+        (doc, CommandHistory::new(64), seq_id)
+    }
+
+    fn active(doc: &Document, seq_id: SequenceId) -> (usize, u32, u32) {
+        let s = &doc.timeline.as_ref().unwrap().sequences[&seq_id];
+        let f = &s.formats[s.active_format];
+        (s.active_format, f.width, f.height)
+    }
+
+    #[test]
+    fn switch_adds_then_reactivates_without_duplicating() {
+        let (mut doc, mut h, seq) = doc_with_seq();
+        // New aspect → added at index 1 and activated.
+        switch_to_aspect(&mut h, &mut doc, seq, "9:16", 1080, 1920);
+        assert_eq!(active(&doc, seq), (1, 1080, 1920));
+        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 2);
+
+        // Back to the original aspect → re-activates index 0, no new format.
+        switch_to_aspect(&mut h, &mut doc, seq, "16:9", 1920, 1080);
+        assert_eq!(active(&doc, seq), (0, 1920, 1080));
+        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 2);
+
+        // Repeating the current aspect is a no-op (no duplicate, still index 0).
+        switch_to_aspect(&mut h, &mut doc, seq, "16:9", 1920, 1080);
+        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 2);
+
+        // Undo the reactivation, then the add — state walks back cleanly.
+        h.undo(&mut doc);
+        assert_eq!(active(&doc, seq), (1, 1080, 1920));
+        h.undo(&mut doc);
+        assert_eq!(active(&doc, seq), (0, 1920, 1080));
+        assert_eq!(doc.timeline.as_ref().unwrap().sequences[&seq].formats.len(), 1);
     }
 }

@@ -405,12 +405,17 @@ impl PhotonicApp {
         let format = active_format(doc);
         let painter = ui.painter_at(rect);
 
-        // Reserve a bottom strip for the transport bar (04 §3.2: "a slim
-        // overlay bar along the bottom edge of the canvas rect").
+        // Reserve a top strip for the aspect/frame bar (CAP-012) and a bottom
+        // strip for the transport bar (04 §3.2). The video image sits between.
+        const FORMAT_H: f32 = 30.0;
         const TRANSPORT_H: f32 = 40.0;
-        let content_rect = egui::Rect::from_min_max(
+        let format_rect = egui::Rect::from_min_max(
             rect.min,
-            egui::pos2(rect.max.x, (rect.max.y - TRANSPORT_H).max(rect.min.y)),
+            egui::pos2(rect.max.x, (rect.min.y + FORMAT_H).min(rect.max.y)),
+        );
+        let content_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, format_rect.max.y),
+            egui::pos2(rect.max.x, (rect.max.y - TRANSPORT_H).max(format_rect.max.y)),
         );
         let transport_rect =
             egui::Rect::from_min_max(egui::pos2(rect.min.x, content_rect.max.y), rect.max);
@@ -498,7 +503,50 @@ impl PhotonicApp {
         }
 
         self.draw_transport_bar(ui, transport_rect, doc, history);
+        self.draw_format_bar(ui, format_rect, doc, history);
         self.draw_video_shortcut_sheet(ctx);
+    }
+
+    /// Aspect/frame bar above the monitor (CAP-012): one-click preset chips to
+    /// switch the sequence between 16:9 / 9:16 / 1:1 / 4:5 / 4:3 / 21:9, the
+    /// active one highlighted. Clicking a preset activates it (or adds+activates
+    /// it if the sequence doesn't have it yet), undoably — so reframing the
+    /// whole edit for a different platform is a single, discoverable click.
+    fn draw_format_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let (cur_w, cur_h) = {
+            let f = active_format(doc);
+            (f.width, f.height)
+        };
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(format!("{} Frame", ph::CROP)).weak());
+                ui.separator();
+                let mut clicked: Option<(&str, u32, u32)> = None;
+                for &(name, w, h) in super::timeline::ops_bridge::ASPECT_PRESETS {
+                    let active = w == cur_w && h == cur_h;
+                    if ui
+                        .selectable_label(active, name)
+                        .on_hover_text(format!("Switch sequence to {name} ({w}×{h})"))
+                        .clicked()
+                    {
+                        clicked = Some((name, w, h));
+                    }
+                }
+                if let Some((name, w, h)) = clicked {
+                    super::timeline::ops_bridge::switch_to_aspect(history, doc, seq_id, name, w, h);
+                }
+            });
+        });
     }
 
     /// Play/pause/step buttons, timecode readout, loop + safe-area toggles,
