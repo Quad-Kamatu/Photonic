@@ -21,15 +21,23 @@
 //! `SolidColor`, `Merge` (over + a non-Normal blend mode via a composition),
 //! `Transform2D`, `Crop`/`Resize` (via a project graph), multi-track fold,
 //! Adjustment re-root, and keyframe-resolved opacity across sampled ticks.
+//!
+//! P7/P8 additions cover the `Grade` `IrOp` per-operator-class (11 §6 P7: "at
+//! minimum: one CDL case, one curve case, one LUT case") and render-level
+//! node-catalog coverage (11 §6 P8): a per-clip composition chaining a unary
+//! effect into a binary merge, and a project-graph splice over the sequence
+//! output (08 §5's unwired-input-defaults-to-program rule, at the project-graph
+//! level rather than per-clip).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
-    AssetId, Clip, ClipEffect, ClipId, ClipSource, EffectKind, FitMode, FrameRate, GraphEdge,
-    GraphId, GraphNode, GraphNodeId, GraphOp, InPort, Interp, Keyframe, NodeGraph, OutPort,
-    PropPath, PropValue, Sequence, SequenceId, Tick, TimelineProject, Track, TrackId, TrackKind,
+    AssetId, Clip, ClipEffect, ClipId, ClipSource, EffectKind, FitMode, FrameRate, Grade, GradeOp,
+    GradeOpKind, GradeOpParams, GraphEdge, GraphId, GraphNode, GraphNodeId, GraphOp, InPort,
+    Interp, Keyframe, LutInterp, NodeGraph, OutPort, PropPath, PropValue, Sequence, SequenceId,
+    Tick, TimelineProject, Track, TrackId, TrackKind,
 };
 use photonic_core::Color;
 use uuid::Uuid;
@@ -371,6 +379,265 @@ fn case_opacity_ramp() -> TimelineProject {
     project
 }
 
+/// A mid-tone solid clip through an ASC CDL grade (slope/offset/power/sat all
+/// non-identity, plus a saturation boost) — locks the CDL corrector math (07
+/// §3.2) end-to-end through `Clip.grade` → `IrOp::Grade` →
+/// `apply_grade_cpu` (11 §6 P7's "one CDL case").
+fn case_grade_cdl() -> TimelineProject {
+    let base = 9_000_000;
+    let mut project = TimelineProject::new();
+    let mut seq = new_seq("grade_cdl", 64, 64, base);
+    let mut v1 = vtrack("V1", base + 10);
+    let mut clip = solid_clip(
+        Color {
+            r: 0.45,
+            g: 0.35,
+            b: 0.25,
+            a: 1.0,
+        },
+        base + 20,
+    );
+    let mut grade = Grade::new();
+    grade.ops.push(GradeOp::new(
+        GradeOpKind::Cdl,
+        GradeOpParams::Cdl {
+            slope: [1.25, 1.0, 0.75],
+            offset: [0.05, 0.0, -0.05],
+            power: [0.9, 1.0, 1.15],
+            sat: 1.4,
+        },
+    ));
+    clip.grade = Some(grade);
+    v1.clips.push(clip);
+    seq.video_tracks.push(v1);
+    project.insert_sequence(seq);
+    project
+}
+
+/// A quadrant test-pattern clip (from the harness `PatternProvider`) through a
+/// `Curves` grade with a non-identity, midtone-lifting master curve — locks
+/// `curve_lut`'s Catmull-Rom spline (07 §3.6). A flat solid can't reveal a
+/// curve's per-value remap the way a multi-luminance pattern does, so this uses
+/// the same asset-clip pattern source as `transform2d_scaled`
+/// (11 §6 P7's "one curve case").
+fn case_grade_curve() -> TimelineProject {
+    let base = 10_000_000;
+    let mut project = TimelineProject::new();
+    let mut seq = new_seq("grade_curve", 80, 80, base);
+    let mut v1 = vtrack("V1", base + 10);
+    let mut clip = asset_clip(base + 90, base + 20);
+    let mut grade = Grade::new();
+    grade.ops.push(GradeOp::new(
+        GradeOpKind::Curves,
+        GradeOpParams::Curves {
+            master: vec![(0.0, 0.0), (0.5, 0.75), (1.0, 1.0)],
+            red: vec![],
+            green: vec![],
+            blue: vec![],
+            hue_vs_hue: vec![],
+            hue_vs_sat: vec![],
+        },
+    ));
+    clip.grade = Some(grade);
+    v1.clips.push(clip);
+    seq.video_tracks.push(v1);
+    project.insert_sequence(seq);
+    project
+}
+
+/// A solid clip through a `Lut3d` grade op referencing an (unregistered) `.cube`
+/// asset (11 §6 P7's "one LUT case"). `graph::compile`'s `resolve_grade` has no
+/// `MediaPool` threaded through yet — its doc comment records that a `Lut3d` op
+/// always resolves inert (the `lut_provider` closure is hardcoded to return
+/// `None`) until a table provider reaches `compile()`. This golden therefore
+/// locks the same thing `crop_resize_passthrough` locks for `Crop`/`Resize`: the
+/// op's presence in the stack does not corrupt or blank the frame. It is the
+/// natural re-bless target once LUT-table resolution lands at the compile
+/// layer (07 §3.8) — at that point this case should start actually darkening/
+/// tinting the solid and will need a fresh bless.
+fn case_grade_lut3d() -> TimelineProject {
+    let base = 11_000_000;
+    let mut project = TimelineProject::new();
+    let mut seq = new_seq("grade_lut3d", 64, 64, base);
+    let mut v1 = vtrack("V1", base + 10);
+    let mut clip = solid_clip(
+        Color {
+            r: 0.55,
+            g: 0.30,
+            b: 0.60,
+            a: 1.0,
+        },
+        base + 20,
+    );
+    let mut grade = Grade::new();
+    grade.ops.push(GradeOp::new(
+        GradeOpKind::Lut3d,
+        GradeOpParams::Lut3d {
+            asset: AssetId::from(uid(base + 91)),
+            intensity: 1.0,
+            interp: LutInterp::Trilinear,
+        },
+    ));
+    clip.grade = Some(grade);
+    v1.clips.push(clip);
+    seq.video_tracks.push(v1);
+    project.insert_sequence(seq);
+    project
+}
+
+/// A per-clip composition `ClipIn → Blur → Merge{Multiply} ← SolidColor →
+/// Output` — a three-node chain routing a unary effect into one side of a
+/// binary merge, distinct from `merge_screen_blend`'s flatter two-source
+/// `SolidColor Merge{Screen} ClipIn` shape. `Blur` is still a passthrough
+/// marker in `eval_cpu` (only `Invert` has a real effect kernel through P7), so
+/// this golden locks the composition topology and the `Multiply` blend math,
+/// not blur math (11 §6 P8's node-catalog render-level coverage).
+fn case_node_blur_merge() -> TimelineProject {
+    let base = 12_000_000;
+    let mut project = TimelineProject::new();
+    let mut seq = new_seq("node_blur_merge", 80, 80, base);
+
+    let clip_in = node(GraphOp::ClipIn, base + 30);
+    let blur = node(GraphOp::Blur, base + 31);
+    let mut solid = node(GraphOp::SolidColor, base + 32);
+    solid.params.base.0.set(
+        "params.color",
+        PropValue::Color(Color {
+            r: 0.9,
+            g: 0.55,
+            b: 0.15,
+            a: 1.0,
+        }),
+    );
+    let merge = node(
+        GraphOp::Merge {
+            mode: BlendMode::Multiply,
+        },
+        base + 33,
+    );
+    let output = node(GraphOp::Output, base + 34);
+    let (ci, bl, so, mg, ou) = (clip_in.id, blur.id, solid.id, merge.id, output.id);
+    let mut nodes = HashMap::new();
+    for n in [clip_in, blur, solid, merge, output] {
+        nodes.insert(n.id, n);
+    }
+    let graph = NodeGraph {
+        id: GraphId::from(uid(base + 40)),
+        name: "blur-merge-comp".into(),
+        nodes,
+        edges: vec![
+            GraphEdge {
+                from: (ci, OutPort::PRIMARY),
+                to: (bl, InPort::PRIMARY),
+            },
+            GraphEdge {
+                from: (bl, OutPort::PRIMARY),
+                to: (mg, InPort::A),
+            },
+            GraphEdge {
+                from: (so, OutPort::PRIMARY),
+                to: (mg, InPort::B),
+            },
+            GraphEdge {
+                from: (mg, OutPort::PRIMARY),
+                to: (ou, InPort::PRIMARY),
+            },
+        ],
+        output: ou,
+        ui: HashMap::new(),
+    };
+    let gid = graph.id;
+    project.graphs.insert(gid, graph);
+
+    let mut v1 = vtrack("V1", base + 10);
+    let mut clip = asset_clip(base + 90, base + 20);
+    clip.composition = Some(gid);
+    v1.clips.push(clip);
+    seq.video_tracks.push(v1);
+    project.insert_sequence(seq);
+    project
+}
+
+/// A project-graph splice `SolidColor → Merge{Normal, opacity 0.4} ← (unwired:
+/// program) → Output` over a solid-clip sequence — a flat translucent tint
+/// standing in for a vignette (08 §5's unwired-input-defaults-to-program rule;
+/// `eval_cpu` has no radial-mask kernel to darken only the frame edges yet, so
+/// a full-frame solid is the faithful stand-in today). Distinct from
+/// `crop_resize_passthrough`'s project-graph case: this exercises the default
+/// on `Merge`'s *second* input specifically (§3.2's "missing b → passthrough a"
+/// / "present a + missing b → merge against the default" branch), not a unary
+/// op's primary input (11 §6 P8's node-catalog render-level coverage).
+fn case_project_graph_vignette() -> TimelineProject {
+    let base = 13_000_000;
+    let mut project = TimelineProject::new();
+    let mut seq = new_seq("project_graph_vignette", 64, 64, base);
+    let mut v1 = vtrack("V1", base + 10);
+    v1.clips.push(solid_clip(
+        Color {
+            r: 0.70,
+            g: 0.55,
+            b: 0.35,
+            a: 1.0,
+        },
+        base + 20,
+    ));
+    seq.video_tracks.push(v1);
+
+    let mut solid = node(GraphOp::SolidColor, base + 31);
+    solid.params.base.0.set(
+        "params.color",
+        PropValue::Color(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+    );
+    let mut merge = node(
+        GraphOp::Merge {
+            mode: BlendMode::Normal,
+        },
+        base + 32,
+    );
+    merge
+        .params
+        .base
+        .0
+        .set("params.opacity", PropValue::Float(0.4));
+    let output = node(GraphOp::Output, base + 33);
+    let (so, mg, ou) = (solid.id, merge.id, output.id);
+    let mut nodes = HashMap::new();
+    for n in [solid, merge, output] {
+        nodes.insert(n.id, n);
+    }
+    // Merge's B input is left unwired → the program (the sequence fold result)
+    // feeds it (08 §5 program-splice), same default `crop_resize_passthrough`
+    // exercises on `Crop`'s primary input.
+    let pg = NodeGraph {
+        id: GraphId::from(uid(base + 40)),
+        name: "vignette-pg".into(),
+        nodes,
+        edges: vec![
+            GraphEdge {
+                from: (so, OutPort::PRIMARY),
+                to: (mg, InPort::A),
+            },
+            GraphEdge {
+                from: (mg, OutPort::PRIMARY),
+                to: (ou, InPort::PRIMARY),
+            },
+        ],
+        output: ou,
+        ui: HashMap::new(),
+    };
+    let pgid = pg.id;
+    project.graphs.insert(pgid, pg);
+    project.project_graph = Some(pgid);
+
+    project.insert_sequence(seq);
+    project
+}
+
 // ── corpus writer ────────────────────────────────────────────────────────────
 
 /// One case's authored fixture: builder output + sampled frames + note.
@@ -472,6 +739,42 @@ fn all_cases() -> Vec<Case> {
             format_index: 0,
             frames: vec![(0, "kf-start"), (30, "kf-mid"), (45, "kf-late")],
             notes: "keyframed opacity 1.0→0.0; sampled white / pink / mostly-red",
+        },
+        Case {
+            name: "grade_cdl",
+            project: case_grade_cdl(),
+            format_index: 0,
+            frames: vec![(0, "cdl")],
+            notes: "solid clip through a non-identity ASC CDL slope/offset/power/sat",
+        },
+        Case {
+            name: "grade_curve",
+            project: case_grade_curve(),
+            format_index: 0,
+            frames: vec![(0, "curve")],
+            notes: "quadrant pattern through a non-identity Curves master curve",
+        },
+        Case {
+            name: "grade_lut3d",
+            project: case_grade_lut3d(),
+            format_index: 0,
+            frames: vec![(0, "lut3d")],
+            notes:
+                "solid clip through a Lut3d op; inert passthrough until compile threads a MediaPool",
+        },
+        Case {
+            name: "node_blur_merge",
+            project: case_node_blur_merge(),
+            format_index: 0,
+            frames: vec![(0, "blur-merge")],
+            notes: "per-clip composition ClipIn→Blur→Merge{Multiply}←SolidColor→Output",
+        },
+        Case {
+            name: "project_graph_vignette",
+            project: case_project_graph_vignette(),
+            format_index: 0,
+            frames: vec![(0, "vignette")],
+            notes: "project-graph SolidColor→Merge{0.4}←(program) splice over the sequence output",
         },
     ]
 }
