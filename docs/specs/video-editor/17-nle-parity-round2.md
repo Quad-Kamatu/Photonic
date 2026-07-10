@@ -41,7 +41,7 @@ Each gap carries: **Ref** (which reference NLE ships it — **Pr** Premiere / **
 | M-9 | Sync Lock | ✅ DONE | `tracks.rs` + `clips.rs:661` |
 | L-1 | Insert/Overwrite/Lift/Extract | ✅ DONE | `command_center.rs:226-229` |
 | L-4 | Thumbnails + waveforms | ✅ DONE | (HAVE list) |
-| **M-3** | **Source-patch UI + target highlight** | ⚠️ PARTIAL | `resolve_target_track` logic exists (`interact.rs:355`) but **no header patch box / no click-to-set / no `target_*_track` state** — carried as **G-6** |
+| **M-3** | **Source-patch UI + target highlight** | ✅ DONE | Header patch boxes and `target_video_track` / `target_audio_track` state route Insert, Overwrite, and Paste; Paste validates kind, enabled/locked state, and occupancy before deterministic fallback (`command_center.rs::timeline_paste_clipboard`). |
 | **M-4** | **Modal tool palette + cursor hints** | ⚠️ PARTIAL | razor toggle exists (`video.toggle_razor`) but no tool-mode segmented control, no per-zone cursor — **G-13** |
 | **M-6** | **Navigator / horizontal scrollbar** | ❌ OPEN | `draw_mini_toolbar` has zoom/snap only — **G-8** |
 | **M-7** | **Master meter beside monitor** | ❌ OPEN | grep `meter/peak/rms` clean in `monitor.rs` — **G-4** |
@@ -105,6 +105,8 @@ Territory spread for a 6-lane wave: `timeline-panel` ×5 (G1/2/3/6/8), `monitor`
 - **Files:** `photonic-core/src/timeline/ops.rs` (`replace_clip_source(seq, track, clip, new_source, new_src_in)` — keeps `start`/`duration`/effects, rebinds `ClipSource` + `source_in`); `app/timeline/ops_bridge.rs` wrapper; `app/command_center.rs` (`video.replace_with_clip`, fill from armed source (G-3) or media-pool selection); Alt-drag-onto-clip path in `app/timeline/mod.rs` drop handler. **Effort:** M. **Class:** Medium. **Watch-out:** if the new source is shorter than the slot, decide trim-vs-hold (Pr trims to slot).
 
 ### G-6 — Source-patch boxes + target-track highlight in headers · `timeline-panel` (round-1 M-3)
+**Status (2026-07-10): ✅ DONE.** Track-header patch targets are wired through Insert, Overwrite, and Paste. Video/audio clipboard entries resolve independently; invalid, disabled, locked, stale, wrong-kind, or occupied explicit targets fall back in stable timeline order. Planner tests cover mixed A/V routing and occupancy created earlier in the same paste.
+
 - **Ref:** Pr / DR. **Impact:** `resolve_target_track` (`interact.rs:355`) already computes an *explicit patch target*, but there is **no UI to set it and no highlight** — Insert/Overwrite/Paste silently use "first enabled" every time. B-roll can't be routed to V2 without dragging. Spec 16 §4 explicitly defers this ("Target track indicator on track headers… click to set target").
 - **Files:** `app/timeline/tracks.rs::draw_header` (a small V1/A1-style patch tab + highlight per kind); timeline session state `target_video_track`/`target_audio_track: Option<TrackId>`; feed it into `resolve_target_track`'s `explicit` arg from `command_center` insert/overwrite/paste paths. **Effort:** M. **Class:** Medium. Unblocks the full value of G-1/G-5 and the 3/4-point spine.
 

@@ -38,7 +38,7 @@ Each gap carries: **DJI** (which DJI app ships it) · **Impact** (for a drone / 
 |---|-----|-----------|-------|--------|
 | 1 | **D-1** — D-Log / D-Log M / HLG → Rec.709 one-click convert (ship DJI `.cube` LUTs + metadata auto-detect) | `panels-video` (+`photonic-video-engine`) | Quick win | S–M |
 | 2 | **D-7** — DJI flight-telemetry SRT parse → data model + burned-in data HUD overlay | `photonic-video-engine` (+`panels-video`) | Medium | M |
-| 3 | **D-5** — Horizon auto-level (rotation-correction) effect + auto-crop | `photonic-video-engine` (+`monitor`) | Medium | M |
+| 3 | **D-5** — Horizon auto-level (manual rotation correction + auto-crop) — ✅ DONE v1 | `photonic-video-engine` (+`monitor`) | Medium | M |
 | 4 | **D-4** — Beat-detection DSP → beat markers + snap-cut-to-beat | `photonic-video-engine` (+`timeline-panel`) | Medium | M |
 | 5 | **D-6** — Hyperlapse / timelapse assembly from image sequence (+ deflicker) | `photonic-video-engine` | Medium | M |
 | 6 | **D-10** — Full flight-telemetry overlay: gauges + GPS mini-map + graphs (builds on D-7) | `photonic-video-engine` (+`panels-video`/`monitor`) | Larger | L |
@@ -88,11 +88,13 @@ Territory spread for a 6-lane wave: `panels-video` ×1 (D-1), `photonic-video-en
 - **Files:** `crates/photonic-video/src/audio/dsp/` (onset/tempo → beat times); `app/command_center.rs` + `commands.rs` (`video.detect_beats` → drop markers; snap-to-beat toggle); snap hook in `app/timeline/`. **Effort:** M. **Class:** Medium. Foundation for D-11.
 
 ### D-5 — Horizon auto-level (rotation-correction) effect + auto-crop · `photonic-video-engine` (+`monitor`)
+**Status (2026-07-10): ✅ DONE for v1 manual leveling + auto-crop.** The active-format inspector edits finite roll correction in degrees, stores radians, and applies the exact minimum shared scale multiplier for centered footage. GPU `Transform2D` now matches the CPU reference for nearest/bilinear sampling, native-size sources, pool padding, and singular transforms. Automatic horizon estimation remains deferred.
+
 - **DJI:** horizon-leveling is a *capture* feature on DJI (gimbal roll trim; Action-cam **HorizonBalancing** ±45° / **HorizonSteady** full-360°). **Post-hoc horizon straightening is a gap in DJI's own software** — no DJI app does it after the fact.
 - **Impact:** action-cam and FPV footage arrives tilted; a "level the horizon" control is a constant fix and nobody in the DJI ecosystem ships it in post. Photonic can, cheaply.
-- **On-device:** the transform half is already built — `ClipTransform.rotation` (radians, `clip.rs:327`) + the reframe on-canvas rotate handle (`reframe.rs`) already rotate a clip and are undoable. The *new* work is (a) a dedicated **Level Horizon** effect/tool = a single roll slider + an **auto-crop** (bump `scale_x/scale_y` so the rotated frame has no black corners — closed-form from the roll angle and aspect), and (b) an optional **auto-estimate** of the roll angle (dominant near-horizontal edge via a gradient/Hough pass on a decoded frame). Manual-slider + auto-crop is the deliverable; auto-estimate is the stretch.
-- **Cloud-AI OUT:** robust horizon *detection* for arbitrary content (sea/sky/urban) benefits from an ML horizon model — **out of v1**; ship the gradient/Hough estimate (approximate) + the manual slider. Gyro-driven straightening is D-12's job.
-- **Files:** `crates/photonic-video/src/graph/` (rotate+auto-crop in the clip-transform composite — mostly already there); `app/reframe.rs` / `panels/video/clip_inspector.rs` (Level-Horizon slider + auto-crop toggle + "auto" button). **Effort:** M. **Class:** Medium.
+- **On-device:** shipped locally: a dedicated **Level Horizon** degree control plus exact **auto-crop** scaling for centered footage, riding `ClipTransform` and per-format reframe overrides. The evaluator now performs real inverse-affine GPU sampling and normalizes native-size decoded frames consistently with the CPU reference. An optional gradient/Hough roll estimate remains a stretch.
+- **Cloud-AI OUT:** robust horizon *detection* for arbitrary content (sea/sky/urban) benefits from an ML horizon model. It is **out of v1**; the shipped v1 is manual correction + deterministic auto-crop. Gyro-driven straightening is D-12's job.
+- **Files:** `crates/photonic-video/src/graph/{eval,eval_cpu,compile,ops,cache}.rs`, `crates/photonic-video/src/{pool,session}.rs`, `app/reframe.rs`, and `panels/video/clip_inspector.rs`. **Effort:** M. **Class:** Medium. **Status:** DONE v1.
 
 ### D-6 — Hyperlapse / timelapse assembly from image sequence (+ deflicker) · `photonic-video-engine`
 - **DJI:** DJI Fly **Hyperlapse** (Free / Circle / Course-Lock / Waypoint) shoots frames and **assembles the timelapse on-device automatically**; it can also keep the RAW frames for later manual assembly. Params: interval, duration, speed.
@@ -174,7 +176,7 @@ Territory spread for a 6-lane wave: `panels-video` ×1 (D-1), `photonic-video-en
 Per the research, DJI runs a small set of pieces server/ML-side; Photonic ships the on-device 90% and flags these **OUT of v1**:
 - **Scene classification** (aerial / skiing / food / party …) that auto-picks a *creative look* (D-2) or *template* (D-11).
 - **Semantic highlight-moment detection** / shot-quality scoring (D-15) — we ship deterministic shot-cut detection instead.
-- **ML horizon detection** for gyro-less footage (D-5) — we ship the gradient/Hough estimate + manual slider; gyro-based is D-12.
+- **ML/gradient-Hough horizon detection** for gyro-less footage (D-5) remains deferred; v1 ships manual correction + deterministic auto-crop. Gyro-based correction is D-12.
 - **Panorama auto-stitch quality via learned matchers** (D-14) — classic CV suffices.
 
 Everything else in this list — telemetry parse+overlay, log→709 convert, beat detection, horizon roll+auto-crop, timelapse assembly, pano reframe, gyro stabilization, HDR pipeline — is **fully on-device** in an egui/wgpu/Rust app. The only non-compute external touch is **map tiles** for D-10, which we cache offline so render never needs the network.
@@ -183,4 +185,4 @@ Everything else in this list — telemetry parse+overlay, log→709 convert, bea
 
 ## Bottom line
 
-Subtracting Photonic's HAVE list leaves a tight, high-leverage drone layer. The cheapest, highest-value move is **D-1** — one-click D-Log→709 riding the finished 3D-LUT engine, near-free and applied to every clip. The **strongest differentiator** is the **flight-telemetry overlay (D-7 → D-10)**, something DJI ships on *no* platform. The **social-edit heart** is beat detection → templates (**D-4 → D-11**), and the **capture-parity trio** DJI does in-app but nowhere on desktop is horizon-level / timelapse-assembly / pano-reframe (**D-5 / D-6 / D-8**), each riding existing transform, ingest, and reframe infra. Do §1 first (it makes every DJI clip watchable in one click), then the Medium band's telemetry + beat + capture-parity features, then the Larger overlay/template/HDR frontier as mini-specs. Cloud/ML is confined to scene-classification and quality-scoring — explicitly out of v1.
+Subtracting Photonic's HAVE list leaves a tight, high-leverage drone layer. Manual horizon leveling + auto-crop (**D-5 v1**) is now shipped. The next cheapest, highest-value move is **D-1** — one-click D-Log→709 once real LUT asset resolution and redistribution are cleared. The **strongest differentiator** remains the flight-telemetry overlay (**D-7 → D-10**), and the **social-edit heart** remains beat detection → templates (**D-4 → D-11**). Timelapse assembly and pano reframe (**D-6 / D-8**) remain open capture-parity work. Cloud/ML remains explicitly outside the v1 boundary.
