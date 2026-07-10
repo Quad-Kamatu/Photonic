@@ -3677,7 +3677,9 @@ impl PhotonicApp {
                     // entry/escape is wired by the node-editor (08) story.
                     if self.node_canvas_active {
                         let mut vid = self.video_panel_ui();
-                        panels::video::node_editor::draw_node_canvas(ui, doc, &mut vid);
+                        panels::video::node_editor::draw_node_canvas(
+                            ui, rect, doc, history, &mut vid,
+                        );
                     } else {
                         self.draw_video_monitor(ui, ctx, rect, doc, history);
                     }
