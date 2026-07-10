@@ -744,6 +744,30 @@ pub(crate) fn set_clip_color_label(
     }
 }
 
+/// **Replace With Clip** (G-5, Premiere, gap G5 residual): swap `clip`'s
+/// SOURCE in place via `ops::replace_clip_source` — timeline `start`,
+/// `duration`, effects, transitions and grade untouched (a `set_clip_prop`
+/// whole-clip diff, one undo step). `new_source_in` optionally re-anchors the
+/// trim in-point (e.g. the tick a Match-Frame arm captured); `None` keeps the
+/// clip's existing `source_in`. The GUI trigger is the clip context menu's
+/// "Replace with clip" entry in `mod.rs`.
+pub(crate) fn replace_clip_source(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+    new_source: ClipSource,
+    new_source_in: Option<Tick>,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmd) = ops::replace_clip_source(p, seq, track, clip, new_source, new_source_in) {
+        commit(history, doc, cmd);
+    }
+}
+
 // ── Media pool → timeline (05 §2) ────────────────────────────────────────────
 
 /// Which track kind can host a clip of this asset kind. `None` = not
@@ -753,6 +777,17 @@ pub(crate) fn track_kind_for_asset(kind: AssetKind) -> Option<TrackKind> {
         AssetKind::Audio => Some(TrackKind::Audio),
         AssetKind::Video | AssetKind::Image | AssetKind::VectorDoc => Some(TrackKind::Video),
         AssetKind::Lut3d => None,
+    }
+}
+
+/// The `ClipSource` for laying `asset` down as a clip: `Vector` for vector
+/// docs, `Asset` for everything else (video/audio/image). Shared by
+/// `clip_for_asset` (media-pool drop/insert) and Replace With Clip's
+/// media-pool-selection arming (`mod.rs::replace_source_candidate`).
+pub(crate) fn clip_source_for_asset(asset: &MediaAsset) -> ClipSource {
+    match asset.kind {
+        AssetKind::VectorDoc => ClipSource::Vector { asset: asset.id },
+        _ => ClipSource::Asset { asset: asset.id },
     }
 }
 
@@ -766,11 +801,7 @@ pub(crate) fn clip_for_asset(asset: &MediaAsset, start: Tick) -> Clip {
         .map(|p| p.duration)
         .filter(|d| d.0 > 0)
         .unwrap_or(Tick(5 * TICKS_PER_SECOND));
-    let source = match asset.kind {
-        AssetKind::VectorDoc => ClipSource::Vector { asset: asset.id },
-        _ => ClipSource::Asset { asset: asset.id },
-    };
-    let mut clip = Clip::new(source, start, duration);
+    let mut clip = Clip::new(clip_source_for_asset(asset), start, duration);
     clip.name = crate::panels::media_pool::asset_display_name(asset);
     clip
 }
@@ -1868,5 +1899,111 @@ mod sync_lock_tests {
         assert_eq!(start_of(&doc, seq, a, a2), Tick(250));
         assert_eq!(start_of(&doc, seq, b, b2), Tick(200));
         assert_eq!(start_of(&doc, seq, c, c2), Tick(200));
+    }
+}
+
+#[cfg(test)]
+mod replace_source_tests {
+    use super::*;
+    use photonic_core::timeline::{ClipEffect, EffectKind, Sequence, TimelineProject};
+
+    /// A project with one active sequence, one video track, and one
+    /// `Adjustment`-source clip [0,100) carrying an effect — "everything the
+    /// editor built around the slot" that Replace With Clip must preserve.
+    fn doc_with_seeded_clip() -> (Document, CommandHistory, SequenceId, TrackId, ClipId) {
+        let mut project = TimelineProject::new();
+        let seq = Sequence::new("s", FrameRate::new(30, 1), 1920, 1080);
+        let seq_id = project.insert_sequence(seq);
+        project.active_sequence = Some(seq_id);
+        let mut doc = Document::new("t", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+        let mut history = CommandHistory::new(64);
+
+        let track = Track::new(TrackKind::Video, "V1");
+        let track_id = track.id;
+        let p = doc.timeline.as_ref().unwrap();
+        let add_track = ops::add_track(p, seq_id, track, None).unwrap();
+        history.execute_discrete(Command::Timeline(add_track), &mut doc);
+
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+        clip.effects.push(ClipEffect::new(EffectKind::Blur));
+        let clip_id = clip.id;
+        let p = doc.timeline.as_ref().unwrap();
+        let insert = ops::insert_clip(p, seq_id, track_id, clip).unwrap();
+        history.execute_discrete(Command::Timeline(insert), &mut doc);
+
+        (doc, history, seq_id, track_id, clip_id)
+    }
+
+    fn find(doc: &Document, seq: SequenceId, track: TrackId, clip: ClipId) -> &Clip {
+        doc.timeline.as_ref().unwrap().sequences[&seq]
+            .track(track)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == clip)
+            .unwrap()
+    }
+
+    #[test]
+    fn replace_swaps_source_keeps_start_duration_and_effects_in_one_undo_step() {
+        let (mut doc, mut history, seq, track, clip) = doc_with_seeded_clip();
+        let new_source = ClipSource::SolidColor {
+            color: photonic_core::Color {
+                r: 0.2,
+                g: 0.4,
+                b: 0.6,
+                a: 1.0,
+            },
+        };
+
+        replace_clip_source(
+            &mut doc,
+            &mut history,
+            seq,
+            track,
+            clip,
+            new_source.clone(),
+            Some(Tick(20)),
+        );
+
+        let c = find(&doc, seq, track, clip);
+        assert_eq!(c.source, new_source, "source swapped");
+        assert_eq!(c.source_in, Tick(20), "source_in re-anchored");
+        assert_eq!(c.start, Tick(0), "start preserved");
+        assert_eq!(c.duration, Tick(100), "duration preserved");
+        assert_eq!(c.effects.len(), 1, "effect stack preserved");
+
+        // A single undo restores the original source, source_in and effect.
+        history.undo(&mut doc);
+        let c = find(&doc, seq, track, clip);
+        assert_eq!(c.source, ClipSource::Adjustment);
+        assert_eq!(c.source_in, Tick(0));
+        assert_eq!(c.effects.len(), 1);
+    }
+
+    #[test]
+    fn replace_with_no_source_in_keeps_the_existing_one() {
+        let (mut doc, mut history, seq, track, clip) = doc_with_seeded_clip();
+        let new_source = ClipSource::SolidColor {
+            color: photonic_core::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        replace_clip_source(
+            &mut doc,
+            &mut history,
+            seq,
+            track,
+            clip,
+            new_source.clone(),
+            None,
+        );
+        let c = find(&doc, seq, track, clip);
+        assert_eq!(c.source, new_source);
+        assert_eq!(c.source_in, Tick(0), "source_in untouched when None");
     }
 }

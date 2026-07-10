@@ -37,7 +37,7 @@ use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::clip::LinkGroupId;
 use photonic_core::timeline::{
-    ops, ClipId, ClipTiming, FrameRate, Sequence, SequenceId, Tick, TrackId, TrackKind,
+    ops, ClipId, ClipSource, ClipTiming, FrameRate, Sequence, SequenceId, Tick, TrackId, TrackKind,
 };
 // Timeline media caches (spec 15 — NLE parity gap 10): the engine-side thumbnail
 // and waveform caches this panel feeds to `clips::paint_lane`.
@@ -305,6 +305,14 @@ impl PhotonicApp {
 
         // ── Clip interaction (select / drag / marquee / context) ────────────
         let content_rect = egui::Rect::from_min_max(ruler_rect.min, lanes_rect.max);
+        // Replace With Clip (G-5): resolve what an armed Match-Frame source or
+        // a media-pool selection would swap onto a right-clicked clip, so the
+        // context menu can offer/gate the entry this frame.
+        let replace_candidate = replace_source_candidate(
+            doc,
+            self.pending_source.as_ref(),
+            self.media_pool_ui.selected,
+        );
         self_interact(
             ui,
             doc,
@@ -320,6 +328,7 @@ impl PhotonicApp {
             lanes_rect,
             &rows,
             &hits,
+            replace_candidate,
         );
 
         // ── Media-pool asset drop (05 §2) ───────────────────────────────────
@@ -1055,6 +1064,7 @@ fn self_interact(
     lanes_rect: egui::Rect,
     rows: &[tracks::TrackRow],
     hits: &[interact::HitCandidate],
+    replace_candidate: Option<(ClipSource, Option<Tick>, String)>,
 ) {
     let resp = ui.interact(
         lanes_rect,
@@ -1212,6 +1222,7 @@ fn self_interact(
             gap_target,
             ph,
             selection.as_slice(),
+            replace_candidate,
         )
     });
 }
@@ -1507,6 +1518,30 @@ fn commit_drag(
     }
 }
 
+/// Resolve what Replace With Clip (G-5, gap G5 residual) would swap onto a
+/// right-clicked clip: an armed 3-point source (Match Frame `F`, or any other
+/// `pending_source` arming, spec 16 §4) wins when present, since it carries a
+/// specific trim range; otherwise the media-pool selection replaces from the
+/// asset's head (`source_in` left `None` — the op keeps the clip's own
+/// in-point). `None` when neither is armed, so the context-menu entry
+/// disables itself. The `String` is the armed source's display name, shown
+/// in the entry's tooltip.
+fn replace_source_candidate(
+    doc: &Document,
+    pending: Option<&interact::PendingSource>,
+    media_selected: Option<AssetId>,
+) -> Option<(ClipSource, Option<Tick>, String)> {
+    if let Some(ps) = pending {
+        return Some((ps.source.clone(), Some(ps.src_in), ps.name.clone()));
+    }
+    let asset = doc.timeline.as_ref()?.media.assets.get(&media_selected?)?;
+    Some((
+        ops_bridge::clip_source_for_asset(asset),
+        None,
+        crate::panels::media_pool::asset_display_name(asset),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn clip_context_menu(
     ui: &mut egui::Ui,
@@ -1517,6 +1552,7 @@ fn clip_context_menu(
     gap_target: Option<(TrackId, Tick)>,
     playhead: Tick,
     selection: &[ClipId],
+    replace_candidate: Option<(ClipSource, Option<Tick>, String)>,
 ) {
     let Some((track, clip)) = target else {
         // No clip under the cursor — offer Close Gap when it is over a closeable
@@ -1602,6 +1638,30 @@ fn clip_context_menu(
             });
         }
     });
+    // Replace With Clip (G-5, Premiere, gap G5 residual): swap this clip's
+    // SOURCE for whatever is armed — a Match-Frame source (`F`) wins over a
+    // media-pool selection (`replace_source_candidate` picks one), keeping
+    // start/duration/effects/grade untouched (`ops_bridge::replace_clip_source`,
+    // one undo step). Disabled with a tooltip when nothing is armed.
+    let replace_hint = replace_candidate
+        .as_ref()
+        .map(|(_, _, name)| format!("Swap this clip's source for \"{name}\""));
+    let replace_btn = ui.add_enabled(
+        replace_candidate.is_some(),
+        egui::Button::new("Replace with clip"),
+    );
+    let replace_btn = match &replace_hint {
+        Some(hint) => replace_btn.on_hover_text(hint),
+        None => replace_btn.on_disabled_hover_text(
+            "Arm a source first: Match Frame (F) on a timeline clip, or select an asset in the media pool",
+        ),
+    };
+    if replace_btn.clicked() {
+        if let Some((source, source_in, _)) = replace_candidate {
+            ops_bridge::replace_clip_source(doc, history, seq_id, track, clip, source, source_in);
+        }
+        ui.close_menu();
+    }
     ui.separator();
     // Link Clips / Unlink (14-nle-parity gap #8's creation half). Acts on the
     // current multi-selection when the right-clicked clip is part of it
