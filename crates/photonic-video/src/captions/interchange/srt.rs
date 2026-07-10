@@ -36,7 +36,7 @@ pub fn parse_srt(input: &str) -> Result<(Vec<CaptionCue>, ImportSummary), Interc
         let (start_str, rest) = timestamp_line
             .split_once("-->")
             .ok_or_else(|| InterchangeError::Parse(format!("malformed timestamp line: {timestamp_line:?}")))?;
-        let end_token = rest.trim().split_whitespace().next().unwrap_or("");
+        let end_token = rest.split_whitespace().next().unwrap_or("");
         let start = parse_ms_timestamp(start_str.trim(), ',')
             .ok_or_else(|| InterchangeError::Parse(format!("bad start timestamp: {start_str:?}")))?;
         let end = parse_ms_timestamp(end_token, ',')

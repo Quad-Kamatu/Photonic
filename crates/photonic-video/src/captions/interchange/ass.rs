@@ -170,8 +170,8 @@ fn alignment_to_position(alignment: i32, margin_l: f32, margin_r: f32, margin_v:
         _ => 0.5,
     };
     let y = match alignment {
-        7 | 8 | 9 => margin_v / res_y,
-        4 | 5 | 6 => 0.5,
+        7..=9 => margin_v / res_y,
+        4..=6 => 0.5,
         _ => 1.0 - margin_v / res_y, // 1, 2, 3: bottom row
     };
     [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]

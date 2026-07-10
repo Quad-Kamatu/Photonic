@@ -93,6 +93,12 @@ pub struct ResolvedExport {
 /// (`0..total_frames`), converts each to the target pix_fmt, writes it to the
 /// encoder, and reports progress/completion via `on_event`. Checks `cancel`
 /// **between** frames (02 §7's "cancellable between frames"), never mid-write.
+// Each parameter is a distinct, independently-meaningful input (tools/preset/
+// resolved describe the job, total_frames/frame_source drive it, audio_samples
+// is optional, cancel/on_event are the two callback channels) — a params
+// struct would just relocate the count, and this fn is a public cross-crate
+// entry point (called from photonic-mcp), so bundling isn't a local, clean win.
+#[allow(clippy::too_many_arguments)]
 pub fn export_frames(
     tools: &FfmpegTools,
     preset: &ExportPreset,

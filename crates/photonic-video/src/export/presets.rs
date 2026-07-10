@@ -184,7 +184,10 @@ pub fn validate(preset: &ExportPreset) -> Result<(), PresetValidationError> {
         ));
     }
     match preset.resolution {
-        ResolutionSpec::Scale(s) if !(s > 0.0) => {
+        // `s.is_nan() || s <= 0.0`, not `!(s > 0.0)` (clippy::neg_cmp_op_on_partial_ord):
+        // negating a partial-order comparison silently drops NaN, and NaN is exactly
+        // the case this check must still reject as a non-positive scale.
+        ResolutionSpec::Scale(s) if s.is_nan() || s <= 0.0 => {
             return Err(PresetValidationError::NonPositiveScale(s));
         }
         ResolutionSpec::Explicit { w, h } if w == 0 || h == 0 => {

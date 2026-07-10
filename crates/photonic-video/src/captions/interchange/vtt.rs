@@ -135,7 +135,7 @@ pub fn parse_vtt(input: &str) -> Result<(Vec<CaptionCue>, ImportSummary), Interc
         let Some((start_str, rest_ts)) = timestamp_line.split_once("-->") else {
             continue;
         };
-        let end_token = rest_ts.trim().split_whitespace().next().unwrap_or("");
+        let end_token = rest_ts.split_whitespace().next().unwrap_or("");
         let (Some(start), Some(end)) = (
             parse_ms_timestamp(start_str.trim(), '.'),
             parse_ms_timestamp(end_token, '.'),
