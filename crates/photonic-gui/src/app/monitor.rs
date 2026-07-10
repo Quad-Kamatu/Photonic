@@ -122,6 +122,21 @@ fn active_sequence(doc: &Document) -> Option<&Sequence> {
     project.sequences.get(&id)
 }
 
+/// True if the active sequence has any clip on any track (video or audio).
+/// Drives the monitor's empty-state invitation.
+fn sequence_has_clips(doc: &Document) -> bool {
+    doc.timeline
+        .as_ref()
+        .and_then(|p| p.active_sequence.and_then(|id| p.sequences.get(&id)))
+        .map(|seq| {
+            seq.video_tracks
+                .iter()
+                .chain(seq.audio_tracks.iter())
+                .any(|t| !t.clips.is_empty())
+        })
+        .unwrap_or(false)
+}
+
 /// The active sequence's active format, or a 1920x1080 16:9 default when no
 /// sequence exists yet (04 §3 "default 16:9 1920x1080 when absent").
 fn active_format(doc: &Document) -> SequenceFormat {
@@ -490,6 +505,23 @@ impl PhotonicApp {
                     egui::vec2(28.0, 28.0),
                 );
                 ui.put(spinner_rect, egui::Spinner::new().size(26.0));
+            } else if !drew_frame && !sequence_has_clips(doc) {
+                // Fresh/empty project — invite the first action instead of a
+                // blank monitor (first-impression affordance).
+                painter.text(
+                    video_rect.center() + egui::vec2(0.0, -9.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{}  Import media to begin", ph::FILM_STRIP),
+                    egui::FontId::proportional(16.0),
+                    egui::Color32::from_gray(150),
+                );
+                painter.text(
+                    video_rect.center() + egui::vec2(0.0, 15.0),
+                    egui::Align2::CENTER_CENTER,
+                    "Use the Media panel or drop files, then drag clips onto the timeline below",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_gray(110),
+                );
             }
             if let Some(err) = &status.last_error {
                 painter.text(
@@ -611,8 +643,22 @@ impl PhotonicApp {
                 }
 
                 ui.separator();
+                // Prominent current / total timecode readout (pro-NLE feel):
+                // large accent-colored playhead time, muted total after it.
                 let fr = active_frame_rate(doc);
-                ui.monospace(format_timecode(fr, self.playhead));
+                let end = sequence_end_tick(doc);
+                ui.label(
+                    egui::RichText::new(format_timecode(fr, self.playhead))
+                        .monospace()
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x9d, 0x8c, 0xf5)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("/ {}", format_timecode(fr, end)))
+                        .monospace()
+                        .weak(),
+                );
 
                 ui.separator();
                 if ui.button("I").on_hover_text("Set In Point (I)").clicked() {
