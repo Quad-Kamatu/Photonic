@@ -162,6 +162,7 @@ fn display_key(k: egui::Key) -> &'static str {
         egui::Key::OpenBracket => "[",
         egui::Key::CloseBracket => "]",
         egui::Key::Semicolon => ";",
+        egui::Key::Quote => "'",
         egui::Key::Plus => "+",
         egui::Key::Minus => "-",
         egui::Key::Equals => "=",
@@ -458,6 +459,36 @@ pub static REGISTRY: &[CommandDef] = &[
         id: "video.add_marker",
         label: "Add Marker at Playhead",
         default: Some(KeyBinding::plain(Key::M)),
+    },
+    // 3/4-point editing (spec 16, Premiere defaults). Insert/Overwrite lay down
+    // the armed source at the playhead; Lift/Extract clear the timeline in/out.
+    // Razor is a blade-mode toggle. Bound here + dispatched in `command_center`;
+    // the video-mode keyboard poll that fires them each frame lives in
+    // `app/monitor.rs` (a separate story's file — see this story's report).
+    CommandDef {
+        id: "video.insert_edit",
+        label: "Insert Edit (3-point)",
+        default: Some(KeyBinding::plain(Key::Comma)),
+    },
+    CommandDef {
+        id: "video.overwrite_edit",
+        label: "Overwrite Edit (3-point)",
+        default: Some(KeyBinding::plain(Key::Period)),
+    },
+    CommandDef {
+        id: "video.lift_edit",
+        label: "Lift (clear timeline in/out)",
+        default: Some(KeyBinding::plain(Key::Semicolon)),
+    },
+    CommandDef {
+        id: "video.extract_edit",
+        label: "Extract (ripple-clear timeline in/out)",
+        default: Some(KeyBinding::plain(Key::Quote)),
+    },
+    CommandDef {
+        id: "video.toggle_razor",
+        label: "Razor Tool (blade)",
+        default: Some(KeyBinding::plain(Key::C)),
     },
     CommandDef {
         id: "video.toggle_snap",

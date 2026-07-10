@@ -5,7 +5,7 @@
 //! activation, …). The palette and any keymap-driven shortcut both route through
 //! it, so a remapped key and a palette click run identical code paths.
 use super::*;
-use crate::app::timeline::ops_bridge;
+use crate::app::timeline::{interact, ops_bridge};
 use crate::commands::{self, CommandId};
 use photonic_core::timeline::{ops, Clip, Sequence, SequenceId, TrackKind};
 
@@ -218,6 +218,17 @@ impl PhotonicApp {
                 self.timeline_paste_clipboard(doc, history);
             }
             "video.add_marker" => self.timeline_add_marker_at_playhead(doc, history),
+            // ── 3/4-point editing (spec 16 §4) ────────────────────────────────
+            // Insert/Overwrite lay down the armed source at the playhead;
+            // Lift/Extract clear the timeline in/out (`work_range`) on the
+            // target track. Each is one undo step, built from the pure core ops
+            // via `interact::do_*_edit`. Razor is a session-mode toggle whose
+            // lane-click split is wired by the timeline-panel story.
+            "video.insert_edit" => self.timeline_insert_edit(doc, history),
+            "video.overwrite_edit" => self.timeline_overwrite_edit(doc, history),
+            "video.lift_edit" => self.timeline_lift_edit(doc, history),
+            "video.extract_edit" => self.timeline_extract_edit(doc, history),
+            "video.toggle_razor" => self.timeline_toggle_razor(),
             "video.toggle_snap" => self.timeline_toggle_snap(),
             "video.zoom_in" => self.timeline_zoom_in(),
             "video.zoom_out" => self.timeline_zoom_out(),
@@ -1034,6 +1045,140 @@ impl PhotonicApp {
             return;
         };
         ops_bridge::add_marker(doc, history, seq_id, self.playhead, "Marker");
+    }
+
+    // ── 3/4-point source editing (spec 16) ───────────────────────────────────
+
+    /// Arm `pending_source` from the first selected timeline clip (spec 16 §4
+    /// minimal arming — no source monitor yet: selecting a clip makes it the
+    /// source). Returns the source now in effect — the freshly-armed selection
+    /// when one exists, else whatever was previously armed.
+    fn arm_pending_source(&mut self, doc: &Document) -> Option<interact::PendingSource> {
+        if let Some(seq) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.active_sequence)
+            .and_then(|id| doc.timeline.as_ref().and_then(|p| p.sequences.get(&id)))
+        {
+            if let Some(ps) = interact::pending_source_from_selection(seq, &self.timeline_selection)
+            {
+                self.pending_source = Some(ps);
+            }
+        }
+        self.pending_source.clone()
+    }
+
+    /// The session source-patch target for `kind` (spec 16 §1 M-3).
+    fn target_track_for(&self, kind: TrackKind) -> Option<TrackId> {
+        match kind {
+            TrackKind::Video => self.target_video_track,
+            TrackKind::Audio => self.target_audio_track,
+        }
+    }
+
+    /// Shared Insert/Overwrite driver: arm the source, resolve the patch track
+    /// for its kind, and lay it down at the playhead. `insert` selects ripple
+    /// (Insert `,`) over replace-in-place (Overwrite `.`). No-op without an
+    /// armed source or a target track of the source's kind.
+    fn timeline_source_edit(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        insert: bool,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let Some(source) = self.arm_pending_source(doc) else {
+            return;
+        };
+        let explicit = self.target_track_for(source.kind);
+        let Some(track) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| interact::resolve_target_track(s, source.kind, explicit))
+        else {
+            return;
+        };
+        let at = self.playhead;
+        let clip = source.to_clip(at);
+        if insert {
+            interact::do_insert_edit(doc, history, seq_id, track, at, clip);
+        } else {
+            interact::do_overwrite_edit(doc, history, seq_id, track, at, clip);
+        }
+    }
+
+    /// Insert the armed source at the playhead, rippling downstream right (`,`).
+    pub(crate) fn timeline_insert_edit(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        self.timeline_source_edit(doc, history, true);
+    }
+
+    /// Overwrite at the playhead with the armed source, no ripple (`.`).
+    pub(crate) fn timeline_overwrite_edit(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        self.timeline_source_edit(doc, history, false);
+    }
+
+    /// Shared Lift/Extract driver over the timeline in/out (`work_range`) on the
+    /// video patch track. `ripple` closes the gap (Extract `'`) over leaving it
+    /// (Lift `;`). No-op without a timeline in/out or a video track.
+    fn timeline_range_edit(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        ripple: bool,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let Some((range, track)) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&seq_id))
+            .and_then(|s| {
+                let range = s.work_range?;
+                let track =
+                    interact::resolve_target_track(s, TrackKind::Video, self.target_video_track)?;
+                Some((range, track))
+            })
+        else {
+            return;
+        };
+        if ripple {
+            interact::do_extract_edit(doc, history, seq_id, track, range);
+        } else {
+            interact::do_lift_edit(doc, history, seq_id, track, range);
+        }
+    }
+
+    /// Lift the timeline in/out on the video patch track, leaving a gap (`;`).
+    pub(crate) fn timeline_lift_edit(&mut self, doc: &mut Document, history: &mut CommandHistory) {
+        self.timeline_range_edit(doc, history, false);
+    }
+
+    /// Extract the timeline in/out on the video patch track, closing the gap (`'`).
+    pub(crate) fn timeline_extract_edit(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        self.timeline_range_edit(doc, history, true);
+    }
+
+    /// Toggle the razor/blade tool (spec 16 §4 M-4, `C`). The lane-click split it
+    /// arms is applied by the timeline-panel story's `self_interact` (its
+    /// territory) — this owns the mode bit and its keybinding.
+    pub(crate) fn timeline_toggle_razor(&mut self) {
+        self.timeline_razor_active = !self.timeline_razor_active;
     }
 }
 

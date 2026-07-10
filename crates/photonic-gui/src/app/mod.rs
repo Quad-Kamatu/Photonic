@@ -809,6 +809,24 @@ pub struct PhotonicApp {
     /// the document (04 §6).
     pub timeline_snap_enabled: bool,
 
+    // ── 3/4-point editing session state (spec 16 §1) ────────────────────────
+    // Insert/Overwrite/Lift/Extract support model. Session-only (this struct is
+    // not serde) and deliberately NOT in the document — the armed source and the
+    // patch targets are editor state, not sequence content.
+    /// The armed 3-point source (source op + trim in/out) for Insert/Overwrite.
+    /// `None` = nothing armed; set from the selected timeline clip at edit time
+    /// (spec 16 §4 minimal arming — a source monitor is the separable §6 story).
+    pub(crate) pending_source: Option<timeline::interact::PendingSource>,
+    /// Source-patch target (spec 16 §1 M-3): which track receives the edit.
+    /// `None` = default to the first enabled track of the source's kind
+    /// (`interact::resolve_target_track`).
+    pub(crate) target_video_track: Option<TrackId>,
+    pub(crate) target_audio_track: Option<TrackId>,
+    /// Razor/blade tool armed (spec 16 §4 M-4): a lane click splits the clip at
+    /// the click point. The lane-click handler lives in the timeline panel; this
+    /// bit (toggled by `C`) arms it.
+    pub(crate) timeline_razor_active: bool,
+
     // ── Program monitor / transport (04 §3.2) ───────────────────────────────
     // Session-only placeholder playback state — there is no engine until P3
     // lands, so "playing" is simulated by advancing `playhead` from wall-clock
@@ -1478,6 +1496,10 @@ impl Default for PhotonicApp {
             playhead: Tick::default(),
             timeline_selection: Vec::new(),
             timeline_snap_enabled: true,
+            pending_source: None,
+            target_video_track: None,
+            target_audio_track: None,
+            timeline_razor_active: false,
             monitor_playing: false,
             monitor_play_reverse: false,
             monitor_play_speed: 1.0,
