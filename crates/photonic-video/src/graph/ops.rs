@@ -297,6 +297,7 @@ mod tests {
         let bottom = solid(1, 1, LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
         let out = merge(&top, &bottom, BlendMode::Normal, 0.5);
         let p = out.pixels[0];
+        #[allow(clippy::needless_range_loop)]
         for c in 0..3 {
             assert!((p[c] - 0.5).abs() < 1e-6, "channel {c} = {}", p[c]);
         }
@@ -357,6 +358,7 @@ mod tests {
         img.pixels[0] = [0.0, 0.0, 0.0, 1.0];
         img.pixels[1] = [1.0, 1.0, 1.0, 1.0];
         let mid = img.sample_bilinear(1.0, 0.5); // pixel boundary between the two
+        #[allow(clippy::needless_range_loop)]
         for c in 0..3 {
             assert!((mid[c] - 0.5).abs() < 1e-6, "channel {c} = {}", mid[c]);
         }

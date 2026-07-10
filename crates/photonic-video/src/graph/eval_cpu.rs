@@ -244,6 +244,7 @@ mod tests {
         let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
         for p in &img.pixels {
+            #[allow(clippy::needless_range_loop)]
             for c in 0..3 {
                 assert!((p[c] - 0.5).abs() < 1e-4, "channel {c} = {}", p[c]);
             }

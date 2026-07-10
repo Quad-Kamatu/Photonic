@@ -533,8 +533,8 @@ mod tests {
         match &planes {
             EncodePlanes::Yuva420 { y, cb, cr, a, .. } => {
                 assert_eq!(y.len(), (w * h) as usize);
-                assert_eq!(cb.len(), 2 * 1, "2x2 chroma downsample for 4x2");
-                assert_eq!(cr.len(), 2 * 1);
+                assert_eq!(cb.len(), 2, "2x2 chroma downsample for 4x2");
+                assert_eq!(cr.len(), 2);
                 assert_eq!(
                     a.len(),
                     (w * h) as usize,
