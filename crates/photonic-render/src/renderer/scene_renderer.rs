@@ -85,6 +85,17 @@ impl PhotonicRenderer {
         vertices: &[Vertex],
         indices: &[u32],
     ) {
+        // Per-layer isolated compositing (#226): when a layer carries opacity < 1
+        // or a non-Normal blend, composite each layer as its own unit through the
+        // composite shader. Gated on no per-node blur effects (those still use the
+        // effects path below; integrating the two is Stage 2). Opaque-Normal-only
+        // documents skip this entirely and take the single-pass fast path.
+        if self.pending_blur_jobs.is_empty()
+            && self.layer_runs.iter().any(LayerRun::is_nontrivial)
+        {
+            self.render_scene_isolated(enc, msaa_view, target_view, w, h, vertices, indices);
+            return;
+        }
         if self.pending_blur_jobs.is_empty() {
             self.record_document_pass(enc, msaa_view, target_view, vertices, indices, BG);
             return;
@@ -119,4 +130,208 @@ impl PhotonicRenderer {
         drop(fx_tex);
         drop(doc_tex);
     }
+
+    /// Per-layer isolated compositing (#226). Renders the artboard background,
+    /// then each layer's geometry to its own offscreen texture, and composites
+    /// them bottom-to-top through the composite shader honouring each layer's
+    /// opacity + blend mode. The final layer composites straight to `target_view`.
+    fn render_scene_isolated(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        msaa_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) {
+        use wgpu::util::DeviceExt;
+        // Shared geometry, uploaded once and drawn as index sub-ranges per layer.
+        let vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("iso_vbuf"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let ibuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("iso_ibuf"),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        // Accumulator starts as the artboard-background quads over the window BG.
+        let artboard_segs = [DrawSegment {
+            mode: BlendMode::Normal,
+            start: 0,
+            count: self.artboard_idx_end,
+        }];
+        let mut acc_tex = self.make_fx_tex(w, h);
+        let mut acc_view = acc_tex.create_view(&Default::default());
+        self.record_range_pass(enc, msaa_view, &acc_view, &vbuf, &ibuf, &artboard_segs, BG);
+
+        let n = self.layer_runs.len();
+        if n == 0 {
+            // No shape geometry: pass the (opaque) artboard through to the target.
+            self.composite_over(enc, target_view, &acc_view, &acc_view, blend_mode_index(BlendMode::Normal), 1.0);
+            return;
+        }
+
+        for (i, run) in self.layer_runs.iter().enumerate() {
+            // Draw this layer's nodes in isolation (transparent background), with
+            // each node's own blend mode clipped to the layer's index range.
+            let segs = clip_segments(&self.draw_segments, run.idx_start, run.idx_end);
+            let layer_tex = self.make_fx_tex(w, h);
+            let layer_view = layer_tex.create_view(&Default::default());
+            self.record_range_pass(
+                enc,
+                msaa_view,
+                &layer_view,
+                &vbuf,
+                &ibuf,
+                &segs,
+                wgpu::Color::TRANSPARENT,
+            );
+
+            // Composite the isolated layer over the accumulator with the layer's
+            // opacity + blend. The last layer writes straight to the target.
+            let mode = blend_mode_index(run.blend);
+            if i + 1 == n {
+                self.composite_over(enc, target_view, &acc_view, &layer_view, mode, run.opacity);
+            } else {
+                let next_tex = self.make_fx_tex(w, h);
+                let next_view = next_tex.create_view(&Default::default());
+                self.composite_over(enc, &next_view, &acc_view, &layer_view, mode, run.opacity);
+                acc_tex = next_tex;
+                acc_view = next_view;
+            }
+        }
+        let _ = acc_tex; // kept alive above; views own their GPU resource
+    }
+
+    /// Draw an index sub-range (given as clipped `DrawSegment`s) into
+    /// `resolve_view` via the shared MSAA target, clearing to `clear` first.
+    /// Empty `segments` produce a clear-only pass (an isolated layer with no
+    /// drawable geometry must not fall back to drawing the whole buffer).
+    fn record_range_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        msaa_view: &wgpu::TextureView,
+        resolve_view: &wgpu::TextureView,
+        vbuf: &wgpu::Buffer,
+        ibuf: &wgpu::Buffer,
+        segments: &[DrawSegment],
+        clear: wgpu::Color,
+    ) {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("iso_layer_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: msaa_view,
+                resolve_target: Some(resolve_view),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear),
+                    store: wgpu::StoreOp::Discard,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        if segments.is_empty() {
+            return; // clear-only
+        }
+        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        pass.set_vertex_buffer(0, vbuf.slice(..));
+        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+        draw_segments(
+            &mut pass,
+            segments,
+            &self.blend_pipelines,
+            &self.fill_pipeline,
+            0,
+        );
+    }
+
+    /// Full-screen composite of `src` over `backdrop` into `dst` with the given
+    /// blend-mode index + opacity (the composite shader writes finished pixels).
+    fn composite_over(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        backdrop: &wgpu::TextureView,
+        src: &wgpu::TextureView,
+        mode: u32,
+        opacity: f32,
+    ) {
+        use wgpu::util::DeviceExt;
+        let params = CompositeParams {
+            mode,
+            opacity,
+            _pad: [0.0, 0.0],
+        };
+        let params_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("composite_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_bg"),
+            layout: &self.composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(backdrop),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("composite_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.composite_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
+/// Clip per-node draw segments to the index sub-range `[start, end)`, truncating
+/// segments that straddle the boundary. Used to draw one layer's geometry.
+fn clip_segments(all: &[DrawSegment], start: u32, end: u32) -> Vec<DrawSegment> {
+    all.iter()
+        .filter_map(|seg| {
+            let a = seg.start.max(start);
+            let b = (seg.start + seg.count).min(end);
+            (b > a).then(|| DrawSegment {
+                mode: seg.mode,
+                start: a,
+                count: b - a,
+            })
+        })
+        .collect()
 }

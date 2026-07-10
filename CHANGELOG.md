@@ -13,6 +13,15 @@ embeds this file to show a "What's New" popup after an update.
 
 ### Added
 
+- **Live per-layer compositing on the canvas (#226).** Layers with opacity < 1 or
+  a non-Normal blend mode now composite as **isolated units** in the interactive
+  GPU renderer — matching the export path — instead of the old per-node
+  approximation that double-darkened overlapping objects and couldn't do
+  backdrop-read blend modes. Each such layer renders to its own offscreen texture
+  and blends over the canvas through the composite shader; opaque/Normal-only
+  documents keep the single-pass fast path. (Per-node blur effects combined with
+  a non-trivial layer still use the previous approximation for now.)
+
 - **Gradient Overlay layer style (P4, #222).** The gradient-overlay effect now
   renders: a shape's Layer Styles stack can hold a Gradient Overlay that fills it
   with a gradient, composited with its own opacity + blend mode. Photoshop

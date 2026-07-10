@@ -1,10 +1,11 @@
 use crate::{
     canvas::CanvasView,
     pipeline::{
-        coalesce_segments, create_blur_bgl, create_blur_pipeline, create_blur_pipeline_with_blend,
-        create_camera_bind_group_layout, create_fill_pipeline, create_fill_pipeline_with_blend,
-        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, DrawSegment,
-        Vertex, SEPARABLE_BLEND_MODES,
+        blend_mode_index, coalesce_segments, create_blur_bgl, create_blur_pipeline,
+        create_blur_pipeline_with_blend, create_camera_bind_group_layout, create_composite_bgl,
+        create_composite_pipeline, create_fill_pipeline, create_fill_pipeline_with_blend,
+        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, CompositeParams,
+        DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
 };
@@ -133,6 +134,40 @@ pub struct PhotonicRenderer {
     pub(crate) blur_pipeline_alpha: wgpu::RenderPipeline,
     /// Effect blur jobs built each frame by build_geometry.
     pub(crate) pending_blur_jobs: Vec<BlurJob>,
+
+    // ── Per-layer compositing (#226) ──────────────────────────────────────────
+    /// Full-screen composite of an isolated layer texture over a backdrop,
+    /// honouring every blend mode with a backdrop read (the GPU port of the CPU
+    /// compositor's per-layer isolation).
+    pub(crate) composite_bgl: wgpu::BindGroupLayout,
+    pub(crate) composite_pipeline: wgpu::RenderPipeline,
+    pub(crate) composite_sampler: wgpu::Sampler,
+    /// Index ranges of each layer's geometry in the frame's shared index buffer,
+    /// in draw order, tagged with the layer's opacity + blend mode. Built by
+    /// build_geometry; consumed by the isolated render path when any layer is
+    /// non-trivial (opacity < 1 or a non-Normal blend).
+    pub(crate) layer_runs: Vec<LayerRun>,
+    /// Index count of the artboard-background quads (the preamble drawn before
+    /// any layer). The first `artboard_idx_end` indices are the white boards.
+    pub(crate) artboard_idx_end: u32,
+}
+
+/// One layer's contiguous geometry range in the frame's shared index buffer,
+/// plus the layer opacity + blend mode used to composite it as an isolated unit.
+#[derive(Clone)]
+pub(crate) struct LayerRun {
+    pub(crate) opacity: f32,
+    pub(crate) blend: BlendMode,
+    pub(crate) idx_start: u32,
+    pub(crate) idx_end: u32,
+}
+
+impl LayerRun {
+    /// A layer that changes the pixels when isolated — needs its own offscreen
+    /// pass + composite. Opaque Normal layers can draw straight into the scene.
+    fn is_nontrivial(&self) -> bool {
+        (self.opacity - 1.0).abs() > f32::EPSILON || self.blend != BlendMode::Normal
+    }
 }
 
 /// One blurred live effect for the windowed renderer's effects layer:
@@ -393,6 +428,19 @@ impl PhotonicRenderer {
         let (glow_tex_a, glow_tex_a_view, glow_tex_b, glow_tex_b_view) =
             create_glow_textures(&device, surface_format, width, height);
 
+        // Per-layer compositing (#226): shader + a filtering sampler.
+        let composite_bgl = create_composite_bgl(&device);
+        let composite_pipeline =
+            create_composite_pipeline(&device, surface_format, &composite_bgl);
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("composite_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         // Fit the view to the document artboard
         let mut view = CanvasView::new(width, height);
         {
@@ -454,6 +502,11 @@ impl PhotonicRenderer {
             pending_gaussian_glows: Vec::new(),
             blur_pipeline_alpha,
             pending_blur_jobs: Vec::new(),
+            composite_bgl,
+            composite_pipeline,
+            composite_sampler,
+            layer_runs: Vec::new(),
+            artboard_idx_end: 0,
         }
     }
 
@@ -554,12 +607,17 @@ impl PhotonicRenderer {
             color_overlays: Vec<[f32; 4]>,
             /// Enabled solid Stroke layer styles: (width in doc units, RGBA).
             stroke_effects: Vec<(f32, [f32; 4])>,
+            /// Dense ordinal of the owning layer among visible layers, in
+            /// `layer_order`. Groups this node's geometry into a `LayerRun` so the
+            /// layer can composite as an isolated unit (#226).
+            layer_ordinal: u32,
         }
 
-        let (artboard_w, artboard_h, artboards, nodes): (
+        let (artboard_w, artboard_h, artboards, layer_meta, nodes): (
             f32,
             f32,
             Vec<[f32; 4]>,
+            Vec<(f32, BlendMode)>,
             Vec<NodeSnapshot>,
         ) = {
             // try_lock — never block; return cached geometry if lock is contended.
@@ -589,24 +647,24 @@ impl PhotonicRenderer {
             self.pending_path_text.clear();
             let mut nodes: Vec<NodeSnapshot> = Vec::new();
 
-            // Fold each layer's opacity + blend mode onto its nodes so layer-level
-            // compositing previews live. This is the live-canvas approximation (the
-            // export path composites each layer exactly as an isolated unit; true
-            // on-canvas isolation for the backdrop-read blend modes is #226). Only
-            // layers that differ from opaque/Normal are mapped, so the common case
-            // costs nothing.
-            let mut layer_fold: std::collections::HashMap<
-                photonic_core::node::NodeId,
-                (f32, BlendMode),
-            > = std::collections::HashMap::new();
+            // Tag every drawn node with its owning layer's dense ordinal (among
+            // visible layers, in draw order) so build_geometry can group each
+            // layer's geometry into a `LayerRun`. The isolated render path (#226)
+            // then composites each non-trivial layer as its own unit — replacing
+            // the old per-node opacity/blend fold approximation. `layer_meta[ord]`
+            // holds that layer's (opacity, blend_mode).
+            let mut node_ordinal: std::collections::HashMap<photonic_core::node::NodeId, u32> =
+                std::collections::HashMap::new();
+            let mut layer_meta: Vec<(f32, BlendMode)> = Vec::new();
             for lid in &doc.layer_order {
                 if let Some(layer) = doc.layers.get(lid) {
-                    if (layer.opacity - 1.0).abs() > f32::EPSILON
-                        || layer.blend_mode != BlendMode::Normal
-                    {
-                        for n in doc.draw_nodes_in_layer(lid) {
-                            layer_fold.insert(n.id, (layer.opacity, layer.blend_mode));
-                        }
+                    if !layer.visible {
+                        continue;
+                    }
+                    let ord = layer_meta.len() as u32;
+                    layer_meta.push((layer.opacity, layer.blend_mode));
+                    for n in doc.draw_nodes_in_layer(lid) {
+                        node_ordinal.insert(n.id, ord);
                     }
                 }
             }
@@ -615,28 +673,11 @@ impl PhotonicRenderer {
                 // Symbol instances render from the *current* master so master
                 // edits and per-instance overrides take effect live.
                 let orig_id = node.id;
+                let node_layer_ord = node_ordinal.get(&orig_id).copied().unwrap_or(0);
                 let resolved = doc.resolve_render_node(node);
-                let base = resolved.as_ref();
-                // Apply the owning layer's opacity/blend (folded onto a copy so the
-                // rest of the loop transparently uses the composited values).
-                let (lmul, lblend) = layer_fold
-                    .get(&orig_id)
-                    .copied()
-                    .unwrap_or((1.0, BlendMode::Normal));
-                let folded_node;
-                let node = if (lmul - 1.0).abs() > f32::EPSILON || lblend != BlendMode::Normal {
-                    let mut f = base.clone();
-                    f.opacity *= lmul;
-                    // Node keeps its own non-Normal blend; otherwise it inherits the
-                    // layer's, so the layer's content blends against the backdrop.
-                    if f.blend_mode == BlendMode::Normal {
-                        f.blend_mode = lblend;
-                    }
-                    folded_node = f;
-                    &folded_node
-                } else {
-                    base
-                };
+                // Layer opacity/blend is applied by the isolated composite path,
+                // not folded onto the node — so nodes keep their own values.
+                let node = resolved.as_ref();
                 match &node.kind {
                     SceneNodeKind::Text(text_node) => {
                         // Text-on-path: render glyph outlines along the spine as
@@ -846,12 +887,13 @@ impl PhotonicRenderer {
                                     _ => None,
                                 }
                             },
+                            layer_ordinal: node_layer_ord,
                         });
                     }
                     _ => {} // Group nodes and future kinds: no GPU geometry of their own
                 }
             }
-            (w, h, artboards, nodes)
+            (w, h, artboards, layer_meta, nodes)
         }; // doc lock released here
 
         // ── Tessellate phase: all CPU work happens with no locks held ─────────
@@ -890,6 +932,8 @@ impl PhotonicRenderer {
             ]);
             idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
+        // The artboard-background quads are the preamble drawn before any layer.
+        let artboard_idx_end = idxs.len() as u32;
 
         // Document-space bounds of a local mesh under an affine transform.
         fn world_bounds(
@@ -1334,8 +1378,36 @@ impl PhotonicRenderer {
             })
         };
 
+        // Group each layer's node geometry into a contiguous `LayerRun` (nodes are
+        // emitted in draw order grouped by layer). Consumed by the isolated
+        // render path when any layer is non-trivial (#226).
+        let mut layer_runs: Vec<LayerRun> = Vec::new();
+        let mut cur_ord: Option<u32> = None;
+        let mut run_start = idxs.len() as u32;
+        let close_run = |runs: &mut Vec<LayerRun>, ord: u32, start: u32, end: u32| {
+            if end <= start {
+                return;
+            }
+            let (opacity, blend) = layer_meta.get(ord as usize).copied().unwrap_or((1.0, BlendMode::Normal));
+            runs.push(LayerRun {
+                opacity,
+                blend,
+                idx_start: start,
+                idx_end: end,
+            });
+        };
+
         for node in &nodes {
             let seg_start = idxs.len() as u32;
+
+            // Close the previous layer's run at this layer boundary.
+            if cur_ord != Some(node.layer_ordinal) {
+                if let Some(ord) = cur_ord {
+                    close_run(&mut layer_runs, ord, run_start, seg_start);
+                }
+                cur_ord = Some(node.layer_ordinal);
+                run_start = seg_start;
+            }
 
             // ── Drop shadow → blurred offset silhouette in the effects layer ───
             if let Some(([sr, sg, sb, sa], opacity, dx, dy, blur)) = node.drop_shadow {
@@ -1574,6 +1646,11 @@ impl PhotonicRenderer {
             // (Gaussian glow lives in a separate buffer and is unaffected.)
             raw_segments.push((node.blend_mode, seg_start, idxs.len() as u32));
         }
+        // Close the final layer run (text-on-path glyphs below are drawn on top,
+        // outside any layer, so the run ends here).
+        if let Some(ord) = cur_ord {
+            close_run(&mut layer_runs, ord, run_start, idxs.len() as u32);
+        }
 
         // ── Text-on-path glyphs ───────────────────────────────────────────────
         // Glyph outlines are already in document coordinates, so they are
@@ -1607,6 +1684,8 @@ impl PhotonicRenderer {
 
         let segments = coalesce_segments(raw_segments);
         self.pending_blur_jobs = blur_jobs;
+        self.layer_runs = layer_runs;
+        self.artboard_idx_end = artboard_idx_end;
 
         // Update cache for next frame (used when lock is contended).
         self.cached_vertices = verts.clone();

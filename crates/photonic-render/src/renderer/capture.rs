@@ -295,5 +295,63 @@ mod offscreen_tests {
             "offscreen capture should show the red rect at centre, got {p:?}"
         );
     }
+
+    /// Stage 1 (#226): a layer at 50% opacity composites as an **isolated unit**.
+    /// Two overlapping opaque rects (red under, blue over) live in one 50%-opacity
+    /// layer over a white artboard. Correct per-layer isolation makes the overlap
+    /// = blue@50% over white ≈ (128,128,255); the *old per-node fold* would double
+    /// the layer opacity there and give ≈ (128,64,191). This pins the fix.
+    #[test]
+    fn half_opacity_layer_composites_as_isolated_unit() {
+        let mut doc = Document::new("iso", 20.0, 20.0);
+        let lid = doc.active_layer_id.unwrap();
+        let red = SceneNode::new(
+            "red",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 14.0, 14.0))
+                    .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        let blue = SceneNode::new(
+            "blue",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(6.0, 6.0, 14.0, 14.0))
+                    .with_fill(Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0))),
+            ),
+        );
+        doc.add_node(red, None);
+        doc.add_node(blue, None);
+        doc.layers.get_mut(&lid).unwrap().opacity = 0.5;
+
+        let Some(mut r) = offscreen(doc, 20, 20) else {
+            eprintln!("no GPU adapter — skipping isolation test");
+            return;
+        };
+        let img = image::load_from_memory(&r.render_capture())
+            .expect("png")
+            .to_rgba8();
+        let near = |p: [u8; 4], e: [u8; 3]| {
+            (p[0] as i32 - e[0] as i32).abs() < 14
+                && (p[1] as i32 - e[1] as i32).abs() < 14
+                && (p[2] as i32 - e[2] as i32).abs() < 14
+        };
+        let overlap = img.get_pixel(10, 10).0; // blue over red → blue on top
+        let red_only = img.get_pixel(3, 3).0;
+        let blue_only = img.get_pixel(17, 17).0;
+        assert!(
+            near(overlap, [128, 128, 255]),
+            "overlap must be blue@50% over white (isolated), got {overlap:?}"
+        );
+        assert!(
+            near(red_only, [255, 128, 128]),
+            "red-only region must be red@50% over white, got {red_only:?}"
+        );
+        assert!(
+            near(blue_only, [128, 128, 255]),
+            "blue-only region must be blue@50% over white, got {blue_only:?}"
+        );
+    }
 }
 
