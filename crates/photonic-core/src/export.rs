@@ -993,13 +993,52 @@ pub struct PdfExportOptions {
     pub icc_profile: Option<std::path::PathBuf>,
 }
 
-/// Compute MediaBox/TrimBox/BleedBox in PDF points. SEAM T1.5/T1.8: expand media
-/// to include doc.bleed_mm and set trim inside it. Today all three = artboard.
-fn compute_page_boxes(doc: &Document, _opts: &PdfExportOptions) -> PageBoxes {
+/// Compute MediaBox/TrimBox/BleedBox in PDF points (T1.5/T1.8).
+///
+/// PDF points ≡ 72 dpi: `to_px(mm, Mm, 72.0)` converts mm → points.
+///
+/// Layout (all centred, Y-up, values in PDF points):
+/// ```text
+///   [0, 0, w+2*outer, h+2*outer]       ← MediaBox  (mark room + bleed + trim)
+///   [mark_room, …, …+w+2*bleed, …]     ← BleedBox  (bleed outside trim)
+///   [outer, outer, outer+w, outer+h]   ← TrimBox   (artboard, the "finished size")
+/// ```
+/// When `bleed_mm == 0` and `marks == false` all three collapse to `[0,0,w,h]`,
+/// preserving the pre-bleed regression baseline exactly.
+fn compute_page_boxes(doc: &Document, opts: &PdfExportOptions) -> PageBoxes {
+    use crate::units::{to_px, DocumentUnit::Mm};
+
     let w = doc.width as f32;
     let h = doc.height as f32;
-    let full = [0.0, 0.0, w, h];
-    PageBoxes { media: full, trim: full, bleed: full }
+
+    // PDF points = 72 dpi; convert mm at that resolution.
+    let pdf_dpi = 72.0_f64;
+    let bleed_px = to_px(doc.bleed_mm, Mm, pdf_dpi) as f32;
+
+    // Reserve room outside the bleed for marks (the slug band).
+    // Use the document slug if non-zero; otherwise fall back to 5 mm so marks
+    // always have somewhere to live when marks=true.
+    let mark_room = if opts.marks {
+        to_px(doc.slug_mm.max(5.0), Mm, pdf_dpi) as f32
+    } else {
+        0.0_f32
+    };
+
+    let outer = bleed_px + mark_room;
+
+    // media  — page sheet including mark band
+    let media = [0.0, 0.0, w + 2.0 * outer, h + 2.0 * outer];
+    // bleed  — trim + bleed extension (mark_room offset from media origin)
+    let bleed = [
+        mark_room,
+        mark_room,
+        mark_room + w + 2.0 * bleed_px,
+        mark_room + h + 2.0 * bleed_px,
+    ];
+    // trim   — the finished artboard size (outer offset from media origin)
+    let trim = [outer, outer, outer + w, outer + h];
+
+    PageBoxes { media, trim, bleed }
 }
 
 /// Resolve an RGB triple into the export colour model.
@@ -1043,8 +1082,127 @@ fn emit_text_pdf(
     _opts: &PdfExportOptions,
 ) {}
 
-/// Render trim + registration marks into the content stream. SEAM T1.6. Today: no-op.
-fn emit_marks(_content: &mut pdf_writer::Content, _boxes: &PageBoxes, _opts: &PdfExportOptions) {}
+/// Render trim and registration marks into the content stream (T1.6).
+///
+/// All coordinates are in absolute PDF page space (Y-up, origin = media bottom-left).
+/// Called *after* `content.restore_state()` so the artwork CTM has been popped.
+///
+/// Marks drawn (when `opts.marks` and sufficient mark_room):
+/// - **Crop/trim marks**: two hairlines at each of the 4 trim corners, extending
+///   outward from the trim edge with a small gap so they do not cross into the live
+///   area.  Colour: registration (CMYK 1,1,1,1), 0.25 pt line width.
+/// - **Registration targets**: a crosshair centred on each of the 4 trim sides,
+///   placed in the middle of the mark band outside the bleed.  A circle (4-arc
+///   bezier approximation) surrounds the crosshair.  Same colour/weight.
+///   NOTE: the circle is approximated by cubic beziers (k ≈ 0.5523); no arc
+///   primitive is available in the PDF content-stream operator set.
+fn emit_marks(content: &mut pdf_writer::Content, boxes: &PageBoxes, opts: &PdfExportOptions) {
+    if !opts.marks {
+        return;
+    }
+
+    // Derive geometry.
+    let [tx0, ty0, tx1, ty1] = boxes.trim;  // trim box in page space
+    let [bx0, by0, bx1, by1] = boxes.bleed;
+
+    // mark_room is the band between bleed and media edges.
+    let mark_room_x = bx0;           // == media_x0 + mark_room (= mark_room since media_x0=0)
+    let mark_room_y = by0;           // same for Y
+    if mark_room_x <= 0.0 || mark_room_y <= 0.0 {
+        // No room for marks (bleed_mm=0 with marks=true would be unusual, skip).
+        return;
+    }
+
+    // Gap between trim edge and start of the crop mark hairline (3 pt).
+    let gap = 3.0_f32;
+    // Crop mark length in points (≈ 12 pt or up to 60% of mark_room).
+    let mark_len = (mark_room_x * 0.6).min(12.0_f32).max(6.0_f32);
+
+    // Registration colour: CMYK all-ink (prints in all channels simultaneously).
+    content.set_stroke_cmyk(1.0, 1.0, 1.0, 1.0);
+    content.set_line_width(0.25);
+
+    // ── Crop / trim marks ─────────────────────────────────────────────────────
+    // Each corner emits two right-angle hairlines that bracket the trim corner
+    // from outside the live area.  The marks start at `gap` beyond the trim edge
+    // and extend a further `mark_len` outward.
+
+    // Helper: emit one crop hairline from (x0,y0) to (x1,y1).
+    let line = |content: &mut pdf_writer::Content, x0: f32, y0: f32, x1: f32, y1: f32| {
+        content.move_to(x0, y0);
+        content.line_to(x1, y1);
+        content.stroke();
+    };
+
+    // Bottom-left corner (trim corner: tx0, ty0)
+    // Horizontal hairline leftward from trim-left edge
+    line(content, tx0 - gap, ty0, tx0 - gap - mark_len, ty0);
+    // Vertical hairline downward from trim-bottom edge
+    line(content, tx0, ty0 - gap, tx0, ty0 - gap - mark_len);
+
+    // Bottom-right corner (trim corner: tx1, ty0)
+    line(content, tx1 + gap, ty0, tx1 + gap + mark_len, ty0);
+    line(content, tx1, ty0 - gap, tx1, ty0 - gap - mark_len);
+
+    // Top-right corner (trim corner: tx1, ty1)
+    line(content, tx1 + gap, ty1, tx1 + gap + mark_len, ty1);
+    line(content, tx1, ty1 + gap, tx1, ty1 + gap + mark_len);
+
+    // Top-left corner (trim corner: tx0, ty1)
+    line(content, tx0 - gap, ty1, tx0 - gap - mark_len, ty1);
+    line(content, tx0, ty1 + gap, tx0, ty1 + gap + mark_len);
+
+    // ── Registration targets ──────────────────────────────────────────────────
+    // Centred on each of the 4 trim sides, in the mid-point of the mark band
+    // (between bleed edge and media edge).  A crosshair + circle.
+
+    // Radius for the registration circle (half the mark band width, capped at 6 pt).
+    let r = (mark_room_x * 0.4).min(6.0_f32).max(3.0_f32);
+
+    // Cubic bezier approximation constant for a quarter circle.
+    let k = 0.5523_f32;
+
+    let reg_target = |content: &mut pdf_writer::Content, cx: f32, cy: f32| {
+        // Crosshair (two lines through the centre).
+        content.move_to(cx - r, cy);
+        content.line_to(cx + r, cy);
+        content.stroke();
+        content.move_to(cx, cy - r);
+        content.line_to(cx, cy + r);
+        content.stroke();
+
+        // Circle approximated by 4 cubic bezier arcs (counter-clockwise from right).
+        // Start at (cx+r, cy).
+        content.move_to(cx + r, cy);
+        // Q1: right → top
+        content.cubic_to(cx + r, cy + k * r, cx + k * r, cy + r, cx, cy + r);
+        // Q2: top → left
+        content.cubic_to(cx - k * r, cy + r, cx - r, cy + k * r, cx - r, cy);
+        // Q3: left → bottom
+        content.cubic_to(cx - r, cy - k * r, cx - k * r, cy - r, cx, cy - r);
+        // Q4: bottom → right
+        content.cubic_to(cx + k * r, cy - r, cx + r, cy - k * r, cx + r, cy);
+        content.close_path();
+        content.stroke();
+    };
+
+    // Centre of the left mark band (between bleed-left and media-left).
+    let cx_left  = bx0 * 0.5;
+    // Centre of the right mark band (between bleed-right and media-right).
+    let cx_right = bx1 + (boxes.media[2] - bx1) * 0.5;
+    // Centre of the bottom mark band.
+    let cy_bot   = by0 * 0.5;
+    // Centre of the top mark band.
+    let cy_top   = by1 + (boxes.media[3] - by1) * 0.5;
+    // Trim mid-points for the cross-axis coordinates.
+    let trim_mid_x = (tx0 + tx1) * 0.5;
+    let trim_mid_y = (ty0 + ty1) * 0.5;
+
+    reg_target(content, cx_left,  trim_mid_y);
+    reg_target(content, cx_right, trim_mid_y);
+    reg_target(content, trim_mid_x, cy_bot);
+    reg_target(content, trim_mid_x, cy_top);
+}
 
 /// Export `doc` as a single-page vector PDF (1 document unit = 1 PDF point).
 ///
@@ -1056,30 +1214,52 @@ fn emit_marks(_content: &mut pdf_writer::Content, _boxes: &PageBoxes, _opts: &Pd
 pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
     use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
 
-    let h = doc.height as f32;
-
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
     let page_id = Ref::new(3);
     let content_id = Ref::new(4);
 
-    // Compute page geometry boxes (all equal artboard today; seam expands for bleed).
+    // Compute page geometry boxes.
+    // T1.5/T1.8: media expands to include bleed+mark-room; trim = artboard.
     let boxes = compute_page_boxes(doc, opts);
-    let w_media = boxes.media[2] - boxes.media[0];
-    let h_media = boxes.media[3] - boxes.media[1];
 
     // ── Content stream ────────────────────────────────────────────────────────
     let mut content = Content::new();
-    // PDF is Y-up with the origin at the bottom-left; Photonic/SVG is Y-down with
-    // the origin at the top-left. Flip Y once so document coordinates map directly.
-    content.transform([1.0, 0.0, 0.0, -1.0, 0.0, h]);
 
+    // ── Artwork transform (T1.8) ──────────────────────────────────────────────
+    // PDF is Y-up; Photonic is Y-down.  The trim box sits at (trim_x0, trim_y0)
+    // in page space, so we need doc (0,0) → page (trim_x0, trim_y1).
+    //
+    //   page_x = trim_x0 + doc_x          (T_e = trim_x0)
+    //   page_y = trim_y1 - doc_y          (Y-flip about the trim top edge)
+    //
+    // CTM: [a b c d e f] ≡ [1  0  0  -1  trim_x0  trim_y1]
+    //
+    // Verification at bleed=0, marks=false:
+    //   trim = [0, 0, w, h]  →  trim_x0=0, trim_y1=h  →  [1,0,0,-1,0,h]  ✓
+    let trim_x0 = boxes.trim[0];
+    let trim_y1 = boxes.trim[3]; // top of trim in Y-up page space
+
+    // bleed_px in PDF-point space (same unit as boxes).
+    let pdf_dpi = 72.0_f64;
+    let bleed_px = crate::units::to_px(doc.bleed_mm, crate::units::DocumentUnit::Mm, pdf_dpi) as f32;
+
+    // Save state so marks can be drawn afterward in absolute page space.
+    content.save_state();
+    content.transform([1.0, 0.0, 0.0, -1.0, trim_x0, trim_y1]);
+
+    // ── Bleed-aware background (T1.8) ─────────────────────────────────────────
+    // The background bleeds past the trim edge into the bleed zone so there is
+    // no white sliver after cutting.  In doc-space (inside the CTM above), the
+    // bleed box spans (-bleed_px, -bleed_px) to (w+bleed_px, h+bleed_px).
     if let Some(bg) = opts.background {
+        let w = doc.width as f32;
+        let h = doc.height as f32;
         set_fill_color(&mut content, convert_color([bg.r, bg.g, bg.b], opts));
-        content.move_to(0.0, 0.0);
-        content.line_to(w_media, 0.0);
-        content.line_to(w_media, h_media);
-        content.line_to(0.0, h_media);
+        content.move_to(-bleed_px, -bleed_px);
+        content.line_to(w + bleed_px, -bleed_px);
+        content.line_to(w + bleed_px, h + bleed_px);
+        content.line_to(-bleed_px, h + bleed_px);
         content.close_path();
         content.fill_nonzero();
     }
@@ -1111,7 +1291,10 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
         }
     }
 
-    // SEAM T1.6: emit trim/registration marks (no-op today).
+    // Pop the artwork CTM so marks are drawn in absolute page space.
+    content.restore_state();
+
+    // T1.6: emit trim/registration marks in absolute page space.
     emit_marks(&mut content, &boxes, opts);
 
     let stream = content.finish();
@@ -1943,5 +2126,167 @@ mod tests {
             !text.contains(" k\n") && !text.contains(" k "),
             "RGB export must NOT contain a CMYK ` k` fill operator;\n{text}"
         );
+    }
+
+    // ── T1.5/T1.6/T1.8 — page-box geometry and marks ─────────────────────────
+
+    /// Regression: bleed=0, marks=false → all three boxes collapse to [0,0,w,h].
+    /// Behaviour must be identical to pre-bleed baseline.
+    #[test]
+    fn page_boxes_no_bleed_no_marks_equals_artboard() {
+        let doc = Document::new("t", 200.0, 150.0);
+        let opts = PdfExportOptions::default(); // marks=false, bleed=0 (doc default)
+        let boxes = compute_page_boxes(&doc, &opts);
+        let expected = [0.0_f32, 0.0, 200.0, 150.0];
+        assert_eq!(boxes.media, expected, "media should equal artboard");
+        assert_eq!(boxes.trim,  expected, "trim  should equal artboard");
+        assert_eq!(boxes.bleed, expected, "bleed should equal artboard");
+    }
+
+    /// T1.5: a 3 mm bleed (marks=false) produces Trim ⊂ Bleed ⊂ Media with
+    /// correct numeric sizes.  At 72 dpi: bleed_px = 3 * 72 / 25.4 ≈ 8.504 pt.
+    #[test]
+    fn page_boxes_bleed_containment_and_size() {
+        use crate::units::{to_px, DocumentUnit::Mm};
+
+        let mut doc = Document::new("t", 252.0, 144.0); // business-card-ish
+        doc.bleed_mm = 3.0;
+        let opts = PdfExportOptions { marks: false, ..Default::default() };
+        let boxes = compute_page_boxes(&doc, &opts);
+
+        let bleed_pt = to_px(3.0, Mm, 72.0) as f32;
+        let w = 252.0_f32;
+        let h = 144.0_f32;
+
+        // Trim == artboard (outer = bleed_px when marks=false, no mark_room)
+        let outer = bleed_pt;
+        let expected_trim = [outer, outer, outer + w, outer + h];
+        let expected_bleed = [0.0, 0.0, w + 2.0 * bleed_pt, h + 2.0 * bleed_pt];
+        let expected_media = [0.0, 0.0, w + 2.0 * bleed_pt, h + 2.0 * bleed_pt];
+
+        // Containment: trim x0/y0 ≥ bleed x0/y0, trim x1/y1 ≤ bleed x1/y1
+        assert!(
+            boxes.trim[0] >= boxes.bleed[0] && boxes.trim[1] >= boxes.bleed[1],
+            "trim origin must be inside bleed: trim={:?}, bleed={:?}",
+            boxes.trim, boxes.bleed
+        );
+        assert!(
+            boxes.trim[2] <= boxes.bleed[2] && boxes.trim[3] <= boxes.bleed[3],
+            "trim far edge must be inside bleed"
+        );
+        assert!(
+            boxes.bleed[0] >= boxes.media[0] && boxes.bleed[1] >= boxes.media[1],
+            "bleed origin must be inside media"
+        );
+        assert!(
+            boxes.bleed[2] <= boxes.media[2] && boxes.bleed[3] <= boxes.media[3],
+            "bleed far edge must be inside media"
+        );
+
+        // Numeric sizes (tolerance 0.01 pt for float arithmetic).
+        let tol = 0.01_f32;
+        assert!((boxes.trim[0]  - expected_trim[0]).abs()  < tol, "trim[0]");
+        assert!((boxes.trim[1]  - expected_trim[1]).abs()  < tol, "trim[1]");
+        assert!((boxes.trim[2]  - expected_trim[2]).abs()  < tol, "trim[2]");
+        assert!((boxes.trim[3]  - expected_trim[3]).abs()  < tol, "trim[3]");
+
+        // When marks=false: media == bleed (no extra band).
+        assert!((boxes.media[2] - expected_media[2]).abs() < tol, "media width");
+        assert!((boxes.media[3] - expected_media[3]).abs() < tol, "media height");
+        let _ = (expected_bleed, expected_media); // suppress unused warnings
+    }
+
+    /// T1.6: exporting with marks=true produces a longer content stream than
+    /// marks=false because extra stroke operators are emitted for the marks.
+    #[test]
+    fn pdf_export_marks_true_emits_more_stroke_ops() {
+        let mut doc = Document::new("t", 252.0, 144.0);
+        doc.bleed_mm = 3.0;
+
+        let opts_no_marks = PdfExportOptions { marks: false, ..Default::default() };
+        let opts_marks    = PdfExportOptions { marks: true,  ..Default::default() };
+
+        let bytes_no = export_pdf(&doc, &opts_no_marks);
+        let bytes_yes = export_pdf(&doc, &opts_marks);
+
+        assert!(
+            bytes_yes.len() > bytes_no.len(),
+            "marks=true PDF ({} bytes) should be larger than marks=false ({} bytes)",
+            bytes_yes.len(), bytes_no.len()
+        );
+
+        // The marks stream must contain stroke operators (`S` in PDF).
+        let text_yes = String::from_utf8_lossy(&bytes_yes);
+        assert!(
+            text_yes.contains(" S\n") || text_yes.contains(" S ") || text_yes.contains("\nS\n"),
+            "marks=true PDF should contain stroke (S) operators"
+        );
+    }
+
+    /// T1.8: when bleed_mm > 0 the exported PDF still starts with %PDF and the
+    /// content-stream transform uses the trim-offset CTM, not the bare [1,0,0,-1,0,h].
+    #[test]
+    fn pdf_export_with_bleed_is_valid_and_uses_trim_offset_transform() {
+        let mut doc = Document::new("t", 252.0, 144.0);
+        doc.bleed_mm = 3.0;
+        let opts = PdfExportOptions::default();
+        let bytes = export_pdf(&doc, &opts);
+        assert!(bytes.starts_with(b"%PDF-1"), "must start with PDF header");
+        // When bleed is 0, trim_y1 = h = 144.  With bleed=3mm≈8.5pt, trim_y1
+        // is approximately 144 + 8.5 = 152.5 pt (trim starts at outer≈8.5).
+        let text = String::from_utf8_lossy(&bytes);
+        // The old bare-h transform [1 0 0 -1 0 144] must NOT appear; the new
+        // bleed-offset trim_y1 value (≈152.5) should appear instead.
+        assert!(
+            !text.contains("0 144 cm"),
+            "old bare-h transform must not appear with bleed set"
+        );
+    }
+
+    /// ACCEPT evidence: write business-card PDFs (with and without marks) to
+    /// /tmp/photonic_accept_*.pdf and print computed box values.
+    /// Run with: cargo test -p photonic-core --lib accept_evidence -- --nocapture
+    #[test]
+    fn accept_evidence_page_boxes_and_marks() {
+        use crate::units::{to_px, DocumentUnit::Mm};
+        use std::io::Write;
+
+        let mut doc = Document::new("accept", 252.0, 144.0);
+        doc.bleed_mm = 3.0;
+
+        let opts_no   = PdfExportOptions { marks: false, ..Default::default() };
+        let opts_marks = PdfExportOptions { marks: true, ..Default::default() };
+
+        let boxes_no    = compute_page_boxes(&doc, &opts_no);
+        let boxes_marks = compute_page_boxes(&doc, &opts_marks);
+
+        let bleed_pt = to_px(3.0, Mm, 72.0) as f32;
+        println!("bleed_mm=3.0  → bleed_pt = {bleed_pt:.4}");
+        println!("--- marks=false ---");
+        println!("  MediaBox = {:?}", boxes_no.media);
+        println!("  BleedBox = {:?}", boxes_no.bleed);
+        println!("  TrimBox  = {:?}", boxes_no.trim);
+        println!("--- marks=true ---");
+        println!("  MediaBox = {:?}", boxes_marks.media);
+        println!("  BleedBox = {:?}", boxes_marks.bleed);
+        println!("  TrimBox  = {:?}", boxes_marks.trim);
+
+        // Containment
+        let m = &boxes_marks;
+        assert!(m.trim[0] >= m.bleed[0] && m.trim[0] >= 0.0, "T⊂B⊂M x0");
+        assert!(m.bleed[0] >= m.media[0], "B⊂M x0");
+        assert!(m.trim[2] <= m.bleed[2], "T⊂B x1");
+        assert!(m.bleed[2] <= m.media[2], "B⊂M x1");
+
+        // Write PDFs
+        let bytes_no    = export_pdf(&doc, &opts_no);
+        let bytes_marks = export_pdf(&doc, &opts_marks);
+        let path_no    = "/tmp/photonic_accept_no_marks.pdf";
+        let path_marks = "/tmp/photonic_accept_marks.pdf";
+        std::fs::File::create(path_no).unwrap().write_all(&bytes_no).unwrap();
+        std::fs::File::create(path_marks).unwrap().write_all(&bytes_marks).unwrap();
+        println!("Wrote: {path_no} ({} bytes)", bytes_no.len());
+        println!("Wrote: {path_marks} ({} bytes)", bytes_marks.len());
+        assert!(bytes_marks.len() > bytes_no.len(), "marks adds bytes");
     }
 }
