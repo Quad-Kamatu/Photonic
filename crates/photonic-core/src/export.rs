@@ -1005,11 +1005,14 @@ pub struct PdfExportOptions {
 /// ```
 /// When `bleed_mm == 0` and `marks == false` all three collapse to `[0,0,w,h]`,
 /// preserving the pre-bleed regression baseline exactly.
-fn compute_page_boxes(doc: &Document, opts: &PdfExportOptions) -> PageBoxes {
+pub fn compute_page_boxes(doc: &Document, opts: &PdfExportOptions) -> PageBoxes {
     use crate::units::{to_px, DocumentUnit::Mm};
 
-    let w = doc.width as f32;
-    let h = doc.height as f32;
+    // Artwork is stored in px at the document DPI; PDF is in points (72 dpi).
+    // Scale px → points so the page is the correct physical size at any DPI.
+    let s = 72.0_f32 / doc.dpi as f32;
+    let w = doc.width as f32 * s;
+    let h = doc.height as f32 * s;
 
     // PDF points = 72 dpi; convert mm at that resolution.
     let pdf_dpi = 72.0_f64;
@@ -1240,13 +1243,19 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
     let trim_x0 = boxes.trim[0];
     let trim_y1 = boxes.trim[3]; // top of trim in Y-up page space
 
-    // bleed_px in PDF-point space (same unit as boxes).
-    let pdf_dpi = 72.0_f64;
-    let bleed_px = crate::units::to_px(doc.bleed_mm, crate::units::DocumentUnit::Mm, pdf_dpi) as f32;
+    // Artwork is drawn in document px inside a CTM that scales px → PDF points
+    // (72 dpi) and flips Y, mapping doc (0,0) top-left to the trim origin. At the
+    // default 72 dpi the scale is 1 (px ≡ pt), matching legacy output.
+    let s = 72.0_f32 / doc.dpi as f32;
+
+    // Bleed in *document px* — the CTM scale converts it to the same point-space
+    // bleed the page boxes use.
+    let bleed_px =
+        crate::units::to_px(doc.bleed_mm, crate::units::DocumentUnit::Mm, doc.dpi) as f32;
 
     // Save state so marks can be drawn afterward in absolute page space.
     content.save_state();
-    content.transform([1.0, 0.0, 0.0, -1.0, trim_x0, trim_y1]);
+    content.transform([s, 0.0, 0.0, -s, trim_x0, trim_y1]);
 
     // ── Bleed-aware background (T1.8) ─────────────────────────────────────────
     // The background bleeds past the trim edge into the bleed zone so there is
