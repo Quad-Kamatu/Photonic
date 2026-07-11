@@ -15,19 +15,20 @@
 #                                  no constant alpha /CA|/ca < 1)
 #   6. OutputIntent present        (/S /GTS_PDFX with an embedded /DestOutputProfile)
 #
-# Complementary structural check: if verapdf is installed, also runs PDF/A-1b as a
-# cross-check on file integrity (fonts/streams/xref) — reported, not required.
+# Complementary structural cross-check: `qpdf --check` (well-formed xref, streams,
+# and objects). Reported for information only — it does NOT affect the exit status.
+# (Note: verapdf validates PDF/A, not PDF/X; a valid X-1a file has no pdfaid XMP so
+# `verapdf -f 1b` always fails on a metadata rule — it is not a meaningful X-1a
+# cross-check and is deliberately not used here.)
 #
-# Usage:   scripts/preflight-pdfx.sh FILE.pdf [--verapdf PATH] [--quiet]
+# Usage:   scripts/preflight-pdfx.sh FILE.pdf [--quiet]
 # Exit:    0 = all X-1a invariants hold; 1 = one or more failed; 2 = usage/tool error.
 set -uo pipefail
 
-VERAPDF="${VERAPDF:-$HOME/verapdf/verapdf}"
 QUIET=0
 PDF=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --verapdf) VERAPDF="$2"; shift 2 ;;
     --quiet) QUIET=1; shift ;;
     -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) PDF="$1"; shift ;;
@@ -105,15 +106,14 @@ else
   fail "missing PDF/X OutputIntent (GTS_PDFX:${OI} DestOutputProfile:${DOP})"
 fi
 
-# ── Cross-check: verapdf PDF/A-1b (structural integrity; reported, not required)
-if [ -x "$VERAPDF" ] || command -v verapdf >/dev/null 2>&1; then
-  VP="${VERAPDF}"; [ -x "$VP" ] || VP="$(command -v verapdf)"
-  if "$VP" --flavour 1b "$PDF" >/dev/null 2>&1; then
-    [ "$QUIET" -eq 1 ] || printf '\033[36m  ·\033[0m cross-check: verapdf PDF/A-1b PASS (structural)\n'
-  else
-    [ "$QUIET" -eq 1 ] || printf '\033[36m  ·\033[0m cross-check: verapdf PDF/A-1b did not pass (informational — X-1a ≠ A-1b)\n'
-  fi
-fi
+# ── Structural cross-check: qpdf --check (informational; never affects exit) ──
+# qpdf --check exits 0 = clean, 3 = recoverable warnings, 2 = errors.
+qpdf --check "$PDF" >/dev/null 2>&1
+case $? in
+  0) [ "$QUIET" -eq 1 ] || printf '\033[36m  ·\033[0m cross-check: qpdf --check OK (structurally sound)\n' ;;
+  3) [ "$QUIET" -eq 1 ] || printf '\033[36m  ·\033[0m cross-check: qpdf --check — recoverable warnings (informational)\n' ;;
+  *) [ "$QUIET" -eq 1 ] || printf '\033[33m  ·\033[0m cross-check: qpdf --check reported structural errors (informational)\n' ;;
+esac
 
 echo
 if [ "$FAILS" -eq 0 ]; then
