@@ -1,4 +1,5 @@
 pub mod annotation;
+pub mod color_cmyk;
 pub mod audit;
 pub mod color;
 pub mod diagnostics;

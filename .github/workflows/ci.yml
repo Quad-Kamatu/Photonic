@@ -104,3 +104,25 @@ jobs:
 
       - name: cargo-deny
         run: cargo deny check
+
+  preflight-gate:
+    name: PDF/X-1a preflight gate
+    runs-on: ubuntu-latest
+    # Proves the print-export conformance checker actually says NO: a self-test
+    # runs it against known-good and known-bad fixtures (RGB, missing
+    # OutputIntent, wrong version, transparency, non-embedded font, encryption),
+    # then preflights the committed sample business card. Needs only qpdf +
+    # poppler (no Rust build) — the committed fixtures carry the proof.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PDF tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils
+
+      - name: Preflight self-test (checker must detect each defect class)
+        run: scripts/test-preflight.sh
+
+      - name: Preflight the committed sample card (must be valid PDF/X-1a)
+        run: scripts/preflight-pdfx.sh docs/print/samples/kamatu-business-card.pdf

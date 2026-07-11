@@ -13,6 +13,7 @@ use crate::protocol::{
     RestoreCheckpointArgs,
     SetArtboardMarginsArgs,
     SetDocumentBleedArgs,
+    SetDocumentColorModeArgs,
     ToolResult,
     UndoRedoArgs,
 };
@@ -831,6 +832,42 @@ pub async fn get_document_bleed(state: &AppState) -> ToolResult {
         doc.bleed_mm, doc.slug_mm
     ))
     .with_data(json!({ "bleed_mm": doc.bleed_mm, "slug_mm": doc.slug_mm }))
+}
+
+
+/// Set the document color mode (rgb or cmyk).
+pub async fn set_document_color_mode(state: &AppState, args: SetDocumentColorModeArgs) -> ToolResult {
+    tracing::debug!("tool: set_document_color_mode");
+    let mode_str = match args.mode.as_deref() {
+        Some(m) => m,
+        None => return ToolResult::error("mode is required"),
+    };
+    let color_mode = match mode_str {
+        "rgb" => photonic_core::document::ColorMode::Rgb,
+        "cmyk" => photonic_core::document::ColorMode::Cmyk,
+        other => return ToolResult::error(format!("mode must be 'rgb' or 'cmyk', got '{other}'")),
+    };
+    let mut doc = state.document.lock().await;
+    doc.color_mode = color_mode;
+    let mode_label = match doc.color_mode {
+        photonic_core::document::ColorMode::Rgb => "rgb",
+        photonic_core::document::ColorMode::Cmyk => "cmyk",
+    };
+    ToolResult::text(format!("Document color mode set to '{mode_label}'."))
+        .with_data(json!({ "color_mode": mode_label }))
+}
+
+
+/// Return the current document color mode.
+pub async fn get_document_color_mode(state: &AppState) -> ToolResult {
+    tracing::debug!("tool: get_document_color_mode");
+    let doc = state.document.lock().await;
+    let mode_label = match doc.color_mode {
+        photonic_core::document::ColorMode::Rgb => "rgb",
+        photonic_core::document::ColorMode::Cmyk => "cmyk",
+    };
+    ToolResult::text(format!("Document color mode: '{mode_label}'."))
+        .with_data(json!({ "color_mode": mode_label }))
 }
 
 

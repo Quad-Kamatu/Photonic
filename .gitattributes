@@ -6,3 +6,14 @@
 *.lua text eol=lf
 *.json text eol=lf
 *.bat text eol=crlf
+
+# Binary assets — never apply line-ending normalization. `* text=auto` misdetects
+# small uncompressed PDFs (no NUL bytes) as text and rewrites CRLF→LF, which
+# corrupts their byte offsets / xref. Mark them binary so they round-trip exactly.
+*.pdf binary
+*.icc binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary

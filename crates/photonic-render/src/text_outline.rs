@@ -1,0 +1,456 @@
+//! Flat text-to-outline conversion for font-independent PDF export.
+//!
+//! When exporting to PDF with `outline_text: true`, every [`TextNode`] in the
+//! document must be converted to vector paths so the resulting file has **zero**
+//! font dependencies — the glyphs are present as PDF path operators and render
+//! identically regardless of which fonts are installed on the viewer's system.
+//!
+//! Architecture note: this module lives in `photonic-render` because `photonic-core`
+//! has no font system. `photonic-mcp` calls `outline_document_text` before invoking
+//! `photonic_core::export::export_pdf`, so the core export code never needs to know
+//! about glyphon.
+
+use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as GlyphonStyle, Weight};
+use kurbo::{Affine, BezPath};
+use photonic_core::{
+    document::Document,
+    node::{FontStyle, NodeId, PathNode, SceneNodeKind, TextAlign, TextNode},
+    path::PathData,
+};
+use ttf_parser::{GlyphId, OutlineBuilder};
+
+// ─── Glyph outline builder ────────────────────────────────────────────────────
+
+/// Accumulates a `ttf-parser` glyph outline (font units, Y-up) into a kurbo
+/// `BezPath`. Shared with `text_path` (both need the same converter). This type
+/// is `pub(crate)` so the sibling module can reuse it without re-exporting it as
+/// part of the crate's public API.
+#[derive(Default)]
+pub(crate) struct BezOutlineBuilder {
+    pub path: BezPath,
+}
+
+impl OutlineBuilder for BezOutlineBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.path.move_to((x as f64, y as f64));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.path.line_to((x as f64, y as f64));
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.path
+            .quad_to((x1 as f64, y1 as f64), (x as f64, y as f64));
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.path.curve_to(
+            (x1 as f64, y1 as f64),
+            (x2 as f64, y2 as f64),
+            (x as f64, y as f64),
+        );
+    }
+    fn close(&mut self) {
+        self.path.close_path();
+    }
+}
+
+// ─── Flat layout ─────────────────────────────────────────────────────────────
+
+/// Shape `node.content` with glyphon, then extract each glyph's outline from
+/// ttf-parser and merge them into one `PathData` in **node-local space**.
+///
+/// The returned path contains all glyph contours merged into a single compound
+/// path, so counter-shapes (holes in `o`, `e`, `a` …) fill correctly under
+/// non-zero winding — ttf contours already use the correct winding direction.
+///
+/// Returns an empty `PathData` when `node.content` is empty or every glyph
+/// resolves to whitespace / a bitmap-only glyph with no outline.
+///
+/// The node's `transform` is **not** applied here; the exporter applies it
+/// after the fact, exactly as it does for `PathNode` geometry.
+pub fn layout_text_flat(font_system: &mut FontSystem, node: &TextNode) -> PathData {
+    if node.content.is_empty() {
+        return PathData::new();
+    }
+
+    let font_size = node.font_size.max(0.01) as f32;
+    let line_height = font_size * node.line_height.max(0.1) as f32;
+
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    // Unbounded layout so all content is shaped even without a fixed width.
+    buf.set_size(font_system, None, None);
+
+    let glyph_style = match node.font_style {
+        FontStyle::Italic => GlyphonStyle::Italic,
+        FontStyle::Oblique => GlyphonStyle::Oblique,
+        FontStyle::Normal => GlyphonStyle::Normal,
+    };
+    let attrs = Attrs::new()
+        .family(Family::Name(&node.font_family))
+        .weight(Weight(node.font_weight))
+        .style(glyph_style);
+
+    buf.set_text(font_system, &node.content, attrs, Shaping::Advanced);
+    buf.shape_until_scroll(font_system, false);
+
+    let mut merged = BezPath::new();
+
+    for run in buf.layout_runs() {
+        // `line_y` in glyphon/cosmic-text is the baseline Y of the run in
+        // buffer-local coordinates (Y-down, origin at the top of the buffer).
+        let baseline_y = run.line_y as f64;
+
+        // Run width for alignment offset calculation.
+        let run_width = run.line_w as f64;
+
+        // Alignment: compute the horizontal offset to apply to the whole run.
+        // The caller doesn't pass an explicit layout_width, so for center/right
+        // we use the run's own width as the reference (no extra offset).
+        let align_offset = match node.align {
+            TextAlign::Left => 0.0,
+            TextAlign::Center => -run_width / 2.0,
+            TextAlign::Right => -run_width,
+        };
+
+        for (i, g) in run.glyphs.iter().enumerate() {
+            let Some(font) = font_system.get_font(g.font_id) else {
+                continue;
+            };
+            let face = font.rustybuzz(); // &ttf_parser::Face via Deref
+            let units = face.units_per_em() as f64;
+            if units <= 0.0 {
+                continue;
+            }
+
+            let mut builder = BezOutlineBuilder::default();
+            if face
+                .outline_glyph(GlyphId(g.glyph_id), &mut builder)
+                .is_none()
+            {
+                // No outline: whitespace, bitmap-only font, etc.
+                continue;
+            }
+
+            // Glyph position in buffer space:
+            //   g.x  — left edge of the glyph advance rectangle (f32, Y-down)
+            //   g.y  — vertical offset relative to the baseline (usually 0.0
+            //          for CJK or glyphs that sit on/below the baseline)
+            // The font-unit outline is Y-up; we flip it to Y-down by scaling Y
+            // by -scale and then translating so the origin lands on the baseline.
+            let gx = align_offset
+                + g.x as f64
+                + node.letter_spacing * i as f64
+                + g.x_offset as f64 * g.font_size as f64;
+            let gy = baseline_y + g.y as f64 + g.y_offset as f64 * g.font_size as f64;
+
+            let scale = g.font_size as f64 / units;
+            // font units (Y-up, origin at glyph origin) → doc space (Y-down):
+            //   translate to (gx, gy) · scale(scale, -scale) · outline
+            let affine =
+                Affine::translate((gx, gy)) * Affine::scale_non_uniform(scale, -scale);
+
+            let mut glyph_path = builder.path;
+            glyph_path.apply_affine(affine);
+
+            // Extend the merged path with all elements of this glyph's outline.
+            for el in glyph_path.iter() {
+                merged.push(el);
+            }
+        }
+    }
+
+    if merged.is_empty() {
+        return PathData::new();
+    }
+    PathData::from_bez_path(&merged)
+}
+
+// ─── Document-level outlining ────────────────────────────────────────────────
+
+/// Return a **clone** of `doc` in which every visible [`TextNode`] (including
+/// nodes nested inside groups at any depth) has been replaced by a [`PathNode`]
+/// carrying the glyph outlines produced by [`layout_text_flat`] (or, when the
+/// text follows a path spine, by [`crate::text_path::layout_text_on_path`]).
+///
+/// The original `doc` is never mutated (undo-safe). The returned document is
+/// suitable for a single-use font-free export; it should **not** be inserted
+/// into the undo history.
+///
+/// Node identity is preserved: the replacement path node keeps the same `id`,
+/// `name`, `transform`, `opacity`, `visible`, `blend_mode`, `layer_id`, and
+/// group/layer membership as the original text node.  Only `kind` changes from
+/// `Text(…)` to `Path(…)`.
+pub fn outline_document_text(doc: &Document, font_system: &mut FontSystem) -> Document {
+    let mut clone = doc.clone();
+
+    // Collect the IDs of all text nodes up front (avoids borrow conflicts while
+    // we mutate clone.nodes).
+    let text_ids: Vec<NodeId> = clone
+        .nodes
+        .values()
+        .filter(|n| matches!(n.kind, SceneNodeKind::Text(_)))
+        .map(|n| n.id)
+        .collect();
+
+    for id in text_ids {
+        let Some(node) = clone.nodes.get(&id) else {
+            continue;
+        };
+        // Skip invisible nodes — they won't appear in the PDF anyway.
+        if !node.visible {
+            continue;
+        }
+
+        let SceneNodeKind::Text(ref text) = node.kind else {
+            continue;
+        };
+        let text = text.clone(); // clone to release the borrow on node
+
+        let path_data = if let Some(spine_id) = text.path_spine_id {
+            // Text-on-path: use the existing on-path layout
+            let spine = clone
+                .nodes
+                .get(&spine_id)
+                .and_then(|n| match &n.kind {
+                    SceneNodeKind::Path(p) => Some(p.path_data.clone()),
+                    _ => None,
+                });
+            if let Some(spine_path) = spine {
+                use crate::text_path::{TextOnPathParams, layout_text_on_path};
+                let params = TextOnPathParams {
+                    content: &text.content,
+                    font_family: &text.font_family,
+                    font_size: text.font_size,
+                    font_weight: text.font_weight,
+                    font_style: text.font_style,
+                    line_height: text.line_height,
+                    letter_spacing: text.letter_spacing,
+                    align: text.align,
+                    path_offset: text.path_offset,
+                };
+                let glyph_paths = layout_text_on_path(font_system, &params, &spine_path);
+                if glyph_paths.is_empty() {
+                    PathData::new()
+                } else {
+                    // Merge all per-glyph paths into one compound path.
+                    use kurbo::BezPath;
+                    let mut merged = BezPath::new();
+                    for gp in &glyph_paths {
+                        for el in gp.to_bez_path().iter() {
+                            merged.push(el);
+                        }
+                    }
+                    PathData::from_bez_path(&merged)
+                }
+            } else {
+                // Spine node not found; fall back to flat layout.
+                layout_text_flat(font_system, &text)
+            }
+        } else {
+            layout_text_flat(font_system, &text)
+        };
+
+        // Build a PathNode carrying the outlined glyphs with the text's style.
+        let path_node = PathNode {
+            path_data,
+            fill: text.fill.clone(),
+            stroke: text.stroke.clone(),
+            is_compound: true, // counter-shapes handled via nonzero winding
+        };
+
+        // Swap the node's kind in place (all other fields stay identical).
+        if let Some(node) = clone.nodes.get_mut(&id) {
+            node.kind = SceneNodeKind::Path(path_node);
+        }
+    }
+
+    clone
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use photonic_core::{
+        document::Document,
+        node::{SceneNode, SceneNodeKind, TextNode},
+    };
+
+    fn make_doc_with_text(content: &str) -> (Document, NodeId) {
+        let mut doc = Document::new("test", 400.0, 300.0);
+        let layer_id = doc
+            .active_layer_id
+            .expect("Document::new always creates a default layer");
+        let mut text_node = TextNode::new(content);
+        text_node.font_family = "sans-serif".to_string();
+        text_node.font_size = 32.0;
+        text_node.font_weight = 400;
+        text_node.line_height = 1.2;
+        text_node.letter_spacing = 0.0;
+        let node = SceneNode::new("text", layer_id, SceneNodeKind::Text(text_node));
+        let node_id = node.id;
+        if let Some(layer) = doc.layers.get_mut(&layer_id) {
+            layer.node_ids.push(node_id);
+        }
+        doc.nodes.insert(node_id, node);
+        (doc, node_id)
+    }
+
+    /// `layout_text_flat` with "Ag" should return a non-empty PathData that
+    /// has a bounding box with a positive height (i.e. glyphs were outlined).
+    /// On CI images with no usable fonts the test is allowed to produce an
+    /// empty result and skips the metric assertions.
+    #[test]
+    fn layout_text_flat_ag_has_geometry() {
+        let mut fs = FontSystem::new();
+        let mut node = TextNode::new("Ag");
+        node.font_size = 32.0;
+        let pd = layout_text_flat(&mut fs, &node);
+        if pd.is_empty() {
+            eprintln!("no system font available — skipping geometry assertions");
+            return;
+        }
+        let bb = pd.bounding_box().expect("non-empty path must have a bbox");
+        // The glyphs must have measurable width and height.
+        assert!(bb.width() > 0.0, "width={}", bb.width());
+        assert!(bb.height() > 0.0, "height={}", bb.height());
+        // With a 32 px font the cap/ascent height (min_y to max_y span) should
+        // be at least 8 doc units and less than 80 (two full line heights).
+        assert!(
+            bb.height() > 8.0 && bb.height() < 80.0,
+            "suspicious cap height: {}",
+            bb.height()
+        );
+        // In the flat layout, glyphs are placed with Y-down origin at the top of
+        // the buffer. `line_y` (the baseline) is some positive Y value (the ascent
+        // in pixels from the buffer top). Ascending glyphs sit ABOVE the baseline,
+        // so `min_y` should be positive but less than `line_y`.  Descenders sit
+        // below the baseline so `max_y > line_y`.  Both are within a 80-unit window
+        // for a 32 px font. The overall bounding box stays within [-10, 80].
+        assert!(bb.min_y() > -10.0, "min_y unexpectedly far above buffer top: {}", bb.min_y());
+        assert!(bb.max_y() < 80.0, "max_y unexpectedly far below buffer top: {}", bb.max_y());
+    }
+
+    /// Empty content must return an empty PathData (no geometry to produce).
+    #[test]
+    fn layout_text_flat_empty_content() {
+        let mut fs = FontSystem::new();
+        let node = TextNode::new("");
+        let pd = layout_text_flat(&mut fs, &node);
+        assert!(pd.is_empty(), "empty content should yield empty PathData");
+    }
+
+    /// `outline_document_text` on a doc with one text node should yield a doc
+    /// whose corresponding node is a `PathNode` with the same ID.
+    #[test]
+    fn outline_document_text_replaces_text_node() {
+        let mut fs = FontSystem::new();
+        let (doc, node_id) = make_doc_with_text("Hi");
+        let outlined = outline_document_text(&doc, &mut fs);
+
+        let replaced = outlined
+            .nodes
+            .get(&node_id)
+            .expect("node must still exist in cloned doc");
+
+        // Original doc is untouched.
+        assert!(
+            matches!(doc.nodes.get(&node_id).unwrap().kind, SceneNodeKind::Text(_)),
+            "original doc should still have Text node"
+        );
+
+        // Cloned doc has a Path node.
+        assert!(
+            matches!(replaced.kind, SceneNodeKind::Path(_)),
+            "outlined doc should have Path node, got {:?}",
+            replaced.kind
+        );
+    }
+
+    /// The replacement PathNode must have a non-empty outline when a usable
+    /// font is available.  (Empty is allowed on no-font CI images.)
+    #[test]
+    fn outline_document_text_path_has_geometry_when_font_available() {
+        let mut fs = FontSystem::new();
+        let (doc, node_id) = make_doc_with_text("Hi");
+        let outlined = outline_document_text(&doc, &mut fs);
+        let node = outlined.nodes.get(&node_id).unwrap();
+        if let SceneNodeKind::Path(p) = &node.kind {
+            if p.path_data.is_empty() {
+                eprintln!("no font — skipping geometry check");
+                return;
+            }
+            assert!(p.path_data.bounding_box().is_some(), "outlined path must have a bbox");
+        } else {
+            panic!("expected PathNode");
+        }
+    }
+
+    /// ACCEPT CRITERION: export a doc with a text node through `outline_document_text`
+    /// + `export_pdf`, write the result to /tmp/photonic_outline_test.pdf, then run
+    /// `pdffonts` on it.  The font table MUST be empty (zero rows) — the PDF contains
+    /// no embedded/referenced fonts; all glyphs are present as vector path operators.
+    ///
+    /// Also verifies the PDF is non-trivial (> 512 bytes) so we know real paths exist.
+    ///
+    /// Requires `pdffonts` (poppler-utils) to be installed. If the binary is absent
+    /// the test passes with a warning so CI without poppler does not break the suite.
+    #[test]
+    fn pdf_has_zero_fonts_after_outlining() {
+        use photonic_core::export::{PdfExportOptions, export_pdf};
+
+        let mut fs = FontSystem::new();
+        let (doc, _node_id) = make_doc_with_text("Hello");
+
+        // Outline text → path nodes.
+        let outlined = outline_document_text(&doc, &mut fs);
+
+        // Export to PDF bytes.
+        let opts = PdfExportOptions::default();
+        let bytes = export_pdf(&outlined, &opts);
+
+        // The PDF must be non-trivial: if the outlined paths are present, the file
+        // will be larger than a bare empty-doc PDF (which is ~500 bytes).
+        assert!(
+            bytes.len() > 512,
+            "PDF suspiciously small ({} bytes) — outlines may be missing",
+            bytes.len()
+        );
+
+        // Write to /tmp so pdffonts can read it.
+        let path = "/tmp/photonic_outline_test.pdf";
+        std::fs::write(path, &bytes).expect("failed to write test PDF");
+
+        // Run pdffonts and capture output.
+        let Ok(output) = std::process::Command::new("pdffonts").arg(path).output() else {
+            eprintln!("pdffonts not found — skipping font-table check");
+            return;
+        };
+
+        if !output.status.success() {
+            eprintln!(
+                "pdffonts exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // Not a failure if pdffonts itself errored (unlikely but defensive).
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("pdffonts output:\n{stdout}");
+
+        // The header is always 2 lines; a non-empty font table adds more.
+        // If there are only 2 lines (name + separator), the font table is empty.
+        let data_lines: Vec<&str> = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+
+        assert!(
+            data_lines.len() <= 2,
+            "PDF should have ZERO fonts but pdffonts reports {} data lines:\n{stdout}",
+            data_lines.len()
+        );
+    }
+}

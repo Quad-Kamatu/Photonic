@@ -1987,13 +1987,34 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_pdf",
-            "description": "Export the entire document as a single-page vector PDF (1 document unit = 1 PDF point). Returns the PDF bytes as base64 in `data_base64`.\n\nMVP scope: filled/stroked vector paths with solid colours, node/group transforms and nesting. Gradient fills are approximated by their first stop colour; text, clipping, per-node opacity, blend modes and multi-page artboards are not yet emitted.",
+            "description": "Export the document as a single-page vector PDF, at its physical size for the document DPI. Returns the PDF bytes as base64 in `data_base64`; also writes to `path` when given.\n\nVector paths with solid colours, transforms and nesting (gradients approximate to their first stop). With `color_mode: \"cmyk\"` the output is a print-ready PDF/X-1a:2001 file: DeviceCMYK via an ICC profile, embedded GTS_PDFX OutputIntent, PDF 1.3, and MediaBox/TrimBox/BleedBox from the document bleed. `outline_text` converts every glyph to a vector path (zero font dependencies); `marks` renders trim + registration marks. Note: documents that use layer opacity/blend still emit transparency (not yet flattened for strict X-1a).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "background": {
                         "type": "string",
                         "description": "Optional page background colour, e.g. \"#ffffff\". Omit for an unpainted (white-in-viewers) page."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Also write the exported PDF to this filesystem path. The base64 payload is still returned."
+                    },
+                    "outline_text": {
+                        "type": "boolean",
+                        "description": "Convert text nodes to vector outlines (zero font dependencies). Default false."
+                    },
+                    "marks": {
+                        "type": "boolean",
+                        "description": "Render trim and registration marks in the bleed/slug area. Default false."
+                    },
+                    "color_mode": {
+                        "type": "string",
+                        "enum": ["rgb", "cmyk"],
+                        "description": "Export colour model. \"rgb\" (default) preserves on-screen colours. \"cmyk\" separates to DeviceCMYK via the ICC profile and emits a PDF/X-1a file. When omitted, the document's own color_mode is used."
+                    },
+                    "profile": {
+                        "type": "string",
+                        "description": "Path to a CMYK ICC profile for colour conversion and the OutputIntent (defaults to the bundled Coated FOGRA39 when color_mode is cmyk)."
                     }
                 }
             }
@@ -4124,6 +4145,22 @@ pub fn tool_list() -> Value {
         {
             "name": "get_document_bleed",
             "description": "Return the current document bleed and slug values in millimetres. Read-only.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "set_document_color_mode",
+            "description": "Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photonic file and is used as the default color space when exporting PDF without an explicit color_mode override.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["rgb", "cmyk"], "description": "Color mode. 'rgb' for screen/web; 'cmyk' for print production." }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "get_document_color_mode",
+            "description": "Return the current document color mode ('rgb' or 'cmyk'). Read-only.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {

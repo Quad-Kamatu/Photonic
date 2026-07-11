@@ -118,6 +118,21 @@ pub struct ExportPdfArgs {
     /// (white-in-viewers) page.
     #[serde(default)]
     pub background: Option<String>,
+    /// Also write the PDF to this filesystem path (base64 is still returned).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Convert text to vector outlines (zero font deps). Default false.
+    #[serde(default)]
+    pub outline_text: Option<bool>,
+    /// Render trim + registration marks. Default false.
+    #[serde(default)]
+    pub marks: Option<bool>,
+    /// Colour model: "rgb" (default) or "cmyk".
+    #[serde(default)]
+    pub color_mode: Option<String>,
+    /// CMYK ICC profile path (defaults to the bundled FOGRA39 when cmyk).
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// Arguments for `export_selection_as_svg` tool
