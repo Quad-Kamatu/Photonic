@@ -696,6 +696,16 @@ pub struct SetDocumentBleedArgs {
     pub slug_mm: Option<f64>,
 }
 
+// ─── Document Color Mode Args ────────────────────────────────────────────────
+
+/// Arguments for `set_document_color_mode` tool
+#[derive(Debug, Deserialize, Default)]
+pub struct SetDocumentColorModeArgs {
+    /// Color mode for the document. Accepted values: "rgb" or "cmyk".
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 // ─── Artboard Margins Args ───────────────────────────────────────────────────
 
 /// Arguments for `set_artboard_margins` tool.

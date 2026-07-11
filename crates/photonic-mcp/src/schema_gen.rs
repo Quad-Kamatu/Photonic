@@ -4148,6 +4148,22 @@ pub fn tool_list() -> Value {
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
+            "name": "set_document_color_mode",
+            "description": "Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photonic file and is used as the default color space when exporting PDF without an explicit color_mode override.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["rgb", "cmyk"], "description": "Color mode. 'rgb' for screen/web; 'cmyk' for print production." }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "get_document_color_mode",
+            "description": "Return the current document color mode ('rgb' or 'cmyk'). Read-only.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
             "name": "set_artboard_margins",
             "description": "Set the artboard safe-area margins (top, right, bottom, left) in document units. Margins define the inner content area; content should stay within these guides. Pass only the fields you want to change.",
             "inputSchema": {

@@ -1685,6 +1685,16 @@ pub(crate) async fn dispatch_tool_inner(
         "get_document_bleed" => Ok(ToolOutput::readonly(
             handlers::document::get_document_bleed(state).await,
         )),
+        "set_document_color_mode" => {
+            let a: SetDocumentColorModeArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::set_document_color_mode(state, a).await,
+            ))
+        }
+        "get_document_color_mode" => Ok(ToolOutput::readonly(
+            handlers::document::get_document_color_mode(state).await,
+        )),
         "set_artboard_margins" => {
             let a: SetArtboardMarginsArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;

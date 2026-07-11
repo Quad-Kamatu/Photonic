@@ -292,15 +292,18 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
         None => None,
     };
 
-    // Parse color_mode: "cmyk" → Cmyk, anything else → Rgb (default).
-    let color_mode = match args.color_mode.as_deref() {
-        Some("cmyk") => photonic_core::document::ColorMode::Cmyk,
-        _ => photonic_core::document::ColorMode::Rgb,
-    };
-
     let icc_profile = args.profile.map(std::path::PathBuf::from);
 
     let doc = state.document.lock().await;
+
+    // Resolve color_mode: explicit arg wins; when omitted fall back to the document's
+    // stored color mode so callers don't have to repeat it every export.
+    let color_mode = match args.color_mode.as_deref() {
+        Some("cmyk") => photonic_core::document::ColorMode::Cmyk,
+        Some("rgb") => photonic_core::document::ColorMode::Rgb,
+        Some(other) => return ToolResult::error(format!("color_mode must be 'rgb' or 'cmyk', got '{other}'")),
+        None => doc.color_mode,
+    };
 
     // When `outline_text` is requested, convert every text node to vector paths
     // so the exported PDF has zero font dependencies. Work on a throw-away clone;
