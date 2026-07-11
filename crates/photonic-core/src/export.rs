@@ -1002,10 +1002,20 @@ fn compute_page_boxes(doc: &Document, _opts: &PdfExportOptions) -> PageBoxes {
     PageBoxes { media: full, trim: full, bleed: full }
 }
 
-/// Resolve an RGB triple into the export colour model. SEAM T0.3: convert to CMYK
-/// via opts.icc_profile when opts.color_mode == Cmyk. Today: always Rgb passthrough.
-fn convert_color(rgb: [f32; 3], _opts: &PdfExportOptions) -> PdfColor {
-    PdfColor::Rgb(rgb)
+/// Resolve an RGB triple into the export colour model.
+///
+/// When `opts.color_mode == Cmyk` the colour is converted through a real ICC
+/// profile (CoatedFOGRA39 by default, or `opts.icc_profile` when supplied).
+/// The transform is cached process-wide so only the first call per profile pays
+/// the parse cost.
+fn convert_color(rgb: [f32; 3], opts: &PdfExportOptions) -> PdfColor {
+    match opts.color_mode {
+        crate::document::ColorMode::Cmyk => {
+            let t = crate::color_cmyk::cached_transform(opts.icc_profile.as_deref());
+            PdfColor::Cmyk(t.rgb_to_cmyk(rgb))
+        }
+        crate::document::ColorMode::Rgb => PdfColor::Rgb(rgb),
+    }
 }
 
 /// Set the non-stroking (fill) colour on the content stream from a PdfColor.
@@ -1832,5 +1842,106 @@ mod tests {
         doc.add_node(node, None);
         let svg = export_svg(&doc, &SvgExportOptions::default());
         assert!(!svg.contains("<filter"), "no effects → no filter:\n{svg}");
+    }
+
+    // ── T0.3 CMYK colour-mode tests ────────────────────────────────────────────
+
+    /// A 100×100 doc with one red-filled rect exported in CMYK mode must contain
+    /// a CMYK fill operator (` k`) and must NOT contain an RGB fill operator (` rg`).
+    #[test]
+    fn pdf_cmyk_mode_emits_k_operator_not_rg() {
+        use crate::document::ColorMode;
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut rect = PathNode::new(PathData::rect(10.0, 10.0, 80.0, 80.0));
+        rect.fill = Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0)); // red
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(rect),
+        );
+        doc.add_node(node, None);
+
+        let opts = PdfExportOptions {
+            color_mode: ColorMode::Cmyk,
+            ..Default::default()
+        };
+        let bytes = export_pdf(&doc, &opts);
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            text.contains(" k\n") || text.contains(" k "),
+            "CMYK export must contain a ` k` fill operator;\n{text}"
+        );
+        assert!(
+            !text.contains(" rg\n") && !text.contains(" rg "),
+            "CMYK export must NOT contain an ` rg` RGB fill operator;\n{text}"
+        );
+    }
+
+    /// Write the CMYK PDF to /tmp for offline qpdf inspection (accept criterion).
+    /// This test is always skipped in CI (guarded by env CMYK_WRITE_ACCEPT=1).
+    #[test]
+    fn pdf_cmyk_accept_write_to_tmp() {
+        if std::env::var("CMYK_WRITE_ACCEPT").as_deref() != Ok("1") {
+            return;
+        }
+        use crate::document::ColorMode;
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("accept", 100.0, 100.0);
+        let mut rect = PathNode::new(PathData::rect(10.0, 10.0, 80.0, 80.0));
+        rect.fill = Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0));
+        let node = SceneNode::new(
+            "r",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(rect),
+        );
+        doc.add_node(node, None);
+        let opts = PdfExportOptions {
+            color_mode: ColorMode::Cmyk,
+            ..Default::default()
+        };
+        let bytes = export_pdf(&doc, &opts);
+        std::fs::write("/tmp/cmyk_accept.pdf", &bytes).unwrap();
+        println!("Written /tmp/cmyk_accept.pdf ({} bytes)", bytes.len());
+    }
+
+    /// The same doc in default (RGB) mode must contain ` rg` and must NOT
+    /// contain a CMYK ` k` fill operator.
+    #[test]
+    fn pdf_rgb_mode_emits_rg_operator_not_k() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut rect = PathNode::new(PathData::rect(10.0, 10.0, 80.0, 80.0));
+        rect.fill = Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0)); // red
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(rect),
+        );
+        doc.add_node(node, None);
+
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        let text = String::from_utf8_lossy(&bytes);
+
+        // pdf-writer writes the content stream uncompressed, so rg must appear.
+        assert!(
+            text.contains(" rg\n") || text.contains(" rg "),
+            "RGB export must contain an ` rg` fill operator;\n{text}"
+        );
+        // No CMYK operator should appear.
+        assert!(
+            !text.contains(" k\n") && !text.contains(" k "),
+            "RGB export must NOT contain a CMYK ` k` fill operator;\n{text}"
+        );
     }
 }

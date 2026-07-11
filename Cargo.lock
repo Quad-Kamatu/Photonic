@@ -3860,6 +3860,7 @@ dependencies = [
  "geo",
  "image",
  "kurbo",
+ "moxcms",
  "pdf-writer",
  "peniko 0.3.2",
  "roxmltree",
@@ -3867,6 +3868,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
