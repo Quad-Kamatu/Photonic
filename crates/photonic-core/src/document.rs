@@ -107,6 +107,20 @@ fn default_format_version() -> u32 {
     CURRENT_FORMAT_VERSION
 }
 
+fn default_dpi() -> f64 {
+    72.0
+}
+
+/// Document colour model. Rgb is the authoring/on-screen model; Cmyk marks the
+/// document for print separation on export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorMode {
+    #[default]
+    Rgb,
+    Cmyk,
+}
+
 pub type DocumentId = Uuid;
 
 /// A named export configuration stored in the document.
@@ -749,6 +763,16 @@ pub struct Document {
     /// The currently active artboard (target for new work / export defaults).
     #[serde(default)]
     pub active_artboard: Option<ArtboardId>,
+    /// Output resolution in pixels per inch; anchors physical-unit (mm/in/pt)
+    /// conversion and PDF point scaling. Default 72.0 → 1 px == 1 pt (legacy).
+    #[serde(default = "default_dpi")]
+    pub dpi: f64,
+    /// Preferred display unit for rulers/readouts; storage stays in px.
+    #[serde(default)]
+    pub display_unit: crate::units::DocumentUnit,
+    /// Colour model used when exporting for print. Default Rgb.
+    #[serde(default)]
+    pub color_mode: ColorMode,
 }
 
 // ─── Dimension Annotation ─────────────────────────────────────────────────────
@@ -829,6 +853,32 @@ pub struct Workspace {
     pub search_query: String,
 }
 
+// ─── Print presets ────────────────────────────────────────────────────────────
+
+/// A standard print size preset — trim size, NOT including bleed.
+#[derive(Debug, Clone, Copy)]
+pub struct PrintPreset {
+    pub name: &'static str,
+    pub w: f64,
+    pub h: f64,
+    pub unit: crate::units::DocumentUnit,
+}
+
+impl PrintPreset {
+    pub const BUSINESS_CARD_US: PrintPreset = PrintPreset {
+        name: "Business Card (US)",
+        w: 3.5,
+        h: 2.0,
+        unit: crate::units::DocumentUnit::In,
+    };
+    pub const BUSINESS_CARD_EU: PrintPreset = PrintPreset {
+        name: "Business Card (EU)",
+        w: 85.0,
+        h: 55.0,
+        unit: crate::units::DocumentUnit::Mm,
+    };
+}
+
 impl Document {
     /// Create a new blank document with a default layer.
     pub fn new(name: impl Into<String>, width: f64, height: f64) -> Self {
@@ -880,12 +930,37 @@ impl Document {
             dimensions: Vec::new(),
             artboards: vec![artboard],
             active_artboard,
+            dpi: 72.0,
+            display_unit: crate::units::DocumentUnit::default(),
+            color_mode: ColorMode::default(),
         }
     }
 
     /// Default A4-landscape artboard.
     pub fn default_artboard() -> Self {
         Self::new("Untitled", 1123.0, 794.0)
+    }
+
+    /// Create a document sized in physical units at `dpi`. width/height are stored
+    /// in px = to_px(value, unit, dpi). Sets dpi and display_unit accordingly.
+    pub fn new_print(
+        name: impl Into<String>,
+        w: f64,
+        h: f64,
+        unit: crate::units::DocumentUnit,
+        dpi: f64,
+    ) -> Self {
+        let wpx = crate::units::to_px(w, unit, dpi);
+        let hpx = crate::units::to_px(h, unit, dpi);
+        let mut d = Document::new(name, wpx, hpx);
+        d.dpi = dpi;
+        d.display_unit = unit;
+        d
+    }
+
+    /// Create a document from a print preset at `dpi`.
+    pub fn from_preset(p: PrintPreset, dpi: f64) -> Self {
+        Document::new_print(p.name, p.w, p.h, p.unit, dpi)
     }
 
     // ─── Artboards ──────────────────────────────────────────────────────────
@@ -2297,5 +2372,45 @@ mod symbol_resolution_tests {
         let resolved = doc.resolve_render_node(&inst);
         // Falls back to the instance's own (green) copy.
         assert_eq!(solid_fill(&resolved), Color::GREEN);
+    }
+}
+
+#[cfg(test)]
+mod print_preset_tests {
+    use super::*;
+    use crate::units::DocumentUnit;
+
+    #[test]
+    fn business_card_us_300dpi() {
+        let doc = Document::from_preset(PrintPreset::BUSINESS_CARD_US, 300.0);
+        // 3.5 in × 300 dpi = 1050 px wide; 2.0 in × 300 dpi = 600 px tall
+        assert!(
+            (doc.width - 1050.0).abs() < 1e-9,
+            "expected width 1050 px, got {}",
+            doc.width
+        );
+        assert!(
+            (doc.height - 600.0).abs() < 1e-9,
+            "expected height 600 px, got {}",
+            doc.height
+        );
+        assert!((doc.dpi - 300.0).abs() < 1e-9);
+        assert_eq!(doc.display_unit, DocumentUnit::In);
+    }
+
+    #[test]
+    fn business_card_us_72dpi() {
+        let doc = Document::from_preset(PrintPreset::BUSINESS_CARD_US, 72.0);
+        // 3.5 in × 72 dpi = 252 px; 2.0 in × 72 dpi = 144 px
+        assert!(
+            (doc.width - 252.0).abs() < 1e-9,
+            "expected width 252 px, got {}",
+            doc.width
+        );
+        assert!(
+            (doc.height - 144.0).abs() < 1e-9,
+            "expected height 144 px, got {}",
+            doc.height
+        );
     }
 }

@@ -291,9 +291,31 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
         },
         None => None,
     };
+
+    // Parse color_mode: "cmyk" → Cmyk, anything else → Rgb (default).
+    let color_mode = match args.color_mode.as_deref() {
+        Some("cmyk") => photonic_core::document::ColorMode::Cmyk,
+        _ => photonic_core::document::ColorMode::Rgb,
+    };
+
+    let icc_profile = args.profile.map(std::path::PathBuf::from);
+
     let doc = state.document.lock().await;
-    let opts = photonic_core::export::PdfExportOptions { background };
+    let opts = photonic_core::export::PdfExportOptions {
+        background,
+        outline_text: args.outline_text.unwrap_or(false),
+        marks: args.marks.unwrap_or(false),
+        color_mode,
+        icc_profile,
+    };
     let bytes = photonic_core::export::export_pdf(&doc, &opts);
+
+    // Optionally write to a filesystem path.
+    if let Some(ref path) = args.path {
+        if let Err(e) = std::fs::write(path, &bytes) {
+            return ToolResult::error(format!("Failed to write PDF to '{path}': {e}"));
+        }
+    }
 
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);

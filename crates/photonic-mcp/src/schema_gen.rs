@@ -1987,13 +1987,34 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_pdf",
-            "description": "Export the entire document as a single-page vector PDF (1 document unit = 1 PDF point). Returns the PDF bytes as base64 in `data_base64`.\n\nMVP scope: filled/stroked vector paths with solid colours, node/group transforms and nesting. Gradient fills are approximated by their first stop colour; text, clipping, per-node opacity, blend modes and multi-page artboards are not yet emitted.",
+            "description": "Export the entire document as a single-page vector PDF (1 document unit = 1 PDF point). Returns the PDF bytes as base64 in `data_base64`.\n\nMVP scope: filled/stroked vector paths with solid colours, node/group transforms and nesting. Gradient fills are approximated by their first stop colour.\n\nNew args (wired, underlying features still landing):\n- `path`: also write the PDF to this filesystem path.\n- `outline_text`: convert text nodes to vector outlines (zero font deps) — T0.2, wired but not yet active.\n- `marks`: render trim + registration marks in the bleed/slug area — T1.6, wired but not yet active.\n- `color_mode`: \"rgb\" (default) or \"cmyk\" — T0.3, wired but conversion not yet active.\n- `profile`: CMYK ICC profile path for color conversion + OutputIntent — T0.3/T0.4, wired but not yet active.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "background": {
                         "type": "string",
                         "description": "Optional page background colour, e.g. \"#ffffff\". Omit for an unpainted (white-in-viewers) page."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Also write the exported PDF to this filesystem path. The base64 payload is still returned."
+                    },
+                    "outline_text": {
+                        "type": "boolean",
+                        "description": "Convert text nodes to vector outlines (zero font dependencies). Default false. Feature landing in T0.2."
+                    },
+                    "marks": {
+                        "type": "boolean",
+                        "description": "Render trim and registration marks in the bleed/slug area. Default false. Feature landing in T1.6."
+                    },
+                    "color_mode": {
+                        "type": "string",
+                        "enum": ["rgb", "cmyk"],
+                        "description": "Export colour model. \"rgb\" (default) preserves current behaviour. \"cmyk\" marks the document for print separation; requires profile. Feature landing in T0.3."
+                    },
+                    "profile": {
+                        "type": "string",
+                        "description": "Path to a CMYK ICC profile for color conversion and OutputIntent (defaults to bundled FOGRA39 when color_mode is cmyk). Feature landing in T0.3/T0.4."
                     }
                 }
             }

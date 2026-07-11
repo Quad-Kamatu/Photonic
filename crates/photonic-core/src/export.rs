@@ -961,13 +961,80 @@ fn stroke_attrs(stroke: &Stroke, obj_scale: f64, ctx: &mut SvgCtx) -> String {
 
 // ─── PDF export (vector) ────────────────────────────────────────────────────
 
+/// A colour resolved into the export colour model for the PDF content stream.
+#[derive(Debug, Clone, Copy)]
+pub enum PdfColor {
+    Rgb([f32; 3]),
+    Cmyk([f32; 4]),
+}
+
+/// Page geometry boxes, in PDF points (Y-up). T1.5/T1.8 expand media to include
+/// bleed and set trim inside it; today all three equal the artboard.
+#[derive(Debug, Clone, Copy)]
+pub struct PageBoxes {
+    pub media: [f32; 4],
+    pub trim: [f32; 4],
+    pub bleed: [f32; 4],
+}
+
 /// Options controlling vector PDF export.
 #[derive(Debug, Clone, Default)]
 pub struct PdfExportOptions {
     /// Paint a full-page background rectangle of this colour before the artwork.
     /// `None` (default) leaves the page background unpainted (white in viewers).
     pub background: Option<Color>,
+    /// Convert text nodes to vector outlines (zero font deps). T0.2.
+    pub outline_text: bool,
+    /// Render trim + registration marks in the bleed/slug area. T1.6.
+    pub marks: bool,
+    /// Export colour model. Rgb (default) preserves current behaviour. T0.3.
+    pub color_mode: crate::document::ColorMode,
+    /// CMYK ICC profile path for conversion + OutputIntent. T0.3/T0.4.
+    pub icc_profile: Option<std::path::PathBuf>,
 }
+
+/// Compute MediaBox/TrimBox/BleedBox in PDF points. SEAM T1.5/T1.8: expand media
+/// to include doc.bleed_mm and set trim inside it. Today all three = artboard.
+fn compute_page_boxes(doc: &Document, _opts: &PdfExportOptions) -> PageBoxes {
+    let w = doc.width as f32;
+    let h = doc.height as f32;
+    let full = [0.0, 0.0, w, h];
+    PageBoxes { media: full, trim: full, bleed: full }
+}
+
+/// Resolve an RGB triple into the export colour model. SEAM T0.3: convert to CMYK
+/// via opts.icc_profile when opts.color_mode == Cmyk. Today: always Rgb passthrough.
+fn convert_color(rgb: [f32; 3], _opts: &PdfExportOptions) -> PdfColor {
+    PdfColor::Rgb(rgb)
+}
+
+/// Set the non-stroking (fill) colour on the content stream from a PdfColor.
+fn set_fill_color(content: &mut pdf_writer::Content, c: PdfColor) {
+    match c {
+        PdfColor::Rgb([r, g, b]) => { content.set_fill_rgb(r, g, b); }
+        PdfColor::Cmyk([cc, m, y, k]) => { content.set_fill_cmyk(cc, m, y, k); }
+    }
+}
+
+/// Set the stroking colour on the content stream from a PdfColor.
+fn set_stroke_color(content: &mut pdf_writer::Content, c: PdfColor) {
+    match c {
+        PdfColor::Rgb([r, g, b]) => { content.set_stroke_rgb(r, g, b); }
+        PdfColor::Cmyk([cc, m, y, k]) => { content.set_stroke_cmyk(cc, m, y, k); }
+    }
+}
+
+/// Emit a Text node as vector outlines. SEAM T0.2: when opts.outline_text, bridge
+/// the photonic-render glyph outliner to emit_path_geometry. Today: no-op.
+fn emit_text_pdf(
+    _node: &SceneNode,
+    _doc: &Document,
+    _content: &mut pdf_writer::Content,
+    _opts: &PdfExportOptions,
+) {}
+
+/// Render trim + registration marks into the content stream. SEAM T1.6. Today: no-op.
+fn emit_marks(_content: &mut pdf_writer::Content, _boxes: &PageBoxes, _opts: &PdfExportOptions) {}
 
 /// Export `doc` as a single-page vector PDF (1 document unit = 1 PDF point).
 ///
@@ -979,13 +1046,17 @@ pub struct PdfExportOptions {
 pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
     use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
 
-    let w = doc.width as f32;
     let h = doc.height as f32;
 
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
     let page_id = Ref::new(3);
     let content_id = Ref::new(4);
+
+    // Compute page geometry boxes (all equal artboard today; seam expands for bleed).
+    let boxes = compute_page_boxes(doc, opts);
+    let w_media = boxes.media[2] - boxes.media[0];
+    let h_media = boxes.media[3] - boxes.media[1];
 
     // ── Content stream ────────────────────────────────────────────────────────
     let mut content = Content::new();
@@ -994,11 +1065,11 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
     content.transform([1.0, 0.0, 0.0, -1.0, 0.0, h]);
 
     if let Some(bg) = opts.background {
-        content.set_fill_rgb(bg.r, bg.g, bg.b);
+        set_fill_color(&mut content, convert_color([bg.r, bg.g, bg.b], opts));
         content.move_to(0.0, 0.0);
-        content.line_to(w, 0.0);
-        content.line_to(w, h);
-        content.line_to(0.0, h);
+        content.line_to(w_media, 0.0);
+        content.line_to(w_media, h_media);
+        content.line_to(0.0, h_media);
         content.close_path();
         content.fill_nonzero();
     }
@@ -1022,13 +1093,16 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
         }
         for node_id in &layer.node_ids {
             if let Some(node) = doc.nodes.get(node_id) {
-                emit_node_pdf(node, doc, &mut content);
+                emit_node_pdf(node, doc, &mut content, opts);
             }
         }
         if needs_gs {
             content.restore_state();
         }
     }
+
+    // SEAM T1.6: emit trim/registration marks (no-op today).
+    emit_marks(&mut content, &boxes, opts);
 
     let stream = content.finish();
 
@@ -1044,7 +1118,24 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
     {
         let mut page = pdf.page(page_id);
         page.parent(page_tree_id)
-            .media_box(Rect::new(0.0, 0.0, w, h))
+            .media_box(Rect::new(
+                boxes.media[0],
+                boxes.media[1],
+                boxes.media[2],
+                boxes.media[3],
+            ))
+            .trim_box(Rect::new(
+                boxes.trim[0],
+                boxes.trim[1],
+                boxes.trim[2],
+                boxes.trim[3],
+            ))
+            .bleed_box(Rect::new(
+                boxes.bleed[0],
+                boxes.bleed[1],
+                boxes.bleed[2],
+                boxes.bleed[3],
+            ))
             .contents(content_id);
         {
             let mut res = page.resources();
@@ -1109,7 +1200,12 @@ fn pdf_blend_mode(m: crate::layer::BlendMode) -> pdf_writer::types::BlendMode {
 
 /// Recursively emit a node's geometry into the PDF content stream, applying its
 /// affine transform within a save/restore so siblings are unaffected.
-fn emit_node_pdf(node: &SceneNode, doc: &Document, content: &mut pdf_writer::Content) {
+fn emit_node_pdf(
+    node: &SceneNode,
+    doc: &Document,
+    content: &mut pdf_writer::Content,
+    opts: &PdfExportOptions,
+) {
     if !node.visible {
         return;
     }
@@ -1127,10 +1223,13 @@ fn emit_node_pdf(node: &SceneNode, doc: &Document, content: &mut pdf_writer::Con
                 None
             };
             if let Some([fr, fg, fb]) = fill {
-                content.set_fill_rgb(fr, fg, fb);
+                set_fill_color(content, convert_color([fr, fg, fb], opts));
             }
             if let Some(s) = stroke {
-                content.set_stroke_rgb(s.color.r, s.color.g, s.color.b);
+                set_stroke_color(
+                    content,
+                    convert_color([s.color.r, s.color.g, s.color.b], opts),
+                );
                 // Non-scaling stroke: the `cm` transform above scales subsequent
                 // line widths, so divide by the transform scale to keep the
                 // authored width (matches the canvas and other exporters).
@@ -1156,13 +1255,14 @@ fn emit_node_pdf(node: &SceneNode, doc: &Document, content: &mut pdf_writer::Con
         SceneNodeKind::Group(g) => {
             for child_id in &g.children {
                 if let Some(child) = doc.nodes.get(child_id) {
-                    emit_node_pdf(child, doc, content);
+                    emit_node_pdf(child, doc, content, opts);
                 }
             }
         }
-        // Text is omitted in the MVP (PDF text needs embedded/subsetted fonts,
-        // which requires a font system not available in photonic-core).
-        SceneNodeKind::Text(_) => {}
+        // Route text nodes through the seam (no-op today; SEAM T0.2 fills this).
+        SceneNodeKind::Text(_) => {
+            emit_text_pdf(node, doc, content, opts);
+        }
         // Raster layers are omitted in the MVP (PDF image XObjects + the raster
         // compositing pipeline are out of scope for the vector PDF exporter).
         SceneNodeKind::Raster(_) => {}
@@ -1458,6 +1558,46 @@ mod tests {
         let bytes = export_pdf(&doc, &PdfExportOptions::default());
         assert!(bytes.starts_with(b"%PDF-1"));
         assert!(String::from_utf8_lossy(&bytes).contains("%%EOF"));
+    }
+
+    #[test]
+    fn pdf_export_red_rect_produces_mediabox_and_nonempty() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut rect = PathNode::new(PathData::rect(0.0, 0.0, 100.0, 100.0));
+        rect.fill = Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0));
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(rect),
+        );
+        doc.add_node(node, None);
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        assert!(!bytes.is_empty(), "PDF bytes must not be empty");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("MediaBox"), "PDF must contain MediaBox");
+    }
+
+    #[test]
+    fn pdf_export_business_card_mediabox_72dpi() {
+        use crate::document::PrintPreset;
+
+        // US business card at 72 dpi → 252×144 px → 252×144 pt MediaBox
+        let doc = Document::from_preset(PrintPreset::BUSINESS_CARD_US, 72.0);
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        let text = String::from_utf8_lossy(&bytes);
+        // MediaBox must be present and the document must be non-empty.
+        assert!(!bytes.is_empty());
+        assert!(text.contains("MediaBox"), "PDF must contain MediaBox");
+        // Width = 252.0, height = 144.0 — these appear in the MediaBox entry.
+        assert!(
+            text.contains("252") || text.contains("252."),
+            "MediaBox should reference width 252:\n{}",
+            &text[..text.len().min(500)]
+        );
     }
 
     #[test]
