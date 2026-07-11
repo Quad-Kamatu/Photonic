@@ -1212,7 +1212,7 @@ fn emit_marks(content: &mut pdf_writer::Content, boxes: &PageBoxes, opts: &PdfEx
 /// per-node opacity, and multi-page artboards are documented follow-ups. Like
 /// SVG, PDF layer groups are non-isolated, so blend reads the page backdrop.
 pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
-    use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
+    use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, TextStr};
 
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
@@ -1306,7 +1306,34 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
         .collect();
 
     let mut pdf = Pdf::new();
-    pdf.catalog(catalog_id).pages(page_tree_id);
+
+    // T0.4 PDF/X-1a: a CMYK export is emitted as a print-ready PDF/X-1a:2001 file —
+    // PDF 1.3, an embedded DeviceCMYK OutputIntent, and GTS_PDFX Info metadata.
+    let x1a = opts.color_mode == crate::document::ColorMode::Cmyk;
+    if x1a {
+        pdf.set_version(1, 3);
+    }
+    // The ICC + Info objects get Refs after the fixed 1–4 and the ExtGState refs.
+    let icc_ref = Ref::new(5 + gstates.len() as i32);
+    let info_ref = Ref::new(6 + gstates.len() as i32);
+
+    {
+        let mut cat = pdf.catalog(catalog_id);
+        cat.pages(page_tree_id);
+        if x1a {
+            let mut intents = cat.output_intents();
+            intents
+                .push()
+                .subtype(pdf_writer::types::OutputIntentSubtype::PDFX)
+                .output_condition_identifier(TextStr("CoatedFOGRA39"))
+                .output_condition(TextStr("Coated FOGRA39 (ISO 12647-2:2004)"))
+                .registry_name(TextStr("http://www.color.org"))
+                .info(TextStr("Coated FOGRA39 (ISO 12647-2:2004)"))
+                .dest_output_profile(icc_ref);
+            intents.finish();
+        }
+        cat.finish();
+    }
     pdf.pages(page_tree_id).kids([page_id]).count(1);
     {
         let mut page = pdf.page(page_id);
@@ -1352,7 +1379,31 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
             .blend_mode(*blend)
             .finish();
     }
+
+    // T0.4: embed the CMYK OutputIntent profile stream + PDF/X-1a Info metadata.
+    if x1a {
+        let icc_bytes = x1a_icc_bytes(opts);
+        pdf.icc_profile(icc_ref, &icc_bytes).n(4).finish();
+        pdf.document_info(info_ref)
+            .title(TextStr("Photonic print export"))
+            .creator(TextStr("Photonic"))
+            .producer(TextStr("Photonic"))
+            .pair(Name(b"GTS_PDFXVersion"), TextStr("PDF/X-1a:2001"))
+            .pair(Name(b"GTS_PDFXConformance"), TextStr("PDF/X-1a:2001"));
+    }
     pdf.finish()
+}
+
+/// Resolve the CMYK ICC profile bytes for the PDF/X OutputIntent: the caller's
+/// `icc_profile` if it loads, otherwise the bundled FOGRA39 default (same profile
+/// the CMYK conversion uses, so the OutputIntent matches the separated colours).
+fn x1a_icc_bytes(opts: &PdfExportOptions) -> Vec<u8> {
+    if let Some(p) = &opts.icc_profile {
+        if let Ok(bytes) = std::fs::read(p) {
+            return bytes;
+        }
+    }
+    crate::color_cmyk::DEFAULT_CMYK_ICC.to_vec()
 }
 
 /// Map a Photonic blend mode to the `pdf-writer` blend mode (the 16 PDF standard
