@@ -104,8 +104,9 @@ fn dogfood_export_business_card_pdfx() {
     assert!(bytes.starts_with(b"%PDF-1.3"), "must be a PDF 1.3 file");
     assert!(bytes.len() > 1000, "PDF should be non-trivial");
 
-    let out = std::env::var("DOGFOOD_OUT")
-        .unwrap_or_else(|_| "/tmp/kamatu-business-card.pdf".to_string());
+    let out = std::env::var("DOGFOOD_OUT").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        std::env::temp_dir().join("kamatu-business-card.pdf")
+    });
     std::fs::write(&out, &bytes).unwrap();
-    println!("DOGFOOD wrote {} ({} bytes)", out, bytes.len());
+    println!("DOGFOOD wrote {} ({} bytes)", out.display(), bytes.len());
 }

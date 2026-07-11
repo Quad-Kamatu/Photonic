@@ -417,12 +417,13 @@ mod tests {
             bytes.len()
         );
 
-        // Write to /tmp so pdffonts can read it.
-        let path = "/tmp/photonic_outline_test.pdf";
-        std::fs::write(path, &bytes).expect("failed to write test PDF");
+        // Write to the OS temp dir so pdffonts can read it (cross-platform; a
+        // hardcoded /tmp path does not exist on the Windows CI runner).
+        let path = std::env::temp_dir().join("photonic_outline_test.pdf");
+        std::fs::write(&path, &bytes).expect("failed to write test PDF");
 
         // Run pdffonts and capture output.
-        let Ok(output) = std::process::Command::new("pdffonts").arg(path).output() else {
+        let Ok(output) = std::process::Command::new("pdffonts").arg(&path).output() else {
             eprintln!("pdffonts not found — skipping font-table check");
             return;
         };

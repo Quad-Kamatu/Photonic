@@ -2151,8 +2151,9 @@ mod tests {
             ..Default::default()
         };
         let bytes = export_pdf(&doc, &opts);
-        std::fs::write("/tmp/cmyk_accept.pdf", &bytes).unwrap();
-        println!("Written /tmp/cmyk_accept.pdf ({} bytes)", bytes.len());
+        let path = std::env::temp_dir().join("cmyk_accept.pdf");
+        std::fs::write(&path, &bytes).unwrap();
+        println!("Written {} ({} bytes)", path.display(), bytes.len());
     }
 
     /// The same doc in default (RGB) mode must contain ` rg` and must NOT
@@ -2309,7 +2310,6 @@ mod tests {
     #[test]
     fn accept_evidence_page_boxes_and_marks() {
         use crate::units::{to_px, DocumentUnit::Mm};
-        use std::io::Write;
 
         let mut doc = Document::new("accept", 252.0, 144.0);
         doc.bleed_mm = 3.0;
@@ -2338,15 +2338,17 @@ mod tests {
         assert!(m.trim[2] <= m.bleed[2], "T⊂B x1");
         assert!(m.bleed[2] <= m.media[2], "B⊂M x1");
 
-        // Write PDFs
+        // Write PDFs to the OS temp dir (cross-platform; a hardcoded /tmp path
+        // does not exist on the Windows CI runner and fails the test there).
         let bytes_no    = export_pdf(&doc, &opts_no);
         let bytes_marks = export_pdf(&doc, &opts_marks);
-        let path_no    = "/tmp/photonic_accept_no_marks.pdf";
-        let path_marks = "/tmp/photonic_accept_marks.pdf";
-        std::fs::File::create(path_no).unwrap().write_all(&bytes_no).unwrap();
-        std::fs::File::create(path_marks).unwrap().write_all(&bytes_marks).unwrap();
-        println!("Wrote: {path_no} ({} bytes)", bytes_no.len());
-        println!("Wrote: {path_marks} ({} bytes)", bytes_marks.len());
+        let dir = std::env::temp_dir();
+        let path_no = dir.join("photonic_accept_no_marks.pdf");
+        let path_marks = dir.join("photonic_accept_marks.pdf");
+        std::fs::write(&path_no, &bytes_no).unwrap();
+        std::fs::write(&path_marks, &bytes_marks).unwrap();
+        println!("Wrote: {} ({} bytes)", path_no.display(), bytes_no.len());
+        println!("Wrote: {} ({} bytes)", path_marks.display(), bytes_marks.len());
         assert!(bytes_marks.len() > bytes_no.len(), "marks adds bytes");
     }
 }
