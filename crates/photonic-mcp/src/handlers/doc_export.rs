@@ -301,6 +301,18 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
     let icc_profile = args.profile.map(std::path::PathBuf::from);
 
     let doc = state.document.lock().await;
+
+    // When `outline_text` is requested, convert every text node to vector paths
+    // so the exported PDF has zero font dependencies. Work on a throw-away clone;
+    // the live document (and its undo history) is untouched.
+    let export_doc: std::borrow::Cow<photonic_core::document::Document> =
+        if args.outline_text.unwrap_or(false) {
+            let mut font_system = glyphon::FontSystem::new();
+            std::borrow::Cow::Owned(photonic_render::outline_document_text(&doc, &mut font_system))
+        } else {
+            std::borrow::Cow::Borrowed(&*doc)
+        };
+
     let opts = photonic_core::export::PdfExportOptions {
         background,
         outline_text: args.outline_text.unwrap_or(false),
@@ -308,7 +320,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
         color_mode,
         icc_profile,
     };
-    let bytes = photonic_core::export::export_pdf(&doc, &opts);
+    let bytes = photonic_core::export::export_pdf(&export_doc, &opts);
 
     // Optionally write to a filesystem path.
     if let Some(ref path) = args.path {
