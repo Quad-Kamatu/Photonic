@@ -11,6 +11,32 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+### Added
+
+- **Print-ready PDF/X-1a export.** `export_pdf` can now emit a commercial-print
+  **PDF/X-1a:2001** file that a print shop accepts without complaint. New options:
+  `color_mode` (`cmyk` produces the X-1a file), `outline_text` (converts every
+  glyph to a vector path — zero font dependencies), `marks` (trim + registration
+  marks), `profile` (CMYK ICC), and `path` (write straight to disk). In CMYK mode
+  the output is DeviceCMYK via a bundled Coated FOGRA39 ICC, with an embedded
+  `GTS_PDFX` OutputIntent, PDF 1.3, and MediaBox/TrimBox/BleedBox derived from the
+  document bleed. Documents get a colour model (`set_document_color_mode` /
+  `get_document_color_mode`) and DPI-correct physical sizing (business-card
+  presets); a document authored at any DPI exports at its true physical size.
+  Ships with `scripts/preflight-pdfx.sh` (a deterministic PDF/X-1a conformance
+  checker, self-tested in CI) and an interim `scripts/svg-to-pdfx.sh` pipeline.
+
+### Fixed
+
+- **Editor no longer pins a CPU core on documents containing a raster.** The
+  history size-cap check re-serialized the entire document — PNG-encoding every
+  raster in the undo history — on a timer, so an idle document with a placed image
+  saturated one core and made the UI sluggish. The size measurement is now
+  memoized and only recomputed when the history actually changes.
+- **Startup update check no longer busy-loops the UI thread.** A slow or hung
+  update check made the window repaint every frame; it now polls a few times a
+  second and stops cleanly if the check fails.
+
 ## [0.2.3] - 2026-07-10
 
 ### Added
