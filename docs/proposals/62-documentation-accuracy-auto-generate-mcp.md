@@ -95,7 +95,7 @@ to current reality; replace `ROADMAP.md` with a pointer to GitHub milestones.
    - Add crate dependency diagram: `photonic-app` → `photonic-gui` + `photonic-mcp`; both → `photonic-core`; `photonic-render` ← `photonic-core`.
    - Replace "20+ handler functions" with actual count.
 
-5. **`ROADMAP.md`**: Replace content with a brief note: "The original Phase A–E roadmap is complete. For current and planned work, see [GitHub Milestones](https://github.com/Quad-Kamatu/Photonic/milestones)."
+5. **`ROADMAP.md`**: Replace content with a brief note: "The original Phase A–E roadmap is complete. For current and planned work, see [GitHub Milestones](https://github.com/unn-corp/Photonic/milestones)."
 
 ## Affected modules
 

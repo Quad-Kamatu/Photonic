@@ -87,7 +87,7 @@ project's [MIT License](LICENSE).
 
 ## Reporting bugs & requesting features
 
-Open a [GitHub issue](https://github.com/Quad-Kamatu/Photonic/issues). For bugs,
+Open a [GitHub issue](https://github.com/unn-corp/Photonic/issues). For bugs,
 include steps to reproduce, what you expected, and what happened (plus OS and GPU
 if it's a rendering issue).
 

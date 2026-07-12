@@ -17,7 +17,7 @@ Photonic is in active early development. Security fixes are applied to the lates
 Instead, report them privately using one of the following:
 
 1. **GitHub Security Advisories** (preferred) — use the
-   ["Report a vulnerability"](https://github.com/Quad-Kamatu/Photonic/security/advisories/new)
+   ["Report a vulnerability"](https://github.com/unn-corp/Photonic/security/advisories/new)
    button on the repository's Security tab. This keeps the report private until a
    fix is ready.
 2. **Email** — send details to **joecheitman@gmail.com** with "Photonic

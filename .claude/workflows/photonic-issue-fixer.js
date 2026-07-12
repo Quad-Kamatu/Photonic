@@ -1,7 +1,7 @@
 export const meta = {
   name: 'photonic-issue-fixer',
   description: 'Plan/read then implement, adversarial-gate, and land each Photonic issue onto one shared PR branch',
-  whenToUse: 'Turn open Quad-Kamatu/Photonic issues into real, verified code aggregated onto a single shared PR. Pass args { issues, baseBranch, workBranch, prTitle, maxRounds, push }; if issues is omitted a triage agent picks tractable ones.',
+  whenToUse: 'Turn open unn-corp/Photonic issues into real, verified code aggregated onto a single shared PR. Pass args { issues, baseBranch, workBranch, prTitle, maxRounds, push }; if issues is omitted a triage agent picks tractable ones.',
   phases: [
     { title: 'Setup', detail: 'create/checkout the shared work branch off base; ensure clean tree' },
     { title: 'Triage', detail: 'pick tractable open issues when none were passed in' },
@@ -17,7 +17,7 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // Photonic is a Rust/wgpu vector editor. All subagents inherit the SESSION cwd
 // (KamatuStudio), so every prompt pins the repo path and tells the agent to
-// operate there. Issues + PRs live on Quad-Kamatu/Photonic via `gh`. Plans live
+// operate there. Issues + PRs live on unn-corp/Photonic via `gh`. Plans live
 // in docs/proposals/<n>-*.md. Joseph's rule: always `cargo build --release`
 // after edits. Implementation is SEQUENTIAL across issues — every agent shares
 // ONE working tree and ONE git branch, so parallel edits would corrupt each
@@ -44,7 +44,7 @@ const TRAILERS =
 const CTX =
   `Repo: ${REPO} (cd into it for EVERY git/cargo/gh command — your cwd starts elsewhere).\n` +
   `Rust workspace crates: photonic-core, photonic-render, photonic-gui, photonic-mcp, photonic-app, photonic-embed.\n` +
-  `Issues + PRs live on GitHub remote Quad-Kamatu/Photonic (use \`gh\`). Plans live in docs/proposals/<n>-*.md.\n` +
+  `Issues + PRs live on GitHub remote unn-corp/Photonic (use \`gh\`). Plans live in docs/proposals/<n>-*.md.\n` +
   `Shared work branch for this run: ${WORK} (already checked out off ${BASE}). Do NOT switch branches.\n` +
   `House rule: after any source edit, \`cargo build --release\` must succeed. GPU headless rendering works here (RTX 4060 Ti).`
 

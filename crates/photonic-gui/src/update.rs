@@ -1,4 +1,4 @@
-//! In-app self-update from GitHub Releases (Quad-Kamatu/Photonic).
+//! In-app self-update from GitHub Releases (unn-corp/Photonic).
 //!
 //! Pulls the latest release's binary asset, verifies it, and replaces the
 //! running executable (applied on next launch). No server required — GitHub
@@ -13,7 +13,7 @@ use std::sync::mpsc::{channel, Receiver};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const REPO_OWNER: &str = "Quad-Kamatu";
+pub const REPO_OWNER: &str = "unn-corp";
 pub const REPO_NAME: &str = "Photonic";
 const BIN_NAME: &str = "photonic";
 

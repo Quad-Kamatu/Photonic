@@ -136,5 +136,5 @@ git push origin "$TAG"
 echo
 echo "✓ Released $TAG."
 echo "  CI (release.yml) is now building + signing the platform archives."
-echo "  Watch: https://github.com/Quad-Kamatu/Photonic/actions"
-echo "  Release: https://github.com/Quad-Kamatu/Photonic/releases/tag/$TAG"
+echo "  Watch: https://github.com/unn-corp/Photonic/actions"
+echo "  Release: https://github.com/unn-corp/Photonic/releases/tag/$TAG"
