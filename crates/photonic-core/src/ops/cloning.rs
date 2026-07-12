@@ -20,9 +20,9 @@ use std::collections::HashMap;
 /// Deep-clone the subtree rooted at `root_id` from a node snapshot.
 ///
 /// Returns the cloned nodes **root-first** (callers use `result[0].id` as the
-/// new root). Every node gets a fresh id and is reparented to `target_layer`;
-/// only the root receives the `(dx, dy)` paste offset. Returns an empty vec if
-/// `root_id` is not present in `nodes`.
+/// new root). Every node gets a fresh id, is reparented to `target_layer`, and
+/// receives the `(dx, dy)` paste offset. Returns an empty vec if `root_id` is
+/// not present in `nodes`.
 ///
 /// The `nodes` map may be a live `Document::nodes` or a detached clipboard
 /// snapshot — cloning never touches the source, so cross-document paste works
@@ -61,7 +61,7 @@ pub fn clone_subtree(
     let remap = |id: NodeId| id_map.get(&id).copied().unwrap_or(id);
 
     let mut out = Vec::with_capacity(order.len());
-    for (idx, old_id) in order.iter().enumerate() {
+    for old_id in &order {
         let Some(src) = nodes.get(old_id) else {
             continue;
         };
@@ -72,15 +72,12 @@ pub fn clone_subtree(
         // `layer_id` pointed at a (possibly foreign) source layer would leave a
         // dangling reference after a cross-document paste.
         node.layer_id = target_layer;
-        if idx == 0 {
+        // Renderers flatten groups to their leaves, so each cloned descendant
+        // needs its own geometry offset. User-space gradients are
+        // document-anchored and follow the same translation.
+        if dx != 0.0 || dy != 0.0 {
             node.transform.matrix[4] += dx;
             node.transform.matrix[5] += dy;
-        }
-        // A root translate moves the entire subtree in world space, including
-        // descendants. User-space gradients are document-anchored, so every
-        // cloned descendant needs the same coordinate delta to keep its paint
-        // locked to the copied geometry.
-        if dx != 0.0 || dy != 0.0 {
             node.transform_user_space_gradients(&Transform::translate(dx, dy));
         }
 

@@ -151,27 +151,22 @@ pub fn plan_move_artboard(
         new: new_artboards,
     }];
     let gradient_translate = Transform::translate(dx, dy);
-    // Translate each owned ROOT only. Its descendants follow through world
-    // transform composition, so changing descendant transforms would double the
-    // offset. Their user-space gradient coordinates still need their own
-    // UpdateNode entries because those coordinates are document-anchored.
+    // Renderers flatten groups to their leaves, so each subtree node needs its
+    // own geometry offset. User-space gradient coordinates are document-anchored
+    // and must follow the same translation.
     for (_, root_id) in owned_root_nodes(doc, artboard_id) {
         for node_id in subtree_node_ids(doc, root_id) {
             let Some(old) = doc.nodes.get(&node_id) else {
                 continue;
             };
             let mut new = old.clone();
-            let gradient_changed = new.transform_user_space_gradients(&gradient_translate);
-            if node_id == root_id {
-                new.transform.matrix[4] += dx;
-                new.transform.matrix[5] += dy;
-            }
-            if node_id == root_id || gradient_changed {
-                commands.push(Command::UpdateNode {
-                    old: old.clone(),
-                    new,
-                });
-            }
+            new.transform_user_space_gradients(&gradient_translate);
+            new.transform.matrix[4] += dx;
+            new.transform.matrix[5] += dy;
+            commands.push(Command::UpdateNode {
+                old: old.clone(),
+                new,
+            });
         }
     }
 
@@ -232,6 +227,53 @@ mod tests {
         let child_id = child.id;
         let group = SceneNode::new(
             "group",
+            layer_id,
+            SceneNodeKind::Group(GroupNode {
+                children: vec![child_id],
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        );
+        let group_id = group.id;
+        doc.nodes.insert(child_id, child);
+        doc.nodes.insert(group_id, group);
+        doc.layers
+            .get_mut(&layer_id)
+            .expect("default layer")
+            .node_ids
+            .push(group_id);
+
+        (doc, artboard_id, group_id, child_id)
+    }
+
+    fn grouped_gradient_document() -> (Document, ArtboardId, NodeId, NodeId) {
+        let mut doc = Document::new("test", 100.0, 100.0);
+        let artboard_id = doc.artboards[0].id;
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let gradient = Gradient::linear(
+            10.0,
+            20.0,
+            30.0,
+            20.0,
+            vec![
+                GradientStop::new(0.0, Color::BLACK),
+                GradientStop::new(1.0, Color::WHITE),
+            ],
+        );
+        let mut child = SceneNode::new(
+            "QR modules",
+            layer_id,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 20.0, 10.0))
+                    .with_fill(Fill::gradient(gradient)),
+            ),
+        );
+        child.transform = Transform::translate(10.0, 20.0);
+        let child_id = child.id;
+        let group = SceneNode::new(
+            "QR code",
             layer_id,
             SceneNodeKind::Group(GroupNode {
                 children: vec![child_id],
@@ -413,39 +455,31 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_group_offsets_the_root_only_so_content_stays_together() {
-        // A node's world position is `parent_world * node.transform`, so offsetting a
-        // group must move the ROOT only — the child follows. Offsetting the child too
-        // would double the shift and scatter grouped content.
-        let (mut doc, artboard_id, group_id, child_id) = grouped_document();
-        let original_group_bbox = node_world_bbox(&doc.nodes[&group_id], &doc).expect("group bbox");
+    fn duplicate_artboard_offsets_group_descendant_geometry_and_user_space_gradient() {
+        let (mut doc, artboard_id, group_id, child_id) = grouped_gradient_document();
         let (command, _) =
-            plan_duplicate_artboard(&doc, artboard_id, 50.0, 25.0, None).expect("known artboard");
+            plan_duplicate_artboard(&doc, artboard_id, 40.0, 700.0, None).expect("known artboard");
         let mut history = CommandHistory::new(200);
         history.execute_discrete(command, &mut doc);
 
-        // Exactly one clone of each source node (group + child), with fresh ids.
-        let clone_ids: Vec<NodeId> = doc
+        let cloned_group = doc
             .nodes
-            .keys()
-            .copied()
-            .filter(|id| *id != group_id && *id != child_id)
-            .collect();
-        assert_eq!(clone_ids.len(), 2, "group + child cloned once each");
-
-        // The cloned group's world bbox is shifted by exactly (50, 25) — not (100, 50)
-        // or any per-level multiple — proving no double-count.
-        let cloned_group_id = clone_ids
-            .iter()
-            .copied()
-            .find(|id| matches!(doc.nodes[id].kind, SceneNodeKind::Group(_)))
+            .values()
+            .find(|node| node.id != group_id && matches!(node.kind, SceneNodeKind::Group(_)))
             .expect("cloned group");
-        let cloned_group_bbox =
-            node_world_bbox(&doc.nodes[&cloned_group_id], &doc).expect("cloned group bbox");
-        assert_eq!(cloned_group_bbox.x0, original_group_bbox.x0 + 50.0);
-        assert_eq!(cloned_group_bbox.y0, original_group_bbox.y0 + 25.0);
-        assert_eq!(cloned_group_bbox.x1, original_group_bbox.x1 + 50.0);
-        assert_eq!(cloned_group_bbox.y1, original_group_bbox.y1 + 25.0);
+        let SceneNodeKind::Group(cloned_group_data) = &cloned_group.kind else {
+            unreachable!()
+        };
+        let cloned_child_id = *cloned_group_data.children.first().expect("cloned child");
+        assert_ne!(cloned_child_id, child_id, "descendant receives a fresh id");
+        assert_eq!(cloned_group.transform.matrix[4], 40.0);
+        assert_eq!(cloned_group.transform.matrix[5], 700.0);
+        assert_eq!(doc.nodes[&cloned_child_id].transform.matrix[4], 50.0);
+        assert_eq!(doc.nodes[&cloned_child_id].transform.matrix[5], 720.0);
+        assert_eq!(
+            gradient_coords(&doc, cloned_child_id),
+            vec![50.0, 720.0, 70.0, 720.0]
+        );
     }
 
     #[test]
@@ -496,12 +530,10 @@ mod tests {
     }
 
     #[test]
-    fn move_group_shifts_the_root_only_so_content_stays_together() {
+    fn move_artboard_offsets_group_descendants() {
         let (mut doc, artboard_id, group_id, child_id) = grouped_document();
-        let original_group_bbox = node_world_bbox(&doc.nodes[&group_id], &doc).expect("group bbox");
         let command = plan_move_artboard(&doc, artboard_id, 50.0, 25.0).expect("move command");
 
-        // Only the group ROOT is updated; the child follows via world composition.
         let Command::Batch(commands) = &command else {
             panic!("move should be a batch");
         };
@@ -512,20 +544,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            updated_ids,
-            vec![group_id],
-            "child must not be updated directly"
-        );
-        assert!(!updated_ids.contains(&child_id));
+        assert_eq!(updated_ids, vec![group_id, child_id]);
 
         let mut history = CommandHistory::new(200);
         history.execute_discrete(command, &mut doc);
 
-        // The whole group shifts by exactly (50, 25) — no per-level doubling.
-        let moved_group_bbox = node_world_bbox(&doc.nodes[&group_id], &doc).expect("moved bbox");
-        assert_eq!(moved_group_bbox.x0, original_group_bbox.x0 + 50.0);
-        assert_eq!(moved_group_bbox.y0, original_group_bbox.y0 + 25.0);
+        assert_eq!(doc.nodes[&group_id].transform.matrix[4], 50.0);
+        assert_eq!(doc.nodes[&group_id].transform.matrix[5], 25.0);
+        assert_eq!(doc.nodes[&child_id].transform.matrix[4], 50.0);
+        assert_eq!(doc.nodes[&child_id].transform.matrix[5], 25.0);
     }
 
     #[test]
