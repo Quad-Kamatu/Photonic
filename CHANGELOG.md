@@ -33,6 +33,13 @@ embeds this file to show a "What's New" popup after an update.
   `set_document_dpi` / `get_document_dpi`; `get_document_info` now reports `dpi`,
   `bleed_mm`, `slug_mm`, and `color_mode`. Export physical size = pixels / dpi ×
   72 pt, so a 1050×600 px card at 300 DPI exports at 252×144 pt (3.5×2 in).
+- **Save documents over MCP.** New `save_document` tool writes the current
+  document to its native `.photon` file (history included), or save-as with a
+  `path`. The GUI and MCP share the current file path, so an AI-built document
+  persists to disk instead of being lost when the window closes.
+- **Native vector QR codes.** `create_qr_code` generates a true vector QR — real
+  path geometry parented into a group — that styles, scales, and exports like any
+  other artwork (no rasterized image).
 
 ### Fixed
 
@@ -60,6 +67,15 @@ embeds this file to show a "What's New" popup after an update.
   (the topmost opaque solid fill covering it, e.g. the `#0b0b12` card), so the
   portrait blends into the card with no white box. RGB export keeps its true soft
   mask and is unaffected.
+- **MCP edits now enter the undo history.** Mutating MCP tools record a single
+  undo step each, so `undo`/`redo` reverts an AI-driven change exactly like a
+  manual edit. Previously most MCP edits bypassed the history tree and couldn't
+  be undone.
+- **Duplicating or moving an artboard carries all of its content.**
+  `duplicate_artboard` / `move_artboard` now clone and translate every descendant
+  — text nodes, `userSpaceOnUse` gradient coordinates, and nested group children
+  (e.g. a QR-code group) — instead of dropping the text, leaving gradients
+  behind, or emptying nested groups.
 
 ## [0.2.4] - 2026-07-11
 
