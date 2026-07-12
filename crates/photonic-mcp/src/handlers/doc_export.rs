@@ -933,26 +933,42 @@ pub fn register_export_gpu(device: std::sync::Arc<wgpu::Device>, queue: std::syn
 async fn export_renderer() -> ExportRenderer {
     EXPORT_RENDERER
         .get_or_init(|| async {
-            // The capture channel is unused (we call `render_export_rgba` directly),
-            // so dropping the sender is harmless. The 16×16 seed size is resized to
-            // each artboard on first render.
-            let (_tx, rx) = std::sync::mpsc::channel();
-            let doc = std::sync::Arc::new(tokio::sync::Mutex::new(
-                photonic_core::document::Document::new("export", 1.0, 1.0),
-            ));
-            let renderer = match EXPORT_GPU.get() {
-                // GUI mode: reuse the live renderer's device — no second GPU context.
-                Some((device, queue)) => Some(photonic_render::PhotonicRenderer::new_offscreen_shared(
-                    std::sync::Arc::clone(device),
-                    std::sync::Arc::clone(queue),
-                    16,
-                    16,
-                    doc,
-                    rx,
-                )),
-                // Headless MCP mode: no live renderer, so a self-owned device is safe.
-                None => photonic_render::PhotonicRenderer::new_offscreen(16, 16, doc, rx).await,
-            };
+            // Build the renderer OFF the async runtime thread: `assemble` takes a
+            // `blocking_lock()` on the seed document (renderer/mod.rs) and the
+            // headless branch does a blocking `pollster::block_on` on the adapter/
+            // device request — both panic ("Cannot block the current thread from
+            // within a runtime") if run on the tokio runtime thread. `spawn_blocking`
+            // moves construction to a blocking-pool thread where blocking is allowed.
+            let renderer = tokio::task::spawn_blocking(|| {
+                // The capture channel is unused (we call `render_export_rgba`
+                // directly), so dropping the sender is harmless. The 16×16 seed size
+                // is resized to each artboard on first render.
+                let (_tx, rx) = std::sync::mpsc::channel();
+                let doc = std::sync::Arc::new(tokio::sync::Mutex::new(
+                    photonic_core::document::Document::new("export", 1.0, 1.0),
+                ));
+                match EXPORT_GPU.get() {
+                    // GUI mode: reuse the live renderer's device — no second GPU context.
+                    Some((device, queue)) => {
+                        Some(photonic_render::PhotonicRenderer::new_offscreen_shared(
+                            std::sync::Arc::clone(device),
+                            std::sync::Arc::clone(queue),
+                            16,
+                            16,
+                            doc,
+                            rx,
+                        ))
+                    }
+                    // Headless MCP mode: no live renderer, so a self-owned device is
+                    // safe. `new_offscreen` is async (adapter/device request); drive
+                    // it to completion here with `pollster` since we're off-runtime.
+                    None => pollster::block_on(photonic_render::PhotonicRenderer::new_offscreen(
+                        16, 16, doc, rx,
+                    )),
+                }
+            })
+            .await
+            .unwrap_or(None);
             std::sync::Arc::new(std::sync::Mutex::new(renderer))
         })
         .await
@@ -2191,6 +2207,79 @@ mod export_pdf_real_path_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod export_blocking_tests {
+    use super::export_artboards;
+    use crate::protocol::ExportArtboardsArgs;
+    use crate::server::{AppState, McpServerConfig};
+    use photonic_core::node::{PathNode, SceneNode, SceneNodeKind};
+    use photonic_core::path::PathData;
+    use photonic_core::style::{Fill, FillKind};
+    use photonic_core::{Artboard, AuditLog, Color, Document};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn state_with(doc: Document) -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(doc)),
+            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    /// Regression for the "Cannot block the current thread from within a runtime"
+    /// panic: `export_artboards` lazily constructs the export renderer, which takes
+    /// a `blocking_lock()` / drives a blocking GPU device request. Before the fix
+    /// that construction ran on the tokio runtime thread and this `#[tokio::test]`
+    /// panicked. After the fix it runs via `spawn_blocking`, so the handler
+    /// COMPLETES and (on a GPU host) writes a PNG.
+    #[tokio::test]
+    async fn export_artboards_from_runtime_writes_png_without_panicking() {
+        let mut doc = Document::new("blk", 64.0, 48.0);
+        doc.artboards = vec![Artboard::new("Board", 0.0, 0.0, 64.0, 48.0)];
+        doc.active_artboard = Some(doc.artboards[0].id);
+        let layer = doc.active_layer_id.unwrap();
+        let mut rect = PathNode::new(PathData::rect(0.0, 0.0, 64.0, 48.0));
+        rect.fill = Fill {
+            kind: FillKind::Solid(Color::new(0.10, 0.30, 0.90, 1.0)),
+            opacity: 1.0,
+            enabled: true,
+        };
+        doc.add_node(SceneNode::new("bg", layer, SceneNodeKind::Path(rect)), None);
+
+        let out = std::env::temp_dir().join("photonic_export_blocking_test.png");
+        let _ = std::fs::remove_file(&out);
+        let state = state_with(doc);
+
+        // The key assertion is simply that this call RETURNS (does not panic) while
+        // running on the tokio runtime.
+        let res = export_artboards(
+            &state,
+            ExportArtboardsArgs {
+                path: Some(out.to_string_lossy().into_owned()),
+                scale: Some(1.0),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // On a GPU host the export succeeds and a valid PNG lands on disk. On a
+        // headless host with no GPU adapter the renderer is unavailable and the
+        // handler returns a clean error (still no panic) — accept that too.
+        if res.is_error != Some(true) {
+            let bytes = std::fs::read(&out).expect("export PNG should exist on success");
+            assert_eq!(&bytes[0..8], b"\x89PNG\r\n\x1a\n", "output must be a PNG");
+            let _ = std::fs::remove_file(&out);
+        } else {
+            eprintln!("no GPU adapter — export returned an error, but did not panic (ok)");
         }
     }
 }

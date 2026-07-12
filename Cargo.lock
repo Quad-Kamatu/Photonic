@@ -3939,6 +3939,7 @@ dependencies = [
  "photonic-core",
  "photonic-matte",
  "photonic-render",
+ "pollster 0.3.0",
  "regex",
  "serde",
  "serde_json",
