@@ -2320,14 +2320,26 @@ impl PhotonicApp {
             self.update_check_rx = Some(crate::update::check_latest());
         }
         if let Some(rx) = &self.update_check_rx {
-            if let Ok(check) = rx.try_recv() {
-                use crate::update::UpdateCheck;
-                if let UpdateCheck::Available(v) = check {
-                    self.update_available = Some(v);
+            match rx.try_recv() {
+                Ok(check) => {
+                    use crate::update::UpdateCheck;
+                    if let UpdateCheck::Available(v) = check {
+                        self.update_available = Some(v);
+                    }
+                    self.update_check_rx = None;
                 }
-                self.update_check_rx = None;
-            } else {
-                ctx.request_repaint();
+                // The check thread ended without sending (panicked, or the thread
+                // failed to spawn). Stop polling so we don't spin forever.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.update_check_rx = None;
+                }
+                // Still pending: wake a few times a second rather than repainting
+                // every frame. `self_update::get_latest_release()` is a blocking
+                // request with no timeout, so a slow/hung update check would
+                // otherwise pin the main thread at 100% until it returns.
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
             }
         }
 
