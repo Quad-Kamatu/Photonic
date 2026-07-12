@@ -644,6 +644,27 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "create_qr_code",
+            "description": "Generate a native, resolution-independent QR code as a group of vectors (a compound path of all dark modules, plus an optional background). Encodes a URL/text and lets you style the modules while staying scannable — the three finder 'eyes' are always rendered recognizably so stylized codes still scan.\n\nStyles: square (classic), rounded (rounded squares), dot (circles), connected ('blob' — neighbouring modules merge with smooth joins). Dark modules take any fill (solid or gradient). Keep good dark-on-light contrast and use a higher error-correction level (q/h) when heavily stylized.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "data": { "type": "string", "description": "Content to encode (URL or text)" },
+                    "module_shape": { "type": "string", "enum": ["square", "rounded", "dot", "connected"], "description": "Module style (default: square)" },
+                    "ecc": { "type": "string", "enum": ["l", "m", "q", "h"], "description": "Error-correction level (default: m). Higher = more robust but denser." },
+                    "radius": { "type": "number", "description": "Corner radius as a fraction of one module, 0..0.5 (default 0.4). Used by rounded/connected." },
+                    "size": { "type": "number", "description": "Total artwork size in document units incl. quiet zone (default 200)" },
+                    "quiet_zone": { "type": "integer", "description": "Quiet-zone margin in modules (default 4; keep >= 2 to stay scannable)" },
+                    "fill": { "type": "object", "description": "Fill for the dark modules — solid or gradient (default solid black)" },
+                    "background": { "type": "string", "description": "Background behind the code: a #rrggbb hex (default white) or 'none' for transparent" },
+                    "x": { "type": "number", "description": "Top-left X (default 0)" },
+                    "y": { "type": "number", "description": "Top-left Y (default 0)" },
+                    "layer_id": { "type": "string" }
+                },
+                "required": ["data"]
+            }
+        },
+        {
             "name": "tag_nodes",
             "description": "Batch add or remove tags on nodes. Tags are arbitrary strings used for querying with find_nodes.",
             "inputSchema": {

@@ -6,6 +6,7 @@ pub mod join;
 pub mod merge;
 pub mod offset;
 pub mod proportional;
+pub mod qr;
 pub mod simplify;
 pub mod stroke_outline;
 pub mod transform_ops;

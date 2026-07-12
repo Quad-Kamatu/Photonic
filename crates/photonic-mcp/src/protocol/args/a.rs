@@ -785,6 +785,45 @@ pub struct CreateGearArgs {
     pub layer_id: Option<String>,
 }
 
+/// Arguments for `create_qr_code` tool
+#[derive(Debug, Deserialize)]
+pub struct CreateQrCodeArgs {
+    /// Content to encode (URL or text). Required.
+    pub data: String,
+    /// Module shape: "square" (default), "rounded", "dot", or "connected" (blob).
+    #[serde(default)]
+    pub module_shape: Option<String>,
+    /// Error-correction level: "l", "m" (default), "q", or "h". Higher = more
+    /// robust (needed for a centre logo) but denser.
+    #[serde(default)]
+    pub ecc: Option<String>,
+    /// Corner radius as a fraction of one module, 0..=0.5 (default 0.4). Used by
+    /// "rounded" and "connected".
+    #[serde(default)]
+    pub radius: Option<f64>,
+    /// Total artwork size in document units incl. quiet zone (default 200).
+    #[serde(default)]
+    pub size: Option<f64>,
+    /// Quiet-zone margin in modules (default 4; keep >= 2 to stay scannable).
+    #[serde(default)]
+    pub quiet_zone: Option<u32>,
+    /// Fill for the dark modules — solid or gradient (default solid black).
+    #[serde(default)]
+    pub fill: Option<FillArg>,
+    /// Background fill behind the code: a `#rrggbb` hex (default white) or
+    /// `"none"` for transparent. A light background keeps the code scannable on
+    /// any canvas.
+    #[serde(default)]
+    pub background: Option<String>,
+    /// Top-left X (default 0).
+    #[serde(default)]
+    pub x: Option<f64>,
+    /// Top-left Y (default 0).
+    #[serde(default)]
+    pub y: Option<f64>,
+    pub layer_id: Option<String>,
+}
+
 /// Arguments for `flip_nodes` tool
 #[derive(Debug, Deserialize)]
 pub struct FlipNodesArgs {

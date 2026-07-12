@@ -448,6 +448,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::create_gear(state, a).await,
             ))
         }
+        "create_qr_code" => {
+            let a: CreateQrCodeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::nodes::create_qr_code(state, a).await,
+            ))
+        }
         "tag_nodes" => {
             let a: TagNodesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(

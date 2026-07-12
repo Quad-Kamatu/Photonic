@@ -1612,6 +1612,120 @@ pub async fn create_gear(state: &AppState, args: CreateGearArgs) -> ToolResult {
     ))
     .with_data(serde_json::json!({ "node_id": node_id, "teeth": teeth }))
 }
+
+pub async fn create_qr_code(state: &AppState, args: CreateQrCodeArgs) -> ToolResult {
+    tracing::debug!("tool: create_qr_code");
+    use photonic_core::color::Color;
+    use photonic_core::ops::qr::{build_qr, QrEcc, QrModuleShape, QrOptions};
+    use photonic_core::style::Fill;
+    use photonic_core::transform::Transform;
+
+    let shape = match args.module_shape.as_deref() {
+        Some(s) => match QrModuleShape::parse(s) {
+            Some(v) => v,
+            None => {
+                return ToolResult::error("module_shape must be square, rounded, dot, or connected")
+            }
+        },
+        None => QrModuleShape::Square,
+    };
+    let ecc = match args.ecc.as_deref() {
+        Some(s) => match QrEcc::parse(s) {
+            Some(v) => v,
+            None => return ToolResult::error("ecc must be l, m, q, or h"),
+        },
+        None => QrEcc::Medium,
+    };
+
+    let opts = QrOptions {
+        data: args.data.clone(),
+        ecc,
+        shape,
+        radius: args.radius.unwrap_or(0.4),
+        size: args.size.unwrap_or(200.0),
+        quiet_zone: args.quiet_zone.unwrap_or(4),
+    };
+    let art = match build_qr(&opts) {
+        Ok(a) => a,
+        Err(e) => return ToolResult::error(e),
+    };
+
+    // Dark-module fill (solid or gradient); default solid black.
+    let fg_fill = match &args.fill {
+        Some(f) => match f.to_fill() {
+            Ok(x) => x,
+            Err(e) => return ToolResult::error(e),
+        },
+        None => Fill::solid(Color::BLACK),
+    };
+    // Background: default white; "none" = transparent; else a solid hex.
+    let bg_fill: Option<Fill> = match args.background.as_deref() {
+        Some(s) if s.eq_ignore_ascii_case("none") => None,
+        Some(hex) => match Color::from_hex(hex) {
+            Some(c) => Some(Fill::solid(c)),
+            None => {
+                return ToolResult::error(format!(
+                    "Invalid background '{hex}' (expected #rrggbb or 'none')"
+                ))
+            }
+        },
+        None => Some(Fill::solid(Color::WHITE)),
+    };
+
+    let tf = Transform::new(1.0, 0.0, 0.0, 1.0, args.x.unwrap_or(0.0), args.y.unwrap_or(0.0));
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let layer_id = args
+        .layer_id
+        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        .or(doc.active_layer_id)
+        .unwrap_or(uuid::Uuid::nil());
+
+    let mut child_ids: Vec<NodeId> = Vec::new();
+
+    // Background rect (behind the modules), if any.
+    if let Some(bg) = bg_fill {
+        let mut pn = PathNode::new(PathData::rect(0.0, 0.0, art.size, art.size));
+        pn.fill = bg;
+        let mut node = SceneNode::new("QR Background", layer_id, SceneNodeKind::Path(pn));
+        node.transform = tf;
+        let id = node.id;
+        history.execute_discrete(Command::AddNode { node, layer_id: Some(layer_id) }, &mut doc);
+        child_ids.push(id);
+    }
+
+    // The compound path of every dark module.
+    let mut mod_pn = PathNode::new(art.modules);
+    mod_pn.fill = fg_fill;
+    let mut mod_node = SceneNode::new("QR Modules", layer_id, SceneNodeKind::Path(mod_pn));
+    mod_node.transform = tf;
+    let mod_id = mod_node.id;
+    history.execute_discrete(
+        Command::AddNode { node: mod_node, layer_id: Some(layer_id) },
+        &mut doc,
+    );
+    child_ids.push(mod_id);
+
+    // Wrap in a group so the code is one movable/recolourable unit.
+    let group = SceneNode::new("QR Code", layer_id, SceneNodeKind::Group(GroupNode::new()));
+    let group_id = group.id;
+    history.execute_discrete(
+        Command::GroupNodes { group, layer_id, insert_index: 0, children: child_ids },
+        &mut doc,
+    );
+
+    ToolResult::text(format!(
+        "Created QR code — {}×{} modules, {shape:?} style, encoding: {}",
+        art.matrix_size, art.matrix_size, opts.data
+    ))
+    .with_data(serde_json::json!({
+        "group_id": group_id,
+        "matrix_size": art.matrix_size,
+        "module_size": art.module_size
+    }))
+}
+
 pub async fn point_on_path(state: &AppState, args: PointOnPathArgs) -> ToolResult {
     tracing::debug!("tool: point_on_path");
     use kurbo::{ParamCurve, ParamCurveArclen};
