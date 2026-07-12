@@ -297,6 +297,95 @@ mod offscreen_tests {
         );
     }
 
+    /// Regression: the SAME `Color` must render identically as glyphon **text**
+    /// and as a **vector path fill**. Before the fix the text atlas used glyphon's
+    /// default `ColorMode::Accurate`, which linearizes the sRGB colour before
+    /// writing to the sRGB target, while vector fills pass sRGB through raw
+    /// (`pipeline.rs` `fs_main` → `return in.color;`). A mid-tone like `#C8A24B`
+    /// therefore looked visibly different as text vs. as a shape. Constructing the
+    /// atlas in `ColorMode::Web` (renderer/mod.rs) makes glyphon match the vector
+    /// pipeline. This renders a golden rect and golden text of the SAME colour and
+    /// asserts the fully-covered glyph pixels equal the rect pixels within 2/255.
+    #[test]
+    fn text_colour_matches_vector_fill_for_same_colour() {
+        use photonic_core::{node::TextNode, style::Fill, transform::Transform};
+        // #C8A24B — a mid-tone where the sRGB-vs-linear gap is largest.
+        let gold = Color::new(200.0 / 255.0, 162.0 / 255.0, 75.0 / 255.0, 1.0);
+
+        let mut doc = Document::new("colour_match", 240.0, 120.0);
+        let lid = doc.active_layer_id.unwrap();
+
+        // Vector reference: a filled rect on the left half.
+        let rect = SceneNode::new(
+            "rect",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 80.0, 120.0)).with_fill(Fill::solid(gold)),
+            ),
+        );
+        doc.add_node(rect, None);
+
+        // Text of the SAME colour on the right half. A heavy weight at a large size
+        // gives thick, fully-covered glyph interiors to sample.
+        let mut tn = TextNode::new("B");
+        tn.font_size = 80.0;
+        tn.font_weight = 900;
+        tn.fill = Fill::solid(gold);
+        let text = SceneNode::new("text", lid, SceneNodeKind::Text(tn))
+            .with_transform(Transform::translate(120.0, 25.0));
+        doc.add_node(text, None);
+
+        let Some(mut r) = offscreen(doc, 240, 120) else {
+            eprintln!("no GPU adapter — skipping text/vector colour-match test");
+            return;
+        };
+        let img = image::load_from_memory(&r.render_capture())
+            .expect("png")
+            .to_rgba8();
+
+        // Reference vector colour: a point solidly inside the rect. `fit_to_rect`
+        // maps doc→screen as scale 0.9 + (12,6) offset, so doc(40,60) ≈ (48,60).
+        let e = img.get_pixel(48, 60).0;
+        assert!(
+            e[0] > 120 && e[1] > 90 && e[2] < 150,
+            "sanity: rect sample should be golden, got {e:?}"
+        );
+
+        // The fully-covered interior of the glyph writes the text colour at 100%
+        // coverage. Scan the text region (kept strictly inside the artboard, well
+        // right of the rect and clear of the dark canvas margin) for the pixel
+        // closest to the vector fill `e`, and report that closest match.
+        let dist2 = |p: [u8; 4], q: [u8; 4]| {
+            let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+            d(p[0], q[0]) + d(p[1], q[1]) + d(p[2], q[2])
+        };
+        let mut best = [0u8, 0, 0, 0];
+        let mut best_d = i32::MAX;
+        for y in 12..112u32 {
+            for x in 95..224u32 {
+                let p = img.get_pixel(x, y).0;
+                let dd = dist2(p, e);
+                if dd < best_d {
+                    best_d = dd;
+                    best = p;
+                }
+            }
+        }
+
+        // The best-covered glyph pixel must equal the vector fill within 2/255.
+        // Before the fix (ColorMode::Accurate) the glyph interior is the linearized
+        // colour and no text pixel lands this close to the raw-sRGB vector fill.
+        let near = (best[0] as i32 - e[0] as i32).abs() <= 2
+            && (best[1] as i32 - e[1] as i32).abs() <= 2
+            && (best[2] as i32 - e[2] as i32).abs() <= 2;
+        assert!(
+            near,
+            "closest glyphon text pixel {best:?} must match vector fill {e:?} within \
+             2/255 (expected with ColorMode::Web). A large gap means the atlas \
+             linearized the text colour (ColorMode::Accurate)."
+        );
+    }
+
     /// Stage 1 (#226): a layer at 50% opacity composites as an **isolated unit**.
     /// Two overlapping opaque rects (red under, blue over) live in one 50%-opacity
     /// layer over a white artboard. Correct per-layer isolation makes the overlap

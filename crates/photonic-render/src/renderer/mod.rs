@@ -458,7 +458,17 @@ impl PhotonicRenderer {
         let swash_cache = SwashCache::new();
         let text_glyph_cache = Cache::new(&device);
         let text_viewport = Viewport::new(&device, &text_glyph_cache);
-        let mut text_atlas = TextAtlas::new(&device, &queue, &text_glyph_cache, surface_format);
+        // Construct the atlas in `ColorMode::Web` so glyphon writes raw sRGB colours
+        // to the sRGB render target instead of linearizing them (its default
+        // `Accurate` mode). This makes interactive text colour match the vector fill
+        // pipeline, which passes sRGB through unmodified (see pipeline.rs `fs_main`).
+        let mut text_atlas = TextAtlas::with_color_mode(
+            &device,
+            &queue,
+            &text_glyph_cache,
+            surface_format,
+            glyphon::ColorMode::Web,
+        );
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             &device,
