@@ -414,11 +414,22 @@ impl PhotonicApp {
                                         // trimming; you get a proactive warning before anything drops.
                                         ui.horizontal(|ui| {
                                             ui.label("Max history size (MB):");
-                                            ui.add(egui::DragValue::new(&mut self.prefs.history_max_mb)
+                                            // Edit the OPEN document's cap — that is the effective limit
+                                            // (`doc.history_max_mb` overrides the global preference). The
+                                            // slider used to bind only to `self.prefs`, so changing it did
+                                            // nothing to an already-open file. Fall back to the pref for the
+                                            // display value when the doc has no explicit cap yet.
+                                            let mut cap_mb =
+                                                doc.history_max_mb.unwrap_or(self.prefs.history_max_mb);
+                                            let resp = ui.add(egui::DragValue::new(&mut cap_mb)
                                                 .speed(1.0)
                                                 .range(1.0..=4000.0)
                                                 .fixed_decimals(0))
-                                                .on_hover_text("Budget for the history payload specifically — the document's own size is separate. You'll be warned before the oldest edits start dropping.");
+                                                .on_hover_text("Caps this document's undo/redo + checkpoint history payload. Applies to the open document immediately, and becomes the default for new documents.");
+                                            if resp.changed() {
+                                                doc.history_max_mb = Some(cap_mb);
+                                                self.prefs.history_max_mb = cap_mb;
+                                            }
                                         });
                                         ui.add_space(4.0);
                                         // Live readout. history_byte_size serializes the whole history, so
