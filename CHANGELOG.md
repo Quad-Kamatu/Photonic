@@ -11,6 +11,8 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-11
+
 ### Added
 
 - **Print-ready PDF/X-1a export.** `export_pdf` can now emit a commercial-print
