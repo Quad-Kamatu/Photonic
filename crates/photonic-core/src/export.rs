@@ -2151,7 +2151,24 @@ fn emit_node_pdf(
             // path, then paint the shading over the clip region.
             let shading = if p.fill.enabled {
                 if let FillKind::Gradient(g) = &p.fill.kind {
-                    build_pdf_shading(g, opts)
+                    // Resolve object-bounding-box gradients into the path's local
+                    // user space before building the shading. The shading is painted
+                    // in node-local space (post-transform, clipped to the local path
+                    // geometry), so a raw `objectBoundingBox` gradient — whose coords
+                    // live in `0..1` — would give an axis one unit long. Under the
+                    // shading's `Extend [true true]` that collapses the whole object
+                    // to a single stop (the reported "gradient exports as solid").
+                    if g.units.is_object_box() {
+                        match p.path_data.bounding_box() {
+                            Some(bb) => build_pdf_shading(
+                                &g.resolved_for_bbox(bb.x0, bb.y0, bb.width(), bb.height()),
+                                opts,
+                            ),
+                            None => build_pdf_shading(g, opts),
+                        }
+                    } else {
+                        build_pdf_shading(g, opts)
+                    }
                 } else {
                     None
                 }
@@ -3336,6 +3353,81 @@ mod tests {
         );
         // Must NOT collapse to a first-stop solid RGB fill.
         assert!(!text.contains(" rg\nf"), "gradient should not export as a solid fill");
+    }
+
+    /// Pull the numeric `/Coords [ … ]` array out of an exported PDF (the shading
+    /// dict is emitted uncompressed, so it is plain text).
+    #[cfg(test)]
+    fn extract_shading_coords(pdf: &str) -> Vec<f32> {
+        let start = pdf.find("/Coords").expect("shading must carry /Coords");
+        let open = pdf[start..].find('[').expect("Coords array open") + start + 1;
+        let close = pdf[open..].find(']').expect("Coords array close") + open;
+        pdf[open..close]
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f32>().ok())
+            .collect()
+    }
+
+    /// ACCEPT (gradient export): a rect with an `objectBoundingBox` blue→purple
+    /// gradient must export a real axial shading whose axis SPANS the rect — not a
+    /// `0..1` axis that `Extend` collapses to a single solid stop. Verified for
+    /// both RGB (DeviceRGB) and CMYK/PDF-X (DeviceCMYK) exports.
+    #[test]
+    fn pdf_object_bbox_gradient_axis_spans_rect_not_solid() {
+        use crate::document::ColorMode;
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::{Fill, FillKind, Gradient, GradientStop, GradientUnits};
+
+        // #2f56cf → #5b21b6
+        let c0 = Color::from_hex("#2f56cf").unwrap();
+        let c1 = Color::from_hex("#5b21b6").unwrap();
+
+        let make_doc = || {
+            let mut doc = Document::new("t", 300.0, 200.0);
+            // Left→right gradient in object-bounding-box space: [0,0.5]→[1,0.5].
+            let grad = Gradient::linear(
+                0.0,
+                0.5,
+                1.0,
+                0.5,
+                vec![GradientStop::new(0.0, c0), GradientStop::new(1.0, c1)],
+            )
+            .with_units(GradientUnits::ObjectBoundingBox);
+            let mut p = PathNode::new(PathData::rect(0.0, 0.0, 300.0, 200.0));
+            p.fill = Fill { kind: FillKind::Gradient(grad), opacity: 1.0, enabled: true };
+            doc.add_node(
+                SceneNode::new("g", doc.active_layer_id.unwrap(), SceneNodeKind::Path(p)),
+                None,
+            );
+            doc
+        };
+
+        // ── RGB export ──
+        let rgb = String::from_utf8_lossy(&export_pdf(&make_doc(), &PdfExportOptions::default()))
+            .into_owned();
+        assert!(rgb.contains("/ShadingType 2"), "expected an axial shading:\n{rgb}");
+        assert!(rgb.contains("/DeviceRGB"), "RGB export uses DeviceRGB stops");
+        let coords = extract_shading_coords(&rgb);
+        assert_eq!(coords.len(), 4, "axial shading has 4 coords: {coords:?}");
+        // The axis must span the object (x: 0 → 300), NOT the buggy 0 → 1.
+        let axis_len = (coords[2] - coords[0]).hypot(coords[3] - coords[1]);
+        assert!(
+            axis_len > 100.0,
+            "gradient axis must span the rect (got length {axis_len} from {coords:?}); \
+             a ~1-unit axis means the object-bbox coords were not resolved and the \
+             gradient collapses to a solid stop under Extend"
+        );
+
+        // ── CMYK / PDF-X export ──
+        let cmyk_opts = PdfExportOptions { color_mode: ColorMode::Cmyk, ..Default::default() };
+        let cmyk =
+            String::from_utf8_lossy(&export_pdf(&make_doc(), &cmyk_opts)).into_owned();
+        assert!(cmyk.contains("/ShadingType 2"), "CMYK export also emits a real shading");
+        assert!(cmyk.contains("/DeviceCMYK"), "CMYK export uses DeviceCMYK stops");
+        let cmyk_coords = extract_shading_coords(&cmyk);
+        let cmyk_axis = (cmyk_coords[2] - cmyk_coords[0]).hypot(cmyk_coords[3] - cmyk_coords[1]);
+        assert!(cmyk_axis > 100.0, "CMYK gradient axis must span the rect: {cmyk_coords:?}");
     }
 
     // ── P1#3 — placed raster embeds as an image XObject ──────────────────────
