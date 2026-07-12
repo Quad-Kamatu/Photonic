@@ -1346,7 +1346,13 @@ fn align256(n: u32) -> u32 {
 /// Each output pixel is inverse-mapped through the camera and the node's affine
 /// transform into the image's local pixel space, bilinearly sampled, then
 /// source-over composited with the node's opacity, blend mode, and layer mask.
-fn composite_raster_nodes(pixels: &mut [u8], w: u32, h: u32, doc: &Document, view: &CanvasView) {
+pub(crate) fn composite_raster_nodes(
+    pixels: &mut [u8],
+    w: u32,
+    h: u32,
+    doc: &Document,
+    view: &CanvasView,
+) {
     let eff = group_opacity_map(doc);
     for node in doc.nodes_in_draw_order() {
         let nid = node.id;

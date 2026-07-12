@@ -45,6 +45,20 @@ impl CanvasView {
         self.pan_x = (self.screen_width as f64 - rect_w * self.zoom) / 2.0 - rect_x * self.zoom;
         self.pan_y = (self.screen_height as f64 - rect_h * self.zoom) / 2.0 - rect_y * self.zoom;
     }
+
+    /// Fit `rect` to the viewport with **no margin**: the rect's top-left maps to
+    /// screen (0, 0) and it scales to fill the shorter axis exactly. Used for
+    /// export framing, where the artboard rectangle must map 1:1 onto the output
+    /// image (unlike [`fit_to_rect`], which insets a 10% margin for on-canvas view).
+    /// When the rect and the viewport share aspect ratio (the export case, where
+    /// the output size is `rect * scale`), the rect fills the frame precisely.
+    pub fn fit_to_rect_exact(&mut self, rect_x: f64, rect_y: f64, rect_w: f64, rect_h: f64) {
+        let scale_x = self.screen_width as f64 / rect_w.max(1e-9);
+        let scale_y = self.screen_height as f64 / rect_h.max(1e-9);
+        self.zoom = scale_x.min(scale_y);
+        self.pan_x = -rect_x * self.zoom;
+        self.pan_y = -rect_y * self.zoom;
+    }
 }
 
 impl Default for CanvasView {

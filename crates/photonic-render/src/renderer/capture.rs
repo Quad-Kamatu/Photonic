@@ -28,8 +28,28 @@ impl PhotonicRenderer {
         self.capture_png(&verts, &idxs)
     }
 
-    /// Render to an offscreen texture, read back pixels, encode as PNG.
+    /// Render to an offscreen texture, read back pixels, encode as PNG. Thin
+    /// wrapper over [`Self::capture_rgba`] (the shared draw + readback path).
     pub(crate) fn capture_png(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
+        let (w, h) = (self.width, self.height);
+        let pixels = self.capture_rgba(vertices, indices);
+        if pixels.is_empty() {
+            return vec![];
+        }
+        let img: ImageBuffer<Rgba<u8>, _> =
+            ImageBuffer::from_raw(w, h, pixels).unwrap_or_else(|| ImageBuffer::new(w, h));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap_or_default();
+        png
+    }
+
+    /// Render to an offscreen texture and read the raw RGBA8 pixels back. This is
+    /// the exact editor draw path (`render_scene` + the glyphon text pass), so any
+    /// caller — the interactive screenshot ([`capture_png`](Self::capture_png)) and
+    /// PNG/artboard export ([`render_export_rgba`](Self::render_export_rgba)) —
+    /// produces pixel-identical output. Returns an empty vec on readback failure.
+    pub(crate) fn capture_rgba(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
         let w = self.width;
         let h = self.height;
 
@@ -235,13 +255,70 @@ impl PhotonicRenderer {
         drop(raw);
         staging.unmap();
 
-        // Encode as PNG
-        let img: ImageBuffer<Rgba<u8>, _> =
-            ImageBuffer::from_raw(w, h, pixels).unwrap_or_else(|| ImageBuffer::new(w, h));
-        let mut png = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap_or_default();
-        png
+        pixels
+    }
+
+    /// Render an arbitrary `document` to an RGBA8 buffer (`(pixels, w, h)`) through
+    /// the editor's exact pipeline, surfacelessly — the WYSIWYG export entry point.
+    ///
+    /// The document is installed into this renderer, the viewport is fit to
+    /// `opts.region` (or the whole document) with **no margin** so the region maps
+    /// 1:1 onto the `w×h` output, and `opts.background` selects the white artboard
+    /// or full transparency. Because it shares `render_scene` + the glyphon text
+    /// pass with the on-canvas frame, text layout, gradient shading, stroke width
+    /// and opacity are identical to what the editor shows. Raster (pixel) nodes are
+    /// composited over the vector result afterwards, matching the editor's raster
+    /// overlay. `opts.crop_to_content`, `ico_sizes`, `jpeg_quality` and
+    /// `overprint_preview` are not consulted here. Empty pixels on readback failure.
+    pub fn render_export_rgba(
+        &mut self,
+        document: &Document,
+        w: u32,
+        h: u32,
+        opts: &crate::headless::ExportOptions,
+    ) -> (Vec<u8>, u32, u32) {
+        let w = w.max(1);
+        let h = h.max(1);
+
+        // Install the document to render (the editor build path reads it back out
+        // of `self.document` under a short lock).
+        {
+            let mut guard = self.document.blocking_lock();
+            *guard = document.clone();
+        }
+
+        if w != self.width || h != self.height {
+            self.resize(w, h);
+        }
+
+        // Exact (marginless) fit of the export region onto the output.
+        let (rx, ry, rw, rh) = opts
+            .region
+            .unwrap_or((0.0, 0.0, document.width, document.height));
+        self.view.screen_width = w;
+        self.view.screen_height = h;
+        self.view.fit_to_rect_exact(rx, ry, rw, rh);
+
+        // Steer the shared draw path for export, render, then always restore the
+        // normal editor mode so a later interactive frame is unaffected.
+        self.export_bg = Some(opts.background);
+        let (verts, idxs) = self.update();
+        let mut pixels = self.capture_rgba(&verts, &idxs);
+        self.export_bg = None;
+
+        if pixels.is_empty() {
+            return (vec![], w, h);
+        }
+
+        // Composite raster (pixel) layers over the GPU vector output, aligned via
+        // the same camera — the editor paints these as textured quads on top, so
+        // export must too.
+        {
+            let guard = self.document.blocking_lock();
+            crate::headless::composite_raster_nodes(&mut pixels, w, h, &guard, &self.view);
+        }
+
+        (pixels, w, h)
     }
 }
 
@@ -268,6 +345,164 @@ mod offscreen_tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(doc)),
             rx,
         ))
+    }
+
+    /// WYSIWYG parity (the whole point of routing export through this renderer):
+    /// the SAME document rendered via the editor's on-canvas path
+    /// (`render_capture`) and via the export path (`render_export_rgba`) must be
+    /// pixel-identical. The document exercises the three historic divergence points
+    /// — glyphon **text** in an installed font, a **linear gradient** fill, and a
+    /// thin **faint grid stroke** (low opacity + sub-pixel width) — all of which the
+    /// retired HeadlessRenderer drew differently. Both paths share one FontSystem
+    /// (same `FontSystem::new()` DB, including `~/.local/share/fonts` on Linux) and
+    /// one draw pipeline, so the images match to the byte.
+    #[test]
+    fn editor_and_export_render_are_pixel_identical() {
+        use crate::headless::{ExportBackground, ExportOptions};
+        use photonic_core::{
+            node::TextNode,
+            style::{Fill, Gradient, GradientStop, Stroke},
+            transform::Transform,
+        };
+
+        const W: u32 = 220;
+        const H: u32 = 140;
+
+        let mut doc = Document::new("parity", W as f64, H as f64);
+        let lid = doc.active_layer_id.unwrap();
+
+        // 1) Linear-gradient-filled rect spanning most of the artboard.
+        let grad = Gradient::linear(
+            10.0,
+            0.0,
+            (W - 10) as f64,
+            0.0,
+            vec![
+                GradientStop::new(0.0, Color::new(0.90, 0.20, 0.20, 1.0)),
+                GradientStop::new(1.0, Color::new(0.20, 0.35, 0.95, 1.0)),
+            ],
+        );
+        let rect = SceneNode::new(
+            "grad",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(10.0, 10.0, (W - 20) as f64, (H - 50) as f64))
+                    .with_fill(Fill::gradient(grad)),
+            ),
+        );
+        doc.add_node(rect, None);
+
+        // 2) Thin, faint grid stroke — hairline lines at 25% opacity.
+        let grid = PathData::from_svg(
+            "M 10 40 L 210 40 M 10 60 L 210 60 M 60 10 L 60 90 M 160 10 L 160 90",
+        )
+        .unwrap();
+        let mut grid_stroke = Stroke::solid(Color::new(0.05, 0.05, 0.08, 1.0), 0.75);
+        grid_stroke.opacity = 0.25;
+        let grid_node = SceneNode::new(
+            "grid",
+            lid,
+            SceneNodeKind::Path(
+                PathNode::new(grid)
+                    .with_fill(Fill::none())
+                    .with_stroke(grid_stroke),
+            ),
+        );
+        doc.add_node(grid_node, None);
+
+        // 3) A text node (installed-font glyphon layout) low on the artboard.
+        let mut tn = TextNode::new("Wave");
+        tn.font_size = 28.0;
+        tn.font_weight = 700;
+        tn.fill = Fill::solid(Color::new(0.05, 0.05, 0.05, 1.0));
+        let text = SceneNode::new("text", lid, SceneNodeKind::Text(tn))
+            .with_transform(Transform::translate(16.0, 98.0));
+        doc.add_node(text, None);
+
+        let Some(mut r) = offscreen(doc.clone(), W, H) else {
+            eprintln!("no GPU adapter — skipping WYSIWYG parity test");
+            return;
+        };
+
+        // Editor path: fit the artboard exactly (marginless) and capture, exactly
+        // as the export path frames it, then decode the PNG back to RGBA.
+        r.view.screen_width = W;
+        r.view.screen_height = H;
+        r.view.fit_to_rect_exact(0.0, 0.0, W as f64, H as f64);
+        let editor_png = r.render_capture();
+        let editor = image::load_from_memory(&editor_png)
+            .expect("editor png")
+            .to_rgba8();
+
+        // Export path: the surfaceless WYSIWYG entry point.
+        let opts = ExportOptions {
+            background: ExportBackground::Artboard,
+            region: Some((0.0, 0.0, W as f64, H as f64)),
+            ..Default::default()
+        };
+        let (export_px, ew, eh) = r.render_export_rgba(&doc, W, H, &opts);
+        assert_eq!((ew, eh), (W, H), "export must honor the requested size");
+        let export = image::RgbaImage::from_raw(ew, eh, export_px).expect("export rgba");
+
+        // Sanity: the render is not blank — the gradient produced distinct colours
+        // across the artboard (left redder than right).
+        let left = editor.get_pixel(20, 30).0;
+        let right = editor.get_pixel(W - 20, 30).0;
+        assert!(
+            left[0] as i32 - left[2] as i32 > 30 && right[2] as i32 - right[0] as i32 > 30,
+            "gradient sanity failed: left {left:?} right {right:?}"
+        );
+
+        // Whole-image parity: every pixel identical within a 1/255 tolerance for
+        // any GPU rounding jitter (in practice the two are bit-identical).
+        let mut worst = 0i32;
+        let mut mismatches = 0u64;
+        for (pe, px) in editor.pixels().zip(export.pixels()) {
+            for c in 0..4 {
+                let d = (pe.0[c] as i32 - px.0[c] as i32).abs();
+                worst = worst.max(d);
+                if d > 1 {
+                    mismatches += 1;
+                }
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "editor vs export diverged at {mismatches} channel(s), worst Δ={worst}. \
+             Export is no longer pixel-identical to the editor."
+        );
+
+        // Explicit gradient-pixel parity at sampled points (subsumed by the above,
+        // stated separately because gradient quality was a known divergence).
+        for &(x, y) in &[(20u32, 30u32), (110, 30), (W - 20, 30)] {
+            assert_eq!(
+                editor.get_pixel(x, y).0,
+                export.get_pixel(x, y).0,
+                "gradient pixel ({x},{y}) differs between editor and export"
+            );
+        }
+
+        // Explicit text-region parity: the glyph band (letter-spacing + advances)
+        // must be present and identical. Count dark glyph pixels in the text band
+        // in both images — equal, and non-zero (text actually rendered in both).
+        let dark = |img: &image::RgbaImage| -> u64 {
+            let mut n = 0;
+            for y in 95..135u32 {
+                for x in 12..208u32 {
+                    let p = img.get_pixel(x, y).0;
+                    if p[0] < 120 && p[1] < 120 && p[2] < 120 && p[3] > 200 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let (te, tx) = (dark(&editor), dark(&export));
+        assert!(te > 20, "text did not render in the editor image ({te} px)");
+        assert_eq!(
+            te, tx,
+            "glyph coverage differs (editor {te} vs export {tx}) — text layout diverged"
+        );
     }
 
     /// Stage 0 smoke test: the windowless renderer drives the real GPU pipeline

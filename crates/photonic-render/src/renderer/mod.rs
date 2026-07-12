@@ -1,5 +1,6 @@
 use crate::{
     canvas::CanvasView,
+    headless::ExportBackground,
     pipeline::{
         blend_mode_index, coalesce_segments, create_blur_bgl, create_blur_pipeline,
         create_blur_pipeline_with_blend, create_camera_bind_group_layout, create_composite_bgl,
@@ -150,6 +151,14 @@ pub struct PhotonicRenderer {
     /// Index count of the artboard-background quads (the preamble drawn before
     /// any layer). The first `artboard_idx_end` indices are the white boards.
     pub(crate) artboard_idx_end: u32,
+
+    /// Export mode — set only while rendering for PNG/artboard export via
+    /// [`Self::render_export_rgba`]. `None` is the normal editor frame. When set
+    /// it steers the shared draw path so export is pixel-identical to the editor:
+    /// `Some(Artboard)` keeps the white board + violet surround (identical to the
+    /// on-canvas frame); `Some(Transparent)` suppresses the white board quads and
+    /// clears the scene to alpha 0 instead of the surround colour.
+    pub(crate) export_bg: Option<ExportBackground>,
 }
 
 /// One layer's contiguous geometry range in the frame's shared index buffer,
@@ -522,6 +531,18 @@ impl PhotonicRenderer {
             composite_sampler,
             layer_runs: Vec::new(),
             artboard_idx_end: 0,
+            export_bg: None,
+        }
+    }
+
+    /// Clear colour for the scene background pass. The normal editor frame clears
+    /// to the violet surround [`BG`]; a transparent export clears to alpha 0 so
+    /// pixels outside the artwork stay see-through. Read by every scene-background
+    /// clear site (`scene_renderer`, `effects_renderer`) so the choice is uniform.
+    pub(crate) fn scene_clear(&self) -> wgpu::Color {
+        match self.export_bg {
+            Some(ExportBackground::Transparent) => wgpu::Color::TRANSPARENT,
+            _ => BG,
         }
     }
 
@@ -927,7 +948,12 @@ impl PhotonicRenderer {
         // model). Falls back to the full document bounds when none are present.
         let white = [1.0f32, 1.0, 1.0, 1.0];
         let mut boards = artboards;
-        if boards.is_empty() {
+        // A transparent export suppresses the white board quads entirely so the
+        // background reads through at alpha 0; every other frame (editor and
+        // opaque-artboard export) keeps them.
+        if matches!(self.export_bg, Some(ExportBackground::Transparent)) {
+            boards.clear();
+        } else if boards.is_empty() {
             boards.push([0.0, 0.0, artboard_w, artboard_h]);
         }
         for b in &boards {

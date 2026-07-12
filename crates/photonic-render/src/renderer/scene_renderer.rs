@@ -95,14 +95,22 @@ impl PhotonicRenderer {
             return;
         }
         if self.pending_blur_jobs.is_empty() {
-            self.record_document_pass(enc, msaa_view, target_view, vertices, indices, BG);
+            self.record_document_pass(
+                enc,
+                msaa_view,
+                target_view,
+                vertices,
+                indices,
+                self.scene_clear(),
+            );
             return;
         }
 
-        // The artboard rect is the first 4 verts / 6 indices built by
-        // build_geometry; render the rest (shapes) to a transparent offscreen
-        // texture so the effects layer can sit beneath them.
-        let skip = 6.min(indices.len());
+        // The artboard rects are the preamble built by build_geometry (6 indices
+        // each); render the rest (shapes) to a transparent offscreen texture so
+        // the effects layer can sit beneath them. `artboard_idx_end` is 0 for a
+        // transparent export (boards suppressed), so all geometry is shapes.
+        let skip = (self.artboard_idx_end as usize).min(indices.len());
         let doc_tex = self.make_fx_tex(w, h);
         let doc_view = doc_tex.create_view(&Default::default());
         self.record_document_pass(
@@ -168,7 +176,15 @@ impl PhotonicRenderer {
         }];
         let mut acc_tex = self.make_fx_tex(w, h);
         let mut acc_view = acc_tex.create_view(&Default::default());
-        self.record_range_pass(enc, msaa_view, &acc_view, &vbuf, &ibuf, &artboard_segs, BG);
+        self.record_range_pass(
+            enc,
+            msaa_view,
+            &acc_view,
+            &vbuf,
+            &ibuf,
+            &artboard_segs,
+            self.scene_clear(),
+        );
 
         let n = self.layer_runs.len();
         if n == 0 {

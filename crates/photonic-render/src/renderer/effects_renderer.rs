@@ -252,7 +252,7 @@ impl PhotonicRenderer {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BG),
+                        load: wgpu::LoadOp::Clear(self.scene_clear()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

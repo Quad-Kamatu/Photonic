@@ -666,8 +666,10 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
         (doc.clone(), selected)
     };
 
-    // Render every target off-thread (creating GPU work off the async runtime).
-    let renderer = preview_renderer().await;
+    // Render every target off-thread through the editor's own surfaceless
+    // renderer, so each artboard PNG is pixel-identical to what the canvas shows
+    // (WYSIWYG). Creating GPU work off the async runtime.
+    let renderer = export_renderer().await;
     let jobs = targets.clone();
     let rendered: Vec<(Artboard, Vec<u8>, u32, u32)> = tokio::task::spawn_blocking(move || {
         use photonic_render::{ExportBackground, ExportOptions};
@@ -675,6 +677,10 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
             ExportBackground::Transparent
         } else {
             ExportBackground::Artboard
+        };
+        let mut guard = renderer.lock().unwrap();
+        let Some(renderer) = guard.as_mut() else {
+            return Vec::new(); // no GPU adapter — surfaced as an error below
         };
         jobs.into_iter()
             .map(|a| {
@@ -685,7 +691,7 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
                     region: Some((a.x, a.y, a.width, a.height)),
                     ..Default::default()
                 };
-                let (px, w, h) = renderer.render_rgba_with_opts(&render_doc, pw, ph, &opts);
+                let (px, w, h) = renderer.render_export_rgba(&render_doc, pw, ph, &opts);
                 (a, px, w, h)
             })
             .collect()
@@ -779,6 +785,37 @@ async fn preview_renderer() -> std::sync::Arc<photonic_render::HeadlessRenderer>
     PREVIEW_RENDERER
         .get_or_init(|| async {
             std::sync::Arc::new(photonic_render::HeadlessRenderer::new().await)
+        })
+        .await
+        .clone()
+}
+
+/// Lazily-initialized **surfaceless** editor renderer shared by PNG/artboard
+/// export. Rendering through the same [`photonic_render::PhotonicRenderer`] the
+/// on-canvas editor uses makes export pixel-identical to the editor (WYSIWYG) —
+/// same glyphon text layout, same GPU gradient shading, same stroke width +
+/// opacity — retiring the divergent `HeadlessRenderer` draw path for export. Held
+/// behind a `std::sync::Mutex` because a render pass needs `&mut` (it mutates
+/// per-frame glyph/geometry state). The inner `Option` is `None` when the machine
+/// has no GPU adapter (headless CI); callers then surface a "renderer unavailable"
+/// error, exactly as the old headless path did when readback failed.
+type ExportRenderer = std::sync::Arc<std::sync::Mutex<Option<photonic_render::PhotonicRenderer>>>;
+
+static EXPORT_RENDERER: tokio::sync::OnceCell<ExportRenderer> = tokio::sync::OnceCell::const_new();
+
+async fn export_renderer() -> ExportRenderer {
+    EXPORT_RENDERER
+        .get_or_init(|| async {
+            // The capture channel is unused (we call `render_export_rgba` directly),
+            // so dropping the sender is harmless. The 16×16 seed size is resized to
+            // each artboard on first render.
+            let (_tx, rx) = std::sync::mpsc::channel();
+            let doc = std::sync::Arc::new(tokio::sync::Mutex::new(
+                photonic_core::document::Document::new("export", 1.0, 1.0),
+            ));
+            let renderer =
+                photonic_render::PhotonicRenderer::new_offscreen(16, 16, doc, rx).await;
+            std::sync::Arc::new(std::sync::Mutex::new(renderer))
         })
         .await
         .clone()
