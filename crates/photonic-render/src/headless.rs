@@ -214,6 +214,26 @@ impl HeadlessRenderer {
         let w = w.max(1);
         let h = h.max(1);
 
+        // Text nodes: neither the GPU tessellation path (`build_geometry` only
+        // emits Path geometry) nor the CPU compositor paint glyphs, so a live
+        // `TextNode` would export as nothing — the PNG/raster export dropped text
+        // entirely. Outline text to filled glyph paths up front (same font,
+        // position and fill colour the live GUI and PDF export use) so both the
+        // GPU and CPU paths below render text like every other filled shape. Only
+        // pay the FontSystem cost when the document actually contains text.
+        let outlined_doc;
+        let document = if document
+            .nodes
+            .values()
+            .any(|n| matches!(n.kind, SceneNodeKind::Text(_)))
+        {
+            let mut font_system = glyphon::FontSystem::new();
+            outlined_doc = crate::outline_document_text(document, &mut font_system);
+            &outlined_doc
+        } else {
+            document
+        };
+
         let include_artboard_bg = opts.background == ExportBackground::Artboard;
         let (verts, idxs, segments, blur_jobs) =
             build_geometry(document, include_artboard_bg, opts.overprint_preview);
@@ -2102,6 +2122,71 @@ mod blend_tests {
             close,
             "pattern should be pinned to doc space: {:?} vs {:?}",
             a, b
+        );
+    }
+
+    /// Regression: the headless PNG/raster export path used to drop text nodes
+    /// entirely (`build_geometry` only emits Path geometry and the CPU compositor
+    /// skips glyphs), so exported artboards had no text. A doc with a solid black
+    /// background rect and a large white text node must export a PNG that
+    /// actually contains white text pixels inside the text's bounding box.
+    #[test]
+    fn raster_export_includes_text() {
+        use photonic_core::node::TextNode;
+        use photonic_core::transform::Transform;
+
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping raster text export test");
+            return;
+        };
+
+        let w = 300u32;
+        let h = 120u32;
+        let mut doc = Document::new("text-export-test", w as f64, h as f64);
+        let layer = doc.active_layer_id.unwrap();
+
+        // Full-artboard black backdrop: the only source of white in the output
+        // is therefore the text itself.
+        let backdrop = SceneNode::new(
+            "backdrop",
+            layer,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, w as f64, h as f64))
+                    .with_fill(Fill::solid(Color::new(0.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        doc.add_node(backdrop, None);
+
+        // Large white text near the top-left. The glyph outline sits between the
+        // transform origin and ~font_size below it (baseline-anchored), so this
+        // lands well inside the artboard.
+        let mut t = TextNode::new("ABCDEF");
+        t.font_family = "DejaVu Sans".to_string();
+        t.font_size = 48.0;
+        t.fill = Fill::solid(Color::new(1.0, 1.0, 1.0, 1.0));
+        let mut text_node = SceneNode::new("label", layer, SceneNodeKind::Text(t));
+        text_node.transform = Transform::new(1.0, 0.0, 0.0, 1.0, 20.0, 15.0);
+        doc.add_node(text_node, None);
+
+        let png = r.render_png_at_size(&doc, w, h);
+        let img = image::load_from_memory(&png)
+            .expect("decode png")
+            .to_rgba8();
+
+        // Count near-white pixels inside the text's rough bounding box. With the
+        // bug present the whole image is black and this count is zero.
+        let mut white = 0u32;
+        for y in 10..70 {
+            for x in 15..250 {
+                let p = img.get_pixel(x, y).0;
+                if p[0] > 200 && p[1] > 200 && p[2] > 200 {
+                    white += 1;
+                }
+            }
+        }
+        assert!(
+            white > 0,
+            "raster export must contain text pixels — found {white} white pixels in the text bbox"
         );
     }
 }
