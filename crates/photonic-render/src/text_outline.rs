@@ -14,7 +14,7 @@ use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as Glyp
 use kurbo::{Affine, BezPath};
 use photonic_core::{
     document::Document,
-    node::{FontStyle, NodeId, PathNode, SceneNodeKind, TextAlign, TextNode},
+    node::{FontStyle, NodeId, PathNode, SceneNodeKind, TextNode},
     path::PathData,
 };
 use ttf_parser::{GlyphId, OutlineBuilder};
@@ -99,17 +99,16 @@ pub fn layout_text_flat(font_system: &mut FontSystem, node: &TextNode) -> PathDa
         // buffer-local coordinates (Y-down, origin at the top of the buffer).
         let baseline_y = run.line_y as f64;
 
-        // Run width for alignment offset calculation.
-        let run_width = run.line_w as f64;
-
-        // Alignment: compute the horizontal offset to apply to the whole run.
-        // The caller doesn't pass an explicit layout_width, so for center/right
-        // we use the run's own width as the reference (no extra offset).
-        let align_offset = match node.align {
-            TextAlign::Left => 0.0,
-            TextAlign::Center => -run_width / 2.0,
-            TextAlign::Right => -run_width,
-        };
+        // Alignment: the live renderer (`renderer::mod` / `text_renderer`) draws
+        // flat text by handing glyphon a `TextArea` whose `left` is the node's
+        // transform origin and never calls `Buffer::set_align`, so glyphon lays
+        // every run out left-anchored at the origin — `node.align` has no effect
+        // on a run's *position*. The exported outline must match that pixel-for-
+        // pixel, so we keep glyphon's own left-anchored `g.x` and apply **no**
+        // horizontal alignment offset. (Previously this shifted center/right runs
+        // left by run_width/2 or run_width, so exported centered text landed left
+        // of where it renders live — bug fixed here.)
+        let align_offset = 0.0;
 
         for (i, g) in run.glyphs.iter().enumerate() {
             let Some(font) = font_system.get_font(g.font_id) else {
@@ -329,6 +328,62 @@ mod tests {
         // for a 32 px font. The overall bounding box stays within [-10, 80].
         assert!(bb.min_y() > -10.0, "min_y unexpectedly far above buffer top: {}", bb.min_y());
         assert!(bb.max_y() < 80.0, "max_y unexpectedly far below buffer top: {}", bb.max_y());
+    }
+
+    /// BUG 2 / ACCEPT: alignment must not move a run's exported x-position. The
+    /// live renderer (`renderer::text_renderer`) hands glyphon a `TextArea` whose
+    /// `left` is the node's transform origin and never sets an alignment, so flat
+    /// text is left-anchored at the origin for every `align` value. The outlined
+    /// geometry used for PDF export must match that pixel-for-pixel: left, center,
+    /// and right all produce the SAME glyph bounding box (previously center/right
+    /// were shifted left by run_width/2 and run_width, landing off-position).
+    #[test]
+    fn layout_text_flat_alignment_does_not_shift_x() {
+        use photonic_core::node::TextAlign;
+
+        let mut fs = FontSystem::new();
+        let mut render = |align: TextAlign| {
+            let mut node = TextNode::new("Right side label");
+            node.font_family = "sans-serif".to_string();
+            node.font_size = 24.0;
+            node.align = align;
+            layout_text_flat(&mut fs, &node).bounding_box()
+        };
+
+        // Call sequentially (each borrows the shared FontSystem in turn).
+        let left = render(TextAlign::Left);
+        let center = render(TextAlign::Center);
+        let right = render(TextAlign::Right);
+        let (Some(left), Some(center), Some(right)) = (left, center, right) else {
+            eprintln!("no system font available — skipping alignment position check");
+            return;
+        };
+
+        // All three must occupy the exact same box (align is position-neutral,
+        // matching the live renderer). Guard against the old regression where
+        // center sat at ≈ -width/2 and right at ≈ -width.
+        let eps = 1e-6;
+        for (name, bb) in [("center", center), ("right", right)] {
+            assert!(
+                (bb.min_x() - left.min_x()).abs() < eps,
+                "{name} min_x {} must equal left min_x {} (align must not shift x)",
+                bb.min_x(),
+                left.min_x(),
+            );
+            assert!(
+                (bb.max_x() - left.max_x()).abs() < eps,
+                "{name} max_x {} must equal left max_x {}",
+                bb.max_x(),
+                left.max_x(),
+            );
+        }
+        // And the run really is anchored at/after the origin (left-aligned), not
+        // pulled left of it.
+        assert!(
+            left.min_x() > -1.0,
+            "left-anchored run should start at ~origin, got min_x={}",
+            left.min_x()
+        );
     }
 
     /// Empty content must return an empty PathData (no geometry to produce).

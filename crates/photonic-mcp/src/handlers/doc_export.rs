@@ -323,6 +323,98 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
         color_mode,
         icc_profile,
     };
+
+    use base64::Engine;
+
+    // ── Per-artboard / multi-page mode ────────────────────────────────────────
+    // Triggered when any artboard selector is set. Each artboard becomes a page
+    // clipped to its rectangle + bleed (single multi-page PDF by default, or one
+    // file per artboard when `separate_files` is set).
+    let artboard_mode = args.all.unwrap_or(false) || args.range.is_some() || args.artboards.is_some();
+    if artboard_mode {
+        const MAX_BOARDS: usize = 64;
+        let selected = match select_artboards_for_export(
+            &doc.artboards,
+            doc.active_artboard,
+            args.all.unwrap_or(false),
+            args.range,
+            args.artboards.as_deref(),
+            MAX_BOARDS,
+        ) {
+            Ok(v) => v,
+            Err(e) => return ToolResult::error(e),
+        };
+        let regions: Vec<photonic_core::export::PageRegion> = selected
+            .iter()
+            .map(photonic_core::export::PageRegion::artboard)
+            .collect();
+
+        if args.separate_files.unwrap_or(false) {
+            // One file per artboard, using `path` as a template.
+            let template = match args.path.as_deref() {
+                Some(p) => p,
+                None => {
+                    return ToolResult::error(
+                        "separate_files=true requires `path` (a template with {name}/{index} or a filename)",
+                    )
+                }
+            };
+            let mut items = Vec::new();
+            let mut total = 0usize;
+            for (i, (ab, region)) in selected.iter().zip(regions.iter()).enumerate() {
+                let bytes = photonic_core::export::export_pdf_regions(&export_doc, &opts, &[*region]);
+                let out_path = expand_path_template(template, &ab.name, i + 1);
+                if let Err(e) = std::fs::write(&out_path, &bytes) {
+                    return ToolResult::error(format!("Failed to write PDF to '{out_path}': {e}"));
+                }
+                total += bytes.len();
+                items.push(serde_json::json!({
+                    "artboard_id": ab.id,
+                    "name": ab.name,
+                    "path": out_path,
+                    "bytes": bytes.len(),
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }));
+            }
+            let n = items.len();
+            return ToolResult::text(format!(
+                "PDF export — {n} file{} ({total} bytes total), one per artboard",
+                if n == 1 { "" } else { "s" }
+            ))
+            .with_data(serde_json::json!({
+                "format": "pdf",
+                "mode": "per-file",
+                "count": n,
+                "mime": "application/pdf",
+                "files": items,
+            }));
+        }
+
+        // Single multi-page PDF.
+        let bytes = photonic_core::export::export_pdf_regions(&export_doc, &opts, &regions);
+        if let Some(ref path) = args.path {
+            if let Err(e) = std::fs::write(path, &bytes) {
+                return ToolResult::error(format!("Failed to write PDF to '{path}': {e}"));
+            }
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let n = regions.len();
+        return ToolResult::text(format!(
+            "PDF export — {} bytes, {n} page{} (one per artboard)",
+            bytes.len(),
+            if n == 1 { "" } else { "s" }
+        ))
+        .with_data(serde_json::json!({
+            "format": "pdf",
+            "mode": "multi-page",
+            "pages": n,
+            "bytes": bytes.len(),
+            "mime": "application/pdf",
+            "data_base64": b64,
+        }));
+    }
+
+    // ── Whole-canvas single page ──────────────────────────────────────────────
     let bytes = photonic_core::export::export_pdf(&export_doc, &opts);
 
     // Optionally write to a filesystem path.
@@ -332,7 +424,6 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
         }
     }
 
-    use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let byte_count = bytes.len();
     ToolResult::text(format!(
@@ -345,6 +436,29 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
         "mime": "application/pdf",
         "data_base64": b64,
     }))
+}
+
+/// Expand a per-artboard filename template. `{name}` → the (sanitized) artboard
+/// name, `{index}`/`{n}` → the 1-based index. If the template has no placeholder,
+/// `-{index}` is inserted before the file extension (or appended when none).
+fn expand_path_template(template: &str, name: &str, index: usize) -> String {
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if template.contains("{name}") || template.contains("{index}") || template.contains("{n}") {
+        return template
+            .replace("{name}", &safe_name)
+            .replace("{index}", &index.to_string())
+            .replace("{n}", &index.to_string());
+    }
+    // No placeholder: insert -{index} before the extension.
+    match template.rfind('.') {
+        Some(dot) if dot > template.rfind(['/', '\\']).map(|s| s + 1).unwrap_or(0) => {
+            format!("{}-{index}{}", &template[..dot], &template[dot..])
+        }
+        _ => format!("{template}-{index}"),
+    }
 }
 
 
@@ -1718,5 +1832,189 @@ mod export_artboards_tests {
     #[test]
     fn empty_document_errors() {
         assert!(select_artboards_for_export(&[], None, true, None, None, 24).is_err());
+    }
+}
+
+/// ROUND 2 — drive the EXACT MCP `export_pdf` handler the brief targets:
+/// `export_pdf { artboards:["Card Back"], color_mode:"cmyk", outline_text:true,
+/// marks:true }` on a card back (dark #0b0b12 card + transparent avatar + a
+/// center-aligned wordmark). Verifies all three issues on the real handler path,
+/// not just the core unit tests.
+#[cfg(test)]
+mod export_pdf_real_path_tests {
+    use super::export_pdf;
+    use crate::protocol::ExportPdfArgs;
+    use crate::server::{AppState, McpServerConfig};
+    use photonic_core::node::{
+        PathNode, RasterNode, SceneNode, SceneNodeKind, TextAlign, TextNode,
+    };
+    use photonic_core::path::PathData;
+    use photonic_core::raster::RasterImage;
+    use photonic_core::style::{Fill, FillKind};
+    use photonic_core::transform::Transform;
+    use photonic_core::{Artboard, AuditLog, Color, Document};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    /// A "Card Back" artboard: dark card, a transparent avatar placed over it
+    /// (oversampled → must downsample), and an align=center wordmark whose origin
+    /// sits on the right half of the card (mirrors tx≈1749.7 in the real doc).
+    fn card_back_doc() -> (Document, photonic_core::node::NodeId) {
+        let mut doc = Document::new("UNN", 1050.0, 600.0);
+        doc.dpi = 300.0;
+        doc.color_mode = photonic_core::document::ColorMode::Cmyk;
+        doc.artboards = vec![Artboard::new("Card Back", 0.0, 0.0, 1050.0, 600.0)];
+        doc.active_artboard = Some(doc.artboards[0].id);
+        let layer = doc.active_layer_id.unwrap();
+
+        // Dark card #0b0b12.
+        let mut card = PathNode::new(PathData::rect(0.0, 0.0, 1050.0, 600.0));
+        card.fill = Fill {
+            kind: FillKind::Solid(Color::new(0.043, 0.043, 0.070, 1.0)),
+            opacity: 1.0,
+            enabled: true,
+        };
+        doc.add_node(SceneNode::new("card", layer, SceneNodeKind::Path(card)), None);
+
+        // Oversampled avatar (1200²) placed small (scale 0.3 → 1000 DPI effective
+        // → downsampled to 300). Transparent border, opaque interior.
+        let native = 1200u32;
+        let mut px = vec![0u8; (native * native * 4) as usize];
+        for y in 0..native {
+            for x in 0..native {
+                let i = ((y * native + x) * 4) as usize;
+                let opaque = x > 360 && x < 840 && y > 360 && y < 840;
+                px[i..i + 4].copy_from_slice(&[235, 225, 210, if opaque { 255 } else { 0 }]);
+            }
+        }
+        let img = RasterImage::from_rgba(native, native, px).unwrap();
+        let mut avatar =
+            SceneNode::new("avatar", layer, SceneNodeKind::Raster(RasterNode::new(img)));
+        avatar.transform = Transform::new(0.3, 0.0, 0.0, 0.3, 120.0, 160.0);
+        doc.add_node(avatar, None);
+
+        // Center-aligned wordmark whose origin is on the right half of the card.
+        let mut wm = TextNode::new("UNNAMED DEVELOPMENT");
+        wm.font_family = "sans-serif".into();
+        wm.font_size = 40.0;
+        wm.align = TextAlign::Center;
+        wm.fill = Fill {
+            kind: FillKind::Solid(Color::new(0.9, 0.9, 0.95, 1.0)),
+            opacity: 1.0,
+            enabled: true,
+        };
+        let mut wm_node = SceneNode::new("wordmark", layer, SceneNodeKind::Text(wm));
+        wm_node.transform = Transform::translate(760.0, 470.0);
+        let wm_id = wm_node.id;
+        doc.add_node(wm_node, None);
+        (doc, wm_id)
+    }
+
+    fn state_with(doc: Document) -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(doc)),
+            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_pdf_card_back_cmyk_outline_marks_real_path() {
+        let (doc, wm_id) = card_back_doc();
+
+        // ── Issue A (position) on the real path: the handler outlines text via
+        // `outline_document_text`; the center wordmark must come out LEFT-anchored
+        // at its origin (x≈760), NOT shifted left by half its width. ──
+        {
+            let mut fs = glyphon::FontSystem::new();
+            let outlined = photonic_render::outline_document_text(&doc, &mut fs);
+            if let SceneNodeKind::Path(p) = &outlined.nodes.get(&wm_id).unwrap().kind {
+                if let Some(bb) = p.path_data.bounding_box() {
+                    // Node origin is 0 in local space; left-anchored text starts at
+                    // ~0 and extends right. A center-shifted run would start near
+                    // -width/2 (strongly negative).
+                    assert!(
+                        bb.min_x() > -5.0,
+                        "wordmark must be left-anchored at its origin (min_x≈0), got {} \
+                         (center-shift regression)",
+                        bb.min_x()
+                    );
+                } else {
+                    eprintln!("no font available — skipping wordmark position check");
+                }
+            } else {
+                panic!("wordmark should be outlined to a Path node");
+            }
+        }
+
+        let tmp = std::env::temp_dir().join("photonic_r2_card_back.pdf");
+        let args: ExportPdfArgs = serde_json::from_value(serde_json::json!({
+            "artboards": ["Card Back"],
+            "color_mode": "cmyk",
+            "outline_text": true,
+            "marks": true,
+            "path": tmp.to_string_lossy(),
+        }))
+        .unwrap();
+
+        let state = state_with(doc);
+        let res = export_pdf(&state, args).await;
+        assert_ne!(res.is_error, Some(true), "export_pdf handler returned an error: {res:?}");
+
+        let bytes = std::fs::read(&tmp).expect("handler must write the PDF");
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+
+        // Issue B — compressed + downsampled, tiny (not the ~11 MB raw dump).
+        assert!(
+            text.contains("/FlateDecode") || text.contains("/DCTDecode"),
+            "embedded raster must be compressed (Flate/DCT), found neither"
+        );
+        assert!(
+            bytes.len() < 2_000_000,
+            "card back should be a small fraction of 11 MB, got {} bytes",
+            bytes.len()
+        );
+        // Downsampled: 1200 px native at 0.3× on a 300-dpi doc = 1000 dpi effective
+        // → capped to 300 → 360 px. The native 1200 must NOT survive.
+        assert!(
+            !text.contains("/Width 1200"),
+            "oversampled raster must be downsampled below its native 1200 px width"
+        );
+
+        // Issue C / X-1a — no live transparency (no SMask); CMYK output.
+        assert!(!text.contains("/SMask"), "CMYK/X-1a must not carry a soft mask");
+        assert!(text.contains("/DeviceCMYK"), "CMYK export must be DeviceCMYK");
+        // X-1a is PDF 1.3.
+        assert!(bytes.starts_with(b"%PDF-1.3"), "X-1a export must be PDF 1.3");
+
+        // Outlined text ⇒ no embedded/referenced fonts.
+        assert!(!text.contains("/Type /Font"), "outline_text must leave zero fonts");
+
+        // If the preflight tooling is present, the real artifact must PASS X-1a.
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/preflight-pdfx.sh");
+        if std::path::Path::new(script).exists() {
+            if let Ok(out) = std::process::Command::new("bash")
+                .arg(script)
+                .arg(&tmp)
+                .arg("--quiet")
+                .output()
+            {
+                // Only assert when the script's own deps (qpdf/pdfinfo) are present;
+                // exit code 2 means a tool was missing → skip, don't fail CI.
+                let code = out.status.code().unwrap_or(2);
+                if code != 2 {
+                    assert_eq!(
+                        code, 0,
+                        "preflight-pdfx.sh must PASS on the CMYK card back:\n{}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr),
+                    );
+                }
+            }
+        }
     }
 }

@@ -706,6 +706,18 @@ pub struct SetDocumentColorModeArgs {
     pub mode: Option<String>,
 }
 
+// ─── Document DPI Args ───────────────────────────────────────────────────────
+
+/// Arguments for `set_document_dpi` tool.
+#[derive(Debug, Deserialize, Default)]
+pub struct SetDocumentDpiArgs {
+    /// Document resolution in dots per inch. Determines the physical size the
+    /// document's pixel dimensions map to on export (physical size = px / dpi ×
+    /// 72 pt). Common print value: 300. Must be > 0.
+    #[serde(default)]
+    pub dpi: Option<f64>,
+}
+
 // ─── Artboard Margins Args ───────────────────────────────────────────────────
 
 /// Arguments for `set_artboard_margins` tool.

@@ -222,7 +222,7 @@ impl PhotonicApp {
                                 let dirty = self.tabs[i].dirty;
                                 let title = self.tabs[i].title.clone();
                                 // Chip: dirty dot + title (click switches / middle
-                                // click closes) followed by a close ✕.
+                                // click closes) followed by a close button.
                                 let dot = if dirty { "● " } else { "" };
                                 let resp = ui
                                     .selectable_label(active, format!("{dot}{title}"))

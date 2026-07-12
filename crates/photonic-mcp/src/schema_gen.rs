@@ -2008,7 +2008,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_pdf",
-            "description": "Export the document as a single-page vector PDF, at its physical size for the document DPI. Returns the PDF bytes as base64 in `data_base64`; also writes to `path` when given.\n\nVector paths with solid colours, transforms and nesting (gradients approximate to their first stop). With `color_mode: \"cmyk\"` the output is a print-ready PDF/X-1a:2001 file: DeviceCMYK via an ICC profile, embedded GTS_PDFX OutputIntent, PDF 1.3, and MediaBox/TrimBox/BleedBox from the document bleed. `outline_text` converts every glyph to a vector path (zero font dependencies); `marks` renders trim + registration marks. Note: documents that use layer opacity/blend still emit transparency (not yet flattened for strict X-1a).",
+            "description": "Export the document as a vector PDF, at its physical size for the document DPI. Returns the PDF bytes as base64 in `data_base64`; also writes to `path` when given.\n\nVector paths with solid colours, transforms and nesting (gradients approximate to their first stop). With `color_mode: \"cmyk\"` the output is a print-ready PDF/X-1a:2001 file: DeviceCMYK via an ICC profile, embedded GTS_PDFX OutputIntent, PDF 1.3, and MediaBox/TrimBox/BleedBox from the document bleed. `outline_text` converts every glyph to a vector path (zero font dependencies); `marks` renders trim + registration marks.\n\nPER-ARTBOARD / MULTI-PAGE: set `all`, `range`, or `artboards` to emit one page per artboard, each clipped to its rectangle + bleed with its own page boxes and marks — a single multi-page PDF by default, or one file per artboard with `separate_files: true` (needs a `path` template). This is the native card-batch path; without any selector the whole canvas is one page. Note: documents that use layer opacity/blend still emit transparency (not yet flattened for strict X-1a).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2036,6 +2036,26 @@ pub fn tool_list() -> Value {
                     "profile": {
                         "type": "string",
                         "description": "Path to a CMYK ICC profile for colour conversion and the OutputIntent (defaults to the bundled Coated FOGRA39 when color_mode is cmyk)."
+                    },
+                    "artboards": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Per-artboard export: specific artboards, each a UUID, an exact name, or a 1-based index string (\"1\", \"2\"). One clipped page per artboard, in this order. Get ids/names from list_artboards."
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Export every artboard, one page each (overrides range/artboards)."
+                    },
+                    "range": {
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "Export a 1-based inclusive artboard index range [start, end], one page each."
+                    },
+                    "separate_files": {
+                        "type": "boolean",
+                        "description": "With a multi-artboard selection, write one file PER artboard instead of a single multi-page PDF. Requires `path` with a {name} or {index} placeholder (or a filename, before whose extension -{index} is inserted)."
                     }
                 }
             }
@@ -4182,6 +4202,22 @@ pub fn tool_list() -> Value {
         {
             "name": "get_document_color_mode",
             "description": "Return the current document color mode ('rgb' or 'cmyk'). Read-only.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "set_document_dpi",
+            "description": "Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photonic file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "dpi": { "type": "number", "exclusiveMinimum": 0, "description": "Dots per inch. Common print value: 300." }
+                },
+                "required": ["dpi"]
+            }
+        },
+        {
+            "name": "get_document_dpi",
+            "description": "Return the current document DPI and the physical page size (pt and inches) it implies for export. Read-only.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {

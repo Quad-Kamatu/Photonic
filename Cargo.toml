@@ -52,6 +52,8 @@ base64 = "0.22"
 
 # PDF export
 pdf-writer = "0.12"
+# Flate/zlib compression for embedded PDF image streams
+miniz_oxide = "0.8"
 
 # Scripting
 mlua = { version = "0.10", features = ["lua54", "vendored"] }

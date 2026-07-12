@@ -1006,13 +1006,24 @@ pub struct PdfExportOptions {
 /// When `bleed_mm == 0` and `marks == false` all three collapse to `[0,0,w,h]`,
 /// preserving the pre-bleed regression baseline exactly.
 pub fn compute_page_boxes(doc: &Document, opts: &PdfExportOptions) -> PageBoxes {
+    compute_page_boxes_dims(doc.width, doc.height, doc, opts)
+}
+
+/// Like [`compute_page_boxes`] but for an explicit page size in document px
+/// (e.g. a single artboard's rectangle). DPI, bleed, and slug come from `doc`.
+pub fn compute_page_boxes_dims(
+    width_px: f64,
+    height_px: f64,
+    doc: &Document,
+    opts: &PdfExportOptions,
+) -> PageBoxes {
     use crate::units::{to_px, DocumentUnit::Mm};
 
     // Artwork is stored in px at the document DPI; PDF is in points (72 dpi).
     // Scale px → points so the page is the correct physical size at any DPI.
     let s = 72.0_f32 / doc.dpi as f32;
-    let w = doc.width as f32 * s;
-    let h = doc.height as f32 * s;
+    let w = width_px as f32 * s;
+    let h = height_px as f32 * s;
 
     // PDF points = 72 dpi; convert mm at that resolution.
     let pdf_dpi = 72.0_f64;
@@ -1207,124 +1218,159 @@ fn emit_marks(content: &mut pdf_writer::Content, boxes: &PageBoxes, opts: &PdfEx
     reg_target(content, trim_mid_x, cy_top);
 }
 
-/// Export `doc` as a single-page vector PDF (1 document unit = 1 PDF point).
-///
-/// MVP scope: filled/stroked vector paths with solid colours, node/group affine
-/// transforms, group nesting, and per-layer opacity + blend mode (via ExtGState).
-/// Gradient fills are approximated by their first stop colour; text, clipping,
-/// per-node opacity, and multi-page artboards are documented follow-ups. Like
-/// SVG, PDF layer groups are non-isolated, so blend reads the page backdrop.
-pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
-    use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, TextStr};
+/// A single output page: the document-space rectangle it frames, in doc px.
+#[derive(Debug, Clone, Copy)]
+pub struct PageRegion {
+    /// Top-left of the region in document coordinates.
+    pub origin_x: f64,
+    pub origin_y: f64,
+    /// Region size in document px (physical size = size / dpi × 72 pt).
+    pub width_px: f64,
+    pub height_px: f64,
+    /// Clip artwork to the region (+ bleed). The whole-document single page sets
+    /// `false` so its output is byte-for-byte the legacy exporter.
+    pub clip: bool,
+}
 
+impl PageRegion {
+    /// The whole document as one unclipped page (legacy single-page export).
+    pub fn whole(doc: &Document) -> Self {
+        Self {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width_px: doc.width,
+            height_px: doc.height,
+            clip: false,
+        }
+    }
+
+    /// A clipped page framing a single artboard's rectangle.
+    pub fn artboard(a: &crate::document::Artboard) -> Self {
+        Self {
+            origin_x: a.x,
+            origin_y: a.y,
+            width_px: a.width,
+            height_px: a.height,
+            clip: true,
+        }
+    }
+}
+
+/// Export `doc` as a single-page vector PDF (the whole canvas).
+///
+/// Scope: filled/stroked vector paths, gradient fills (axial/radial shadings),
+/// placed raster images (image XObjects), node/group affine transforms, group
+/// nesting, and per-layer opacity + blend mode (via ExtGState). Physical page
+/// size honours `doc.dpi` (px → pt by 72/dpi). CMYK mode emits a print-ready
+/// PDF/X-1a:2001 file. For per-artboard / multi-page output use
+/// [`export_pdf_regions`]. Like SVG, PDF layer groups are non-isolated, so blend
+/// reads the page backdrop.
+pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
+    export_pdf_regions(doc, opts, &[PageRegion::whole(doc)])
+}
+
+/// Export `doc` as a multi-page vector PDF — one page per [`PageRegion`]. This
+/// backs per-artboard / multi-page export: each region becomes a page clipped to
+/// its rectangle + bleed, with its own Media/Trim/Bleed boxes and marks. Layer
+/// opacity/blend ExtGStates are document-level, so they are computed once and the
+/// objects are shared across every page. An empty `regions` slice falls back to
+/// the whole document (identical to [`export_pdf`]).
+pub fn export_pdf_regions(
+    doc: &Document,
+    opts: &PdfExportOptions,
+    regions: &[PageRegion],
+) -> Vec<u8> {
+    use pdf_writer::{Finish, Name, Pdf, Rect, Ref, TextStr};
+
+    let whole = [PageRegion::whole(doc)];
+    let regions: &[PageRegion] = if regions.is_empty() { &whole } else { regions };
+
+    // Layer ExtGStates are document-level → computed once, objects shared.
+    let gstates = collect_layer_gstates(doc);
+
+    // Build each page's boxes + content stream (and its deferred resources) up front.
+    let pages: Vec<(PageBoxes, Vec<u8>, PdfResources)> = regions
+        .iter()
+        .map(|r| {
+            let boxes = compute_page_boxes_dims(r.width_px, r.height_px, doc, opts);
+            let (stream, res) = build_page_content(doc, opts, *r, &boxes);
+            (boxes, stream, res)
+        })
+        .collect();
+
+    // ── Ref allocation (catalog=1, page-tree=2, then page/content pairs, then
+    // the shared ExtGStates, then ICC + Info). For a single whole-doc page this
+    // reproduces the legacy 1–6 numbering exactly.
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
-    let page_id = Ref::new(3);
-    let content_id = Ref::new(4);
-
-    // Compute page geometry boxes.
-    // T1.5/T1.8: media expands to include bleed+mark-room; trim = artboard.
-    let boxes = compute_page_boxes(doc, opts);
-
-    // ── Content stream ────────────────────────────────────────────────────────
-    let mut content = Content::new();
-
-    // ── Artwork transform (T1.8) ──────────────────────────────────────────────
-    // PDF is Y-up; Photonic is Y-down.  The trim box sits at (trim_x0, trim_y0)
-    // in page space, so we need doc (0,0) → page (trim_x0, trim_y1).
-    //
-    //   page_x = trim_x0 + doc_x          (T_e = trim_x0)
-    //   page_y = trim_y1 - doc_y          (Y-flip about the trim top edge)
-    //
-    // CTM: [a b c d e f] ≡ [1  0  0  -1  trim_x0  trim_y1]
-    //
-    // Verification at bleed=0, marks=false:
-    //   trim = [0, 0, w, h]  →  trim_x0=0, trim_y1=h  →  [1,0,0,-1,0,h]  ✓
-    let trim_x0 = boxes.trim[0];
-    let trim_y1 = boxes.trim[3]; // top of trim in Y-up page space
-
-    // Artwork is drawn in document px inside a CTM that scales px → PDF points
-    // (72 dpi) and flips Y, mapping doc (0,0) top-left to the trim origin. At the
-    // default 72 dpi the scale is 1 (px ≡ pt), matching legacy output.
-    let s = 72.0_f32 / doc.dpi as f32;
-
-    // Bleed in *document px* — the CTM scale converts it to the same point-space
-    // bleed the page boxes use.
-    let bleed_px =
-        crate::units::to_px(doc.bleed_mm, crate::units::DocumentUnit::Mm, doc.dpi) as f32;
-
-    // Save state so marks can be drawn afterward in absolute page space.
-    content.save_state();
-    content.transform([s, 0.0, 0.0, -s, trim_x0, trim_y1]);
-
-    // ── Bleed-aware background (T1.8) ─────────────────────────────────────────
-    // The background bleeds past the trim edge into the bleed zone so there is
-    // no white sliver after cutting.  In doc-space (inside the CTM above), the
-    // bleed box spans (-bleed_px, -bleed_px) to (w+bleed_px, h+bleed_px).
-    if let Some(bg) = opts.background {
-        let w = doc.width as f32;
-        let h = doc.height as f32;
-        set_fill_color(&mut content, convert_color([bg.r, bg.g, bg.b], opts));
-        content.move_to(-bleed_px, -bleed_px);
-        content.line_to(w + bleed_px, -bleed_px);
-        content.line_to(w + bleed_px, h + bleed_px);
-        content.line_to(-bleed_px, h + bleed_px);
-        content.close_path();
-        content.fill_nonzero();
+    let mut next = 3_i32;
+    let mut page_refs: Vec<(Ref, Ref)> = Vec::with_capacity(pages.len());
+    for _ in 0..pages.len() {
+        let page_id = Ref::new(next);
+        let content_id = Ref::new(next + 1);
+        next += 2;
+        page_refs.push((page_id, content_id));
     }
-
-    // Layers that need a graphics state (opacity < 1 or non-Normal blend) wrap
-    // their nodes in a `/gsN` ExtGState so the layer composites as a unit. The
-    // states are collected here and written as PDF objects + page resources below.
-    let mut gstates: Vec<(f32, pdf_writer::types::BlendMode)> = Vec::new();
-    for layer_id in &doc.layer_order {
-        let layer = match doc.layers.get(layer_id) {
-            Some(l) if l.visible && l.print => l,
-            _ => continue,
-        };
-        let needs_gs =
-            layer.opacity < 1.0 || layer.blend_mode != crate::layer::BlendMode::Normal;
-        if needs_gs {
-            let name = format!("gs{}", gstates.len());
-            gstates.push((layer.opacity.clamp(0.0, 1.0), pdf_blend_mode(layer.blend_mode)));
-            content.save_state();
-            content.set_parameters(Name(name.as_bytes()));
-        }
-        for node_id in &layer.node_ids {
-            if let Some(node) = doc.nodes.get(node_id) {
-                emit_node_pdf(node, doc, &mut content, opts);
-            }
-        }
-        if needs_gs {
-            content.restore_state();
-        }
-    }
-
-    // Pop the artwork CTM so marks are drawn in absolute page space.
-    content.restore_state();
-
-    // T1.6: emit trim/registration marks in absolute page space.
-    emit_marks(&mut content, &boxes, opts);
-
-    let stream = content.finish();
-
-    // ── Document structure ──────────────────────────────────────────────────────
-    // ExtGState objects get Refs after the fixed 1–4 (catalog/pages/page/content).
     let gs_refs: Vec<Ref> = (0..gstates.len())
-        .map(|i| Ref::new(5 + i as i32))
+        .map(|_| {
+            let r = Ref::new(next);
+            next += 1;
+            r
+        })
+        .collect();
+    let icc_ref = Ref::new(next);
+    next += 1;
+    let info_ref = Ref::new(next);
+    next += 1;
+
+    // Per-page resource object refs: images `(color, optional smask)` and
+    // shadings `(shading, stitching-fn, per-segment exponential-fns)`. Allocated
+    // after the fixed objects so docs with no images/gradients keep legacy
+    // numbering.
+    struct PageObjRefs {
+        images: Vec<(Ref, Option<Ref>)>,
+        shadings: Vec<(Ref, Ref, Vec<Ref>)>,
+    }
+    let alloc = |n_slots: &mut i32| {
+        let r = Ref::new(*n_slots);
+        *n_slots += 1;
+        r
+    };
+    let obj_refs: Vec<PageObjRefs> = pages
+        .iter()
+        .map(|(_, _, res)| {
+            let images = res
+                .images
+                .iter()
+                .map(|img| {
+                    let color = alloc(&mut next);
+                    let smask = img.alpha.as_ref().map(|_| alloc(&mut next));
+                    (color, smask)
+                })
+                .collect();
+            let shadings = res
+                .shadings
+                .iter()
+                .map(|sh| {
+                    let shading = alloc(&mut next);
+                    let stitch = alloc(&mut next);
+                    let exps: Vec<Ref> =
+                        (0..sh.stops.len().saturating_sub(1)).map(|_| alloc(&mut next)).collect();
+                    (shading, stitch, exps)
+                })
+                .collect();
+            PageObjRefs { images, shadings }
+        })
         .collect();
 
     let mut pdf = Pdf::new();
 
-    // T0.4 PDF/X-1a: a CMYK export is emitted as a print-ready PDF/X-1a:2001 file —
+    // PDF/X-1a: a CMYK export is emitted as a print-ready PDF/X-1a:2001 file —
     // PDF 1.3, an embedded DeviceCMYK OutputIntent, and GTS_PDFX Info metadata.
     let x1a = opts.color_mode == crate::document::ColorMode::Cmyk;
     if x1a {
         pdf.set_version(1, 3);
     }
-    // The ICC + Info objects get Refs after the fixed 1–4 and the ExtGState refs.
-    let icc_ref = Ref::new(5 + gstates.len() as i32);
-    let info_ref = Ref::new(6 + gstates.len() as i32);
 
     {
         let mut cat = pdf.catalog(catalog_id);
@@ -1343,44 +1389,148 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
         }
         cat.finish();
     }
-    pdf.pages(page_tree_id).kids([page_id]).count(1);
+
+    // Page tree.
     {
-        let mut page = pdf.page(page_id);
-        page.parent(page_tree_id)
-            .media_box(Rect::new(
-                boxes.media[0],
-                boxes.media[1],
-                boxes.media[2],
-                boxes.media[3],
-            ))
-            .trim_box(Rect::new(
-                boxes.trim[0],
-                boxes.trim[1],
-                boxes.trim[2],
-                boxes.trim[3],
-            ))
-            .bleed_box(Rect::new(
-                boxes.bleed[0],
-                boxes.bleed[1],
-                boxes.bleed[2],
-                boxes.bleed[3],
-            ))
-            .contents(content_id);
-        {
-            let mut res = page.resources();
-            if !gs_refs.is_empty() {
-                let mut egs = res.ext_g_states();
-                for (i, r) in gs_refs.iter().enumerate() {
-                    egs.pair(Name(format!("gs{i}").as_bytes()), *r);
-                }
-                egs.finish();
-            }
-            res.finish();
-        }
-        page.finish();
+        let kids: Vec<Ref> = page_refs.iter().map(|(p, _)| *p).collect();
+        pdf.pages(page_tree_id)
+            .kids(kids)
+            .count(pages.len() as i32);
     }
-    pdf.stream(content_id, &stream);
-    // Write the ExtGState objects: layer alpha (fill + stroke) and blend mode.
+
+    // Each page object + its content stream.
+    for (((boxes, stream, _), (page_id, content_id)), page_objs) in
+        pages.iter().zip(page_refs.iter()).zip(obj_refs.iter())
+    {
+        {
+            let mut page = pdf.page(*page_id);
+            page.parent(page_tree_id)
+                .media_box(Rect::new(
+                    boxes.media[0],
+                    boxes.media[1],
+                    boxes.media[2],
+                    boxes.media[3],
+                ))
+                .trim_box(Rect::new(
+                    boxes.trim[0],
+                    boxes.trim[1],
+                    boxes.trim[2],
+                    boxes.trim[3],
+                ))
+                .bleed_box(Rect::new(
+                    boxes.bleed[0],
+                    boxes.bleed[1],
+                    boxes.bleed[2],
+                    boxes.bleed[3],
+                ))
+                .contents(*content_id);
+            {
+                let mut res = page.resources();
+                if !gs_refs.is_empty() {
+                    let mut egs = res.ext_g_states();
+                    for (i, r) in gs_refs.iter().enumerate() {
+                        egs.pair(Name(format!("gs{i}").as_bytes()), *r);
+                    }
+                    egs.finish();
+                }
+                if !page_objs.images.is_empty() {
+                    let mut xobjs = res.x_objects();
+                    for (i, (color, _)) in page_objs.images.iter().enumerate() {
+                        xobjs.pair(Name(format!("Im{i}").as_bytes()), *color);
+                    }
+                    xobjs.finish();
+                }
+                if !page_objs.shadings.is_empty() {
+                    let mut sh = res.shadings();
+                    for (i, (shading, _, _)) in page_objs.shadings.iter().enumerate() {
+                        sh.pair(Name(format!("Sh{i}").as_bytes()), *shading);
+                    }
+                    sh.finish();
+                }
+                res.finish();
+            }
+            page.finish();
+        }
+        pdf.stream(*content_id, stream);
+    }
+
+    // Image XObjects + gradient shading objects, per page.
+    for ((_, _, res), page_objs) in pages.iter().zip(obj_refs.iter()) {
+        for (img, (color_ref, smask_ref)) in res.images.iter().zip(page_objs.images.iter()) {
+            {
+                let mut xobj = pdf.image_xobject(*color_ref, &img.color);
+                xobj.filter(img.color_filter);
+                xobj.width(img.width as i32).height(img.height as i32);
+                if img.is_cmyk {
+                    xobj.color_space().device_cmyk();
+                } else {
+                    xobj.color_space().device_rgb();
+                }
+                xobj.bits_per_component(8);
+                if let Some(sm) = smask_ref {
+                    xobj.s_mask(*sm);
+                }
+                xobj.finish();
+            }
+            // SMask samples are Flate-compressed (see build_pdf_image).
+            if let (Some(alpha), Some(sm)) = (img.alpha.as_ref(), smask_ref) {
+                let mut mask = pdf.image_xobject(*sm, alpha);
+                mask.filter(pdf_writer::Filter::FlateDecode);
+                mask.width(img.width as i32).height(img.height as i32);
+                mask.color_space().device_gray();
+                mask.bits_per_component(8);
+                mask.finish();
+            }
+        }
+        for (sh, (shading_ref, stitch_ref, exp_refs)) in
+            res.shadings.iter().zip(page_objs.shadings.iter())
+        {
+            // Per-segment exponential (linear) interpolation functions.
+            for (seg, exp_ref) in exp_refs.iter().enumerate() {
+                let c0 = sh.stops[seg].1.clone();
+                let c1 = sh.stops[seg + 1].1.clone();
+                pdf.exponential_function(*exp_ref)
+                    .domain([0.0, 1.0])
+                    .c0(c0)
+                    .c1(c1)
+                    .n(1.0)
+                    .finish();
+            }
+            // Stitching function across all segments.
+            {
+                let interior: Vec<f32> = sh.stops[1..sh.stops.len() - 1].iter().map(|s| s.0).collect();
+                let encode: Vec<f32> = exp_refs.iter().flat_map(|_| [0.0_f32, 1.0]).collect();
+                pdf.stitching_function(*stitch_ref)
+                    .domain([0.0, 1.0])
+                    .functions(exp_refs.iter().copied())
+                    .bounds(interior)
+                    .encode(encode)
+                    .finish();
+            }
+            // The axial/radial shading itself.
+            {
+                use pdf_writer::types::FunctionShadingType;
+                let mut shading = pdf.function_shading(*shading_ref);
+                shading.shading_type(if sh.radial {
+                    FunctionShadingType::Radial
+                } else {
+                    FunctionShadingType::Axial
+                });
+                if sh.is_cmyk {
+                    shading.color_space().device_cmyk();
+                } else {
+                    shading.color_space().device_rgb();
+                }
+                shading.insert(Name(b"Coords")).array().items(sh.coords.iter().copied());
+                shading.insert(Name(b"Domain")).array().items([0.0_f32, 1.0]);
+                shading.insert(Name(b"Extend")).array().items([true, true]);
+                shading.function(*stitch_ref);
+                shading.finish();
+            }
+        }
+    }
+
+    // Shared ExtGState objects: layer alpha (fill + stroke) and blend mode.
     for ((opacity, blend), r) in gstates.iter().zip(gs_refs.iter()) {
         pdf.ext_graphics(*r)
             .non_stroking_alpha(*opacity)
@@ -1389,7 +1539,7 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
             .finish();
     }
 
-    // T0.4: embed the CMYK OutputIntent profile stream + PDF/X-1a Info metadata.
+    // CMYK OutputIntent profile stream + PDF/X-1a Info metadata.
     if x1a {
         let icc_bytes = x1a_icc_bytes(opts);
         pdf.icc_profile(icc_ref, &icc_bytes).n(4).finish();
@@ -1401,6 +1551,114 @@ pub fn export_pdf(doc: &Document, opts: &PdfExportOptions) -> Vec<u8> {
             .pair(Name(b"GTS_PDFXConformance"), TextStr("PDF/X-1a:2001"));
     }
     pdf.finish()
+}
+
+/// Collect the per-layer ExtGState (alpha, blend) list in draw order — one entry
+/// per visible/printing layer that needs a non-trivial graphics state. Shared by
+/// every page; the order matches the `gsN` counter in [`build_page_content`] so
+/// the indices line up.
+fn collect_layer_gstates(doc: &Document) -> Vec<(f32, pdf_writer::types::BlendMode)> {
+    let mut states = Vec::new();
+    for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible && l.print => l,
+            _ => continue,
+        };
+        if layer.opacity < 1.0 || layer.blend_mode != crate::layer::BlendMode::Normal {
+            states.push((layer.opacity.clamp(0.0, 1.0), pdf_blend_mode(layer.blend_mode)));
+        }
+    }
+    states
+}
+
+/// Build one page's content stream for `region` (see [`export_pdf_regions`]).
+///
+/// PDF is Y-up, Photonic Y-down. The CTM maps document coordinates so the
+/// region's top-left `(origin_x, origin_y)` lands at the trim box's top-left and
+/// Y is flipped:
+///   page_x = s·doc_x + (trim_x0 − s·origin_x)
+///   page_y = −s·doc_y + (trim_y1 + s·origin_y)
+/// where `s = 72/dpi`. For the whole document (origin 0,0) this collapses to the
+/// legacy `[s,0,0,−s,trim_x0,trim_y1]`.
+fn build_page_content(
+    doc: &Document,
+    opts: &PdfExportOptions,
+    region: PageRegion,
+    boxes: &PageBoxes,
+) -> (Vec<u8>, PdfResources) {
+    use pdf_writer::{Content, Name};
+
+    let mut res = PdfResources::default();
+    let mut content = Content::new();
+
+    let s = 72.0_f32 / doc.dpi as f32;
+    let trim_x0 = boxes.trim[0];
+    let trim_y1 = boxes.trim[3]; // top of trim in Y-up page space
+    let e = trim_x0 - s * region.origin_x as f32;
+    let f = trim_y1 + s * region.origin_y as f32;
+
+    // Bleed in document px — the CTM scale converts it to point-space bleed.
+    let bleed_px =
+        crate::units::to_px(doc.bleed_mm, crate::units::DocumentUnit::Mm, doc.dpi) as f32;
+
+    // Save state so marks can be drawn afterward in absolute page space.
+    content.save_state();
+    content.transform([s, 0.0, 0.0, -s, e, f]);
+
+    let ox = region.origin_x as f32;
+    let oy = region.origin_y as f32;
+    let w = region.width_px as f32;
+    let h = region.height_px as f32;
+
+    // Clip artwork to the region + bleed (per-artboard export). The whole-doc
+    // page sets clip=false and emits no clip op, preserving legacy output.
+    if region.clip {
+        content.rect(ox - bleed_px, oy - bleed_px, w + 2.0 * bleed_px, h + 2.0 * bleed_px);
+        content.clip_nonzero();
+        content.end_path();
+    }
+
+    // Bleed-aware background: fill past the trim edge into the bleed zone so no
+    // white sliver remains after cutting.
+    if let Some(bg) = opts.background {
+        set_fill_color(&mut content, convert_color([bg.r, bg.g, bg.b], opts));
+        content.move_to(ox - bleed_px, oy - bleed_px);
+        content.line_to(ox + w + bleed_px, oy - bleed_px);
+        content.line_to(ox + w + bleed_px, oy + h + bleed_px);
+        content.line_to(ox - bleed_px, oy + h + bleed_px);
+        content.close_path();
+        content.fill_nonzero();
+    }
+
+    // Layers, each wrapped in its shared `/gsN` ExtGState when it needs one.
+    let mut gs_counter = 0usize;
+    for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible && l.print => l,
+            _ => continue,
+        };
+        let needs_gs =
+            layer.opacity < 1.0 || layer.blend_mode != crate::layer::BlendMode::Normal;
+        if needs_gs {
+            let name = format!("gs{gs_counter}");
+            gs_counter += 1;
+            content.save_state();
+            content.set_parameters(Name(name.as_bytes()));
+        }
+        for node_id in &layer.node_ids {
+            if let Some(node) = doc.nodes.get(node_id) {
+                emit_node_pdf(node, doc, &mut content, opts, &mut res, 1.0);
+            }
+        }
+        if needs_gs {
+            content.restore_state();
+        }
+    }
+
+    // Pop the artwork CTM so marks are drawn in absolute page space.
+    content.restore_state();
+    emit_marks(&mut content, boxes, opts);
+    (content.finish(), res)
 }
 
 /// Resolve the CMYK ICC profile bytes for the PDF/X OutputIntent: the caller's
@@ -1453,62 +1711,426 @@ fn pdf_blend_mode(m: crate::layer::BlendMode) -> pdf_writer::types::BlendMode {
 
 /// Recursively emit a node's geometry into the PDF content stream, applying its
 /// affine transform within a save/restore so siblings are unaffected.
+// ─── Deferred page resources (images + gradient shadings) ────────────────────
+
+/// A placed raster prepared for PDF embedding as an image XObject. Pixel data is
+/// already downsampled to a sane effective DPI and **compressed** (see
+/// [`build_pdf_image`]); `width`/`height` are the post-downsample sample dims.
+struct PdfImage {
+    width: u32,
+    height: u32,
+    /// Encoded colour stream (3/px DeviceRGB or 4/px DeviceCMYK before encoding).
+    color: Vec<u8>,
+    /// Stream filter for `color` (`FlateDecode` for lossless, `DctDecode` for
+    /// JPEG-compressed photographic RGB).
+    color_filter: pdf_writer::Filter,
+    is_cmyk: bool,
+    /// Optional DeviceGray soft mask, Flate-compressed (RGB export only; CMYK/
+    /// X-1a is pre-flattened opaque so the output carries no transparency).
+    alpha: Option<Vec<u8>>,
+}
+
+/// Cap on a placed raster's effective resolution. Anything sampled finer than
+/// this at its on-page size is downsampled — 300 DPI is press-quality and the
+/// eye can't resolve more at normal viewing distance, so this is the "no visible
+/// quality loss" point the export bug (11.8 MB → a fraction) targets.
+const MAX_IMAGE_DPI: f64 = 300.0;
+
+/// zlib/Flate-compress `data` for a PDF stream `/Filter /FlateDecode`.
+fn flate_compress(data: &[u8]) -> Vec<u8> {
+    use miniz_oxide::deflate::compress_to_vec_zlib;
+    // Level 7: strong ratio without the price of level 10; images are already
+    // downsampled so this runs on modest buffers.
+    compress_to_vec_zlib(data, 7)
+}
+
+/// True when `rgb` samples look photographic (lots of distinct colours / smooth
+/// gradients) rather than flat vector art / screenshots with hard edges. Photos
+/// tolerate DCT/JPEG with no visible loss and compress far better with it; flat
+/// art gets ringing artifacts, so it stays on lossless Flate. Samples a stride
+/// for speed on large buffers.
+fn looks_photographic(rgb: &[u8]) -> bool {
+    let px = rgb.len() / 3;
+    if px < 256 {
+        return false; // tiny images: not worth DCT, keep them crisp
+    }
+    let mut seen = std::collections::HashSet::new();
+    let step = (px / 4096).max(1);
+    let mut i = 0;
+    while i < px {
+        let o = i * 3;
+        // Quantise to 5 bits/channel so anti-aliasing noise doesn't inflate the
+        // count, but true photo variety still does.
+        let key = ((rgb[o] >> 3) as u32) << 10
+            | ((rgb[o + 1] >> 3) as u32) << 5
+            | (rgb[o + 2] >> 3) as u32;
+        seen.insert(key);
+        if seen.len() > 1024 {
+            return true;
+        }
+        i += step;
+    }
+    false
+}
+
+/// DCT/JPEG-encode an interleaved RGB buffer at `q` quality (0–100). Returns
+/// `None` if the encoder fails (caller falls back to Flate).
+fn jpeg_compress_rgb(rgb: &[u8], width: u32, height: u32, q: u8) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q);
+    enc.encode(rgb, width, height, image::ExtendedColorType::Rgb8).ok()?;
+    Some(out)
+}
+
+/// Downsample an RGBA8 buffer to `nw`×`nh` with a triangle (bilinear) filter.
+/// Returns the original buffer untouched when no shrink is needed.
+fn downsample_rgba(px: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> (Vec<u8>, u32, u32) {
+    if nw >= w || nh >= h || nw == 0 || nh == 0 {
+        return (px.to_vec(), w, h);
+    }
+    let Some(src) = image::RgbaImage::from_raw(w, h, px.to_vec()) else {
+        return (px.to_vec(), w, h);
+    };
+    let dst = image::imageops::resize(&src, nw, nh, image::imageops::FilterType::Triangle);
+    (dst.into_raw(), nw, nh)
+}
+
+/// A linear/radial gradient prepared as a PDF axial/radial shading.
+struct PdfShading {
+    radial: bool,
+    /// Axial `[x0 y0 x1 y1]` or radial `[x0 y0 r0 x1 y1 r1]`, in node-local space.
+    coords: Vec<f32>,
+    is_cmyk: bool,
+    /// `(offset, colour-components)` in the page colour model, offset ascending.
+    stops: Vec<(f32, Vec<f32>)>,
+}
+
+/// Resources collected while a page's content stream is built; written as PDF
+/// objects (and named in the page `/Resources`) by [`export_pdf_regions`].
+#[derive(Default)]
+struct PdfResources {
+    images: Vec<PdfImage>,
+    shadings: Vec<PdfShading>,
+}
+
+impl PdfResources {
+    fn add_image(&mut self, img: PdfImage) -> usize {
+        self.images.push(img);
+        self.images.len() - 1
+    }
+    fn add_shading(&mut self, sh: PdfShading) -> usize {
+        self.shadings.push(sh);
+        self.shadings.len() - 1
+    }
+}
+
+/// Resolve the opaque backdrop RGB behind a placed raster, for the CMYK/X-1a
+/// flatten (which can't keep alpha). Walks the document in draw order and returns
+/// the colour of the *topmost* opaque, solid-filled path drawn **before** the
+/// raster whose world bbox fully covers it — i.e. the card/panel the image sits
+/// on. Falls back to the page background, then white.
+///
+/// Uniform-backdrop assumption: a single covering colour (exact for an avatar on
+/// a solid card). Non-covering or gradient/image backdrops fall through to the
+/// page background — the RGB path (true SMask) remains the fully-general route.
+fn backdrop_rgb_for(doc: &Document, opts: &PdfExportOptions, raster: &SceneNode) -> [f32; 3] {
+    let mut bg = opts
+        .background
+        .map(|c| [c.r, c.g, c.b])
+        .unwrap_or([1.0, 1.0, 1.0]);
+    let Some(rbb) = node_world_bbox(raster, doc) else {
+        return bg;
+    };
+    let covers = |nbb: kurbo::Rect| {
+        nbb.x0 <= rbb.x0 + 1e-6
+            && nbb.y0 <= rbb.y0 + 1e-6
+            && nbb.x1 + 1e-6 >= rbb.x1
+            && nbb.y1 + 1e-6 >= rbb.y1
+    };
+    'scan: for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible && l.print => l,
+            _ => continue,
+        };
+        for nid in &layer.node_ids {
+            if *nid == raster.id {
+                break 'scan; // reached the image — later nodes are above it
+            }
+            let Some(node) = doc.nodes.get(nid) else { continue };
+            if !node.visible || node.opacity < 1.0 {
+                continue;
+            }
+            if let SceneNodeKind::Path(p) = &node.kind {
+                if !p.fill.enabled || (p.fill.opacity - 1.0).abs() > 1e-3 {
+                    continue;
+                }
+                if let FillKind::Solid(c) = &p.fill.kind {
+                    if c.a >= 1.0 {
+                        if let Some(nbb) = node_world_bbox(node, doc) {
+                            if covers(nbb) {
+                                bg = [c.r, c.g, c.b];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    bg
+}
+
+/// Convert a placed RGBA raster to a [`PdfImage`] in the export colour model,
+/// **downsampled** to at most [`MAX_IMAGE_DPI`] at its placed size and
+/// **compressed** so a placed photo doesn't bloat the PDF (bug: two rasters →
+/// 11.8 MB uncompressed).
+///
+/// `placed_scale` is the accumulated affine scale from the page root to this
+/// node (doc-px per image-px); `doc_dpi` is the document resolution. The image's
+/// effective DPI is `doc_dpi / placed_scale`, so anything finer than the cap is
+/// shrunk before encoding. Transparency is handled per colour model:
+/// RGB export keeps an 8-bit soft mask for true alpha (bug 1); CMYK/X-1a can't
+/// carry transparency, so it pre-composites the alpha over `backdrop` — the
+/// actual artwork behind the image (e.g. the dark card), NOT a hard-coded white,
+/// so a transparent avatar blends into the card instead of punching a white hole.
+fn build_pdf_image(
+    img: &crate::raster::RasterImage,
+    opts: &PdfExportOptions,
+    placed_scale: f64,
+    doc_dpi: f64,
+    backdrop: [f32; 3],
+) -> PdfImage {
+    // ── Downsample to the effective-DPI cap ──────────────────────────────────
+    let effective_dpi = doc_dpi / placed_scale.max(1e-6);
+    let factor = (MAX_IMAGE_DPI / effective_dpi).min(1.0);
+    let (px, width, height) = if factor < 1.0 {
+        let nw = ((img.width as f64 * factor).round() as u32).max(1);
+        let nh = ((img.height as f64 * factor).round() as u32).max(1);
+        downsample_rgba(&img.pixels, img.width, img.height, nw, nh)
+    } else {
+        (img.pixels.clone(), img.width, img.height)
+    };
+
+    let n = (width as usize) * (height as usize);
+    let is_cmyk = opts.color_mode == crate::document::ColorMode::Cmyk;
+    if is_cmyk {
+        let mut color = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            let r = px[i * 4] as f32 / 255.0;
+            let g = px[i * 4 + 1] as f32 / 255.0;
+            let b = px[i * 4 + 2] as f32 / 255.0;
+            let a = px[i * 4 + 3] as f32 / 255.0;
+            // Composite over the real backdrop to drop alpha (X-1a output is
+            // opaque). Transparent pixels resolve to the artwork behind the image
+            // (the card), not white — so no white box over a dark card.
+            let over = |c: f32, bg: f32| c * a + (1.0 - a) * bg;
+            let cmyk = match convert_color(
+                [
+                    over(r, backdrop[0]),
+                    over(g, backdrop[1]),
+                    over(b, backdrop[2]),
+                ],
+                opts,
+            ) {
+                PdfColor::Cmyk(v) => v,
+                PdfColor::Rgb(v) => [0.0, 0.0, 0.0, 1.0 - (v[0] + v[1] + v[2]) / 3.0],
+            };
+            color.push((cmyk[0] * 255.0).round().clamp(0.0, 255.0) as u8);
+            color.push((cmyk[1] * 255.0).round().clamp(0.0, 255.0) as u8);
+            color.push((cmyk[2] * 255.0).round().clamp(0.0, 255.0) as u8);
+            color.push((cmyk[3] * 255.0).round().clamp(0.0, 255.0) as u8);
+        }
+        // Lossless Flate: DCT on DeviceCMYK carries an Adobe-inversion caveat and
+        // X-1a bans lossy-with-transparency edge cases — keep the print path safe.
+        PdfImage {
+            width,
+            height,
+            color: flate_compress(&color),
+            color_filter: pdf_writer::Filter::FlateDecode,
+            is_cmyk: true,
+            alpha: None,
+        }
+    } else {
+        let mut color = Vec::with_capacity(n * 3);
+        let mut alpha = Vec::with_capacity(n);
+        let mut any_alpha = false;
+        for i in 0..n {
+            color.push(px[i * 4]);
+            color.push(px[i * 4 + 1]);
+            color.push(px[i * 4 + 2]);
+            let a = px[i * 4 + 3];
+            if a != 255 {
+                any_alpha = true;
+            }
+            alpha.push(a);
+        }
+        // DCT/JPEG for opaque photographic RGB (big win, no visible loss); Flate
+        // otherwise — images with alpha (logos/cutouts, kept crisp + JPEG can't
+        // carry the mask) and flat vector art (JPEG rings on hard edges).
+        let (color_enc, color_filter) = if !any_alpha
+            && looks_photographic(&color)
+        {
+            match jpeg_compress_rgb(&color, width, height, 85) {
+                Some(j) => (j, pdf_writer::Filter::DctDecode),
+                None => (flate_compress(&color), pdf_writer::Filter::FlateDecode),
+            }
+        } else {
+            (flate_compress(&color), pdf_writer::Filter::FlateDecode)
+        };
+        PdfImage {
+            width,
+            height,
+            color: color_enc,
+            color_filter,
+            is_cmyk: false,
+            alpha: any_alpha.then(|| flate_compress(&alpha)),
+        }
+    }
+}
+
+/// Build a [`PdfShading`] from a linear/radial gradient, or `None` for other
+/// gradient kinds (which fall back to a solid approximation via [`fill_rgb`]).
+fn build_pdf_shading(g: &Gradient, opts: &PdfExportOptions) -> Option<PdfShading> {
+    let is_cmyk = opts.color_mode == crate::document::ColorMode::Cmyk;
+    let comps = |col: &Color| -> Vec<f32> {
+        match convert_color([col.r, col.g, col.b], opts) {
+            PdfColor::Rgb(v) => v.to_vec(),
+            PdfColor::Cmyk(v) => v.to_vec(),
+        }
+    };
+    let mut stops: Vec<(f32, Vec<f32>)> = g
+        .stops
+        .iter()
+        .map(|s| ((s.offset as f32).clamp(0.0, 1.0), comps(&s.color)))
+        .collect();
+    if stops.len() < 2 {
+        return None;
+    }
+    stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Force strictly-increasing offsets so the stitching-function Bounds are valid.
+    for i in 1..stops.len() {
+        if stops[i].0 <= stops[i - 1].0 {
+            stops[i].0 = (stops[i - 1].0 + 1e-4).min(1.0);
+        }
+    }
+    match g.kind {
+        GradientKind::Linear => {
+            if g.coords.len() < 4 {
+                return None;
+            }
+            let coords = vec![
+                g.coords[0] as f32,
+                g.coords[1] as f32,
+                g.coords[2] as f32,
+                g.coords[3] as f32,
+            ];
+            Some(PdfShading { radial: false, coords, is_cmyk, stops })
+        }
+        GradientKind::Radial => {
+            if g.coords.len() < 5 {
+                return None;
+            }
+            let (cx, cy, r) = (g.coords[0] as f32, g.coords[1] as f32, g.coords[4] as f32);
+            let coords = vec![cx, cy, 0.0, cx, cy, r];
+            Some(PdfShading { radial: true, coords, is_cmyk, stops })
+        }
+    }
+}
+
 fn emit_node_pdf(
     node: &SceneNode,
     doc: &Document,
     content: &mut pdf_writer::Content,
     opts: &PdfExportOptions,
+    res: &mut PdfResources,
+    // Accumulated affine scale from the page root to this node (doc-px per
+    // node-local unit). Threaded so placed rasters know their on-page size and can
+    // downsample to a sane effective DPI. The root call passes 1.0.
+    parent_scale: f64,
 ) {
     if !node.visible {
         return;
     }
     let [a, b, c, d, e, f] = node.transform.matrix;
+    let node_scale = parent_scale * affine_scale(&node.transform);
     content.save_state();
     content.transform([a as f32, b as f32, c as f32, d as f32, e as f32, f as f32]);
 
     match &node.kind {
         SceneNodeKind::Path(p) => {
-            emit_path_geometry(&p.path_data, content);
-            let fill = fill_rgb(&p.fill);
             let stroke = if p.stroke.enabled && p.stroke.width > 0.0 {
                 Some(&p.stroke)
             } else {
                 None
             };
-            if let Some([fr, fg, fb]) = fill {
-                set_fill_color(content, convert_color([fr, fg, fb], opts));
-            }
-            if let Some(s) = stroke {
-                set_stroke_color(
-                    content,
-                    convert_color([s.color.r, s.color.g, s.color.b], opts),
-                );
-                // Non-scaling stroke: the `cm` transform above scales subsequent
-                // line widths, so divide by the transform scale to keep the
-                // authored width (matches the canvas and other exporters).
-                let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
-                content.set_line_width((s.width / obj_scale) as f32);
-            }
-            match (fill.is_some(), stroke.is_some()) {
-                (true, true) => {
-                    content.fill_nonzero_and_stroke();
+            // Gradient fill → a real PDF axial/radial shading (#4): clip to the
+            // path, then paint the shading over the clip region.
+            let shading = if p.fill.enabled {
+                if let FillKind::Gradient(g) = &p.fill.kind {
+                    build_pdf_shading(g, opts)
+                } else {
+                    None
                 }
-                (true, false) => {
-                    content.fill_nonzero();
-                }
-                (false, true) => {
+            } else {
+                None
+            };
+
+            if let Some(sh) = shading {
+                let idx = res.add_shading(sh);
+                emit_path_geometry(&p.path_data, content);
+                content.save_state();
+                content.clip_nonzero();
+                content.end_path();
+                content.shading(pdf_writer::Name(format!("Sh{idx}").as_bytes()));
+                content.restore_state();
+                // Stroke on top of the gradient fill, if present.
+                if let Some(s) = stroke {
+                    emit_path_geometry(&p.path_data, content);
+                    set_stroke_color(
+                        content,
+                        convert_color([s.color.r, s.color.g, s.color.b], opts),
+                    );
+                    let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
+                    content.set_line_width((s.width / obj_scale) as f32);
                     content.stroke();
                 }
-                // No paint — discard the path so it does not linger in the stream.
-                (false, false) => {
-                    content.end_path();
+            } else {
+                emit_path_geometry(&p.path_data, content);
+                let fill = fill_rgb(&p.fill);
+                if let Some([fr, fg, fb]) = fill {
+                    set_fill_color(content, convert_color([fr, fg, fb], opts));
+                }
+                if let Some(s) = stroke {
+                    set_stroke_color(
+                        content,
+                        convert_color([s.color.r, s.color.g, s.color.b], opts),
+                    );
+                    // Non-scaling stroke: the `cm` transform above scales subsequent
+                    // line widths, so divide by the transform scale to keep the
+                    // authored width (matches the canvas and other exporters).
+                    let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
+                    content.set_line_width((s.width / obj_scale) as f32);
+                }
+                match (fill.is_some(), stroke.is_some()) {
+                    (true, true) => {
+                        content.fill_nonzero_and_stroke();
+                    }
+                    (true, false) => {
+                        content.fill_nonzero();
+                    }
+                    (false, true) => {
+                        content.stroke();
+                    }
+                    // No paint — discard the path so it does not linger in the stream.
+                    (false, false) => {
+                        content.end_path();
+                    }
                 }
             }
         }
         SceneNodeKind::Group(g) => {
             for child_id in &g.children {
                 if let Some(child) = doc.nodes.get(child_id) {
-                    emit_node_pdf(child, doc, content, opts);
+                    emit_node_pdf(child, doc, content, opts, res, node_scale);
                 }
             }
         }
@@ -1516,9 +2138,30 @@ fn emit_node_pdf(
         SceneNodeKind::Text(_) => {
             emit_text_pdf(node, doc, content, opts);
         }
-        // Raster layers are omitted in the MVP (PDF image XObjects + the raster
-        // compositing pipeline are out of scope for the vector PDF exporter).
-        SceneNodeKind::Raster(_) => {}
+        // Placed rasters embed as image XObjects (#3). Adjustment layers carry no
+        // pixels of their own (they recolour the composite) and are skipped.
+        SceneNodeKind::Raster(r) => {
+            if !r.is_adjustment_layer() && r.image.width > 0 && r.image.height > 0 {
+                // CMYK/X-1a flatten composites over the real backdrop (RGB keeps
+                // its SMask, so the backdrop is unused there).
+                let backdrop = backdrop_rgb_for(doc, opts, node);
+                let idx = res.add_image(build_pdf_image(
+                    &r.image,
+                    opts,
+                    node_scale,
+                    doc.dpi as f64,
+                    backdrop,
+                ));
+                let w = r.image.width as f32;
+                let h = r.image.height as f32;
+                content.save_state();
+                // Map the image unit square onto the node-local (0,0)-(w,h) rect
+                // (Y-down): sample row 0 (top) → doc y=0.
+                content.transform([w, 0.0, 0.0, -h, 0.0, h]);
+                content.x_object(pdf_writer::Name(format!("Im{idx}").as_bytes()));
+                content.restore_state();
+            }
+        }
     }
 
     content.restore_state();
@@ -1602,6 +2245,86 @@ fn fill_rgb(fill: &Fill) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ROUND 2 / Issue C — the per-artboard CMYK export path flattens a
+    /// transparent raster over the ACTUAL backdrop (the dark card beneath it), not
+    /// white. Drives `export_pdf_regions` with a clipped artboard region, then
+    /// decodes the embedded CMYK image's transparent-corner sample and asserts it
+    /// resolved to the dark card (high K), not white (all-zero CMYK). Also asserts
+    /// the stream is Flate-compressed with no SMask (X-1a-safe).
+    #[test]
+    fn pdf_artboard_cmyk_raster_flattens_over_backdrop_not_white() {
+        use crate::document::{Artboard, ColorMode};
+        use crate::node::{PathNode, RasterNode};
+        use crate::path::PathData;
+        use crate::raster::RasterImage;
+        use crate::style::{Fill, FillKind};
+        use crate::transform::Transform;
+
+        let mut doc = Document::new("card", 1050.0, 600.0);
+        doc.dpi = 300.0;
+        doc.color_mode = ColorMode::Cmyk;
+        doc.artboards = vec![Artboard::new("Card Back", 0.0, 0.0, 1050.0, 600.0)];
+        let layer = doc.active_layer_id.unwrap();
+
+        // Dark card #0b0b12 covering the artboard.
+        let mut card = PathNode::new(PathData::rect(0.0, 0.0, 1050.0, 600.0));
+        card.fill = Fill {
+            kind: FillKind::Solid(Color::new(0.043, 0.043, 0.070, 1.0)),
+            opacity: 1.0,
+            enabled: true,
+        };
+        doc.add_node(SceneNode::new("card", layer, SceneNodeKind::Path(card)), None);
+
+        // Avatar over the card: transparent corner (a==0), opaque interior.
+        let native = 200u32;
+        let mut px = vec![0u8; (native * native * 4) as usize];
+        for y in 0..native {
+            for x in 0..native {
+                let i = ((y * native + x) * 4) as usize;
+                let opaque = x > 60 && x < 140 && y > 60 && y < 140;
+                px[i..i + 4].copy_from_slice(&[240, 230, 220, if opaque { 255 } else { 0 }]);
+            }
+        }
+        let img = RasterImage::from_rgba(native, native, px).unwrap();
+        let mut avatar =
+            SceneNode::new("avatar", layer, SceneNodeKind::Raster(RasterNode::new(img)));
+        avatar.transform = Transform::new(1.5, 0.0, 0.0, 1.5, 400.0, 200.0);
+        let avatar_id = avatar.id;
+        doc.add_node(avatar, None);
+
+        let opts = PdfExportOptions {
+            color_mode: ColorMode::Cmyk,
+            marks: true,
+            ..Default::default()
+        };
+        let region = PageRegion::artboard(&doc.artboards[0]);
+        let bytes = export_pdf_regions(&doc, &opts, &[region]);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("/FlateDecode"), "CMYK raster must be Flate-compressed");
+        assert!(!text.contains("/SMask"), "CMYK/X-1a must carry no transparency");
+
+        // The backdrop resolution + composite: the transparent corner must resolve
+        // to the dark card, not white.
+        let bg = backdrop_rgb_for(&doc, &opts, doc.nodes.get(&avatar_id).unwrap());
+        assert!(
+            bg[0] < 0.2 && bg[1] < 0.2 && bg[2] < 0.2,
+            "backdrop should resolve to the dark card, got {bg:?}"
+        );
+        let mut corner = vec![0u8; (native * native * 4) as usize]; // all transparent
+        for i in 0..(native * native) as usize {
+            corner[i * 4..i * 4 + 4].copy_from_slice(&[240, 230, 220, 0]);
+        }
+        let cimg = RasterImage::from_rgba(native, native, corner).unwrap();
+        let pi = build_pdf_image(&cimg, &opts, 1.5, 300.0, bg);
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&pi.color).unwrap();
+        // Not white: white flattens to CMYK 0,0,0,0. The dark card has substantial K.
+        assert!(
+            raw[3] > 120,
+            "transparent area must flatten to the dark card (high K), got CMYK {:?} (white box regression)",
+            &raw[..4]
+        );
+    }
 
     /// SVG export must be transparent by default — no opaque background rect
     /// baked behind the artwork (regression for white-background exports).
@@ -1853,11 +2576,14 @@ mod tests {
         );
     }
 
+    /// Superseded by [`pdf_gradient_exports_axial_shading_not_solid`]: a gradient
+    /// fill now exports as a real PDF axial shading, no longer flattened to its
+    /// first stop. This guards against regressing back to the solid approximation.
     #[test]
-    fn pdf_export_approximates_gradient_with_first_stop() {
+    fn pdf_gradient_no_longer_flattens_to_first_stop() {
         use crate::node::PathNode;
         use crate::path::PathData;
-        use crate::style::{Fill, FillKind, Gradient, GradientKind, GradientStop};
+        use crate::style::{Fill, FillKind, Gradient, GradientStop};
 
         let mut doc = Document::new("t", 100.0, 100.0);
         let grad = Gradient::linear(
@@ -1881,10 +2607,11 @@ mod tests {
 
         let text =
             String::from_utf8_lossy(&export_pdf(&doc, &PdfExportOptions::default())).into_owned();
-        // First stop is green → "0 1 0 rg".
+        assert!(text.contains("/ShadingType 2"), "gradient must export as a shading");
+        // The old first-stop-solid behaviour must be gone.
         assert!(
-            text.contains("0 1 0 rg"),
-            "expected first-stop green fill:\n{text}"
+            !text.contains("0 1 0 rg"),
+            "gradient must not flatten to a first-stop solid fill:\n{text}"
         );
     }
 
@@ -2302,6 +3029,381 @@ mod tests {
             !text.contains("0 144 cm"),
             "old bare-h transform must not appear with bleed set"
         );
+    }
+
+    // ── P0#2 — per-artboard / multi-page PDF export ──────────────────────────
+
+    /// A two-region export must produce a 2-page PDF: `/Count 2`, two `/Type
+    /// /Page` objects, and two distinct MediaBoxes.
+    #[test]
+    fn export_pdf_regions_emits_one_page_per_region() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::Fill;
+
+        let mut doc = Document::new("t", 400.0, 200.0);
+        let mut rect = PathNode::new(PathData::rect(0.0, 0.0, 400.0, 200.0));
+        rect.fill = Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0));
+        doc.add_node(
+            SceneNode::new("r", doc.active_layer_id.unwrap(), SceneNodeKind::Path(rect)),
+            None,
+        );
+
+        // Two side-by-side 200×200 regions carved out of the 400×200 canvas.
+        let regions = [
+            PageRegion { origin_x: 0.0, origin_y: 0.0, width_px: 200.0, height_px: 200.0, clip: true },
+            PageRegion { origin_x: 200.0, origin_y: 0.0, width_px: 200.0, height_px: 200.0, clip: true },
+        ];
+        let bytes = export_pdf_regions(&doc, &PdfExportOptions::default(), &regions);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(bytes.starts_with(b"%PDF-1"), "must be a PDF");
+        assert_eq!(
+            text.matches("/Type /Page\n").count()
+                + text.matches("/Type /Page ").count()
+                + text.matches("/Type /Page/").count(),
+            2,
+            "expected exactly 2 page objects:\n{text}"
+        );
+        assert!(text.contains("/Count 2"), "page tree /Count must be 2:\n{text}");
+        // Clip operator (`W n`) must appear for a clipped region.
+        assert!(
+            text.contains(" W\n") || text.contains(" W ") || text.contains("\nW\n"),
+            "clipped region should emit a clip (W) operator"
+        );
+    }
+
+    /// ACCEPT (P0#2): a 3.5×2 in card authored at 300 dpi (1050×600 px) exported
+    /// per-artboard must land a 252×144 pt TrimBox — the finished card size — no
+    /// redesign needed.
+    #[test]
+    fn per_artboard_pdf_trim_is_physical_size_at_300dpi() {
+        let mut doc = Document::new("card", 1050.0, 600.0);
+        doc.dpi = 300.0;
+        doc.bleed_mm = 3.0;
+        let ab = doc.artboards[0].clone();
+        // The default artboard spans the canvas; assert it's 1050×600.
+        assert!((ab.width - 1050.0).abs() < 1e-6 && (ab.height - 600.0).abs() < 1e-6);
+
+        let region = PageRegion::artboard(&ab);
+        let boxes = compute_page_boxes_dims(region.width_px, region.height_px, &doc, &PdfExportOptions::default());
+        let approx = |a: f32, b: f32| (a - b).abs() < 0.05;
+        let trim_w = boxes.trim[2] - boxes.trim[0];
+        let trim_h = boxes.trim[3] - boxes.trim[1];
+        assert!(
+            approx(trim_w, 252.0) && approx(trim_h, 144.0),
+            "300-dpi 1050×600 card must trim to 252×144 pt, got {trim_w}×{trim_h}"
+        );
+
+        // End-to-end: the multi-page exporter produces a valid PDF for it.
+        let bytes = export_pdf_regions(&doc, &PdfExportOptions::default(), &[region]);
+        assert!(bytes.starts_with(b"%PDF-1"));
+    }
+
+    /// The whole-document single-page path must still route through the region
+    /// exporter and stay a valid single page (`/Count 1`).
+    #[test]
+    fn export_pdf_single_page_still_count_one() {
+        let doc = Document::new("t", 100.0, 100.0);
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/Count 1"), "single page must have /Count 1:\n{text}");
+    }
+
+    // ── P1#4 — gradient shading in PDF ───────────────────────────────────────
+
+    /// A blue→purple linear gradient fill must export as a real PDF axial shading
+    /// (ShadingType 2, a stitching + exponential function, and an `sh` paint op) —
+    /// not a flattened first-stop solid.
+    #[test]
+    fn pdf_gradient_exports_axial_shading_not_solid() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::{Fill, FillKind, Gradient, GradientStop};
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let grad = Gradient::linear(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            vec![
+                GradientStop::new(0.0, Color::new(0.1, 0.2, 0.9, 1.0)),
+                GradientStop::new(1.0, Color::new(0.5, 0.1, 0.8, 1.0)),
+            ],
+        );
+        let mut p = PathNode::new(PathData::rect(0.0, 0.0, 100.0, 100.0));
+        p.fill = Fill {
+            kind: FillKind::Gradient(grad),
+            opacity: 1.0,
+            enabled: true,
+        };
+        doc.add_node(
+            SceneNode::new("g", doc.active_layer_id.unwrap(), SceneNodeKind::Path(p)),
+            None,
+        );
+
+        let text = String::from_utf8_lossy(&export_pdf(&doc, &PdfExportOptions::default())).into_owned();
+        assert!(text.contains("/ShadingType 2"), "expected axial shading:\n{text}");
+        assert!(text.contains("/FunctionType 3"), "expected a stitching function");
+        assert!(text.contains("/FunctionType 2"), "expected exponential sub-function(s)");
+        assert!(text.contains("/Coords"), "shading must carry Coords");
+        // `sh` paint operator (clip + shade), and the path is clipped (`W`).
+        assert!(
+            text.contains(" sh\n") || text.contains(" sh ") || text.contains("\nsh\n"),
+            "expected an sh (shade) operator"
+        );
+        // Must NOT collapse to a first-stop solid RGB fill.
+        assert!(!text.contains(" rg\nf"), "gradient should not export as a solid fill");
+    }
+
+    // ── P1#3 — placed raster embeds as an image XObject ──────────────────────
+
+    /// A document with a placed PNG (raster node) must export a PDF containing an
+    /// image XObject and a Do paint operator — the image is present, not dropped.
+    #[test]
+    fn pdf_embeds_placed_raster_as_image_xobject() {
+        use crate::node::RasterNode;
+        use crate::raster::RasterImage;
+
+        let mut doc = Document::new("t", 64.0, 64.0);
+        // A 4×4 opaque red RGBA image.
+        let pixels: Vec<u8> = (0..16).flat_map(|_| [255u8, 0, 0, 255]).collect();
+        let img = RasterImage::from_rgba(4, 4, pixels).unwrap();
+        let node = SceneNode::new(
+            "photo",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Raster(RasterNode::new(img)),
+        );
+        doc.add_node(node, None);
+
+        let text = String::from_utf8_lossy(&export_pdf(&doc, &PdfExportOptions::default())).into_owned();
+        assert!(text.contains("/Subtype /Image"), "expected an image XObject:\n{}", &text[..text.len().min(800)]);
+        assert!(text.contains("/Width 4") && text.contains("/Height 4"), "image dimensions");
+        assert!(text.contains("/DeviceRGB"), "RGB image colour space");
+        assert!(
+            text.contains("/Im0 Do") || text.contains("Do\n"),
+            "expected a Do (paint XObject) operator"
+        );
+    }
+
+    /// A placed raster with alpha (RGB export) must carry an SMask; a CMYK export
+    /// must pre-flatten it to an opaque DeviceCMYK image (no SMask — X-1a forbids
+    /// transparency).
+    #[test]
+    fn pdf_raster_alpha_smask_rgb_and_flattened_cmyk() {
+        use crate::document::ColorMode;
+        use crate::node::RasterNode;
+        use crate::raster::RasterImage;
+
+        let make_doc = || {
+            let mut doc = Document::new("t", 64.0, 64.0);
+            // Semi-transparent green.
+            let pixels: Vec<u8> = (0..16).flat_map(|_| [0u8, 200, 0, 128]).collect();
+            let img = RasterImage::from_rgba(4, 4, pixels).unwrap();
+            doc.add_node(
+                SceneNode::new(
+                    "photo",
+                    doc.active_layer_id.unwrap(),
+                    SceneNodeKind::Raster(RasterNode::new(img)),
+                ),
+                None,
+            );
+            doc
+        };
+
+        let rgb = String::from_utf8_lossy(&export_pdf(&make_doc(), &PdfExportOptions::default()))
+            .into_owned();
+        assert!(rgb.contains("/SMask"), "RGB raster with alpha should carry an SMask");
+        assert!(rgb.contains("/DeviceGray"), "SMask is a DeviceGray image");
+
+        let cmyk_opts = PdfExportOptions { color_mode: ColorMode::Cmyk, ..Default::default() };
+        let cmyk = String::from_utf8_lossy(&export_pdf(&make_doc(), &cmyk_opts)).into_owned();
+        assert!(cmyk.contains("/DeviceCMYK"), "CMYK raster should be DeviceCMYK");
+        assert!(!cmyk.contains("/SMask"), "CMYK/X-1a export must not carry transparency");
+    }
+
+    /// ACCEPT (bug 1): a transparent PNG over a filled rect must export so the rect
+    /// shows through — the exporter emits a soft mask and a transparent pixel maps
+    /// to SMask 0 (fully transparent), NOT an opaque white fill covering the card.
+    #[test]
+    fn pdf_transparent_raster_shows_through_not_white() {
+        use crate::node::{PathNode, RasterNode};
+        use crate::path::PathData;
+        use crate::raster::RasterImage;
+        use crate::style::{Fill, FillKind};
+
+        let mut doc = Document::new("t", 8.0, 8.0);
+        let layer = doc.active_layer_id.unwrap();
+
+        // Dark background rect covering the page.
+        let mut bg = PathNode::new(PathData::rect(0.0, 0.0, 8.0, 8.0));
+        bg.fill = Fill {
+            kind: FillKind::Solid(Color::new(0.05, 0.05, 0.08, 1.0)),
+            opacity: 1.0,
+            enabled: true,
+        };
+        doc.add_node(SceneNode::new("card", layer, SceneNodeKind::Path(bg)), None);
+
+        // A 4×4 RGBA image whose corner is fully transparent (0,0,0,0) and centre
+        // is opaque white — the "avatar over a dark card" repro.
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        for i in 0..16 {
+            let opaque = i == 5; // one interior pixel fully opaque white
+            let p = &mut pixels[i * 4..i * 4 + 4];
+            p.copy_from_slice(&[255, 255, 255, if opaque { 255 } else { 0 }]);
+        }
+        let img = RasterImage::from_rgba(4, 4, pixels.clone()).unwrap();
+        doc.add_node(
+            SceneNode::new("avatar", layer, SceneNodeKind::Raster(RasterNode::new(img.clone()))),
+            None,
+        );
+
+        // Structural: the exported PDF carries a soft mask (not a white fill).
+        let text =
+            String::from_utf8_lossy(&export_pdf(&doc, &PdfExportOptions::default())).into_owned();
+        assert!(text.contains("/SMask"), "transparent raster must export a soft mask");
+        assert!(text.contains("/DeviceGray"), "the soft mask is a DeviceGray image");
+
+        // The soft-mask samples themselves: the transparent corner is 0, an opaque
+        // pixel is 255. (Had the exporter filled transparent white, there'd be no
+        // mask and the corner colour would be opaque.)
+        let pi = build_pdf_image(&img, &PdfExportOptions::default(), 1.0, 72.0, [1.0, 1.0, 1.0]);
+        let alpha = pi.alpha.as_ref().expect("alpha soft mask must be present");
+        let gray = miniz_oxide::inflate::decompress_to_vec_zlib(alpha)
+            .expect("SMask stream is valid zlib");
+        assert_eq!(gray.len(), 16, "one gray sample per pixel");
+        assert_eq!(gray[0], 0, "transparent corner → SMask 0 (shows the card through)");
+        assert_eq!(gray[5], 255, "opaque pixel → SMask 255");
+    }
+
+    /// ACCEPT (bug 3): a card with two placed rasters must export at a small
+    /// fraction of the raw pixel size — downsampled to the DPI cap and compressed
+    /// (DCT for the photographic RGB), no longer the ~11.8 MB uncompressed dump.
+    #[test]
+    fn pdf_embedded_rasters_are_downsampled_and_compressed() {
+        use crate::node::RasterNode;
+        use crate::raster::RasterImage;
+        use crate::transform::Transform;
+
+        // 2×3 in card at 300 dpi; two 1200×1200 photographic rasters placed at
+        // half size (→ 600 dpi effective, above the 300 cap → downsampled).
+        let mut doc = Document::new("card", 600.0, 900.0);
+        doc.dpi = 300.0;
+        let layer = doc.active_layer_id.unwrap();
+
+        let native = 1200u32;
+        let make_photo = || {
+            let mut px = Vec::with_capacity((native * native * 4) as usize);
+            for y in 0..native {
+                for x in 0..native {
+                    // Three de-correlated smooth ramps → >1024 distinct colours, so
+                    // `looks_photographic` picks the DCT path.
+                    px.extend_from_slice(&[
+                        (x.wrapping_mul(2) & 0xff) as u8,
+                        (y.wrapping_mul(2) & 0xff) as u8,
+                        ((x + y).wrapping_mul(2) & 0xff) as u8,
+                        255,
+                    ]);
+                }
+            }
+            RasterImage::from_rgba(native, native, px).unwrap()
+        };
+
+        for ty in [0.0_f64, 300.0] {
+            let mut node = SceneNode::new(
+                "photo",
+                layer,
+                SceneNodeKind::Raster(RasterNode::new(make_photo())),
+            );
+            // Scale 0.5 (half the native pixels on the page) and stack vertically.
+            node.transform = Transform::new(0.5, 0.0, 0.0, 0.5, 0.0, ty);
+            doc.add_node(node, None);
+        }
+
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        // Raw uncompressed color for two 1200² rasters ≈ 8.2 MB (the old dump).
+        let raw = 2 * (native as usize) * (native as usize) * 3;
+        assert!(
+            bytes.len() < raw / 8,
+            "expected a small fraction of the {raw}-byte raw size, got {}",
+            bytes.len()
+        );
+        // Absolute sanity: comfortably under 1 MB for this card.
+        assert!(
+            bytes.len() < 1_000_000,
+            "two-raster card should export well under 1 MB, got {} bytes",
+            bytes.len()
+        );
+        // The downsample cap: XObject width is 600 (1200 × 0.5), not the native 1200.
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("/Width 600"), "raster should be downsampled to 600 px wide");
+        assert!(
+            text.contains("/DCTDecode"),
+            "photographic RGB should compress with DCT/JPEG"
+        );
+    }
+
+    /// ACCEPT (P0#2 + P1): write a 2-artboard CMYK PDF/X-1a card batch (with a
+    /// gradient fill + a placed raster) to the temp dir for offline preflight.
+    /// Gated by `ARTBOARD_ACCEPT=1` so CI stays fast.
+    ///   ARTBOARD_ACCEPT=1 cargo test -p photonic-core --lib per_artboard_cmyk_accept -- --nocapture
+    #[test]
+    fn per_artboard_cmyk_accept_write_to_tmp() {
+        if std::env::var("ARTBOARD_ACCEPT").as_deref() != Ok("1") {
+            return;
+        }
+        use crate::document::{ColorMode, Artboard};
+        use crate::node::{PathNode, RasterNode};
+        use crate::path::PathData;
+        use crate::raster::RasterImage;
+        use crate::style::{Fill, FillKind, Gradient, GradientStop};
+
+        // 3.5×2 in card at 300 dpi ⇒ 1050×600 px, plus a second (back) artboard.
+        let mut doc = Document::new("cards", 2100.0, 600.0);
+        doc.dpi = 300.0;
+        doc.bleed_mm = 3.0;
+        doc.color_mode = ColorMode::Cmyk;
+        doc.artboards = vec![
+            Artboard::new("front", 0.0, 0.0, 1050.0, 600.0),
+            Artboard::new("back", 1050.0, 0.0, 1050.0, 600.0),
+        ];
+        doc.active_artboard = Some(doc.artboards[0].id);
+        let layer = doc.active_layer_id.unwrap();
+
+        // Gradient panel on the front.
+        let grad = Gradient::linear(
+            0.0, 0.0, 1050.0, 0.0,
+            vec![
+                GradientStop::new(0.0, Color::new(0.05, 0.12, 0.30, 1.0)),
+                GradientStop::new(1.0, Color::new(0.35, 0.10, 0.55, 1.0)),
+            ],
+        );
+        let mut panel = PathNode::new(PathData::rect(0.0, 0.0, 1050.0, 600.0));
+        panel.fill = Fill { kind: FillKind::Gradient(grad), opacity: 1.0, enabled: true };
+        doc.add_node(SceneNode::new("panel", layer, SceneNodeKind::Path(panel)), None);
+
+        // A placed raster (opaque) on the front.
+        let pixels: Vec<u8> = (0..(64 * 64)).flat_map(|i| {
+            let v = (i % 255) as u8;
+            [v, 200, 255 - v, 255]
+        }).collect();
+        let img = RasterImage::from_rgba(64, 64, pixels).unwrap();
+        let mut rnode = SceneNode::new("logo", layer, SceneNodeKind::Raster(RasterNode::new(img)));
+        rnode.transform = crate::transform::Transform::new(4.0, 0.0, 0.0, 4.0, 60.0, 60.0);
+        doc.add_node(rnode, None);
+
+        let opts = PdfExportOptions {
+            background: Some(Color::new(0.05, 0.12, 0.30, 1.0)),
+            outline_text: false,
+            marks: true,
+            color_mode: ColorMode::Cmyk,
+            icc_profile: None,
+        };
+        let regions: Vec<PageRegion> = doc.artboards.iter().map(PageRegion::artboard).collect();
+        let bytes = export_pdf_regions(&doc, &opts, &regions);
+        let path = std::env::temp_dir().join("photonic_artboard_batch.pdf");
+        std::fs::write(&path, &bytes).unwrap();
+        println!("Wrote {} ({} bytes, {} pages)", path.display(), bytes.len(), regions.len());
     }
 
     /// ACCEPT evidence: write business-card PDFs (with and without marks) to

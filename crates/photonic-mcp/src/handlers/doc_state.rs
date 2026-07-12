@@ -14,6 +14,7 @@ use crate::protocol::{
     SetArtboardMarginsArgs,
     SetDocumentBleedArgs,
     SetDocumentColorModeArgs,
+    SetDocumentDpiArgs,
     ToolResult,
     UndoRedoArgs,
 };
@@ -205,6 +206,14 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
         "artboard_count": artboard_summaries.len(),
         "artboards": artboard_summaries,
         "active_artboard": doc.active_artboard,
+        // Print-production properties (honored on PDF/raster export).
+        "dpi": doc.dpi,
+        "bleed_mm": doc.bleed_mm,
+        "slug_mm": doc.slug_mm,
+        "color_mode": match doc.color_mode {
+            photonic_core::document::ColorMode::Rgb => "rgb",
+            photonic_core::document::ColorMode::Cmyk => "cmyk",
+        },
         "nodes": {
             "total": total,
             "path": path_count,
@@ -868,6 +877,61 @@ pub async fn get_document_color_mode(state: &AppState) -> ToolResult {
     };
     ToolResult::text(format!("Document color mode: '{mode_label}'."))
         .with_data(json!({ "color_mode": mode_label }))
+}
+
+
+/// Set the document resolution (DPI). Controls the physical size the document's
+/// pixel dimensions map to on export: physical size = px / dpi × 72 pt. Presets
+/// set this (e.g. 300 for print); the default is 72 (px ≡ pt).
+pub async fn set_document_dpi(state: &AppState, args: SetDocumentDpiArgs) -> ToolResult {
+    tracing::debug!("tool: set_document_dpi");
+    let dpi = match args.dpi {
+        Some(d) if d > 0.0 && d.is_finite() => d,
+        Some(d) => return ToolResult::error(format!("dpi must be a positive number, got {d}")),
+        None => return ToolResult::error("dpi is required"),
+    };
+    let mut doc = state.document.lock().await;
+    doc.dpi = dpi;
+    // Physical page size at this DPI (px → pt via ×72/dpi), reported for clarity.
+    let w_pt = doc.width * 72.0 / dpi;
+    let h_pt = doc.height * 72.0 / dpi;
+    ToolResult::text(format!(
+        "Document DPI set to {dpi} — {}×{} px is {:.2}×{:.2} pt ({:.3}×{:.3} in) on export",
+        doc.width as u32,
+        doc.height as u32,
+        w_pt,
+        h_pt,
+        w_pt / 72.0,
+        h_pt / 72.0,
+    ))
+    .with_data(json!({
+        "dpi": dpi,
+        "page_pt": { "width": w_pt, "height": h_pt },
+        "page_in": { "width": w_pt / 72.0, "height": h_pt / 72.0 },
+    }))
+}
+
+/// Return the current document DPI plus the physical page size it implies.
+pub async fn get_document_dpi(state: &AppState) -> ToolResult {
+    tracing::debug!("tool: get_document_dpi");
+    let doc = state.document.lock().await;
+    let w_pt = doc.width * 72.0 / doc.dpi;
+    let h_pt = doc.height * 72.0 / doc.dpi;
+    ToolResult::text(format!(
+        "Document DPI: {} — {}×{} px is {:.2}×{:.2} pt ({:.3}×{:.3} in) on export",
+        doc.dpi,
+        doc.width as u32,
+        doc.height as u32,
+        w_pt,
+        h_pt,
+        w_pt / 72.0,
+        h_pt / 72.0,
+    ))
+    .with_data(json!({
+        "dpi": doc.dpi,
+        "page_pt": { "width": w_pt, "height": h_pt },
+        "page_in": { "width": w_pt / 72.0, "height": h_pt / 72.0 },
+    }))
 }
 
 

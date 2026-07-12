@@ -3860,6 +3860,7 @@ dependencies = [
  "geo",
  "image",
  "kurbo",
+ "miniz_oxide",
  "moxcms",
  "pdf-writer",
  "peniko 0.3.2",

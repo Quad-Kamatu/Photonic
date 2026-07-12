@@ -133,6 +133,23 @@ pub struct ExportPdfArgs {
     /// CMYK ICC profile path (defaults to the bundled FOGRA39 when cmyk).
     #[serde(default)]
     pub profile: Option<String>,
+    /// Per-artboard / multi-page export. Specific artboards, each a UUID, an
+    /// exact name, or a 1-based index string ("1", "2", …). One clipped PDF page
+    /// per artboard, in the given order. Omit (with `all`/`range` unset) to export
+    /// the whole canvas as a single page.
+    #[serde(default)]
+    pub artboards: Option<Vec<String>>,
+    /// Export every artboard, one page each (overrides `range`/`artboards`).
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// Export a 1-based inclusive artboard index range `[start, end]`.
+    #[serde(default)]
+    pub range: Option<[usize; 2]>,
+    /// When exporting multiple artboards, write one file PER artboard instead of a
+    /// single multi-page PDF. Requires `path` to contain a `{name}` or `{index}`
+    /// placeholder (or an extension, before which `-{index}` is inserted).
+    #[serde(default)]
+    pub separate_files: Option<bool>,
 }
 
 /// Arguments for `export_selection_as_svg` tool

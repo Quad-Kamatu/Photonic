@@ -19,6 +19,7 @@ roxmltree = { workspace = true }
 image = { workspace = true }
 base64 = { workspace = true }
 pdf-writer = { workspace = true }
+miniz_oxide = { workspace = true }
 moxcms = "0.8"
 qrcodegen = "1.8"
 tracing = { workspace = true }

@@ -11,6 +11,56 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-artboard / multi-page PDF export.** `export_pdf` now takes an artboard
+  selector — `artboards` (UUIDs / names / 1-based indices), `all`, or `range` —
+  and emits one clipped PDF page per artboard, each with its own
+  Media/Trim/Bleed boxes and marks. A single multi-page PDF by default, or one
+  file per artboard with `separate_files: true` (a `path` template with
+  `{name}`/`{index}`). This is the native card-batch path: a 2-artboard doc
+  exports front + back cards, each a single 3.5×2 in trim, each passing
+  PDF/X-1a preflight. New core API: `export_pdf_regions` + `PageRegion`.
+- **Raster images in PDF.** Placed bitmaps (avatars, photos, rasterized logos)
+  now embed as PDF image XObjects instead of being dropped. RGB export keeps an
+  8-bit soft mask for true alpha; CMYK/X-1a export pre-flattens to opaque
+  DeviceCMYK (transparency is disallowed in X-1a).
+- **Gradient shadings in PDF.** Linear and radial gradient fills export as real
+  PDF axial/radial shadings (ShadingType 2/3 with stitching + exponential
+  functions) instead of flattening to the first stop — a true gradient, in RGB
+  or DeviceCMYK.
+- **Document DPI is now a first-class, honored property.** New MCP tools
+  `set_document_dpi` / `get_document_dpi`; `get_document_info` now reports `dpi`,
+  `bleed_mm`, `slug_mm`, and `color_mode`. Export physical size = pixels / dpi ×
+  72 pt, so a 1050×600 px card at 300 DPI exports at 252×144 pt (3.5×2 in).
+
+### Fixed
+
+- **Transparent PNGs no longer export as white boxes in PDF.** A placed RGBA
+  raster with transparent regions (e.g. an avatar over a dark card) now carries
+  its true alpha as a PDF soft mask (`/SMask`), so transparent pixels show the
+  artwork beneath instead of an opaque white rectangle covering it.
+- **Center/right-aligned text now exports at the position it renders live.** The
+  outline path shifted center runs left by half their width (and right runs by a
+  full width), so exported centered text landed left of where the on-canvas and
+  raster renderers draw it. The live renderer anchors flat text at the node
+  origin regardless of alignment; the exporter now matches it pixel-for-pixel.
+- **Embedded rasters are downsampled and compressed.** Placed bitmaps were
+  written as raw uncompressed samples, so a single card with two photos ballooned
+  to ~11.8 MB. Images are now downsampled to at most 300 DPI at their placed size
+  and compressed (DCT/JPEG for photographic RGB, Flate otherwise), preserving
+  transparency through the soft mask — the same card now exports at a small
+  fraction of that size with no visible quality loss. CMYK/X-1a stays lossless
+  Flate with no transparency, so print preflight still passes. Applies to every
+  export path, including per-artboard/clipped pages.
+- **CMYK/X-1a raster transparency now flattens over the real backdrop.** X-1a
+  can't carry transparency, so a placed avatar's alpha must be baked in — but it
+  was baked over hard-coded white, punching a white rectangle through a dark card.
+  Transparent pixels now composite over the artwork actually beneath the image
+  (the topmost opaque solid fill covering it, e.g. the `#0b0b12` card), so the
+  portrait blends into the card with no white box. RGB export keeps its true soft
+  mask and is unaffected.
+
 ## [0.2.4] - 2026-07-11
 
 ### Added

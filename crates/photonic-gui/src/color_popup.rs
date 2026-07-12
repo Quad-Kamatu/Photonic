@@ -694,7 +694,7 @@ fn contrast_and_cvd(ui: &mut Ui, rgb: [f32; 3], reference: Option<[f32; 3]>) {
             } else if ok_aa {
                 "AA"
             } else {
-                "✗"
+                egui_phosphor::regular::X
             };
             ui.label(
                 egui::RichText::new(format!("{label} {cr:.1} {tag}"))
@@ -706,8 +706,8 @@ fn contrast_and_cvd(ui: &mut Ui, rgb: [f32; 3], reference: Option<[f32; 3]>) {
         match reference {
             Some(r) => show(ui, "vs bg", r),
             None => {
-                show(ui, "▲", [0.0; 3]);
-                show(ui, "△", [1.0; 3]);
+                show(ui, "vs blk", [0.0; 3]);
+                show(ui, "vs wht", [1.0; 3]);
             }
         }
     });

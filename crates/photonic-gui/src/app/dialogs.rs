@@ -67,7 +67,7 @@ impl PhotonicApp {
 
     /// In-editor File ▸ New modal — draws the shared new-document form in a centered
     /// window. On commit it opens the new document in a **new tab** (leaving other
-    /// open documents untouched), and closes on Escape, the window's ✕, or after
+    /// open documents untouched), and closes on Escape, the window's close button, or after
     /// creating. Returns `true` when a new document was created.
     pub(crate) fn draw_new_document_modal(
         &mut self,
