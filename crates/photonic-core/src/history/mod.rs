@@ -2274,6 +2274,16 @@ pub enum Command {
         new: Vec<crate::Artboard>,
     },
 
+    /// Replace the persisted document state in one self-contained undo step.
+    ///
+    /// This is the deliberate fallback for integrations that make arbitrary
+    /// document edits without a smaller, purpose-built command variant.
+    ReplaceDocument {
+        old: Document,
+        new: Document,
+        description: String,
+    },
+
     /// Replace the entire variable-width profile list (used by the Width tool
     /// when editing a profile's samples on canvas). Profiles are small, so the
     /// whole list is snapshotted for self-contained undo.
@@ -2426,6 +2436,10 @@ impl Command {
             Command::UpdateRasterMeta { old, new } => {
                 BASE + old.mem_estimate() + new.mem_estimate()
             }
+            Command::ReplaceDocument { old, new, .. } => {
+                BASE + old.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
+                    + new.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
+            }
             Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
             _ => BASE,
         }
@@ -2483,6 +2497,7 @@ impl Command {
             Command::ReparentNode { .. } => "Reparent node".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
             Command::SetArtboards { .. } => "Update artboards".to_string(),
+            Command::ReplaceDocument { description, .. } => description.clone(),
             Command::SetWidthProfiles { .. } => "Edit width profile".to_string(),
             Command::ResizeCanvas {
                 new_width,
@@ -2807,6 +2822,10 @@ impl Command {
                 }
             }
 
+            Command::ReplaceDocument { new, .. } => {
+                *doc = new.clone();
+            }
+
             Command::SetWidthProfiles { new, .. } => {
                 doc.width_profiles = new.clone();
             }
@@ -3108,6 +3127,12 @@ impl Command {
             Command::SetArtboards { old, new } => Some(Command::SetArtboards {
                 old: new.clone(),
                 new: old.clone(),
+            }),
+
+            Command::ReplaceDocument { old, new, description } => Some(Command::ReplaceDocument {
+                old: new.clone(),
+                new: old.clone(),
+                description: description.clone(),
             }),
 
             Command::SetWidthProfiles { old, new } => Some(Command::SetWidthProfiles {

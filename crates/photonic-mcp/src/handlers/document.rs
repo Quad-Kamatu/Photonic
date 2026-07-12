@@ -1,9 +1,11 @@
 use crate::protocol::{
     PlayActionArgs,
+    SaveDocumentArgs,
     ToolResult,
 };
 use crate::server::AppState;
 use serde_json::json;
+use std::path::PathBuf;
 
 pub use crate::handlers::doc_state::{
     get_document_state, get_document_info, undo, redo, list_checkpoints, restore_checkpoint, diff_checkpoints, list_history, jump_to_history, get_canvas_overview, resize_canvas, get_document_template, apply_document_template, set_document_bleed, get_document_bleed, set_document_color_mode, get_document_color_mode, set_document_dpi, get_document_dpi, set_artboard_margins, get_artboard_margins, add_construction_line, add_dimension, list_dimensions, remove_dimension, fit_to_margins,
@@ -26,6 +28,58 @@ pub use crate::handlers::doc_data::{
 pub use crate::handlers::doc_styles_symbols::{
     define_graphic_style, list_graphic_styles, apply_graphic_style, delete_graphic_style, define_width_profile, list_width_profiles, apply_width_profile, delete_width_profile, define_symbol, list_symbols, place_symbol, break_link_to_symbol, delete_symbol, spray_symbol_instances, load_symbol_library,
 };
+
+/// Save the current document and persistent history in the same native
+/// `.photon` container used by the GUI's File → Save command.
+pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResult {
+    tracing::debug!("tool: save_document");
+    let requested_path = match args.path {
+        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
+        Some(_) => return ToolResult::error("path must not be empty"),
+        None => match state.document_path.lock() {
+            Ok(path) => match path.clone() {
+                Some(path) => path,
+                None => return ToolResult::error(
+                    "This document has no current path; call save_document with a path.",
+                ),
+            },
+            Err(_) => return ToolResult::error("Could not read the current document path"),
+        },
+    };
+    let path = if requested_path.is_absolute() {
+        requested_path
+    } else {
+        match std::env::current_dir() {
+            Ok(dir) => dir.join(requested_path),
+            Err(error) => return ToolResult::error(format!("Could not resolve save path: {error}")),
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return ToolResult::error(format!("Could not create save directory: {error}"));
+        }
+    }
+    let (json, bytes) = {
+        let doc = state.document.lock().await;
+        let mut history = state.history.lock().await;
+        history.enforce_size();
+        match photonic_core::save_photon(&doc, Some(&history.snapshot_state())) {
+            Ok(json) => {
+                let bytes = json.len();
+                (json, bytes)
+            }
+            Err(error) => return ToolResult::error(format!("Could not serialize document: {error}")),
+        }
+    };
+    if let Err(error) = std::fs::write(&path, json) {
+        return ToolResult::error(format!("Could not save document: {error}"));
+    }
+    if let Ok(mut current_path) = state.document_path.lock() {
+        *current_path = Some(path.clone());
+    }
+    ToolResult::text(format!("Saved {}", path.display()))
+        .with_data(json!({ "path": path, "bytes": bytes }))
+}
 
 
 

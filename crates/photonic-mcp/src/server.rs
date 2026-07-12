@@ -9,10 +9,9 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use photonic_core::{
-    document::Document, history::CommandHistory, AuditLog,
-};
+use photonic_core::{document::Document, history::CommandHistory, AuditLog};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{oneshot, Mutex};
@@ -63,6 +62,8 @@ impl ToolOutput {
 pub struct AppState {
     pub document: Arc<Mutex<Document>>,
     pub history: Arc<Mutex<CommandHistory>>,
+    /// Last native document path used by MCP save/save-as.
+    pub document_path: Arc<StdMutex<Option<PathBuf>>>,
     /// Sends screenshot requests to the render thread.
     /// Uses std::sync::mpsc so the render thread can poll synchronously.
     pub capture_tx: Arc<StdMutex<std::sync::mpsc::Sender<oneshot::Sender<Vec<u8>>>>>,
@@ -95,6 +96,7 @@ impl McpServer {
             state: AppState {
                 document,
                 history,
+                document_path: Arc::new(StdMutex::new(None)),
                 capture_tx: Arc::new(StdMutex::new(capture_tx)),
                 config,
                 audit_log,
@@ -102,6 +104,13 @@ impl McpServer {
             },
             running,
         }
+    }
+
+    /// Share the host application's current native document path with MCP so a
+    /// pathless `save_document` has the same save target as an opened file.
+    pub fn with_document_path(mut self, document_path: Arc<StdMutex<Option<PathBuf>>>) -> Self {
+        self.state.document_path = document_path;
+        self
     }
 
     /// Start listening. This blocks the current task.

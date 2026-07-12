@@ -148,6 +148,7 @@ fn main() -> Result<()> {
 
     // Audit log shared between the MCP server thread and the GUI Audit panel.
     let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::new()));
+    let mcp_document_path = Arc::new(std::sync::Mutex::new(args.file.clone()));
 
     let mcp_config = McpServerConfig {
         port: args.mcp_port,
@@ -167,7 +168,8 @@ fn main() -> Result<()> {
             mcp_config,
             Arc::new(AtomicBool::new(false)),
             audit_log,
-        );
+        )
+        .with_document_path(Arc::clone(&mcp_document_path));
         rt.block_on(mcp_server.run())?;
         return Ok(());
     }
@@ -186,6 +188,7 @@ fn main() -> Result<()> {
         mcp_config.clone(),
         Arc::clone(&mcp_running),
         Arc::clone(&audit_log),
+        Arc::clone(&mcp_document_path),
     );
 
     let event_loop = EventLoop::new()?;
@@ -198,6 +201,7 @@ fn main() -> Result<()> {
         mcp_restart_requested,
         mcp_capture_tx: capture_tx,
         mcp_config,
+        mcp_document_path,
         capture_rx: Some(capture_rx),
         state: None,
         show_welcome: args.file.is_none(),
@@ -256,6 +260,7 @@ struct PhotonicWinitApp {
     /// Spawn ingredients retained so the server can be re-created on restart.
     mcp_capture_tx: std::sync::mpsc::Sender<oneshot::Sender<Vec<u8>>>,
     mcp_config: McpServerConfig,
+    mcp_document_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     capture_rx: Option<std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>>,
     state: Option<RenderState>,
     show_welcome: bool,
@@ -362,13 +367,15 @@ fn spawn_mcp_server(
     config: McpServerConfig,
     running_flag: Arc<AtomicBool>,
     audit: Arc<std::sync::Mutex<AuditLog>>,
+    document_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
 ) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
-        let server = McpServer::new(document, history, capture_tx, config, running_flag, audit);
+        let server = McpServer::new(document, history, capture_tx, config, running_flag, audit)
+            .with_document_path(document_path);
         if let Err(e) = rt.block_on(server.run()) {
             tracing::error!("MCP server error: {}", e);
         }
@@ -391,6 +398,7 @@ impl PhotonicWinitApp {
                 self.mcp_config.clone(),
                 Arc::clone(&self.mcp_running),
                 Arc::clone(&self.audit_log),
+                Arc::clone(&self.mcp_document_path),
             );
         }
     }
@@ -601,7 +609,18 @@ impl PhotonicWinitApp {
         // Honor a pending MCP restart request from the GUI modal (#170) before we
         // take a mutable borrow of `self.state` for the frame.
         self.maybe_restart_mcp();
+        let mcp_document_path = Arc::clone(&self.mcp_document_path);
         let Some(state) = &mut self.state else { return };
+
+        // Keep GUI File → Save and MCP save_document pointed at the same native
+        // file. MCP writes are picked up before drawing; GUI path changes are
+        // published after drawing below.
+        if let Ok(path) = mcp_document_path.lock() {
+            if state.gui.current_file != *path {
+                state.gui.current_file = path.clone();
+            }
+        }
+        let gui_path_before = state.gui.current_file.clone();
 
         // 1. Build document geometry + push camera
         let (verts, idxs) = state.renderer.update();
@@ -653,6 +672,12 @@ impl PhotonicWinitApp {
             }
         });
         // doc lock released here ↑
+
+        if state.gui.current_file != gui_path_before {
+            if let Ok(mut path) = mcp_document_path.lock() {
+                *path = state.gui.current_file.clone();
+            }
+        }
 
         // Flush debounced checkpoint: if a user action happened ≥30 s ago with
         // no further actions since, write the snapshot now.

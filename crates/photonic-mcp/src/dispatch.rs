@@ -1,7 +1,7 @@
 use crate::handlers;
 use crate::protocol::*;
 use crate::server::{AppState, ToolOutput};
-use photonic_core::{audit_timestamp, AuditEntry};
+use photonic_core::{audit_timestamp, AuditEntry, Command, Document};
 use serde_json::Value;
 
 /// Notify the checkpoint system that a mutation has occurred.
@@ -14,14 +14,107 @@ async fn post_mutation(state: &AppState, tool_name: &str) {
         .schedule_mcp_checkpoint(tool_name);
 }
 
+/// Persisted MCP edits which predate purpose-built `Command` variants. Their
+/// handlers still mutate `Document` directly, so the dispatcher wraps the
+/// before/after document states in one discrete history entry. Tools that
+/// already use `execute_discrete` are intentionally absent: their more compact
+/// domain command remains the canonical history record.
+fn needs_document_snapshot(name: &str) -> bool {
+    matches!(
+        name,
+        "add_annotation"
+            | "resolve_annotation"
+            | "define_grammar_rule"
+            | "delete_grammar_rule"
+            | "define_action"
+            | "delete_action"
+            | "register_event_trigger"
+            | "remove_event_trigger"
+            | "save_workspace"
+            | "delete_workspace"
+            | "set_constraint"
+            | "remove_constraint"
+            | "define_variable"
+            | "set_variable_value"
+            | "delete_variable"
+            | "add_export_profile"
+            | "remove_export_profile"
+            | "import_design_tokens"
+            | "add_construction_line"
+            | "set_document_bleed"
+            | "set_document_color_mode"
+            | "set_document_dpi"
+            | "set_artboard_margins"
+            | "add_dimension"
+            | "remove_dimension"
+            | "define_graphic_style"
+            | "delete_graphic_style"
+            | "define_width_profile"
+            | "delete_width_profile"
+            | "define_symbol"
+            | "delete_symbol"
+            | "add_color_swatch"
+            | "delete_color_swatch"
+            | "load_swatch_library"
+            | "define_pattern"
+            | "delete_pattern"
+            | "save_gradient_swatch"
+            | "delete_gradient_swatch"
+            | "define_spot_color"
+            | "delete_spot_color"
+            | "pin_object_guides"
+            | "create_character_style"
+            | "delete_character_style"
+            | "create_paragraph_style"
+            | "delete_paragraph_style"
+    )
+}
+
+fn document_changed(before: &Document, after: &Document) -> bool {
+    serde_json::to_value(before).ok() != serde_json::to_value(after).ok()
+}
+
 pub(crate) async fn dispatch_tool(
     state: &AppState,
     name: &str,
     args: Value,
 ) -> Result<ToolResult, String> {
     let start = std::time::Instant::now();
+    let snapshot_before = if needs_document_snapshot(name) {
+        Some(state.document.lock().await.clone())
+    } else {
+        None
+    };
+    let history_before = if snapshot_before.is_some() {
+        Some(state.history.lock().await.current_node())
+    } else {
+        None
+    };
     let output = dispatch_tool_inner(state, name, args.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
+
+    // Direct handlers leave the history head unchanged. Turn their completed
+    // before/after state into exactly one discrete undo step; command-based
+    // handlers have already advanced the head and are never double-recorded.
+    if let (Some(before), Some(history_before), Ok(tool_output)) =
+        (&snapshot_before, history_before, &output)
+    {
+        if tool_output.result.is_error != Some(true) {
+            let mut doc = state.document.lock().await;
+            let mut history = state.history.lock().await;
+            if history.current_node() == history_before && document_changed(before, &doc) {
+                let after = doc.clone();
+                history.execute_discrete(
+                    Command::ReplaceDocument {
+                        old: before.clone(),
+                        new: after,
+                        description: format!("MCP: {name}"),
+                    },
+                    &mut doc,
+                );
+            }
+        }
+    }
 
     // Record in the audit log.
     let (result_summary, is_error) = match &output {
@@ -846,6 +939,12 @@ pub(crate) async fn dispatch_tool_inner(
             let a: GetDocumentStateArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(
                 handlers::document::get_document_state(state, a).await,
+            ))
+        }
+        "save_document" => {
+            let a: SaveDocumentArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::document::save_document(state, a).await,
             ))
         }
         "undo" => {
@@ -2040,5 +2139,146 @@ pub(crate) async fn dispatch_tool_inner(
             ))
         }
         _ => Err(format!("Unknown tool: {}", name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::clipboard::new_clipboard_ring;
+    use crate::server::McpServerConfig;
+    use photonic_core::{
+        node::{PathNode, TextNode},
+        AuditLog, Document, PathData, SceneNode, SceneNodeKind,
+    };
+    use serde_json::json;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("history test", 200.0, 100.0))),
+            history: Arc::new(Mutex::new(photonic_core::CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(new_clipboard_ring()),
+        }
+    }
+
+    async fn undo(state: &AppState) {
+        let result = dispatch_tool(state, "undo", json!({})).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn mcp_text_delete_and_artboard_edits_undo_to_their_prior_states() {
+        let state = test_state();
+        let (text_id, path_id, artboard_id, original_artboard_name) = {
+            let mut doc = state.document.lock().await;
+            let layer_id = doc.active_layer_id.expect("default layer");
+            let text = SceneNode::new(
+                "Greeting",
+                layer_id,
+                SceneNodeKind::Text(TextNode::new("before")),
+            );
+            let text_id = text.id;
+            doc.add_node(text, Some(layer_id));
+            let path = SceneNode::new(
+                "Delete me",
+                layer_id,
+                SceneNodeKind::Path(PathNode::new(PathData::rect(1.0, 2.0, 3.0, 4.0))),
+            );
+            let path_id = path.id;
+            doc.add_node(path, Some(layer_id));
+            let artboard = doc.artboards.first().unwrap();
+            (text_id, path_id, artboard.id, artboard.name.clone())
+        };
+
+        let result = dispatch_tool(
+            &state,
+            "find_replace_text",
+            json!({ "find": "before", "replace": "after" }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        undo(&state).await;
+        {
+            let doc = state.document.lock().await;
+            let SceneNodeKind::Text(text) = &doc.nodes[&text_id].kind else {
+                panic!("text node");
+            };
+            assert_eq!(text.content, "before");
+        }
+
+        let result = dispatch_tool(&state, "delete_nodes", json!({ "node_ids": [path_id] }))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(!state.document.lock().await.nodes.contains_key(&path_id));
+        undo(&state).await;
+        assert!(state.document.lock().await.nodes.contains_key(&path_id));
+
+        let result = dispatch_tool(
+            &state,
+            "update_artboard",
+            json!({ "artboard_id": artboard_id, "name": "Changed" }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        undo(&state).await;
+        let doc = state.document.lock().await;
+        assert_eq!(doc.artboards.first().unwrap().name, original_artboard_name);
+    }
+
+    #[tokio::test]
+    async fn direct_document_mutator_uses_snapshot_history_fallback() {
+        let state = test_state();
+        let result = dispatch_tool(&state, "set_document_bleed", json!({ "bleed_mm": 3.0 }))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+        undo(&state).await;
+        assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[tokio::test]
+    async fn save_document_writes_native_file_round_trips_and_remembers_path() {
+        let state = test_state();
+        assert!(crate::schema_gen::tool_list().as_array().unwrap().iter().any(|tool| {
+            tool.get("name").and_then(|name| name.as_str()) == Some("save_document")
+        }));
+        let expected_counts = {
+            let mut doc = state.document.lock().await;
+            let layer_id = doc.active_layer_id.expect("default layer");
+            doc.add_node(
+                SceneNode::new(
+                    "Tiny rectangle",
+                    layer_id,
+                    SceneNodeKind::Path(PathNode::new(PathData::rect(1.0, 2.0, 3.0, 4.0))),
+                ),
+                Some(layer_id),
+            );
+            (doc.artboards.len(), doc.nodes.len())
+        };
+        let base = std::env::temp_dir().join(format!("photonic-save-{}", uuid::Uuid::new_v4()));
+        let path = base.join("nested").join("tiny.photon");
+
+        let result = dispatch_tool(&state, "save_document", json!({ "path": path })).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(path.exists(), "save_document must create its parent directories");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let (loaded, _) = photonic_core::load_photon(&contents).unwrap();
+        assert_eq!((loaded.artboards.len(), loaded.nodes.len()), expected_counts);
+        assert_eq!(state.document_path.lock().unwrap().as_deref(), Some(path.as_path()));
+
+        let repeat = dispatch_tool(&state, "save_document", json!({})).await.unwrap();
+        assert_ne!(repeat.is_error, Some(true), "pathless save should use the remembered path");
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

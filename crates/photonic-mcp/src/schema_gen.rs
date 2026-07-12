@@ -1620,6 +1620,17 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "save_document",
+            "description": "Save the current in-memory document in Photonic's native .photon format, including its undo/history tree. Pass path to save-as and make it the current MCP document path; omit path to save to that current path. Parent directories are created automatically. Returns the absolute path and bytes written.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional destination path for save-as. Required when the document has no current path." }
+                },
+                "required": []
+            }
+        },
+        {
             "name": "create_layer",
             "description": "Create a new layer in the document",
             "inputSchema": {

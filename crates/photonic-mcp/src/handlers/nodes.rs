@@ -1119,6 +1119,7 @@ mod create_shape_color_tests {
         AppState {
             document: Arc::new(Mutex::new(Document::new("t", 100.0, 100.0))),
             history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
             capture_tx: Arc::new(StdMutex::new(tx)),
             config: McpServerConfig::default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),

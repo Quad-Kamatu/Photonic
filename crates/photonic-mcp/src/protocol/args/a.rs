@@ -1,8 +1,16 @@
+use super::*;
 use serde::Deserialize;
 use uuid::Uuid;
-use super::*;
 
 // ─── MCP Tool Call args/results ───────────────────────────────────────────────
+
+/// Arguments for `save_document`.
+#[derive(Debug, Deserialize, Default)]
+pub struct SaveDocumentArgs {
+    /// Native `.photon` destination. Omit to save to the current MCP document path.
+    #[serde(default)]
+    pub path: Option<String>,
+}
 
 /// Arguments for `copy_nodes_to_clipboard` tool
 #[derive(Debug, Deserialize)]
@@ -1313,4 +1321,3 @@ pub struct CreateShapeArgs {
 }
 
 pub use photonic_core::PrimitiveKind as ShapeType;
-
