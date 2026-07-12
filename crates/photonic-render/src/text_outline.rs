@@ -10,6 +10,7 @@
 //! `photonic_core::export::export_pdf`, so the core export code never needs to know
 //! about glyphon.
 
+use glyphon::cosmic_text::fontdb;
 use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as GlyphonStyle, Weight};
 use kurbo::{Affine, BezPath};
 use photonic_core::{
@@ -53,6 +54,136 @@ impl OutlineBuilder for BezOutlineBuilder {
     }
 }
 
+// ─── Font resolution ───────────────────────────────────────────────────────────
+
+/// The concrete font face glyphon actually resolved for a text node's request —
+/// i.e. the face whose glyph outlines the PDF/raster export will embed.
+///
+/// The export path must embed the outlines of the *document's* font. When the
+/// requested family/weight cannot be found, glyphon silently falls back to a
+/// default face, and the exported glyphs then no longer match what the live
+/// renderer draws. This struct lets callers (and tests) verify the resolved face
+/// equals the requested family + weight, and drives the substitution warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFace {
+    /// fontdb id of the resolved face.
+    pub id: fontdb::ID,
+    /// Primary family name of the resolved face (as recorded in the font DB).
+    pub family: String,
+    /// Weight (100–900) of the resolved face.
+    pub weight: u16,
+    /// Whether the resolved face is italic/oblique (non-normal style).
+    pub italic: bool,
+}
+
+/// CSS generic family keywords. When a text node's family is one of these there
+/// is no "correct" concrete face, so resolving to *any* installed family is a
+/// legitimate match — not a silent substitution worth warning about.
+fn is_generic_family(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "sans-serif"
+            | "serif"
+            | "monospace"
+            | "cursive"
+            | "fantasy"
+            | "system-ui"
+            | "ui-sans-serif"
+            | "ui-serif"
+            | "ui-monospace"
+            | "sans"
+            | "mono"
+            | "emoji"
+            | "math"
+    )
+}
+
+/// Look up the family name, weight, and style of a resolved font id in the DB.
+fn face_info(font_system: &FontSystem, id: fontdb::ID) -> Option<ResolvedFace> {
+    let info = font_system.db().face(id)?;
+    let family = info
+        .families
+        .first()
+        .map(|(name, _)| name.clone())
+        .unwrap_or_default();
+    Some(ResolvedFace {
+        id,
+        family,
+        weight: info.weight.0,
+        italic: !matches!(info.style, fontdb::Style::Normal),
+    })
+}
+
+/// Emit a `tracing::warn!` when glyphon resolved a *different* family or weight
+/// than the document requested — surfacing a silent substitution instead of
+/// letting the export quietly render in a fallback font.
+fn warn_if_substituted(node: &TextNode, resolved: &ResolvedFace) {
+    // A generic keyword ("sans-serif" …) has no canonical concrete face.
+    if is_generic_family(&node.font_family) {
+        return;
+    }
+    if !resolved.family.eq_ignore_ascii_case(node.font_family.trim()) {
+        tracing::warn!(
+            requested_family = %node.font_family,
+            requested_weight = node.font_weight,
+            resolved_family = %resolved.family,
+            resolved_weight = resolved.weight,
+            "export font substitution: requested family not found in the font DB; \
+             outlined glyphs will use a fallback face and will not match the document"
+        );
+    } else if resolved.weight != node.font_weight {
+        tracing::warn!(
+            requested_family = %node.font_family,
+            requested_weight = node.font_weight,
+            resolved_weight = resolved.weight,
+            "export font weight substitution: exact weight unavailable for this \
+             family; outlining the nearest available weight"
+        );
+    }
+}
+
+/// Shape `node`'s text and report the concrete font face glyphon resolves for
+/// its first outlined glyph — the face whose outlines an outline/raster export
+/// will actually embed.
+///
+/// Returns `None` only when nothing resolves (empty content in a font-less
+/// environment). Also emits a substitution warning via [`warn_if_substituted`]
+/// so a missing document font is surfaced rather than silently swapped.
+///
+/// This is the export counterpart to the live renderer's shaping: both build the
+/// same `Attrs` (family + weight + style) over a `FontSystem::new()` DB — which
+/// on Linux includes `~/.local/share/fonts` — so a face that resolves here is
+/// exactly the one the live renderer draws.
+pub fn resolve_document_font(font_system: &mut FontSystem, node: &TextNode) -> Option<ResolvedFace> {
+    let probe: &str = if node.content.trim().is_empty() {
+        "A"
+    } else {
+        &node.content
+    };
+    let font_size = node.font_size.max(0.01) as f32;
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, font_size * 1.2));
+    buf.set_size(font_system, None, None);
+    let glyph_style = match node.font_style {
+        FontStyle::Italic => GlyphonStyle::Italic,
+        FontStyle::Oblique => GlyphonStyle::Oblique,
+        FontStyle::Normal => GlyphonStyle::Normal,
+    };
+    let attrs = Attrs::new()
+        .family(Family::Name(&node.font_family))
+        .weight(Weight(node.font_weight))
+        .style(glyph_style);
+    buf.set_text(font_system, probe, attrs, Shaping::Advanced);
+    buf.shape_until_scroll(font_system, false);
+
+    let font_id = buf
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter().map(|g| g.font_id))
+        .next()?;
+    let resolved = face_info(font_system, font_id)?;
+    warn_if_substituted(node, &resolved);
+    Some(resolved)
+}
+
 // ─── Flat layout ─────────────────────────────────────────────────────────────
 
 /// Shape `node.content` with glyphon, then extract each glyph's outline from
@@ -93,6 +224,9 @@ pub fn layout_text_flat(font_system: &mut FontSystem, node: &TextNode) -> PathDa
     buf.shape_until_scroll(font_system, false);
 
     let mut merged = BezPath::new();
+    // Warn once if glyphon substituted a different family/weight than requested,
+    // so a missing document font is surfaced rather than silently swapped.
+    let mut checked_substitution = false;
 
     for run in buf.layout_runs() {
         // `line_y` in glyphon/cosmic-text is the baseline Y of the run in
@@ -114,6 +248,14 @@ pub fn layout_text_flat(font_system: &mut FontSystem, node: &TextNode) -> PathDa
             let Some(font) = font_system.get_font(g.font_id) else {
                 continue;
             };
+            // First outlined glyph tells us the face glyphon actually resolved;
+            // compare it against the request and warn on silent substitution.
+            if !checked_substitution {
+                checked_substitution = true;
+                if let Some(resolved) = face_info(font_system, g.font_id) {
+                    warn_if_substituted(node, &resolved);
+                }
+            }
             let face = font.rustybuzz(); // &ttf_parser::Face via Deref
             let units = face.units_per_em() as f64;
             if units <= 0.0 {
@@ -383,6 +525,96 @@ mod tests {
             left.min_x() > -1.0,
             "left-anchored run should start at ~origin, got min_x={}",
             left.min_x()
+        );
+    }
+
+    /// Pick a real, non-generic font face installed in the system DB so the
+    /// resolution test is portable (no hardcoded family). Prefers a plain
+    /// regular (weight 400, normal style) face for unambiguous resolution,
+    /// falling back to the first concrete face otherwise. Returns `None` on a
+    /// font-less environment.
+    fn pick_installed_face(fs: &FontSystem) -> Option<(String, u16, FontStyle)> {
+        let mut fallback: Option<(String, u16, FontStyle)> = None;
+        for face in fs.db().faces() {
+            let Some((family, _)) = face.families.first() else {
+                continue;
+            };
+            if is_generic_family(family) {
+                continue;
+            }
+            let style = match face.style {
+                fontdb::Style::Italic => FontStyle::Italic,
+                fontdb::Style::Oblique => FontStyle::Oblique,
+                fontdb::Style::Normal => FontStyle::Normal,
+            };
+            if face.weight.0 == 400 && matches!(face.style, fontdb::Style::Normal) {
+                return Some((family.clone(), 400, FontStyle::Normal));
+            }
+            if fallback.is_none() {
+                fallback = Some((family.clone(), face.weight.0, style));
+            }
+        }
+        fallback
+    }
+
+    /// ACCEPT CRITERION: the export text path must resolve the EXACT family +
+    /// weight the document requested — no silent fallback to the default sans.
+    /// Request a concrete installed family/weight and assert the face glyphon
+    /// resolves for the outline/export path matches it. (Skips on a font-less
+    /// CI image where no concrete family exists.)
+    #[test]
+    fn export_resolves_exact_requested_family_and_weight() {
+        let mut fs = FontSystem::new();
+        let Some((family, weight, style)) = pick_installed_face(&fs) else {
+            eprintln!("no installed fonts — skipping font-resolution check");
+            return;
+        };
+
+        let mut node = TextNode::new("Ag");
+        node.font_family = family.clone();
+        node.font_weight = weight;
+        node.font_style = style;
+        node.font_size = 48.0;
+
+        let resolved = resolve_document_font(&mut fs, &node)
+            .expect("a resolvable installed font must produce a face");
+
+        assert!(
+            resolved.family.eq_ignore_ascii_case(&family),
+            "export resolved family {:?} but the document requested {:?} \
+             (silent font substitution)",
+            resolved.family,
+            family,
+        );
+        assert_eq!(
+            resolved.weight, weight,
+            "export resolved weight {} but the document requested {}",
+            resolved.weight, weight,
+        );
+    }
+
+    /// A request for a family that is not installed must resolve to a DIFFERENT
+    /// family (there is nothing else it could do) — proving `resolve_document_font`
+    /// actually observes the substitution the warning path reports. If, on some
+    /// exotic system, the bogus name happens to resolve to itself, the test is a
+    /// no-op rather than a false failure.
+    #[test]
+    fn export_flags_missing_family_as_substitution() {
+        let mut fs = FontSystem::new();
+        let missing = "ZzzNoSuchFontFamily-Photonic-9187";
+        let mut node = TextNode::new("Ag");
+        node.font_family = missing.to_string();
+        node.font_weight = 400;
+        node.font_size = 48.0;
+
+        let Some(resolved) = resolve_document_font(&mut fs, &node) else {
+            eprintln!("no installed fonts — skipping substitution check");
+            return;
+        };
+        assert!(
+            !resolved.family.eq_ignore_ascii_case(missing),
+            "a non-existent family must not resolve to itself: {:?}",
+            resolved.family,
         );
     }
 

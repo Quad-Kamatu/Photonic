@@ -10,4 +10,4 @@ pub mod text_path;
 pub use canvas::CanvasView;
 pub use headless::{ExportBackground, ExportOptions, HeadlessRenderer};
 pub use renderer::PhotonicRenderer;
-pub use text_outline::{layout_text_flat, outline_document_text};
+pub use text_outline::{layout_text_flat, outline_document_text, resolve_document_font, ResolvedFace};
