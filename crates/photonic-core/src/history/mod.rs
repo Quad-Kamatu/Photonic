@@ -1848,6 +1848,236 @@ mod tests {
         h.redo(&mut doc);
         assert_eq!(sample(&doc), 255, "redo re-applies red");
     }
+
+    // ── #194: history must NOT hold raster frame buffers ─────────────────────
+    //
+    // The live bitmap is the *document's* object (doc memory). History must
+    // store only lightweight per-edit deltas, so a small size cap no longer
+    // trims real undo history away on a big raster. Exercises the batched-edit
+    // path (the shape the GUI records), which before this fix stored TWO full
+    // frame-buffer clones per undo step.
+
+    #[test]
+    fn raster_history_stays_tiny_and_retained_under_cap() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+
+        let mut doc = make_doc();
+        let lid = doc.active_layer_id.unwrap();
+        // A 2000×2000 RGBA raster = 16 MB of pixels — the live object, held in
+        // document memory (added directly, not through history).
+        let node = SceneNode::new(
+            "big",
+            lid,
+            SceneNodeKind::Raster(RasterNode {
+                image: RasterImage::new(2000, 2000),
+                mask: None,
+                source_uri: None,
+                adjustment: None,
+            }),
+        );
+        let rid = node.id;
+        doc.add_node(node, Some(lid));
+
+        let mut h = CommandHistory::new(100_000);
+        // 5 MB size cap. Before this fix, a single batched full-clone edit
+        // (~32 MB of before/after pixels) already blew it, so enforce_size
+        // trimmed the tree down to its MIN_RETAINED_STEPS floor.
+        let cap: u64 = 5 * 1024 * 1024;
+        h.set_limits(100_000, Some(cap));
+
+        const EDITS: usize = 30;
+        // Non-overlapping 40×40 squares, so each edit's region reverts cleanly.
+        let region = 40u32;
+        let mut samples: Vec<(usize, u8)> = Vec::new();
+        for k in 0..EDITS {
+            let old = doc.nodes.get(&rid).unwrap().clone();
+            let mut new = old.clone();
+            let v = (k as u8).wrapping_add(1);
+            let ox = (k as u32) * 45; // 0..1305, +40 < next start → no overlap
+            let oy = 100u32;
+            if let SceneNodeKind::Raster(r) = &mut new.kind {
+                for y in oy..oy + region {
+                    for x in ox..ox + region {
+                        let i = ((y * 2000 + x) * 4) as usize;
+                        r.image.pixels[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+                    }
+                }
+            }
+            // Exactly what the GUI emits: a Batch wrapping the pixel edit.
+            h.execute(
+                Command::Batch(vec![Command::UpdateNode { old, new }]),
+                &mut doc,
+            );
+            let si = (((oy + 5) * 2000 + (ox + 5)) * 4) as usize;
+            samples.push((si, v));
+        }
+
+        // Simulate the GUI's periodic size enforcement.
+        h.enforce_size();
+
+        // 1) The full 30-step history is RETAINED — not trimmed to the floor.
+        assert_eq!(
+            h.undo_depth(),
+            EDITS,
+            "size cap trimmed real history — per-edit deltas are not tiny"
+        );
+        // Well clear of the MIN_RETAINED_STEPS (=5) trim floor.
+        assert!(
+            h.undo_depth() > 5,
+            "undo history collapsed toward the MIN_RETAINED_STEPS floor"
+        );
+        // 2) History stays tiny: region deltas, never whole frame buffers.
+        let est = h.history_memory_estimate();
+        assert!(
+            est < 2 * 1024 * 1024,
+            "history_memory_estimate {est} bytes is not tiny — pixels are stored"
+        );
+
+        // 3) Undo/redo reproduce exact pixels for the last few steps.
+        let pix = |d: &Document, i: usize| -> u8 {
+            match &d.nodes.get(&rid).unwrap().kind {
+                SceneNodeKind::Raster(r) => r.image.pixels[i],
+                _ => 0,
+            }
+        };
+        let (last_i, last_v) = *samples.last().unwrap();
+        assert_eq!(pix(&doc, last_i), last_v, "final edit not applied");
+        for step in (EDITS - 3..EDITS).rev() {
+            assert!(h.undo(&mut doc));
+            let (i, _) = samples[step];
+            assert_eq!(pix(&doc, i), 0, "undo did not restore pre-edit pixels at step {step}");
+        }
+        for step in EDITS - 3..EDITS {
+            assert!(h.redo(&mut doc));
+            let (i, v) = samples[step];
+            assert_eq!(pix(&doc, i), v, "redo did not reproduce edit pixels at step {step}");
+        }
+    }
+
+    /// #194 dir. 1: a masked raster pixel edit is still stored as a compact
+    /// region delta (the mask is unchanged, so only image pixels are captured)
+    /// and round-trips exactly — including the mask.
+    #[test]
+    fn masked_raster_edit_stored_as_region_delta_round_trips() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+        use crate::raster::mask::Mask;
+
+        let mut doc = make_doc();
+        let lid = doc.active_layer_id.unwrap();
+        let node = SceneNode::new(
+            "ras",
+            lid,
+            SceneNodeKind::Raster(RasterNode {
+                image: RasterImage::new(64, 64),
+                mask: Some(Mask::full(64, 64)),
+                source_uri: None,
+                adjustment: None,
+            }),
+        );
+        let rid = node.id;
+        doc.add_node(node, Some(lid));
+        let mut h = CommandHistory::new(1000);
+
+        let old = doc.nodes.get(&rid).unwrap().clone();
+        let mut new = old.clone();
+        if let SceneNodeKind::Raster(r) = &mut new.kind {
+            for y in 10..20u32 {
+                for x in 10..20u32 {
+                    let i = ((y * 64 + x) * 4) as usize;
+                    r.image.pixels[i..i + 4].copy_from_slice(&[9, 9, 9, 255]);
+                }
+            }
+        }
+        h.execute(Command::UpdateNode { old, new }, &mut doc);
+
+        assert!(
+            matches!(h.current_command(), Some(Command::UpdateRasterRegion { .. })),
+            "masked raster edit not stored as a region delta: {:?}",
+            h.current_command()
+        );
+
+        let sample = |d: &Document| -> u8 {
+            match &d.nodes[&rid].kind {
+                SceneNodeKind::Raster(r) => r.image.pixels[((14 * 64 + 14) * 4) as usize],
+                _ => 0,
+            }
+        };
+        let mask_present = |d: &Document| -> bool {
+            matches!(&d.nodes[&rid].kind, SceneNodeKind::Raster(r) if r.mask.is_some())
+        };
+        assert_eq!(sample(&doc), 9);
+        assert!(mask_present(&doc), "mask missing after edit");
+        h.undo(&mut doc);
+        assert_eq!(sample(&doc), 0, "undo did not restore pixels");
+        assert!(mask_present(&doc), "mask lost on undo");
+        h.redo(&mut doc);
+        assert_eq!(sample(&doc), 9, "redo did not reproduce pixels");
+        assert!(mask_present(&doc), "mask lost on redo");
+    }
+
+    /// #194 dir. 2: a metadata-only edit on a raster (opacity/name/… changed,
+    /// pixels untouched) stores just the stripped fields — NOT two full bitmap
+    /// clones — while the live pixels are preserved across undo/redo.
+    #[test]
+    fn raster_meta_only_edit_stores_no_pixels() {
+        use crate::node::RasterNode;
+        use crate::raster::image::RasterImage;
+
+        let mut doc = make_doc();
+        let lid = doc.active_layer_id.unwrap();
+        // 512×512 filled raster = 1 MB of non-trivial pixels.
+        let node = SceneNode::new(
+            "ras",
+            lid,
+            SceneNodeKind::Raster(RasterNode {
+                image: RasterImage::filled(512, 512, [7, 8, 9, 255]),
+                mask: None,
+                source_uri: None,
+                adjustment: None,
+            }),
+        );
+        let rid = node.id;
+        doc.add_node(node, Some(lid));
+        let mut h = CommandHistory::new(1000);
+
+        // Change ONLY metadata (opacity + name); pixels are byte-identical.
+        let old = doc.nodes.get(&rid).unwrap().clone();
+        let mut new = old.clone();
+        new.opacity = 0.25;
+        new.name = "renamed".into();
+        h.execute(Command::UpdateNode { old, new }, &mut doc);
+
+        assert!(
+            matches!(h.current_command(), Some(Command::UpdateRasterMeta { .. })),
+            "meta-only raster edit not stored as UpdateRasterMeta: {:?}",
+            h.current_command()
+        );
+        assert!(
+            h.current_command().unwrap().mem_estimate() < 2_000,
+            "meta delta must hold no pixel buffers"
+        );
+
+        let px_ok = |d: &Document| -> bool {
+            matches!(&d.nodes[&rid].kind,
+                SceneNodeKind::Raster(r)
+                    if r.image.width == 512 && r.image.pixels[0..4] == [7, 8, 9, 255])
+        };
+        assert_eq!(doc.nodes[&rid].opacity, 0.25);
+        assert_eq!(doc.nodes[&rid].name, "renamed");
+        assert!(px_ok(&doc), "live pixels clobbered by meta edit");
+
+        h.undo(&mut doc);
+        assert_eq!(doc.nodes[&rid].opacity, 1.0);
+        assert_eq!(doc.nodes[&rid].name, "ras");
+        assert!(px_ok(&doc), "pixels lost on undo of meta edit");
+
+        h.redo(&mut doc);
+        assert_eq!(doc.nodes[&rid].opacity, 0.25);
+        assert_eq!(doc.nodes[&rid].name, "renamed");
+        assert!(px_ok(&doc), "pixels lost on redo of meta edit");
+    }
 }
 
 /// A reversible command that can be applied to a Document.
@@ -1902,6 +2132,15 @@ pub enum Command {
         old: Vec<u8>,
         new: Vec<u8>,
     },
+    /// Delta form of an `UpdateNode` on a raster node whose PIXELS and MASK are
+    /// unchanged — only lightweight metadata (transform, opacity, visibility,
+    /// name, effects, adjustment spec, …) differs (#194). Both node states are
+    /// stored with their heavy image + mask buffers stripped to a 1×1
+    /// placeholder, so the command holds **no** bitmap clones. On apply / undo
+    /// the live node's real pixels + mask are preserved in place and only the
+    /// metadata fields are swapped in. Produced transparently in `execute`
+    /// (see [`Command::into_raster_delta`]); never emitted by call sites.
+    UpdateRasterMeta { old: SceneNode, new: SceneNode },
     /// Add a layer.
     AddLayer { layer: Layer },
     /// Remove a layer.
@@ -2182,49 +2421,36 @@ impl Command {
             Command::UpdateRasterRegion { old, new, .. } => {
                 BASE + old.len() as u64 + new.len() as u64
             }
+            // Both states carry stripped (1×1) buffers, so this is tiny — that is
+            // the entire point of the variant (no full-bitmap clones).
+            Command::UpdateRasterMeta { old, new } => {
+                BASE + old.mem_estimate() + new.mem_estimate()
+            }
             Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
             _ => BASE,
         }
     }
 
-    /// If this is an `UpdateNode` whose only change is raster pixels (same node,
-    /// same dimensions, no mask, all other fields equal), rewrite it as a compact
-    /// [`Command::UpdateRasterRegion`] over just the changed rectangle (#196).
-    /// Otherwise returns `self` unchanged. Called once per `execute`.
+    /// Rewrite a raster `UpdateNode` into a compact delta that holds **no** full
+    /// bitmap clone (#194/#196), so raster history stays tiny. Applied once per
+    /// `execute`, recursing into batches so brush / filter / adjustment edits —
+    /// including masked ones and those the GUI wraps in a [`Command::Batch`] —
+    /// never store a whole frame buffer. Three outcomes for an eligible edit:
+    ///
+    /// - **Pixel edit** (mask + metadata unchanged): a
+    ///   [`Command::UpdateRasterRegion`] over just the changed rectangle.
+    /// - **Metadata-only edit** (pixels + mask byte-identical): a
+    ///   [`Command::UpdateRasterMeta`] carrying only the stripped fields.
+    /// - **Anything else** (dimensions changed, or pixels *and* mask/metadata
+    ///   changed together): the original `UpdateNode`, so correctness is never
+    ///   at risk.
     pub fn into_raster_delta(self) -> Command {
-        use crate::node::SceneNodeKind;
-        let Command::UpdateNode { old, new } = &self else {
-            return self;
-        };
-        if old.id != new.id {
-            return self;
-        }
-        let (SceneNodeKind::Raster(ro), SceneNodeKind::Raster(rn)) = (&old.kind, &new.kind) else {
-            return self;
-        };
-        let (oi, ni) = (&ro.image, &rn.image);
-        // Region deltas only make sense for a pure same-size pixel edit with no
-        // mask involved and no other node field changed.
-        if oi.width != ni.width
-            || oi.height != ni.height
-            || ro.mask.is_some()
-            || rn.mask.is_some()
-            || !node_meta_equal_ignoring_raster_pixels(old, new)
-        {
-            return self;
-        }
-        match diff_raster_region(oi, ni) {
-            Some((x, y, w, h, old_px, new_px)) => Command::UpdateRasterRegion {
-                node_id: new.id,
-                x,
-                y,
-                w,
-                h,
-                old: old_px,
-                new: new_px,
-            },
-            // No pixels actually differ → keep the (harmless) UpdateNode.
-            None => self,
+        match self {
+            Command::UpdateNode { old, new } => raster_update_delta(old, new),
+            Command::Batch(cmds) => {
+                Command::Batch(cmds.into_iter().map(|c| c.into_raster_delta()).collect())
+            }
+            other => other,
         }
     }
 
@@ -2240,6 +2466,7 @@ impl Command {
                 format!("Remove {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
             }
             Command::UpdateNode { old, new } => describe_node_update(old, new),
+            Command::UpdateRasterMeta { old, new } => describe_node_update(old, new),
             Command::UpdateRasterRegion { .. } => "Edit raster".to_string(),
             Command::AddLayer { layer } => format!("Add layer \"{}\"", layer.name),
             Command::RemoveLayer { .. } => "Remove layer".to_string(),
@@ -2379,6 +2606,23 @@ impl Command {
                     if let crate::node::SceneNodeKind::Raster(r) = &mut node.kind {
                         paste_raster_region(&mut r.image, *x, *y, *w, *h, new);
                     }
+                }
+            }
+            Command::UpdateRasterMeta { new, .. } => {
+                if let Some(n) = doc.nodes.get_mut(&new.id) {
+                    // `new` is a stripped placeholder; swap the LIVE pixels + mask
+                    // into a fresh copy of it so metadata comes from history while
+                    // the real bitmap stays in the document (never cloned).
+                    let mut fresh = new.clone();
+                    if let (
+                        crate::node::SceneNodeKind::Raster(dst),
+                        crate::node::SceneNodeKind::Raster(live),
+                    ) = (&mut fresh.kind, &mut n.kind)
+                    {
+                        std::mem::swap(&mut dst.image, &mut live.image);
+                        std::mem::swap(&mut dst.mask, &mut live.mask);
+                    }
+                    *n = fresh;
                 }
             }
             Command::AddLayer { layer } => {
@@ -2609,6 +2853,19 @@ impl Command {
                 old: old.clone(),
                 new: incoming_new.clone(),
             }),
+            // Raster metadata drags (move/opacity/… on a raster) delta down to
+            // `UpdateRasterMeta`; coalesce them exactly like `UpdateNode` so one
+            // continuous gesture stays a single undo step (parity with the pre-
+            // delta behaviour, where these were plain same-id `UpdateNode`s).
+            (
+                Command::UpdateRasterMeta { old, new: last_new },
+                Command::UpdateRasterMeta {
+                    new: incoming_new, ..
+                },
+            ) if last_new.id == incoming_new.id => Some(Command::UpdateRasterMeta {
+                old: old.clone(),
+                new: incoming_new.clone(),
+            }),
             (Command::SetWidthProfiles { old, .. }, Command::SetWidthProfiles { new, .. }) => {
                 Some(Command::SetWidthProfiles {
                     old: old.clone(),
@@ -2696,6 +2953,10 @@ impl Command {
                 y: *y,
                 w: *w,
                 h: *h,
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            Command::UpdateRasterMeta { old, new } => Some(Command::UpdateRasterMeta {
                 old: new.clone(),
                 new: old.clone(),
             }),
@@ -3091,6 +3352,78 @@ fn node_meta_equal_ignoring_raster_pixels(a: &SceneNode, b: &SceneNode) -> bool 
         c
     };
     serde_json::to_vec(&strip(a)).ok() == serde_json::to_vec(&strip(b)).ok()
+}
+
+/// Replace a raster node's heavy pixel + mask buffers with 1×1 / `None`
+/// placeholders, keeping every other field. Used to build the two stripped
+/// endpoints of a [`Command::UpdateRasterMeta`], whose `apply` restores the
+/// live buffers, so the metadata is stored without any bitmap clone (#194).
+fn strip_raster_buffers(n: &SceneNode) -> SceneNode {
+    use crate::node::SceneNodeKind;
+    use crate::raster::image::RasterImage;
+    let mut c = n.clone();
+    if let SceneNodeKind::Raster(r) = &mut c.kind {
+        r.image = RasterImage::new(1, 1);
+        r.mask = None;
+    }
+    c
+}
+
+/// Turn an `UpdateNode`'s `old`/`new` into the cheapest correct history command
+/// (see [`Command::into_raster_delta`] for the full contract). Non-raster or
+/// mismatched-id/-dimension edits fall through to a plain `UpdateNode`.
+fn raster_update_delta(old: SceneNode, new: SceneNode) -> Command {
+    use crate::node::SceneNodeKind;
+    // Only same-node raster→raster edits are eligible for a delta.
+    let (SceneNodeKind::Raster(ro), SceneNodeKind::Raster(rn)) = (&old.kind, &new.kind) else {
+        return Command::UpdateNode { old, new };
+    };
+    if old.id != new.id
+        || ro.image.width != rn.image.width
+        || ro.image.height != rn.image.height
+    {
+        return Command::UpdateNode { old, new };
+    }
+
+    // `node_meta_equal_ignoring_raster_pixels` compares every field EXCEPT the
+    // image pixels (the mask IS included), so it is true exactly when the mask
+    // and all non-pixel metadata are unchanged.
+    if node_meta_equal_ignoring_raster_pixels(&old, &new) {
+        // Pure pixel edit — brush/filter/adjustment. Even a *masked* raster lands
+        // here as long as the mask itself is untouched, because the region delta
+        // only rewrites image pixels and leaves the (equal) mask in place.
+        return match diff_raster_region(&ro.image, &rn.image) {
+            Some((x, y, w, h, old_px, new_px)) => Command::UpdateRasterRegion {
+                node_id: new.id,
+                x,
+                y,
+                w,
+                h,
+                old: old_px,
+                new: new_px,
+            },
+            // Nothing actually differs → a metadata no-op; still store it stripped
+            // so it holds no bitmap.
+            None => Command::UpdateRasterMeta {
+                old: strip_raster_buffers(&old),
+                new: strip_raster_buffers(&new),
+            },
+        };
+    }
+
+    // Metadata differs. If the pixels AND mask are byte-identical it is a pure
+    // metadata edit (move / opacity / visibility / rename / effects / adjustment
+    // spec): store just the stripped fields instead of two full bitmap clones.
+    if ro.image.pixels == rn.image.pixels && ro.mask == rn.mask {
+        return Command::UpdateRasterMeta {
+            old: strip_raster_buffers(&old),
+            new: strip_raster_buffers(&new),
+        };
+    }
+
+    // Pixels AND mask/metadata changed together (rare) — keep the self-contained
+    // full `UpdateNode` so undo/redo correctness is never at risk.
+    Command::UpdateNode { old, new }
 }
 
 /// Find the bounding box of pixels that differ between two same-size RGBA
