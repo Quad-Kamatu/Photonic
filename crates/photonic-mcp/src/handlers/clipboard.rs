@@ -68,7 +68,7 @@ pub fn new_clipboard_ring() -> StdMutex<ClipboardRing> {
 
 /// Collect a node subtree (root + all descendants) from the document into a HashMap.
 /// Returns (root_id, all_nodes).
-fn collect_subtree(
+pub(crate) fn collect_subtree(
     doc: &photonic_core::document::Document,
     root_id: NodeId,
 ) -> HashMap<NodeId, SceneNode> {

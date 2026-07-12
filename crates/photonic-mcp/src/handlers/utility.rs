@@ -129,16 +129,31 @@ pub async fn update_node(state: &AppState, args: UpdateNodeArgs) -> ToolResult {
 pub async fn delete_nodes(state: &AppState, args: DeleteNodeArgs) -> ToolResult {
     tracing::debug!("tool: delete_nodes (count={})", args.node_ids.len());
     let count = args.node_ids.len();
-    // Batch all removals into one command so the doc lock is held only once.
-    let cmd = Command::Batch(
-        args.node_ids
-            .iter()
-            .map(|&node_id| Command::RemoveNode { node_id })
-            .collect(),
-    );
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute_discrete(cmd, &mut doc);
+
+    // Deleting a group must remove its whole subtree — a bare RemoveNode would
+    // leave the children orphaned in the document (unreachable but still present,
+    // and still found by find_nodes). Use RemoveSubtree (undo-safe via its
+    // AddSubtree inverse) for any node with descendants; RemoveNode for leaves.
+    let mut commands: Vec<Command> = Vec::new();
+    for &node_id in &args.node_ids {
+        let Some(node) = doc.nodes.get(&node_id) else {
+            continue;
+        };
+        let layer_id = node.layer_id;
+        if matches!(node.kind, SceneNodeKind::Group(_)) {
+            let nodes: Vec<SceneNode> =
+                crate::handlers::clipboard::collect_subtree(&doc, node_id)
+                    .into_values()
+                    .collect();
+            commands.push(Command::RemoveSubtree { layer_id, roots: vec![node_id], nodes });
+        } else {
+            commands.push(Command::RemoveNode { node_id });
+        }
+    }
+    // One Batch = the doc lock is taken once and the whole delete is one undo step.
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     ToolResult::text(format!("Deleted {} node(s)", count))
 }
 pub async fn get_node(state: &AppState, args: GetNodeArgs) -> ToolResult {

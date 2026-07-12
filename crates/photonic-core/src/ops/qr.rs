@@ -297,6 +297,92 @@ mod tests {
     }
 
     #[test]
+    fn qr_group_parents_children_and_deletes_cleanly() {
+        use crate::document::Document;
+        use crate::history::{Command, CommandHistory};
+        use crate::node::{GroupNode, PathNode, SceneNode, SceneNodeKind};
+
+        let mut doc = Document::new("t", 4000.0, 4000.0);
+        let mut history = CommandHistory::new(200);
+        let layer = doc.active_layer_id.unwrap();
+
+        let art = build_qr(&QrOptions {
+            data: "https://kamatu.studio".into(),
+            size: 290.0,
+            quiet_zone: 3,
+            shape: QrModuleShape::Connected,
+            ecc: QrEcc::High,
+            radius: 0.4,
+        })
+        .unwrap();
+
+        // Mirror the create_qr_code handler's command sequence.
+        let bg = SceneNode::new(
+            "QR Background",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, art.size, art.size))),
+        );
+        let modules =
+            SceneNode::new("QR Modules", layer, SceneNodeKind::Path(PathNode::new(art.modules)));
+        let (bg_id, mod_id) = (bg.id, modules.id);
+        let child_ids = vec![bg_id, mod_id];
+        let group = SceneNode::new(
+            "QR Code",
+            layer,
+            SceneNodeKind::Group(GroupNode {
+                children: child_ids.clone(),
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        );
+        let group_id = group.id;
+        history.execute_discrete(
+            Command::Batch(vec![
+                Command::AddNode { node: bg, layer_id: Some(layer) },
+                Command::AddNode { node: modules, layer_id: Some(layer) },
+                Command::GroupNodes {
+                    group,
+                    layer_id: layer,
+                    insert_index: usize::MAX,
+                    children: child_ids,
+                },
+            ]),
+            &mut doc,
+        );
+
+        // (1,2) Group is populated and the modules are NOT loose siblings.
+        match &doc.nodes.get(&group_id).expect("group exists").kind {
+            SceneNodeKind::Group(g) => {
+                assert_eq!(g.children, vec![bg_id, mod_id], "group must list its children")
+            }
+            _ => panic!("not a group"),
+        }
+        let lids = &doc.layers[&layer].node_ids;
+        assert_eq!(lids.last(), Some(&group_id), "group must be at the TOP of z-order");
+        assert!(
+            !lids.contains(&bg_id) && !lids.contains(&mod_id),
+            "children must be in the group, not loose siblings"
+        );
+
+        // (4) Deleting the group must remove ALL QR geometry — zero orphans. This
+        // is the RemoveSubtree that delete_nodes now issues for a group (a bare
+        // RemoveNode would leave the children orphaned in doc.nodes).
+        let subtree: Vec<SceneNode> = [group_id, bg_id, mod_id]
+            .iter()
+            .filter_map(|id| doc.nodes.get(id).cloned())
+            .collect();
+        history.execute_discrete(
+            Command::RemoveSubtree { layer_id: layer, roots: vec![group_id], nodes: subtree },
+            &mut doc,
+        );
+        assert!(!doc.nodes.contains_key(&group_id), "group removed");
+        assert!(!doc.nodes.contains_key(&mod_id), "QR Modules orphaned after group delete");
+        assert!(!doc.nodes.contains_key(&bg_id), "QR Background orphaned after group delete");
+    }
+
+    #[test]
     fn quiet_zone_insets_the_matrix() {
         let opts = QrOptions { data: "x".into(), size: 200.0, quiet_zone: 4, ..Default::default() };
         let art = build_qr(&opts).unwrap();

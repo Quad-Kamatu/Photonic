@@ -1682,38 +1682,53 @@ pub async fn create_qr_code(state: &AppState, args: CreateQrCodeArgs) -> ToolRes
         .or(doc.active_layer_id)
         .unwrap_or(uuid::Uuid::nil());
 
+    let mut commands: Vec<Command> = Vec::new();
     let mut child_ids: Vec<NodeId> = Vec::new();
 
-    // Background rect (behind the modules), if any.
+    // Background rect (behind the modules), if any — first child = bottom of group.
     if let Some(bg) = bg_fill {
         let mut pn = PathNode::new(PathData::rect(0.0, 0.0, art.size, art.size));
         pn.fill = bg;
         let mut node = SceneNode::new("QR Background", layer_id, SceneNodeKind::Path(pn));
         node.transform = tf;
-        let id = node.id;
-        history.execute_discrete(Command::AddNode { node, layer_id: Some(layer_id) }, &mut doc);
-        child_ids.push(id);
+        child_ids.push(node.id);
+        commands.push(Command::AddNode { node, layer_id: Some(layer_id) });
     }
 
-    // The compound path of every dark module.
+    // The compound path of every dark module (top of the group).
     let mut mod_pn = PathNode::new(art.modules);
     mod_pn.fill = fg_fill;
     let mut mod_node = SceneNode::new("QR Modules", layer_id, SceneNodeKind::Path(mod_pn));
     mod_node.transform = tf;
-    let mod_id = mod_node.id;
-    history.execute_discrete(
-        Command::AddNode { node: mod_node, layer_id: Some(layer_id) },
-        &mut doc,
-    );
-    child_ids.push(mod_id);
+    child_ids.push(mod_node.id);
+    commands.push(Command::AddNode { node: mod_node, layer_id: Some(layer_id) });
 
-    // Wrap in a group so the code is one movable/recolourable unit.
-    let group = SceneNode::new("QR Code", layer_id, SceneNodeKind::Group(GroupNode::new()));
-    let group_id = group.id;
-    history.execute_discrete(
-        Command::GroupNodes { group, layer_id, insert_index: 0, children: child_ids },
-        &mut doc,
+    // Wrap in a group so the code is one movable/recolourable unit. The group
+    // node must ALREADY list its children — `GroupNodes` only detaches them from
+    // the layer and inserts the group (it does not populate the child list).
+    // Insert at the top of z-order (usize::MAX clamps to the layer length) so the
+    // QR is visible without a manual reorder. One Batch = one undo step, and the
+    // whole group deletes as a unit (no orphaned "QR Modules" paths).
+    let group = SceneNode::new(
+        "QR Code",
+        layer_id,
+        SceneNodeKind::Group(GroupNode {
+            children: child_ids.clone(),
+            clip_children: false,
+            clip_node_id: None,
+            blend_spine_id: None,
+            live_boolean: None,
+        }),
     );
+    let group_id = group.id;
+    commands.push(Command::GroupNodes {
+        group,
+        layer_id,
+        insert_index: usize::MAX,
+        children: child_ids,
+    });
+
+    history.execute_discrete(Command::Batch(commands), &mut doc);
 
     ToolResult::text(format!(
         "Created QR code — {}×{} modules, {shape:?} style, encoding: {}",
