@@ -11,6 +11,8 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-12
+
 ### Added
 
 - **Per-artboard / multi-page PDF export.** `export_pdf` now takes an artboard
