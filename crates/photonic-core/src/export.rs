@@ -1330,6 +1330,8 @@ pub fn export_pdf_regions(
     struct PageObjRefs {
         images: Vec<(Ref, Option<Ref>)>,
         shadings: Vec<(Ref, Ref, Vec<Ref>)>,
+        /// One ExtGState object per deduped per-object (fill, stroke) alpha pair.
+        gstates: Vec<Ref>,
     }
     let alloc = |n_slots: &mut i32| {
         let r = Ref::new(*n_slots);
@@ -1359,7 +1361,8 @@ pub fn export_pdf_regions(
                     (shading, stitch, exps)
                 })
                 .collect();
-            PageObjRefs { images, shadings }
+            let gstates = res.gstates.iter().map(|_| alloc(&mut next)).collect();
+            PageObjRefs { images, shadings, gstates }
         })
         .collect();
 
@@ -1426,10 +1429,13 @@ pub fn export_pdf_regions(
                 .contents(*content_id);
             {
                 let mut res = page.resources();
-                if !gs_refs.is_empty() {
+                if !gs_refs.is_empty() || !page_objs.gstates.is_empty() {
                     let mut egs = res.ext_g_states();
                     for (i, r) in gs_refs.iter().enumerate() {
                         egs.pair(Name(format!("gs{i}").as_bytes()), *r);
+                    }
+                    for (i, r) in page_objs.gstates.iter().enumerate() {
+                        egs.pair(Name(format!("ga{i}").as_bytes()), *r);
                     }
                     egs.finish();
                 }
@@ -1527,6 +1533,13 @@ pub fn export_pdf_regions(
                 shading.function(*stitch_ref);
                 shading.finish();
             }
+        }
+        // Per-object fill/stroke alpha ExtGStates (`ca`/`CA`) for this page.
+        for (&(fill_alpha, stroke_alpha), r) in res.gstates.iter().zip(page_objs.gstates.iter()) {
+            pdf.ext_graphics(*r)
+                .non_stroking_alpha(fill_alpha)
+                .stroking_alpha(stroke_alpha)
+                .finish();
         }
     }
 
@@ -1811,6 +1824,10 @@ struct PdfShading {
 struct PdfResources {
     images: Vec<PdfImage>,
     shadings: Vec<PdfShading>,
+    /// Per-object soft-alpha ExtGStates: `(non_stroking_alpha, stroking_alpha)`
+    /// for fill and stroke opacity. Named `gaN` in the page `/Resources` to keep
+    /// them distinct from the document-level layer `gsN` states.
+    gstates: Vec<(f32, f32)>,
 }
 
 impl PdfResources {
@@ -1821,6 +1838,31 @@ impl PdfResources {
     fn add_shading(&mut self, sh: PdfShading) -> usize {
         self.shadings.push(sh);
         self.shadings.len() - 1
+    }
+    /// Add (or reuse) a per-object alpha ExtGState carrying fill (`ca`) and stroke
+    /// (`CA`) opacity. Deduped so a whole grid of faint strokes shares one object.
+    fn add_gstate(&mut self, fill_alpha: f32, stroke_alpha: f32) -> usize {
+        if let Some(i) = self.gstates.iter().position(|&(ca, ca_s)| {
+            (ca - fill_alpha).abs() < 1e-4 && (ca_s - stroke_alpha).abs() < 1e-4
+        }) {
+            return i;
+        }
+        self.gstates.push((fill_alpha, stroke_alpha));
+        self.gstates.len() - 1
+    }
+}
+
+/// Effective fill opacity for the PDF non-stroking alpha — the solid colour's own
+/// alpha times the fill opacity, matching the SVG exporter's `c.a * fill_opacity`.
+/// Non-solid paints carry per-stop alpha elsewhere, so only the fill opacity applies.
+fn pdf_fill_alpha(fill: &Fill) -> f32 {
+    if !fill.enabled {
+        return 1.0;
+    }
+    match &fill.kind {
+        FillKind::Solid(c) => c.a * fill.opacity,
+        FillKind::None => 1.0,
+        _ => fill.opacity,
     }
 }
 
@@ -2062,6 +2104,23 @@ fn emit_node_pdf(
             } else {
                 None
             };
+            // Per-object soft alpha: fill + stroke opacity (and node opacity) must
+            // be honoured on export, or a faint grid stroked at 6% white prints at
+            // full strength — heavy, near-solid lines. The live canvas and raster
+            // export already multiply these in; the PDF path did not. Emit an
+            // ExtGState carrying `ca` (fill) / `CA` (stroke) alpha around the draw.
+            let node_op = node.opacity.clamp(0.0, 1.0);
+            let fill_alpha = (pdf_fill_alpha(&p.fill) * node_op).clamp(0.0, 1.0);
+            let stroke_alpha =
+                (stroke.map(|s| s.color.a * s.opacity).unwrap_or(1.0) * node_op).clamp(0.0, 1.0);
+            let alpha_gs = if fill_alpha < 0.999 || stroke_alpha < 0.999 {
+                let idx = res.add_gstate(fill_alpha, stroke_alpha);
+                content.save_state();
+                content.set_parameters(pdf_writer::Name(format!("ga{idx}").as_bytes()));
+                true
+            } else {
+                false
+            };
             // Gradient fill → a real PDF axial/radial shading (#4): clip to the
             // path, then paint the shading over the clip region.
             let shading = if p.fill.enabled {
@@ -2125,6 +2184,9 @@ fn emit_node_pdf(
                         content.end_path();
                     }
                 }
+            }
+            if alpha_gs {
+                content.restore_state();
             }
         }
         SceneNodeKind::Group(g) => {
@@ -2525,6 +2587,58 @@ mod tests {
         assert!(
             text.contains("/ExtGState") && text.contains("/ca 0.5"),
             "missing ExtGState alpha:\n{text}"
+        );
+    }
+
+    /// Regression: a thin, faint grid stroke (width 1, white, opacity 0.06) must
+    /// export at its authored width AND opacity. Before the fix the PDF path set
+    /// the stroke colour + width but never emitted the stroke alpha, so a 6%-white
+    /// grid printed as full-strength, near-solid lines. Assert (a) the emitted
+    /// stroke width equals the document width (`1 w`, non-scaling at identity
+    /// transform) and (b) a per-object ExtGState carries the 0.06 stroke alpha,
+    /// referenced by the path before it strokes.
+    #[test]
+    fn pdf_export_thin_faint_stroke_keeps_width_and_opacity() {
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::{Fill, Stroke};
+
+        let mut doc = Document::new("t", 200.0, 150.0);
+        let mut rect = PathNode::new(PathData::rect(10.0, 10.0, 180.0, 130.0));
+        rect.fill = Fill::none();
+        let mut stroke = Stroke::solid(Color::new(1.0, 1.0, 1.0, 1.0), 1.0);
+        stroke.opacity = 0.06;
+        rect.stroke = stroke;
+        doc.add_node(
+            SceneNode::new("grid", doc.active_layer_id.unwrap(), SceneNodeKind::Path(rect)),
+            None,
+        );
+
+        let bytes = export_pdf(&doc, &PdfExportOptions::default());
+        let text = String::from_utf8_lossy(&bytes);
+
+        // (a) Stroke width matches the document width (1.0), not thickened.
+        assert!(
+            text.contains("1 w\n") || text.contains("1 w "),
+            "stroke width must export as the authored 1 (non-scaling):\n{text}"
+        );
+        // White stroke colour set, then the path is stroked.
+        assert!(text.contains("1 1 1 RG"), "missing white stroke colour:\n{text}");
+
+        // (b) A per-object ExtGState (`gaN`) is referenced before the stroke, and
+        // carries the faint 0.06 stroke alpha (`/CA`) — NOT 1.0.
+        assert!(
+            text.contains("/ga0 gs"),
+            "path not wrapped with a per-object alpha ExtGState:\n{text}"
+        );
+        assert!(
+            text.contains("/CA 0.06"),
+            "stroke alpha must export at 0.06, not full opacity:\n{text}"
+        );
+        // Guard against the alpha being silently full-strength.
+        assert!(
+            !text.contains("/CA 1\n") && !text.contains("/CA 1 "),
+            "stroke alpha must not be 1.0:\n{text}"
         );
     }
 
