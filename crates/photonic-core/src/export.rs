@@ -2181,6 +2181,149 @@ fn collect_backdrop_ops(
     }
 }
 
+/// Composite an RGB `paint` over an opaque `backdrop` at `alpha`, yielding an
+/// opaque tone. The CMYK/X-1a flatten uses this so a faint fill/stroke emits at
+/// full opacity (PDF/X forbids constant alpha < 1) yet still reads as the correct
+/// light shade — 6% white over a dark card becomes a faint dark-grey, not white.
+fn flatten_over(paint: [f32; 3], backdrop: [f32; 3], alpha: f32) -> [f32; 3] {
+    let a = alpha.clamp(0.0, 1.0);
+    let one_minus = 1.0 - a;
+    [
+        paint[0] * a + backdrop[0] * one_minus,
+        paint[1] * a + backdrop[1] * one_minus,
+        paint[2] * a + backdrop[2] * one_minus,
+    ]
+}
+
+/// Resolve an opaque RGB backdrop beneath `target`, for the CMYK/X-1a vector
+/// opacity flatten. Walks the document in painter order and returns the topmost
+/// (last-drawn) opaque solid fill whose world bbox covers `target`'s centre,
+/// falling back to the page background (then white) where nothing opaque sits
+/// beneath. This mirrors the raster flatten's backdrop resolution
+/// ([`backdrop_scene_for`]) but collapses to a single representative colour, which
+/// is all a uniform fill/stroke composite needs.
+fn backdrop_rgb_for(doc: &Document, opts: &PdfExportOptions, target: &SceneNode) -> [f32; 3] {
+    let fallback = opts
+        .background
+        .map(|c| [c.r, c.g, c.b])
+        .unwrap_or([1.0, 1.0, 1.0]);
+    // Pre-target opaque fills in draw order, with their world bboxes.
+    let mut candidates: Vec<(kurbo::Rect, [f32; 3])> = Vec::new();
+    let mut target_center: Option<(f64, f64)> = None;
+    'outer: for layer_id in &doc.layer_order {
+        let layer = match doc.layers.get(layer_id) {
+            Some(l) if l.visible && l.print => l,
+            _ => continue,
+        };
+        for nid in &layer.node_ids {
+            if let Some(node) = doc.nodes.get(nid) {
+                if scan_backdrop_fills(
+                    node,
+                    doc,
+                    kurbo::Affine::IDENTITY,
+                    target.id,
+                    &mut candidates,
+                    &mut target_center,
+                ) {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let Some((cx, cy)) = target_center else {
+        return fallback;
+    };
+    // Topmost (last-drawn) opaque fill whose bbox covers the target centre wins.
+    for (bb, rgb) in candidates.iter().rev() {
+        if cx >= bb.x0 && cx <= bb.x1 && cy >= bb.y0 && cy <= bb.y1 {
+            return *rgb;
+        }
+    }
+    fallback
+}
+
+/// DFS helper for [`backdrop_rgb_for`]. Accumulates the world transform, appends
+/// every pre-`target` opaque solid fill (world bbox + colour) to `candidates` in
+/// draw order, and records `target`'s world-bbox centre when it is reached.
+/// Returns `true` once `target` is encountered so the walk can stop.
+fn scan_backdrop_fills(
+    node: &SceneNode,
+    doc: &Document,
+    parent_world: kurbo::Affine,
+    target_id: NodeId,
+    candidates: &mut Vec<(kurbo::Rect, [f32; 3])>,
+    target_center: &mut Option<(f64, f64)>,
+) -> bool {
+    let world = parent_world * node.transform.to_kurbo();
+    if node.id == target_id {
+        if let Some(bb) = local_bbox(node, doc) {
+            let wbb = world.transform_rect_bbox(bb);
+            *target_center = Some(((wbb.x0 + wbb.x1) * 0.5, (wbb.y0 + wbb.y1) * 0.5));
+        }
+        return true;
+    }
+    if !node.visible || node.opacity <= 0.0 {
+        return false;
+    }
+    match &node.kind {
+        SceneNodeKind::Path(p) => {
+            if p.fill.enabled {
+                if let FillKind::Solid(c) = &p.fill.kind {
+                    let a = c.a * p.fill.opacity * node.opacity;
+                    if a >= 0.999 {
+                        if let Some(bb) = p.path_data.bounding_box() {
+                            candidates
+                                .push((world.transform_rect_bbox(bb), [c.r, c.g, c.b]));
+                        }
+                    }
+                }
+            }
+        }
+        SceneNodeKind::Group(g) => {
+            for cid in &g.children {
+                if let Some(child) = doc.nodes.get(cid) {
+                    if scan_backdrop_fills(
+                        child,
+                        doc,
+                        world,
+                        target_id,
+                        candidates,
+                        target_center,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Node-local bounding box (pre-transform) of a `target` node, for backdrop
+/// centre resolution. Groups union their children; text/adjustment nodes have no
+/// geometric box here.
+fn local_bbox(node: &SceneNode, doc: &Document) -> Option<kurbo::Rect> {
+    match &node.kind {
+        SceneNodeKind::Path(p) => p.path_data.bounding_box(),
+        SceneNodeKind::Group(g) => {
+            let mut combined: Option<kurbo::Rect> = None;
+            for cid in &g.children {
+                if let Some(child) = doc.nodes.get(cid) {
+                    if let Some(cb) = node_world_bbox(child, doc) {
+                        combined = Some(combined.map_or(cb, |prev| prev.union(cb)));
+                    }
+                }
+            }
+            combined
+        }
+        SceneNodeKind::Raster(r) if !r.is_adjustment_layer() => {
+            Some(kurbo::Rect::new(0.0, 0.0, r.image.width as f64, r.image.height as f64))
+        }
+        _ => None,
+    }
+}
+
 /// Convert a placed RGBA raster to a [`PdfImage`] in the export colour model,
 /// **downsampled** to at most [`MAX_IMAGE_DPI`] at its placed size and
 /// **compressed** so a placed photo doesn't bloat the PDF (bug: two rasters →
@@ -2292,10 +2435,22 @@ fn build_pdf_image(
 
 /// Build a [`PdfShading`] from a linear/radial gradient, or `None` for other
 /// gradient kinds (which fall back to a solid approximation via [`fill_rgb`]).
-fn build_pdf_shading(g: &Gradient, opts: &PdfExportOptions) -> Option<PdfShading> {
+/// `flatten`, when `Some((backdrop, k))`, composites each stop's colour over
+/// `backdrop` at `stop.alpha * k` before colour conversion — the CMYK/PDF-X path
+/// resolving per-stop (and fill/node) opacity into opaque stops so no constant
+/// alpha is emitted. `None` (RGB export) leaves the stop colours untouched.
+fn build_pdf_shading(
+    g: &Gradient,
+    opts: &PdfExportOptions,
+    flatten: Option<([f32; 3], f32)>,
+) -> Option<PdfShading> {
     let is_cmyk = opts.color_mode == crate::document::ColorMode::Cmyk;
     let comps = |col: &Color| -> Vec<f32> {
-        match convert_color([col.r, col.g, col.b], opts) {
+        let rgb = match flatten {
+            Some((bd, k)) => flatten_over([col.r, col.g, col.b], bd, (col.a * k).clamp(0.0, 1.0)),
+            None => [col.r, col.g, col.b],
+        };
+        match convert_color(rgb, opts) {
             PdfColor::Rgb(v) => v.to_vec(),
             PdfColor::Cmyk(v) => v.to_vec(),
         }
@@ -2374,7 +2529,18 @@ fn emit_node_pdf(
             let fill_alpha = (pdf_fill_alpha(&p.fill) * node_op).clamp(0.0, 1.0);
             let stroke_alpha =
                 (stroke.map(|s| s.color.a * s.opacity).unwrap_or(1.0) * node_op).clamp(0.0, 1.0);
-            let alpha_gs = if fill_alpha < 0.999 || stroke_alpha < 0.999 {
+            let is_cmyk = opts.color_mode == crate::document::ColorMode::Cmyk;
+            let faint = fill_alpha < 0.999 || stroke_alpha < 0.999;
+            // RGB export keeps true constant alpha via a per-object `/ca`/`/CA`
+            // ExtGState. CMYK/PDF-X FORBIDS constant alpha < 1, so instead FLATTEN:
+            // composite each faint paint over the opaque backdrop beneath the node
+            // and emit at full opacity (no `/ca`/`/CA`). Resolve the backdrop once.
+            let backdrop = if is_cmyk && faint {
+                Some(backdrop_rgb_for(doc, opts, node))
+            } else {
+                None
+            };
+            let alpha_gs = if !is_cmyk && faint {
                 let idx = res.add_gstate(fill_alpha, stroke_alpha);
                 content.save_state();
                 content.set_parameters(pdf_writer::Name(format!("ga{idx}").as_bytes()));
@@ -2393,16 +2559,21 @@ fn emit_node_pdf(
                     // live in `0..1` — would give an axis one unit long. Under the
                     // shading's `Extend [true true]` that collapses the whole object
                     // to a single stop (the reported "gradient exports as solid").
+                    // CMYK/PDF-X: flatten per-stop alpha (and fill/node opacity)
+                    // over the backdrop so the shading emits opaque stops with no
+                    // constant alpha. RGB keeps the shading colours untouched.
+                    let grad_flatten = backdrop.map(|bd| (bd, (p.fill.opacity * node_op)));
                     if g.units.is_object_box() {
                         match p.path_data.bounding_box() {
                             Some(bb) => build_pdf_shading(
                                 &g.resolved_for_bbox(bb.x0, bb.y0, bb.width(), bb.height()),
                                 opts,
+                                grad_flatten,
                             ),
-                            None => build_pdf_shading(g, opts),
+                            None => build_pdf_shading(g, opts, grad_flatten),
                         }
                     } else {
-                        build_pdf_shading(g, opts)
+                        build_pdf_shading(g, opts, grad_flatten)
                     }
                 } else {
                     None
@@ -2422,10 +2593,12 @@ fn emit_node_pdf(
                 // Stroke on top of the gradient fill, if present.
                 if let Some(s) = stroke {
                     emit_path_geometry(&p.path_data, content);
-                    set_stroke_color(
-                        content,
-                        convert_color([s.color.r, s.color.g, s.color.b], opts),
-                    );
+                    let src = [s.color.r, s.color.g, s.color.b];
+                    let rgb = match backdrop {
+                        Some(bd) => flatten_over(src, bd, stroke_alpha),
+                        None => src,
+                    };
+                    set_stroke_color(content, convert_color(rgb, opts));
                     let obj_scale = (a * d - b * c).abs().sqrt().max(1e-6);
                     content.set_line_width((s.width / obj_scale) as f32);
                     content.stroke();
@@ -2433,14 +2606,20 @@ fn emit_node_pdf(
             } else {
                 emit_path_geometry(&p.path_data, content);
                 let fill = fill_rgb(&p.fill);
-                if let Some([fr, fg, fb]) = fill {
-                    set_fill_color(content, convert_color([fr, fg, fb], opts));
+                if let Some(src) = fill {
+                    let rgb = match backdrop {
+                        Some(bd) => flatten_over(src, bd, fill_alpha),
+                        None => src,
+                    };
+                    set_fill_color(content, convert_color(rgb, opts));
                 }
                 if let Some(s) = stroke {
-                    set_stroke_color(
-                        content,
-                        convert_color([s.color.r, s.color.g, s.color.b], opts),
-                    );
+                    let src = [s.color.r, s.color.g, s.color.b];
+                    let rgb = match backdrop {
+                        Some(bd) => flatten_over(src, bd, stroke_alpha),
+                        None => src,
+                    };
+                    set_stroke_color(content, convert_color(rgb, opts));
                     // Non-scaling stroke: the `cm` transform above scales subsequent
                     // line widths, so divide by the transform scale to keep the
                     // authored width (matches the canvas and other exporters).
@@ -3074,6 +3253,76 @@ mod tests {
         assert!(
             !text.contains("/CA 1\n") && !text.contains("/CA 1 "),
             "stroke alpha must not be 1.0:\n{text}"
+        );
+    }
+
+    /// Regression: the CMYK / PDF-X-1a export path must NOT emit constant alpha
+    /// (`/ca`/`/CA` < 1) for a faint fill/stroke — PDF/X-1a forbids live
+    /// transparency. Instead the faint paint is FLATTENED: composited over the
+    /// opaque backdrop beneath it into an opaque tone. A dark card + a path stroked
+    /// 6% white must export with (a) no constant-alpha ExtGState at all, and (b) a
+    /// CMYK stroke colour that is the faint dark-grey composite, NOT pure white
+    /// (`0 0 0 0 K`). RGB export (covered above) still emits true `/CA`.
+    #[test]
+    fn pdf_export_cmyk_flattens_faint_stroke_no_constant_alpha() {
+        use crate::document::ColorMode;
+        use crate::node::PathNode;
+        use crate::path::PathData;
+        use crate::style::{Fill, FillKind, Stroke};
+
+        let mut doc = Document::new("t", 200.0, 150.0);
+        doc.color_mode = ColorMode::Cmyk;
+        let layer = doc.active_layer_id.unwrap();
+
+        // Opaque dark backdrop covering the page.
+        let mut bg = PathNode::new(PathData::rect(0.0, 0.0, 200.0, 150.0));
+        bg.fill = Fill {
+            kind: FillKind::Solid(Color::new(0.05, 0.05, 0.05, 1.0)),
+            opacity: 1.0,
+            enabled: true,
+        };
+        doc.add_node(SceneNode::new("bg", layer, SceneNodeKind::Path(bg)), None);
+
+        // A path stroked white at 6% opacity, over the dark backdrop.
+        let mut grid = PathNode::new(PathData::rect(10.0, 10.0, 180.0, 130.0));
+        grid.fill = Fill::none();
+        let mut stroke = Stroke::solid(Color::new(1.0, 1.0, 1.0, 1.0), 1.0);
+        stroke.opacity = 0.06;
+        grid.stroke = stroke;
+        doc.add_node(SceneNode::new("grid", layer, SceneNodeKind::Path(grid)), None);
+
+        let opts = PdfExportOptions {
+            color_mode: ColorMode::Cmyk,
+            ..Default::default()
+        };
+        let bytes = export_pdf(&doc, &opts);
+        let text = String::from_utf8_lossy(&bytes);
+
+        // (a) No constant alpha anywhere — no `/ca` or `/CA` keys emitted.
+        assert!(
+            !text.contains("/ca") && !text.contains("/CA"),
+            "CMYK/X-1a export must not emit any constant alpha (/ca or /CA):\n{text}"
+        );
+
+        // (b) The stroke composited to a faint dark-grey — a CMYK `K` stroke op
+        // that is NOT pure white (`0 0 0 0 K`) and carries real ink (K > 0).
+        let stroke_k = text
+            .lines()
+            .find_map(|l| l.trim().strip_suffix(" K"))
+            .map(|s| s.to_string());
+        let stroke_k = stroke_k.expect("expected a CMYK stroke-colour op (`… K`)");
+        let comps: Vec<f32> = stroke_k
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f32>().ok())
+            .collect();
+        assert_eq!(comps.len(), 4, "stroke `K` op must have 4 CMYK components: {stroke_k:?}");
+        assert!(
+            comps != vec![0.0, 0.0, 0.0, 0.0],
+            "faint white stroke must composite to a dark tone, not pure white: {stroke_k:?}"
+        );
+        assert!(
+            comps[3] > 0.1,
+            "composited faint stroke should carry substantial K ink: {stroke_k:?}"
         );
     }
 
