@@ -1168,3 +1168,104 @@ pub async fn liquify(state: &AppState, args: LiquifyArgs) -> ToolResult {
     history.execute_discrete(Command::UpdateNode { old, new: new_node }, &mut doc);
     ToolResult::text(format!("{} on {}", args.op, nid)).with_data(json!({ "node_id": nid }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::McpServerConfig;
+    use photonic_core::{Artboard, AuditLog, Document};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state(doc: Document) -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(doc)),
+            history: Arc::new(Mutex::new(
+                photonic_core::history::CommandHistory::new(100),
+            )),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    /// A tiny opaque PNG, base64-encoded, for feeding `place_image`.
+    fn png_b64(w: u32, h: u32) -> String {
+        let bytes = RasterImage::filled(w, h, [255, 0, 0, 255]).to_png();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// World-space AABB top-left of a node, composing local bounds with the node
+    /// transform exactly like `inspect_node`'s `world_bounds`.
+    fn world_top_left(node: &photonic_core::SceneNode) -> (f64, f64) {
+        let local = node.local_bounds().expect("raster has local bounds");
+        let affine = node.transform.to_kurbo();
+        let pts = [
+            affine * kurbo::Point::new(local.x0, local.y0),
+            affine * kurbo::Point::new(local.x1, local.y0),
+            affine * kurbo::Point::new(local.x1, local.y1),
+            affine * kurbo::Point::new(local.x0, local.y1),
+        ];
+        let x0 = pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let y0 = pts.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        (x0, y0)
+    }
+
+    /// Regression for the "placed images land on the wrong artboard / wrong
+    /// coordinates" bug: `place_image` must position the raster's top-left at the
+    /// requested DOCUMENT-space (x, y), independent of the active artboard.
+    #[tokio::test]
+    async fn place_image_lands_at_requested_document_coords() {
+        // Two artboards: A1 at the origin, A2 far to the right. Make A2 active so
+        // any "relative to active artboard" offset bug would shift the placement.
+        let mut doc = Document::new("t", 200.0, 200.0);
+        let a2 = Artboard::new("Artboard 2", 300.0, 0.0, 200.0, 200.0);
+        let a2_id = a2.id;
+        let a1_id = doc.artboards[0].id;
+        doc.artboards.push(a2);
+        doc.active_artboard = Some(a2_id);
+
+        let state = test_state(doc);
+
+        // Request placement squarely inside A2's rect, in document space.
+        let (req_x, req_y) = (320.0, 40.0);
+        let r = place_image(
+            &state,
+            PlaceImageArgs {
+                path: None,
+                data_base64: Some(png_b64(32, 32)),
+                x: req_x,
+                y: req_y,
+                name: Some("img".into()),
+                layer_id: None,
+            },
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "place_image should succeed");
+
+        let doc = state.document.lock().await;
+        let node = doc
+            .nodes
+            .values()
+            .find(|n| matches!(n.kind, SceneNodeKind::Raster(_)))
+            .expect("raster node placed");
+
+        // (1) World-space top-left equals the requested (x, y), NOT offset by the
+        //     active artboard origin (which would land it at 620, 40).
+        let (wx, wy) = world_top_left(node);
+        assert!(
+            (wx - req_x).abs() < 1e-6 && (wy - req_y).abs() < 1e-6,
+            "world top-left ({wx}, {wy}) != requested ({req_x}, {req_y})"
+        );
+
+        // (2) The placed image is assigned to the artboard it actually overlaps
+        //     (A2), and NOT to A1.
+        let owner = doc
+            .artboard_for_rect(wx, wy, wx + 32.0, wy + 32.0)
+            .expect("placed image overlaps an artboard");
+        assert_eq!(owner.id, a2_id, "image should belong to A2");
+        assert_ne!(owner.id, a1_id, "image must not belong to A1");
+    }
+}

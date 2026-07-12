@@ -1601,6 +1601,29 @@ fn build_page_content(
     let bleed_px =
         crate::units::to_px(doc.bleed_mm, crate::units::DocumentUnit::Mm, doc.dpi) as f32;
 
+    // Per-artboard export must include EXACTLY the content overlapping this
+    // region. On a clipped (per-artboard) page, a node whose world bbox lies
+    // wholly outside the region rect (+ bleed) contributes nothing but a hidden,
+    // clipped-away XObject — so skip emitting it entirely, assigning each node to
+    // the artboard region it actually occupies. Nodes with an unknown bbox (e.g.
+    // text) are always kept and left to the clip, preserving prior behavior.
+    let region_rect = region.clip.then(|| {
+        let b = bleed_px as f64;
+        kurbo::Rect::new(
+            region.origin_x - b,
+            region.origin_y - b,
+            region.origin_x + region.width_px + b,
+            region.origin_y + region.height_px + b,
+        )
+    });
+    let overlaps_region = |node: &SceneNode| -> bool {
+        let Some(rect) = region_rect else { return true };
+        match node_world_bbox(node, doc) {
+            Some(bb) => bb.x1 > rect.x0 && bb.x0 < rect.x1 && bb.y1 > rect.y0 && bb.y0 < rect.y1,
+            None => true,
+        }
+    };
+
     // Save state so marks can be drawn afterward in absolute page space.
     content.save_state();
     content.transform([s, 0.0, 0.0, -s, e, f]);
@@ -1647,6 +1670,9 @@ fn build_page_content(
         }
         for node_id in &layer.node_ids {
             if let Some(node) = doc.nodes.get(node_id) {
+                if !overlaps_region(node) {
+                    continue;
+                }
                 emit_node_pdf(node, doc, &mut content, opts, &mut res, 1.0);
             }
         }
@@ -2245,6 +2271,48 @@ fn fill_rgb(fill: &Fill) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-artboard export must include EXACTLY the content overlapping each
+    /// artboard's rectangle. A raster placed over artboard 2 must appear (as an
+    /// image XObject) in artboard 2's page, and must NOT be embedded at all in
+    /// artboard 1's page — not even as a hidden, clipped-away XObject.
+    #[test]
+    fn per_artboard_export_includes_only_overlapping_content() {
+        use crate::document::Artboard;
+        use crate::node::RasterNode;
+        use crate::raster::RasterImage;
+        use crate::transform::Transform;
+
+        // A1 at the origin, A2 to the right — non-overlapping rectangles.
+        let mut doc = Document::new("t", 200.0, 200.0);
+        doc.artboards = vec![
+            Artboard::new("A1", 0.0, 0.0, 200.0, 200.0),
+            Artboard::new("A2", 300.0, 0.0, 200.0, 200.0),
+        ];
+        let layer = doc.active_layer_id.unwrap();
+
+        // A 32×32 raster whose top-left sits at (320, 40) — squarely inside A2,
+        // wholly outside A1.
+        let img = RasterImage::filled(32, 32, [255, 0, 0, 255]);
+        let mut node = SceneNode::new("img", layer, SceneNodeKind::Raster(RasterNode::new(img)));
+        node.transform = Transform::translate(320.0, 40.0);
+        doc.add_node(node, None);
+
+        let opts = PdfExportOptions::default();
+        let a1 = export_pdf_regions(&doc, &opts, &[PageRegion::artboard(&doc.artboards[0])]);
+        let a2 = export_pdf_regions(&doc, &opts, &[PageRegion::artboard(&doc.artboards[1])]);
+
+        // An image XObject is a stream carrying `/Subtype /Image`.
+        let has_image = |pdf: &[u8]| {
+            pdf.windows(b"/Subtype /Image".len())
+                .any(|w| w == b"/Subtype /Image")
+        };
+        assert!(has_image(&a2), "A2 (overlapping) must embed the image");
+        assert!(
+            !has_image(&a1),
+            "A1 (non-overlapping) must NOT embed the image, even clipped"
+        );
+    }
 
     /// ROUND 2 / Issue C — the per-artboard CMYK export path flattens a
     /// transparent raster over the ACTUAL backdrop (the dark card beneath it), not
