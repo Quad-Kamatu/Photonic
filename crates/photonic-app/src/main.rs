@@ -445,6 +445,12 @@ impl ApplicationHandler for PhotonicWinitApp {
             capture_rx,
         ));
 
+        // Share the windowed renderer's GPU device/queue with the MCP export path
+        // so `export_artboards`/`export_raster` render on the SAME GPU context. A
+        // second wgpu device alongside the presenting surface device crashed the
+        // running app; reusing this one avoids the conflict entirely.
+        photonic_mcp::register_export_gpu(renderer.device_arc(), renderer.queue_arc());
+
         // ── Lua REPL (binds to the live document) ────────────────────────────
         let lua_repl = match LuaRepl::new(Arc::clone(&self.document), Arc::clone(&self.history)) {
             Ok(r) => r,

@@ -1855,7 +1855,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_raster",
-            "description": "Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF) and return the image data as a base64-encoded string.\n\nPNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.\n\nOptionally specify width/height to resize the output. If omitted, the capture uses the current canvas dimensions.",
+            "description": "Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF). Returns the image data as a base64-encoded string, OR — when `path` is given — writes the image to disk and returns only a small result (path + dimensions), keeping full-resolution PNGs off the socket.\n\nPNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.\n\nOptionally specify width/height to resize the output. If omitted, the capture uses the current canvas dimensions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1875,13 +1875,17 @@ pub fn tool_list() -> Value {
                     "quality": {
                         "type": "integer",
                         "description": "JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Write the encoded image to this filesystem path (parent dirs created) and return a small result (path + width/height) instead of base64. Omit to return base64 inline. Use this for full-resolution PNGs, whose base64 is too large for the MCP socket."
                     }
                 }
             }
         },
         {
             "name": "export_artboards",
-            "description": "Export one or more artboards to raster images — one image per artboard — returned as base64. Unlike export_raster (which snapshots the live editor viewport), each artboard's rectangle is rendered off-screen at its own aspect ratio, so results are exact regardless of the current zoom/scroll. Select artboards by (precedence): all=true → every artboard; range=[start,end] → 1-based inclusive index range; artboards=[...] → a list of UUIDs, exact names, or 1-based index strings; otherwise the active artboard. Get ids/names/indices from list_artboards. Max 24 artboards per call; each side capped at 8192 px.",
+            "description": "Export one or more artboards to raster images — one image per artboard. Returns base64 by default, OR — when `path` is given — writes each image to disk and returns only a small result (path + dimensions per artboard), keeping full-resolution PNGs off the socket. Unlike export_raster (which snapshots the live editor viewport), each artboard's rectangle is rendered off-screen at its own aspect ratio, so results are exact regardless of the current zoom/scroll. Select artboards by (precedence): all=true → every artboard; range=[start,end] → 1-based inclusive index range; artboards=[...] → a list of UUIDs, exact names, or 1-based index strings; otherwise the active artboard. Get ids/names/indices from list_artboards. Set bleed=true to include the document print bleed around each artboard (for print upload). Max 24 artboards per call; each side capped at 8192 px.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1914,6 +1918,14 @@ pub fn tool_list() -> Value {
                     "quality": {
                         "type": "integer",
                         "description": "JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG."
+                    },
+                    "bleed": {
+                        "type": "boolean",
+                        "description": "Expand each artboard's rectangle by the document print bleed (bleed_mm, at the export scale/DPI) on all four sides, so the output includes the bleed area for print upload. Output dimensions become artboard px + 2×bleed px. Default false (trim only)."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Write each artboard's image to disk (parent dirs created) and return a small result (path + dimensions) instead of base64. With multiple artboards, include a {name} or {index} placeholder (or an extension, before which -{index} is inserted); a single artboard is written to `path` verbatim. Omit to return base64 inline."
                     }
                 }
             }

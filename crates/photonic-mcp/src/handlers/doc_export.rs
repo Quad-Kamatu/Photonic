@@ -461,6 +461,28 @@ fn expand_path_template(template: &str, name: &str, index: usize) -> String {
     }
 }
 
+/// Write `bytes` to `path`, creating any missing parent directories first.
+fn write_file_with_parents(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, bytes)
+}
+
+/// Read a PNG's pixel dimensions straight from its IHDR chunk — no full decode.
+/// The byte layout is fixed: 8-byte signature, then the IHDR chunk whose data
+/// begins at offset 16 (width, big-endian u32) and 20 (height).
+fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
+    if png.len() < 24 || &png[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    Some((w, h))
+}
+
 
 pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResult {
     tracing::debug!("tool: export_raster");
@@ -502,6 +524,9 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
         _ => png_bytes,
     };
 
+    // Output dimensions (from the canonical PNG, before any format conversion).
+    let (out_w, out_h) = png_dimensions(&png_bytes).unwrap_or((0, 0));
+
     // Convert format if needed.
     let (final_bytes, mime) = if is_jpeg {
         let quality = args.quality.unwrap_or(90).clamp(1, 100);
@@ -529,8 +554,6 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
         (png_bytes, "image/png")
     };
 
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
     let byte_count = final_bytes.len();
     let fmt_label = if is_jpeg {
         "JPEG"
@@ -544,9 +567,34 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
         "PNG"
     };
 
+    // When `path` is set, write the encoded image to disk and return a SMALL
+    // result (path + dimensions) — never the base64, so a full-resolution PNG
+    // does not overwhelm the MCP socket. Base64 is only returned when `path`
+    // is omitted. Mirrors `export_pdf`'s path handling.
+    if let Some(ref path) = args.path {
+        if let Err(e) = write_file_with_parents(path, &final_bytes) {
+            return ToolResult::error(format!("Failed to write image to '{path}': {e}"));
+        }
+        return ToolResult::text(format!(
+            "{fmt_label} export — {byte_count} bytes → {path} ({out_w}×{out_h})"
+        ))
+        .with_data(serde_json::json!({
+            "format": fmt_label.to_lowercase(),
+            "path": path,
+            "width": out_w,
+            "height": out_h,
+            "bytes": byte_count,
+            "mime": mime,
+        }));
+    }
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
     ToolResult::text(format!("{fmt_label} export — {byte_count} bytes")).with_data(
         serde_json::json!({
             "format": fmt_label.to_lowercase(),
+            "width": out_w,
+            "height": out_h,
             "bytes": byte_count,
             "mime": mime,
             "data_base64": b64,
@@ -648,6 +696,7 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
     }
     let scale = args.scale.unwrap_or(1.0).clamp(0.05, 8.0);
     let transparent = args.transparent.unwrap_or(false);
+    let bleed = args.bleed.unwrap_or(false);
 
     // Resolve the target artboards and snapshot the document under one lock.
     let (render_doc, targets) = {
@@ -664,6 +713,20 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
             Err(e) => return ToolResult::error(e),
         };
         (doc.clone(), selected)
+    };
+
+    // Print-bleed inset in document px, added to all four sides of each artboard
+    // rectangle when `bleed` is set. `bleed_mm` is converted at the document DPI
+    // (the same coordinate space artboard rectangles live in), so the expanded
+    // region includes exactly the document's print bleed.
+    let bleed_px = if bleed {
+        photonic_core::units::to_px(
+            render_doc.bleed_mm,
+            photonic_core::units::DocumentUnit::Mm,
+            render_doc.dpi,
+        )
+    } else {
+        0.0
     };
 
     // Render every target off-thread through the editor's own surfaceless
@@ -684,11 +747,18 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
         };
         jobs.into_iter()
             .map(|a| {
-                let pw = ((a.width * scale).round() as i64).clamp(1, MAX_DIM as i64) as u32;
-                let ph = ((a.height * scale).round() as i64).clamp(1, MAX_DIM as i64) as u32;
+                // Expand the trim rectangle by the print bleed on all four sides.
+                let (rx, ry, rw, rh) = (
+                    a.x - bleed_px,
+                    a.y - bleed_px,
+                    a.width + 2.0 * bleed_px,
+                    a.height + 2.0 * bleed_px,
+                );
+                let pw = ((rw * scale).round() as i64).clamp(1, MAX_DIM as i64) as u32;
+                let ph = ((rh * scale).round() as i64).clamp(1, MAX_DIM as i64) as u32;
                 let opts = ExportOptions {
                     background,
-                    region: Some((a.x, a.y, a.width, a.height)),
+                    region: Some((rx, ry, rw, rh)),
                     ..Default::default()
                 };
                 let (px, w, h) = renderer.render_export_rgba(&render_doc, pw, ph, &opts);
@@ -703,11 +773,15 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
         return ToolResult::error("Renderer returned no pixels (GPU readback failed)");
     }
 
-    // Encode each artboard to the requested format.
+    // Encode each artboard to the requested format. When `path` is set, write each
+    // image to disk and return a SMALL result (path + dimensions per artboard) —
+    // never base64, so a full-resolution PNG never floods the MCP socket. Base64 is
+    // only emitted when `path` is omitted. Mirrors `export_pdf`'s path handling.
     use base64::Engine;
+    let board_count = rendered.len();
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut total_bytes = 0usize;
-    for (a, px, w, h) in rendered {
+    for (idx, (a, px, w, h)) in rendered.into_iter().enumerate() {
         if px.is_empty() {
             continue;
         }
@@ -747,17 +821,41 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
             _ => (png, "image/png", "png"),
         };
         total_bytes += bytes.len();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        items.push(serde_json::json!({
-            "artboard_id": a.id,
-            "name": a.name,
-            "width": w,
-            "height": h,
-            "format": fmt_label,
-            "bytes": bytes.len(),
-            "mime": mime,
-            "data_base64": b64,
-        }));
+
+        if let Some(template) = args.path.as_deref() {
+            // Single artboard → write to `path` verbatim; multiple → expand the
+            // {name}/{index} template so each artboard gets a distinct file.
+            let out_path = if board_count > 1 {
+                expand_path_template(template, &a.name, idx + 1)
+            } else {
+                template.to_string()
+            };
+            if let Err(e) = write_file_with_parents(&out_path, &bytes) {
+                return ToolResult::error(format!("Failed to write image to '{out_path}': {e}"));
+            }
+            items.push(serde_json::json!({
+                "artboard_id": a.id,
+                "name": a.name,
+                "path": out_path,
+                "width": w,
+                "height": h,
+                "format": fmt_label,
+                "bytes": bytes.len(),
+                "mime": mime,
+            }));
+        } else {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            items.push(serde_json::json!({
+                "artboard_id": a.id,
+                "name": a.name,
+                "width": w,
+                "height": h,
+                "format": fmt_label,
+                "bytes": bytes.len(),
+                "mime": mime,
+                "data_base64": b64,
+            }));
+        }
     }
 
     if items.is_empty() {
@@ -765,13 +863,23 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
     }
 
     let n = items.len();
-    ToolResult::text(format!(
-        "Exported {n} artboard{} as {} — {} bytes total",
-        if n == 1 { "" } else { "s" },
-        format.to_uppercase(),
-        total_bytes
-    ))
-    .with_data(serde_json::json!({ "count": n, "format": format, "artboards": items }))
+    let summary = if args.path.is_some() {
+        format!(
+            "Exported {n} artboard{} as {} → disk — {} bytes total",
+            if n == 1 { "" } else { "s" },
+            format.to_uppercase(),
+            total_bytes
+        )
+    } else {
+        format!(
+            "Exported {n} artboard{} as {} — {} bytes total",
+            if n == 1 { "" } else { "s" },
+            format.to_uppercase(),
+            total_bytes
+        )
+    };
+    ToolResult::text(summary)
+        .with_data(serde_json::json!({ "count": n, "format": format, "artboards": items }))
 }
 
 /// Lazily-initialized offscreen renderer shared by `preview_selection`. Created
@@ -803,6 +911,25 @@ type ExportRenderer = std::sync::Arc<std::sync::Mutex<Option<photonic_render::Ph
 
 static EXPORT_RENDERER: tokio::sync::OnceCell<ExportRenderer> = tokio::sync::OnceCell::const_new();
 
+/// GPU device/queue shared from the live GUI renderer. When the app runs with a
+/// window, it registers a clone of the windowed renderer's device+queue here (see
+/// [`register_export_gpu`]) so the export renderer reuses the SAME GPU context
+/// instead of creating a second `wgpu::Instance`/adapter/device. Creating a second
+/// device alongside the presenting surface device crashed the running app; sharing
+/// one device is safe (`Device`/`Queue` are `Send + Sync`). Absent in headless MCP
+/// mode (no window, no live renderer), where a self-owned device is safe.
+static EXPORT_GPU: std::sync::OnceLock<(
+    std::sync::Arc<wgpu::Device>,
+    std::sync::Arc<wgpu::Queue>,
+)> = std::sync::OnceLock::new();
+
+/// Register the live GUI renderer's GPU device/queue for reuse by artboard/PNG
+/// export. Called once from the app after the windowed renderer is created. A
+/// second call is ignored (the first registration wins).
+pub fn register_export_gpu(device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>) {
+    let _ = EXPORT_GPU.set((device, queue));
+}
+
 async fn export_renderer() -> ExportRenderer {
     EXPORT_RENDERER
         .get_or_init(|| async {
@@ -813,8 +940,19 @@ async fn export_renderer() -> ExportRenderer {
             let doc = std::sync::Arc::new(tokio::sync::Mutex::new(
                 photonic_core::document::Document::new("export", 1.0, 1.0),
             ));
-            let renderer =
-                photonic_render::PhotonicRenderer::new_offscreen(16, 16, doc, rx).await;
+            let renderer = match EXPORT_GPU.get() {
+                // GUI mode: reuse the live renderer's device — no second GPU context.
+                Some((device, queue)) => Some(photonic_render::PhotonicRenderer::new_offscreen_shared(
+                    std::sync::Arc::clone(device),
+                    std::sync::Arc::clone(queue),
+                    16,
+                    16,
+                    doc,
+                    rx,
+                )),
+                // Headless MCP mode: no live renderer, so a self-owned device is safe.
+                None => photonic_render::PhotonicRenderer::new_offscreen(16, 16, doc, rx).await,
+            };
             std::sync::Arc::new(std::sync::Mutex::new(renderer))
         })
         .await
@@ -1713,6 +1851,7 @@ pub async fn run_export_profile(state: &AppState, args: RunExportProfileArgs) ->
                 width: profile.width,
                 height: profile.height,
                 quality: None,
+                path: None,
             };
             export_raster(state, raster_args).await
         }

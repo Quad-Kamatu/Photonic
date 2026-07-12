@@ -505,6 +505,84 @@ mod offscreen_tests {
         );
     }
 
+    /// Live-context regression: TWO `PhotonicRenderer`s sharing ONE GPU device in
+    /// ONE process must both render — the scenario that crashed the running GUI when
+    /// export created a *second* wgpu device alongside the windowed one. Here the
+    /// first renderer stands in for the live windowed renderer; the second is built
+    /// via [`PhotonicRenderer::new_offscreen_shared`] from the first's shared
+    /// `device_arc()`/`queue_arc()` (exactly what `register_export_gpu` hands the MCP
+    /// export path). Both produce pixels, and the shared export render never disturbs
+    /// the "live" renderer's own output.
+    #[test]
+    fn shared_device_export_renderer_coexists_with_live_renderer() {
+        use crate::headless::{ExportBackground, ExportOptions};
+
+        const W: u32 = 40;
+        const H: u32 = 40;
+
+        // A blue rect filling the artboard, so both renders are unambiguously non-blank.
+        let mut doc = Document::new("shared", W as f64, H as f64);
+        let node = SceneNode::new(
+            "rect",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, W as f64, H as f64))
+                    .with_fill(Fill::solid(Color::new(0.10, 0.30, 0.90, 1.0))),
+            ),
+        );
+        doc.add_node(node, None);
+
+        // Renderer #1 — stands in for the live windowed renderer (owns the device).
+        let Some(mut live) = offscreen(doc.clone(), W, H) else {
+            eprintln!("no GPU adapter — skipping shared-device test");
+            return;
+        };
+
+        // Renderer #2 — the export renderer, built on the SAME device/queue (no
+        // second wgpu device is created). Its document/size/view are isolated.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let export_doc = std::sync::Arc::new(tokio::sync::Mutex::new(Document::new("x", 1.0, 1.0)));
+        let mut export = PhotonicRenderer::new_offscreen_shared(
+            live.device_arc(),
+            live.queue_arc(),
+            16,
+            16,
+            export_doc,
+            rx,
+        );
+
+        let opts = ExportOptions {
+            background: ExportBackground::Artboard,
+            region: Some((0.0, 0.0, W as f64, H as f64)),
+            ..Default::default()
+        };
+
+        // The export renderer renders the doc through the shared device.
+        let (px, ew, eh) = export.render_export_rgba(&doc, W, H, &opts);
+        assert_eq!((ew, eh), (W, H), "shared export must honor the requested size");
+        let img = image::RgbaImage::from_raw(ew, eh, px).expect("shared export rgba");
+        let center = img.get_pixel(W / 2, H / 2).0;
+        assert!(
+            center[2] > 150 && center[3] > 200,
+            "shared-device export produced no pixels: center={center:?}"
+        );
+
+        // The "live" renderer still renders correctly AFTER the shared export ran —
+        // sharing the device did not corrupt or lose it.
+        live.view.screen_width = W;
+        live.view.screen_height = H;
+        live.view.fit_to_rect_exact(0.0, 0.0, W as f64, H as f64);
+        let live_png = live.render_capture();
+        let live_img = image::load_from_memory(&live_png)
+            .expect("live png")
+            .to_rgba8();
+        let lc = live_img.get_pixel(W / 2, H / 2).0;
+        assert!(
+            lc[2] > 150 && lc[3] > 200,
+            "live renderer broke after shared export: center={lc:?}"
+        );
+    }
+
     /// Stage 0 smoke test: the windowless renderer drives the real GPU pipeline
     /// and reads pixels back. A red rect filling a 20×20 doc → red at the centre.
     #[test]

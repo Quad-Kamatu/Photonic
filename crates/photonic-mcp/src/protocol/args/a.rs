@@ -1225,6 +1225,11 @@ pub struct ExportRasterArgs {
     pub height: Option<u32>,
     /// JPEG quality 1–100 (default: 90). Ignored for PNG.
     pub quality: Option<u8>,
+    /// Write the encoded image to this filesystem path (parent dirs are created)
+    /// and return a small result (path + dimensions) instead of the base64 payload.
+    /// Omit to return base64 inline. Keeps full-resolution PNGs off the MCP socket.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Arguments for the `export_artboards` tool.
@@ -1252,6 +1257,17 @@ pub struct ExportArtboardsArgs {
     /// JPEG/WebP quality 1–100.
     #[serde(default)]
     pub quality: Option<u8>,
+    /// Write each artboard's encoded image to disk (parent dirs created) and return
+    /// a small result (path + dimensions) instead of base64. With multiple artboards,
+    /// use a `{name}`/`{index}` placeholder in the path (or an extension, before which
+    /// `-{index}` is inserted). Omit to return base64 inline.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Expand each artboard's rectangle by the document bleed (`bleed_mm` at the
+    /// export scale/DPI) on all four sides, so the PNG includes the print bleed area.
+    /// Default false (trim only).
+    #[serde(default)]
+    pub bleed: Option<bool>,
 }
 
 /// Arguments for `create_shape` tool

@@ -67,8 +67,12 @@ pub struct PhotonicRenderer {
     /// [`PhotonicRenderer::new_offscreen`] — it renders only through
     /// `capture_png` and never presents a swapchain frame.
     pub(crate) surface: Option<wgpu::Surface<'static>>,
-    pub(crate) device: wgpu::Device,
-    pub(crate) queue: wgpu::Queue,
+    /// `Arc`-wrapped so the device/queue can be shared with a second, isolated
+    /// offscreen export renderer ([`new_offscreen_shared`](Self::new_offscreen_shared))
+    /// without creating a conflicting second `wgpu` device. `wgpu::Device`/`Queue`
+    /// are not `Clone` in wgpu 22, so `Arc` is how we hand out a shared handle.
+    pub(crate) device: Arc<wgpu::Device>,
+    pub(crate) queue: Arc<wgpu::Queue>,
     pub(crate) surface_config: wgpu::SurfaceConfiguration,
     pub(crate) surface_format: wgpu::TextureFormat,
 
@@ -251,6 +255,7 @@ impl PhotonicRenderer {
             .expect("No suitable GPU adapter found");
 
         let (device, queue) = Self::request_device(&adapter).await;
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
 
         let caps = surface.get_capabilities(&adapter);
         // Prefer a non-sRGB linear format so egui doesn't double-gamma-correct.
@@ -318,6 +323,7 @@ impl PhotonicRenderer {
             })
             .await?;
         let (device, queue) = Self::request_device(&adapter).await;
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
 
         // Linear (non-sRGB) RGBA: readback needs no channel swap and blending
         // matches the windowed path's preferred format.
@@ -346,6 +352,53 @@ impl PhotonicRenderer {
         ))
     }
 
+    /// Construct a **windowless** renderer that reuses an **already-created**
+    /// `device`/`queue` instead of requesting its own adapter + device. This is the
+    /// export path inside the live GUI process: the app hands us a clone of the
+    /// windowed renderer's device/queue so a full-resolution artboard/PNG export
+    /// renders on the SAME GPU context — no second `wgpu::Instance`/adapter/device
+    /// is created. Spinning up a second device alongside the presenting surface
+    /// device is what crashed the running app; sharing one device is safe because
+    /// `wgpu::Device`/`Queue` are `Send + Sync` and internally synchronised, and
+    /// this renderer keeps its own isolated `document`, size and camera state, so it
+    /// never disturbs the live view.
+    ///
+    /// Uses `Rgba8Unorm` (like [`new_offscreen`](Self::new_offscreen)) regardless of
+    /// the windowed surface format, so readback needs no channel swap.
+    pub fn new_offscreen_shared(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        width: u32,
+        height: u32,
+        document: Arc<Mutex<Document>>,
+        capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
+    ) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        Self::assemble(
+            device,
+            queue,
+            None,
+            surface_config,
+            surface_format,
+            width,
+            height,
+            document,
+            capture_rx,
+        )
+    }
+
     async fn request_device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {
         adapter
             .request_device(
@@ -366,8 +419,8 @@ impl PhotonicRenderer {
     /// ([`new_offscreen`](Self::new_offscreen)) constructors.
     #[allow(clippy::too_many_arguments)]
     fn assemble(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
         surface: Option<wgpu::Surface<'static>>,
         surface_config: wgpu::SurfaceConfiguration,
         surface_format: wgpu::TextureFormat,
@@ -554,6 +607,18 @@ impl PhotonicRenderer {
 
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// Shared handle to the GPU device — cloned into the MCP export renderer so a
+    /// full-resolution export renders on this SAME device instead of spinning up a
+    /// conflicting second one (see [`new_offscreen_shared`](Self::new_offscreen_shared)).
+    pub fn device_arc(&self) -> Arc<wgpu::Device> {
+        Arc::clone(&self.device)
+    }
+
+    /// Shared handle to the GPU queue — companion to [`device_arc`](Self::device_arc).
+    pub fn queue_arc(&self) -> Arc<wgpu::Queue> {
+        Arc::clone(&self.queue)
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {

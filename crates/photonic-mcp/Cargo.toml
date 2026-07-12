@@ -8,6 +8,7 @@ license.workspace = true
 photonic-core = { path = "../photonic-core" }
 photonic-matte = { path = "../photonic-matte" }
 photonic-render = { path = "../photonic-render" }
+wgpu = { workspace = true }
 glyphon = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
