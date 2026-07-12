@@ -1824,29 +1824,202 @@ impl PdfResources {
     }
 }
 
-/// Resolve the opaque backdrop RGB behind a placed raster, for the CMYK/X-1a
-/// flatten (which can't keep alpha). Walks the document in draw order and returns
-/// the colour of the *topmost* opaque, solid-filled path drawn **before** the
-/// raster whose world bbox fully covers it — i.e. the card/panel the image sits
-/// on. Falls back to the page background, then white.
+/// One opaque(-ish) paint of the artwork drawn beneath a placed raster, projected
+/// into that raster's own pixel grid (native, pre-downsample). Fills and strokes
+/// both reduce to a *fillable* outline so a single scanline rasteriser renders
+/// them; `alpha` carries node/fill/stroke/colour opacity for correct compositing.
+struct BackdropOp {
+    /// Fillable outline in native image-pixel coordinates.
+    outline: kurbo::BezPath,
+    rgb: [f32; 3],
+    alpha: f32,
+}
+
+/// The real artwork drawn *beneath* a placed raster, expressed in the raster's own
+/// pixel grid, so the CMYK/X-1a flatten can composite the transparent image over
+/// genuine underlying content (bg + grid + slashes + …) instead of a single solid
+/// colour. This is how Illustrator flattens: transparent regions resolve to the
+/// art behind them, not a hard-coded box.
 ///
-/// Uniform-backdrop assumption: a single covering colour (exact for an avatar on
-/// a solid card). Non-covering or gradient/image backdrops fall through to the
-/// page background — the RGB path (true SMask) remains the fully-general route.
-fn backdrop_rgb_for(doc: &Document, opts: &PdfExportOptions, raster: &SceneNode) -> [f32; 3] {
-    let mut bg = opts
+/// [`Self::rasterize`] renders the scene at any target resolution, so it stays
+/// aligned with a raster that gets downsampled to the DPI cap before encoding.
+struct BackdropScene {
+    /// Page background / white — the colour of any pixel no op covers.
+    fallback: [f32; 3],
+    /// Covering artwork in native image-pixel space, in draw order (painter's).
+    ops: Vec<BackdropOp>,
+    /// Native raster dims the ops were projected into (`rasterize` scales from here).
+    img_w: u32,
+    img_h: u32,
+}
+
+impl BackdropScene {
+    /// A single flat colour with no underlying geometry — the fallback route for
+    /// callers/tests that only need a uniform flatten backdrop.
+    fn uniform(rgb: [f32; 3]) -> Self {
+        Self { fallback: rgb, ops: Vec::new(), img_w: 0, img_h: 0 }
+    }
+
+    /// Render the backdrop into a `w`×`h` RGB grid (row-major, one `[f32; 3]`/px).
+    /// Ops are projected from native image-pixel space by the downsample scale so
+    /// the grid aligns pixel-for-pixel with the (possibly downsampled) raster.
+    fn rasterize(&self, w: u32, h: u32) -> Vec<[f32; 3]> {
+        let mut buf = vec![self.fallback; (w as usize) * (h as usize)];
+        if self.ops.is_empty() || w == 0 || h == 0 {
+            return buf;
+        }
+        let sx = w as f64 / self.img_w.max(1) as f64;
+        let sy = h as f64 / self.img_h.max(1) as f64;
+        let scale = kurbo::Affine::scale_non_uniform(sx, sy);
+        for op in &self.ops {
+            let path = scale * op.outline.clone();
+            fill_bezpath_into(&path, op.rgb, op.alpha, w, h, &mut buf);
+        }
+        buf
+    }
+}
+
+/// Scanline-fill `path` (nonzero winding) into `buf` (`w`×`h`, row-major RGB),
+/// alpha-blending `rgb` at `alpha` over whatever is already there. One sample at
+/// each pixel centre — no anti-aliasing, since the flatten only needs the
+/// underlying colours, not edge quality.
+fn fill_bezpath_into(
+    path: &kurbo::BezPath,
+    rgb: [f32; 3],
+    alpha: f32,
+    w: u32,
+    h: u32,
+    buf: &mut [[f32; 3]],
+) {
+    use kurbo::PathEl;
+    if alpha <= 0.0 {
+        return;
+    }
+    // Flatten to closed polygon rings (each subpath is implicitly closed for fill).
+    let mut rings: Vec<Vec<kurbo::Point>> = Vec::new();
+    let mut cur: Vec<kurbo::Point> = Vec::new();
+    kurbo::flatten(path.elements().iter().copied(), 0.25, |el| match el {
+        PathEl::MoveTo(p) => {
+            if cur.len() > 1 {
+                rings.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+            cur.push(p);
+        }
+        PathEl::LineTo(p) => cur.push(p),
+        PathEl::ClosePath => {
+            if cur.len() > 1 {
+                rings.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        }
+        _ => {}
+    });
+    if cur.len() > 1 {
+        rings.push(cur);
+    }
+
+    // Edges: (y_top, y_bot, x_at_y_top, dx/dy, winding-direction).
+    struct Edge {
+        y_top: f64,
+        y_bot: f64,
+        x_top: f64,
+        dxdy: f64,
+        dir: i32,
+    }
+    let mut edges: Vec<Edge> = Vec::new();
+    for ring in &rings {
+        for i in 0..ring.len() {
+            let a = ring[i];
+            let b = ring[(i + 1) % ring.len()];
+            if a.y == b.y {
+                continue; // horizontal edges contribute no crossings
+            }
+            let (p0, p1, dir) = if a.y < b.y { (a, b, 1) } else { (b, a, -1) };
+            edges.push(Edge {
+                y_top: p0.y,
+                y_bot: p1.y,
+                x_top: p0.x,
+                dxdy: (p1.x - p0.x) / (p1.y - p0.y),
+                dir,
+            });
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+
+    let a = alpha.clamp(0.0, 1.0);
+    let one_minus = 1.0 - a;
+    for py in 0..h {
+        let yc = py as f64 + 0.5;
+        // Crossings of scanline yc with each edge (half-open [y_top, y_bot)).
+        let mut xs: Vec<(f64, i32)> = Vec::new();
+        for e in &edges {
+            if yc >= e.y_top && yc < e.y_bot {
+                xs.push((e.x_top + (yc - e.y_top) * e.dxdy, e.dir));
+            }
+        }
+        if xs.len() < 2 {
+            continue;
+        }
+        xs.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut wind = 0i32;
+        for pair in 0..xs.len() - 1 {
+            wind += xs[pair].1;
+            if wind == 0 {
+                continue; // outside the shape between these two crossings
+            }
+            let (xa, xb) = (xs[pair].0, xs[pair + 1].0);
+            // Pixel centres px+0.5 in [xa, xb): px in [xa-0.5, xb-0.5).
+            let start = ((xa - 0.5).ceil()).max(0.0) as i64;
+            let end = ((xb - 0.5).ceil()).min(w as f64) as i64;
+            for px in start..end {
+                let idx = py as usize * w as usize + px as usize;
+                let d = buf[idx];
+                buf[idx] = [
+                    rgb[0] * a + d[0] * one_minus,
+                    rgb[1] * a + d[1] * one_minus,
+                    rgb[2] * a + d[2] * one_minus,
+                ];
+            }
+        }
+    }
+}
+
+/// Build the [`BackdropScene`] beneath a placed `raster`, for the CMYK/X-1a flatten
+/// (which can't keep alpha). Walks the document in draw order, projecting every
+/// path drawn **before** the raster into the raster's pixel grid — so the flatten
+/// composites the transparent image over the *actual* content behind it (the card,
+/// the grid, the slashes), not a single solid colour. Falls back to the page
+/// background (then white) for any pixel no artwork covers.
+fn backdrop_scene_for(doc: &Document, opts: &PdfExportOptions, raster: &SceneNode) -> BackdropScene {
+    let fallback = opts
         .background
         .map(|c| [c.r, c.g, c.b])
         .unwrap_or([1.0, 1.0, 1.0]);
-    let Some(rbb) = node_world_bbox(raster, doc) else {
-        return bg;
+    let world = raster.transform.to_kurbo();
+    // Map world (doc-px) → this raster's native pixel grid. The image unit square
+    // is drawn onto node-local (0,0)-(w,h) (see `emit_node_pdf`), so node-local
+    // coords *are* image-pixel coords; inverse of the raster's world transform
+    // takes any underlying node's world geometry into that grid.
+    if world.determinant().abs() < 1e-12 {
+        return BackdropScene::uniform(fallback);
+    }
+    let inv = world.inverse();
+
+    let mut scene = BackdropScene {
+        fallback,
+        ops: Vec::new(),
+        img_w: raster_native_dims(raster).map(|d| d.0).unwrap_or(0),
+        img_h: raster_native_dims(raster).map(|d| d.1).unwrap_or(0),
     };
-    let covers = |nbb: kurbo::Rect| {
-        nbb.x0 <= rbb.x0 + 1e-6
-            && nbb.y0 <= rbb.y0 + 1e-6
-            && nbb.x1 + 1e-6 >= rbb.x1
-            && nbb.y1 + 1e-6 >= rbb.y1
-    };
+    if scene.img_w == 0 || scene.img_h == 0 {
+        return scene;
+    }
+
     'scan: for layer_id in &doc.layer_order {
         let layer = match doc.layers.get(layer_id) {
             Some(l) if l.visible && l.print => l,
@@ -1856,27 +2029,88 @@ fn backdrop_rgb_for(doc: &Document, opts: &PdfExportOptions, raster: &SceneNode)
             if *nid == raster.id {
                 break 'scan; // reached the image — later nodes are above it
             }
-            let Some(node) = doc.nodes.get(nid) else { continue };
-            if !node.visible || node.opacity < 1.0 {
-                continue;
-            }
-            if let SceneNodeKind::Path(p) = &node.kind {
-                if !p.fill.enabled || (p.fill.opacity - 1.0).abs() > 1e-3 {
-                    continue;
-                }
-                if let FillKind::Solid(c) = &p.fill.kind {
-                    if c.a >= 1.0 {
-                        if let Some(nbb) = node_world_bbox(node, doc) {
-                            if covers(nbb) {
-                                bg = [c.r, c.g, c.b];
-                            }
-                        }
-                    }
-                }
+            if let Some(node) = doc.nodes.get(nid) {
+                collect_backdrop_ops(node, doc, kurbo::Affine::IDENTITY, inv, &mut scene.ops);
             }
         }
     }
-    bg
+    scene
+}
+
+/// Native pixel dims of a placed (non-adjustment) raster, else `None`.
+fn raster_native_dims(node: &SceneNode) -> Option<(u32, u32)> {
+    match &node.kind {
+        SceneNodeKind::Raster(r) if !r.is_adjustment_layer() => {
+            Some((r.image.width, r.image.height))
+        }
+        _ => None,
+    }
+}
+
+/// Recursively project `node`'s fills/strokes into the backdrop grid via
+/// `inv * parent_world * node.transform`, appending to `ops` in draw order (fill
+/// beneath stroke, earlier nodes beneath later ones). Groups recurse; rasters and
+/// text below the image are ignored (they fall through to the scene fallback).
+fn collect_backdrop_ops(
+    node: &SceneNode,
+    doc: &Document,
+    parent_world: kurbo::Affine,
+    inv: kurbo::Affine,
+    ops: &mut Vec<BackdropOp>,
+) {
+    if !node.visible || node.opacity <= 0.0 {
+        return;
+    }
+    let world = parent_world * node.transform.to_kurbo();
+    match &node.kind {
+        SceneNodeKind::Path(p) => {
+            let to_grid = inv * world;
+            // Fill first (drawn underneath its own stroke).
+            if let Some(rgb) = fill_rgb(&p.fill) {
+                let ca = match &p.fill.kind {
+                    FillKind::Solid(c) => c.a,
+                    _ => 1.0,
+                };
+                let alpha = node.opacity * p.fill.opacity * ca;
+                if alpha > 0.0 {
+                    ops.push(BackdropOp {
+                        outline: to_grid * p.path_data.to_bez_path(),
+                        rgb,
+                        alpha,
+                    });
+                }
+            }
+            // Stroke: expand to a fillable outline in node-local space, then project.
+            if p.stroke.enabled && p.stroke.width > 0.0 {
+                let alpha = node.opacity * p.stroke.opacity * p.stroke.color.a;
+                if alpha > 0.0 {
+                    let style = kurbo::Stroke::new(p.stroke.width);
+                    let outline = kurbo::stroke(
+                        p.path_data.to_bez_path(),
+                        &style,
+                        &kurbo::StrokeOpts::default(),
+                        0.1,
+                    );
+                    ops.push(BackdropOp {
+                        outline: to_grid * outline,
+                        rgb: [p.stroke.color.r, p.stroke.color.g, p.stroke.color.b],
+                        alpha,
+                    });
+                }
+            }
+        }
+        SceneNodeKind::Group(g) => {
+            for child_id in &g.children {
+                if let Some(child) = doc.nodes.get(child_id) {
+                    collect_backdrop_ops(child, doc, world, inv, ops);
+                }
+            }
+        }
+        // Raster/text backdrops aren't rasterised here — a transparent pixel over
+        // them resolves to the scene fallback (page bg). Full generality stays on
+        // the RGB/SMask route.
+        _ => {}
+    }
 }
 
 /// Convert a placed RGBA raster to a [`PdfImage`] in the export colour model,
@@ -1897,7 +2131,7 @@ fn build_pdf_image(
     opts: &PdfExportOptions,
     placed_scale: f64,
     doc_dpi: f64,
-    backdrop: [f32; 3],
+    backdrop: &BackdropScene,
 ) -> PdfImage {
     // ── Downsample to the effective-DPI cap ──────────────────────────────────
     let effective_dpi = doc_dpi / placed_scale.max(1e-6);
@@ -1913,22 +2147,23 @@ fn build_pdf_image(
     let n = (width as usize) * (height as usize);
     let is_cmyk = opts.color_mode == crate::document::ColorMode::Cmyk;
     if is_cmyk {
+        // Rasterise the real artwork beneath the image at the (downsampled) sample
+        // grid, so each transparent pixel flattens over its ACTUAL backdrop (bg +
+        // grid + slashes), not one solid colour — the Illustrator flatten model.
+        let bd = backdrop.rasterize(width, height);
         let mut color = Vec::with_capacity(n * 4);
         for i in 0..n {
             let r = px[i * 4] as f32 / 255.0;
             let g = px[i * 4 + 1] as f32 / 255.0;
             let b = px[i * 4 + 2] as f32 / 255.0;
             let a = px[i * 4 + 3] as f32 / 255.0;
+            let bg = bd[i];
             // Composite over the real backdrop to drop alpha (X-1a output is
             // opaque). Transparent pixels resolve to the artwork behind the image
-            // (the card), not white — so no white box over a dark card.
+            // (the card/grid), not white — so no white/black box over dark art.
             let over = |c: f32, bg: f32| c * a + (1.0 - a) * bg;
             let cmyk = match convert_color(
-                [
-                    over(r, backdrop[0]),
-                    over(g, backdrop[1]),
-                    over(b, backdrop[2]),
-                ],
+                [over(r, bg[0]), over(g, bg[1]), over(b, bg[2])],
                 opts,
             ) {
                 PdfColor::Cmyk(v) => v,
@@ -2144,13 +2379,13 @@ fn emit_node_pdf(
             if !r.is_adjustment_layer() && r.image.width > 0 && r.image.height > 0 {
                 // CMYK/X-1a flatten composites over the real backdrop (RGB keeps
                 // its SMask, so the backdrop is unused there).
-                let backdrop = backdrop_rgb_for(doc, opts, node);
+                let backdrop = backdrop_scene_for(doc, opts, node);
                 let idx = res.add_image(build_pdf_image(
                     &r.image,
                     opts,
                     node_scale,
                     doc.dpi as f64,
-                    backdrop,
+                    &backdrop,
                 ));
                 let w = r.image.width as f32;
                 let h = r.image.height as f32;
@@ -2306,7 +2541,8 @@ mod tests {
 
         // The backdrop resolution + composite: the transparent corner must resolve
         // to the dark card, not white.
-        let bg = backdrop_rgb_for(&doc, &opts, doc.nodes.get(&avatar_id).unwrap());
+        let scene = backdrop_scene_for(&doc, &opts, doc.nodes.get(&avatar_id).unwrap());
+        let bg = scene.rasterize(native, native)[0]; // corner pixel
         assert!(
             bg[0] < 0.2 && bg[1] < 0.2 && bg[2] < 0.2,
             "backdrop should resolve to the dark card, got {bg:?}"
@@ -2316,7 +2552,7 @@ mod tests {
             corner[i * 4..i * 4 + 4].copy_from_slice(&[240, 230, 220, 0]);
         }
         let cimg = RasterImage::from_rgba(native, native, corner).unwrap();
-        let pi = build_pdf_image(&cimg, &opts, 1.5, 300.0, bg);
+        let pi = build_pdf_image(&cimg, &opts, 1.5, 300.0, &scene);
         let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&pi.color).unwrap();
         // Not white: white flattens to CMYK 0,0,0,0. The dark card has substantial K.
         assert!(
@@ -2324,6 +2560,120 @@ mod tests {
             "transparent area must flatten to the dark card (high K), got CMYK {:?} (white box regression)",
             &raw[..4]
         );
+    }
+
+    /// ACCEPT (issue: transparent PNGs not transparent on export). A transparent
+    /// raster over a dark card + a thin grid must NOT flatten to a single solid
+    /// box on the CMYK/X-1a path — its transparent regions must resolve to the
+    /// ACTUAL art behind it (bg *and* grid), and the RGB path must keep true
+    /// per-pixel alpha via an `/SMask`. Illustrator's flatten model.
+    #[test]
+    fn transparent_raster_flattens_over_real_backdrop_grid_not_solid_box() {
+        use crate::document::{Artboard, ColorMode};
+        use crate::node::{PathNode, RasterNode};
+        use crate::path::PathData;
+        use crate::raster::RasterImage;
+        use crate::style::{Fill, FillKind, Stroke};
+        use crate::transform::Transform;
+
+        let build = || {
+            let mut doc = Document::new("card", 1050.0, 600.0);
+            doc.dpi = 300.0;
+            doc.artboards = vec![Artboard::new("Card Back", 0.0, 0.0, 1050.0, 600.0)];
+            let layer = doc.active_layer_id.unwrap();
+
+            // Dark background rect covering the artboard (#0b0b12).
+            let mut bg = PathNode::new(PathData::rect(0.0, 0.0, 1050.0, 600.0));
+            bg.fill = Fill {
+                kind: FillKind::Solid(Color::new(0.043, 0.043, 0.070, 1.0)),
+                opacity: 1.0,
+                enabled: true,
+            };
+            doc.add_node(SceneNode::new("bg", layer, SceneNodeKind::Path(bg)), None);
+
+            // A thin light-grey grid (strokes, no fill) crossing the image region
+            // — vertical + horizontal lines through world x∈[400,700], y∈[200,500].
+            let grid_svg = "M450 0 L450 600 M550 0 L550 600 M650 0 L650 600 \
+                            M0 250 L1050 250 M0 350 L1050 350 M0 450 L1050 450";
+            let mut grid = PathNode::new(PathData::from_svg(grid_svg).unwrap());
+            grid.fill = Fill { kind: FillKind::None, opacity: 1.0, enabled: false };
+            grid.stroke = Stroke::solid(Color::new(0.60, 0.60, 0.62, 1.0), 6.0);
+            doc.add_node(SceneNode::new("grid", layer, SceneNodeKind::Path(grid)), None);
+
+            // Fully-transparent PNG placed over the card + grid: every pixel a==0,
+            // so the flattened output is *entirely* the backdrop. If the flatten
+            // used one solid colour the whole image would be uniform; over the real
+            // backdrop it must show the grid against the dark card.
+            let native = 200u32;
+            let mut px = vec![0u8; (native * native * 4) as usize];
+            for i in 0..(native * native) as usize {
+                px[i * 4..i * 4 + 4].copy_from_slice(&[240, 230, 220, 0]);
+            }
+            let img = RasterImage::from_rgba(native, native, px).unwrap();
+            let mut avatar =
+                SceneNode::new("avatar", layer, SceneNodeKind::Raster(RasterNode::new(img)));
+            avatar.transform = Transform::new(1.5, 0.0, 0.0, 1.5, 400.0, 200.0);
+            let id = avatar.id;
+            doc.add_node(avatar, None);
+            (doc, id, native)
+        };
+
+        // ── CMYK / X-1a flatten: transparent regions show the real backdrop ──────
+        let (doc, avatar_id, native) = build();
+        let cmyk_opts = PdfExportOptions { color_mode: ColorMode::Cmyk, ..Default::default() };
+        let cmyk = String::from_utf8_lossy(&export_pdf_regions(
+            &doc,
+            &cmyk_opts,
+            &[PageRegion::artboard(&doc.artboards[0])],
+        ))
+        .into_owned();
+        assert!(cmyk.contains("/DeviceCMYK"), "CMYK raster should be DeviceCMYK");
+        assert!(!cmyk.contains("/SMask"), "CMYK/X-1a export must not carry transparency");
+
+        // The rasterised backdrop must be *non-uniform* — dark card AND lighter grid.
+        let scene = backdrop_scene_for(&doc, &cmyk_opts, doc.nodes.get(&avatar_id).unwrap());
+        let bd = scene.rasterize(native, native);
+        let lum = |c: [f32; 3]| c[0] + c[1] + c[2];
+        let min = bd.iter().copied().map(lum).fold(f32::MAX, f32::min);
+        let max = bd.iter().copied().map(lum).fold(f32::MIN, f32::max);
+        assert!(
+            max - min > 0.6,
+            "backdrop must be real art (dark card + grid), not a solid box: \
+             luminance span {min}..{max}"
+        );
+
+        // The flattened CMYK samples must vary too: high K over the dark card, lower
+        // K over the grid lines — i.e. the grid genuinely shows through.
+        let pi = build_pdf_image(
+            &doc.nodes
+                .get(&avatar_id)
+                .and_then(|n| match &n.kind {
+                    SceneNodeKind::Raster(r) => Some(r.image.clone()),
+                    _ => None,
+                })
+                .unwrap(),
+            &cmyk_opts,
+            1.5,
+            300.0,
+            &scene,
+        );
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&pi.color).unwrap();
+        let ks: Vec<u8> = raw.chunks_exact(4).map(|p| p[3]).collect();
+        let kmin = *ks.iter().min().unwrap();
+        let kmax = *ks.iter().max().unwrap();
+        assert!(kmax > 200, "dark card must flatten to high K, got max {kmax}");
+        assert!(kmin < 160, "grid lines must show through as lower K, got min {kmin}");
+
+        // ── RGB path: true per-pixel alpha preserved via an /SMask ───────────────
+        let (rgb_doc, _, _) = build();
+        let rgb = String::from_utf8_lossy(&export_pdf_regions(
+            &rgb_doc,
+            &PdfExportOptions::default(),
+            &[PageRegion::artboard(&rgb_doc.artboards[0])],
+        ))
+        .into_owned();
+        assert!(rgb.contains("/SMask"), "RGB export must preserve alpha via an /SMask");
+        assert!(rgb.contains("/DeviceGray"), "the soft mask is a DeviceGray image");
     }
 
     /// SVG export must be transparent by default — no opaque background rect
@@ -3267,7 +3617,13 @@ mod tests {
         // The soft-mask samples themselves: the transparent corner is 0, an opaque
         // pixel is 255. (Had the exporter filled transparent white, there'd be no
         // mask and the corner colour would be opaque.)
-        let pi = build_pdf_image(&img, &PdfExportOptions::default(), 1.0, 72.0, [1.0, 1.0, 1.0]);
+        let pi = build_pdf_image(
+            &img,
+            &PdfExportOptions::default(),
+            1.0,
+            72.0,
+            &BackdropScene::uniform([1.0, 1.0, 1.0]),
+        );
         let alpha = pi.alpha.as_ref().expect("alpha soft mask must be present");
         let gray = miniz_oxide::inflate::decompress_to_vec_zlib(alpha)
             .expect("SMask stream is valid zlib");
