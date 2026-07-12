@@ -1,28 +1,28 @@
-mod raster_ops;
-mod panel_actions;
-mod hotbar_ui;
-mod geometry;
 mod dialogs;
+mod geometry;
+mod hotbar_ui;
+mod panel_actions;
+mod raster_ops;
 mod search_ui;
 use geometry::*;
 mod demos;
 use demos::*;
 mod hit_test;
 use hit_test::*;
+pub(crate) mod autosave;
+mod close_guard;
 mod command_center;
 mod direct_select;
-mod proportional_move;
 mod erase_tools;
 pub(crate) mod gradient_handles;
 pub(crate) mod layer_ops;
+mod menu_drawer;
+mod proportional_move;
+mod recovery;
 mod rulers;
+mod tabs;
 mod tool_handlers;
 mod width_tool;
-mod menu_drawer;
-mod tabs;
-pub(crate) mod autosave;
-mod close_guard;
-mod recovery;
 use egui::{Color32, RichText};
 use egui_phosphor::regular as ph;
 use kurbo::{BezPath, PathEl, Point};
@@ -30,6 +30,7 @@ use photonic_core::{
     history::{Command, CommandHistory, HistoryGraphNode},
     layer::LayerId,
     node::{GroupNode, NodeId, PathNode},
+    ops::artboard_ops,
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
@@ -530,7 +531,10 @@ struct ObjectOptionsDialog {
 }
 
 impl ObjectOptionsDialog {
-    fn from_layer(layer_id: photonic_core::layer::LayerId, l: &photonic_core::layer::Layer) -> Self {
+    fn from_layer(
+        layer_id: photonic_core::layer::LayerId,
+        l: &photonic_core::layer::Layer,
+    ) -> Self {
         Self {
             target: OptionsTarget::Layer(layer_id),
             kind_label: "Layer",
@@ -593,7 +597,11 @@ impl ObjectOptionsDialog {
         l.opacity = self.opacity.clamp(0.0, 1.0);
         l.blend_mode = self.blend_mode;
         l.is_template = self.is_template;
-        l.color = if self.color_enabled { Some(self.color) } else { None };
+        l.color = if self.color_enabled {
+            Some(self.color)
+        } else {
+            None
+        };
         l.print = self.print;
         l.lock_transparency = self.lock_transparency;
         l.lock_pixels = self.lock_pixels;
@@ -684,18 +692,11 @@ struct PreviewTexCache {
     hash: u64,
 }
 
-/// In-progress artboard move: the board id, the cursor→origin grab offset, the
-/// board's original position, and the artwork that travels with it (node id +
-/// original translation) so dragging the board moves its contents too.
+/// In-progress artboard move: the board id and cursor→origin grab offset.
 struct ArtboardDrag {
     id: photonic_core::ArtboardId,
     grab_dx: f64,
     grab_dy: f64,
-    orig_x: f64,
-    orig_y: f64,
-    /// Full clones of the artwork that travels with the board, captured at drag
-    /// start — used for live moving and for the undo record.
-    orig_nodes: Vec<photonic_core::node::SceneNode>,
 }
 
 /// One open document and its per-document state, for the multi-document tab bar.
@@ -1895,7 +1896,6 @@ fn write_photon_file(
 }
 
 impl PhotonicApp {
-
     pub fn new() -> Self {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;
@@ -2031,7 +2031,10 @@ impl PhotonicApp {
             action_names: &self.action_names,
             history_graph: &self.history_graph,
             history_current: self.history_current,
-            history_last_saved: self.tabs.get(self.active_tab).and_then(|t| t.last_saved_node),
+            history_last_saved: self
+                .tabs
+                .get(self.active_tab)
+                .and_then(|t| t.last_saved_node),
             doc_export: &mut self.doc_export,
             bleed_mm_input: &mut self.bleed_mm_input,
             slug_mm_input: &mut self.slug_mm_input,
@@ -2053,7 +2056,6 @@ impl PhotonicApp {
             self.pending_panel_actions.push(action);
         }
     }
-
 
     /// Draw the full UI for one frame.
     ///
@@ -2145,8 +2147,7 @@ impl PhotonicApp {
         // state. Re-seed whenever the active tool changes into either one (a switch
         // between the two sub-variants re-seeds to the whole path; narrowing to a
         // single anchor is then done by clicking within the active sub-variant).
-        let is_point_edit_tool =
-            |t: Tool| matches!(t, Tool::DirectSelect | Tool::ProportionalMove);
+        let is_point_edit_tool = |t: Tool| matches!(t, Tool::DirectSelect | Tool::ProportionalMove);
         let entered_direct_select =
             is_point_edit_tool(self.active_tool) && self.last_tool != self.active_tool;
         // Central tool-lifecycle seam (#190): on a tool switch, fire the previous
@@ -2740,20 +2741,32 @@ impl PhotonicApp {
 
         // ── Bottom status bar ────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("statusbar")
-            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(concat!("Photonic v", env!("CARGO_PKG_VERSION"))).weak());
+                    ui.label(
+                        RichText::new(concat!("Photonic v", env!("CARGO_PKG_VERSION"))).weak(),
+                    );
                     // Isolation Mode indicator.
                     if let Some(iso_id) = self.isolated_group {
                         ui.separator();
-                        let name = doc.nodes.get(&iso_id).map(|n| n.name.as_str()).unwrap_or("Group");
-                        ui.label(RichText::new(format!("Isolation: {}  (Esc to exit)", name))
-                            .color(egui::Color32::from_rgb(80, 160, 255))
-                            .strong());
+                        let name = doc
+                            .nodes
+                            .get(&iso_id)
+                            .map(|n| n.name.as_str())
+                            .unwrap_or("Group");
+                        ui.label(
+                            RichText::new(format!("Isolation: {}  (Esc to exit)", name))
+                                .color(egui::Color32::from_rgb(80, 160, 255))
+                                .strong(),
+                        );
                     }
                     ui.separator();
-                    let sel_info = self.selected_id
+                    let sel_info = self
+                        .selected_id
                         .and_then(|id| doc.nodes.get(&id))
                         .map(|n| format!("  •  \"{}\" selected", n.name))
                         .unwrap_or_default();
@@ -2780,7 +2793,10 @@ impl PhotonicApp {
                             )
                         };
                         if ui
-                            .add(egui::Button::new(RichText::new(mcp_txt).color(mcp_col)).frame(false))
+                            .add(
+                                egui::Button::new(RichText::new(mcp_txt).color(mcp_col))
+                                    .frame(false),
+                            )
                             .on_hover_text("MCP server — click for details and restart")
                             .clicked()
                         {
@@ -2793,7 +2809,10 @@ impl PhotonicApp {
                         } else {
                             format!("{} Console", ph::TERMINAL)
                         };
-                        if ui.selectable_label(self.lua_console.visible, label).clicked() {
+                        if ui
+                            .selectable_label(self.lua_console.visible, label)
+                            .clicked()
+                        {
                             self.lua_console.visible = !self.lua_console.visible;
                         }
                     });
@@ -2827,7 +2846,7 @@ impl PhotonicApp {
         const DRAWER_FLOAT_X: f32 = 4.0; // gap on the drawer's right, off the canvas
         const DRAWER_PAD_X: f32 = 10.0; // drawer inner left/right content gutter
         const DRAWER_PAD_Y: f32 = 8.0; // drawer inner top/bottom content gutter
-        // Rail width is fully determined by its padding, icon size and right gap.
+                                       // Rail width is fully determined by its padding, icon size and right gap.
         const RAIL_WIDTH: f32 = RAIL_PAD_X + RAIL_ICON + RAIL_PAD_X + RAIL_GAP;
 
         // Style the rail to match the floating drawer: its left edge stays flush
@@ -3158,7 +3177,9 @@ impl PhotonicApp {
                     .max_width(480.0)
                     .default_width(right_target_w)
             } else {
-                panel.resizable(false).exact_width((right_target_w * rt).max(1.0))
+                panel
+                    .resizable(false)
+                    .exact_width((right_target_w * rt).max(1.0))
             };
             let resp = panel.show(ctx, |ui| {
                 ui.set_opacity(rt);
@@ -3179,17 +3200,16 @@ impl PhotonicApp {
                         self.draw_claude_tab(ui);
                     }
                     RightDrawerGroup::History => {
-                        egui::ScrollArea::vertical().id_salt("right_history_scroll").show(
-                            ui,
-                            |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("right_history_scroll")
+                            .show(ui, |ui| {
                                 self.draw_property_drawer_content(
                                     ui,
                                     doc,
                                     history,
                                     DrawerGroup::History,
                                 );
-                            },
-                        );
+                            });
                     }
                 }
             });
@@ -3947,32 +3967,11 @@ impl PhotonicApp {
                                     if let Some(p) = hresp.interact_pointer_pos() {
                                         let (cx, cy) =
                                             view.screen_to_canvas(p.x as f64, p.y as f64);
-                                        // Capture (full clones of) the artwork
-                                        // whose centre lies on this board.
-                                        let mut orig_nodes = Vec::new();
-                                        for node in doc.nodes.values() {
-                                            if let Some((nx0, ny0, nx1, ny1)) =
-                                                text_aware_canvas_bounds(node, renderer)
-                                            {
-                                                let ncx = (nx0 + nx1) * 0.5;
-                                                let ncy = (ny0 + ny1) * 0.5;
-                                                if ncx >= *x
-                                                    && ncx <= *x + *w
-                                                    && ncy >= *y
-                                                    && ncy <= *y + *h
-                                                {
-                                                    orig_nodes.push(node.clone());
-                                                }
-                                            }
-                                        }
                                         self.artboard_pre = Some(doc.artboards.clone());
                                         self.artboard_drag = Some(ArtboardDrag {
                                             id: *id,
                                             grab_dx: cx - *x,
                                             grab_dy: cy - *y,
-                                            orig_x: *x,
-                                            orig_y: *y,
-                                            orig_nodes,
                                         });
                                         select = Some(*id);
                                     }
@@ -4237,20 +4236,10 @@ impl PhotonicApp {
                                     }
                                 }
 
-                                let dx = nx - d.orig_x;
-                                let dy = ny - d.orig_y;
                                 if let Some(ab) = doc.artboards.iter_mut().find(|a| a.id == d.id) {
                                     ab.x = nx;
                                     ab.y = ny;
                                 }
-                                // Move the artwork that sits on the board with it.
-                                for on in &d.orig_nodes {
-                                    if let Some(node) = doc.nodes.get_mut(&on.id) {
-                                        node.transform.matrix[4] = on.transform.matrix[4] + dx;
-                                        node.transform.matrix[5] = on.transform.matrix[5] + dy;
-                                    }
-                                }
-                                doc_modified = true;
 
                                 // Draw the alignment guide lines (full viewport).
                                 let gp = ui.painter_at(rect);
@@ -4288,31 +4277,35 @@ impl PhotonicApp {
                         }
                     }
                     if end_artboard_drag {
-                        // Record the completed move (board + artwork) as one
-                        // undoable, change-logged step.
+                        // Re-plan the live board move from its pre-drag state so
+                        // the core planner moves its owned artwork in the same
+                        // undo step as the artboard rect.
                         if let Some(d) = self.artboard_drag.take() {
-                            let mut cmds: Vec<Command> = Vec::new();
                             if let Some(pre) = self.artboard_pre.take() {
-                                if pre != doc.artboards {
-                                    cmds.push(Command::SetArtboards {
-                                        old: pre,
-                                        new: doc.artboards.clone(),
-                                    });
-                                }
-                            }
-                            for on in &d.orig_nodes {
-                                if let Some(cur) = doc.nodes.get(&on.id) {
-                                    if cur.transform.matrix != on.transform.matrix {
-                                        cmds.push(Command::UpdateNode {
-                                            old: on.clone(),
-                                            new: cur.clone(),
-                                        });
+                                let old_position = pre
+                                    .iter()
+                                    .find(|artboard| artboard.id == d.id)
+                                    .map(|artboard| (artboard.x, artboard.y));
+                                let new_position = doc
+                                    .artboards
+                                    .iter()
+                                    .find(|artboard| artboard.id == d.id)
+                                    .map(|artboard| (artboard.x, artboard.y));
+                                if let (Some((old_x, old_y)), Some((new_x, new_y))) =
+                                    (old_position, new_position)
+                                {
+                                    let dx = new_x - old_x;
+                                    let dy = new_y - old_y;
+                                    if dx != 0.0 || dy != 0.0 {
+                                        doc.artboards = pre;
+                                        if let Some(cmd) =
+                                            artboard_ops::plan_move_artboard(doc, d.id, dx, dy)
+                                        {
+                                            history.execute(cmd, doc);
+                                            doc_modified = true;
+                                        }
                                     }
                                 }
-                            }
-                            if !cmds.is_empty() {
-                                history.execute(Command::Batch(cmds), doc);
-                                doc_modified = true;
                             }
                         }
                     }
@@ -4449,7 +4442,17 @@ impl PhotonicApp {
 
                     // Compact add/remove toolbar pinned to the viewport corner.
                     let mut do_add = false;
+                    let mut do_duplicate = false;
                     let mut do_remove = false;
+                    let duplicate_target = doc
+                        .active_artboard
+                        .or_else(|| doc.artboards.first().map(|artboard| artboard.id))
+                        .and_then(|id| {
+                            doc.artboards
+                                .iter()
+                                .find(|artboard| artboard.id == id)
+                                .map(|artboard| (id, artboard.width))
+                        });
                     egui::Area::new(ui.id().with("artboard_tools"))
                         // Sit above the cursor-coordinate readout (bottom-left).
                         .fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 58.0))
@@ -4462,6 +4465,16 @@ impl PhotonicApp {
                                     );
                                     if ui.add(egui::Button::new(ph::PLUS).small()).clicked() {
                                         do_add = true;
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            duplicate_target.is_some(),
+                                            egui::Button::new("⧉").small(),
+                                        )
+                                        .on_hover_text("Duplicate artboard with its contents")
+                                        .clicked()
+                                    {
+                                        do_duplicate = true;
                                     }
                                     if ui
                                         .add_enabled(
@@ -4500,6 +4513,21 @@ impl PhotonicApp {
                             doc,
                         );
                         doc_modified = true;
+                    }
+                    if do_duplicate {
+                        if let Some((id, width)) = duplicate_target {
+                            if let Some((cmd, new_id)) = artboard_ops::plan_duplicate_artboard(
+                                doc,
+                                id,
+                                width + 40.0,
+                                0.0,
+                                None,
+                            ) {
+                                history.execute(cmd, doc);
+                                doc.active_artboard = Some(new_id);
+                                doc_modified = true;
+                            }
+                        }
                     }
                     if do_remove {
                         if let Some(id) = doc.active_artboard {
@@ -5717,13 +5745,11 @@ impl PhotonicApp {
         doc_modified
     }
 
-
     // ── Select tool handler ───────────────────────────────────────────────────
 
     // (Select / Pen / Shape Builder handlers moved to `mod tool_handlers`)
 
     // (Layer/group operations moved to `mod layer_ops`)
-
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -5746,16 +5772,9 @@ fn viewport_kb(ctx: &egui::Context) -> bool {
 // ─── Claude tab ───────────────────────────────────────────────────────────────
 
 impl PhotonicApp {
-
     // ── "What's New" popup ─────────────────────────────────────────────────────
 
-
     // ── Export modal ─────────────────────────────────────────────────────────
-
-
-
-
-
 }
 
 // ── hit-testing & node helpers moved to `mod hit_test` (see hit_test.rs) ──
@@ -5785,7 +5804,9 @@ fn render_changelog_body(ui: &mut egui::Ui, body: &str) {
             let w = ui.available_width();
             let job = inline_md_job(ui, h.trim(), Color32::from_rgb(226, 232, 240), true, w);
             ui.add(egui::Label::new(job));
-        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))
+        } else if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
         {
             ui.horizontal_top(|ui| {
                 ui.add_space(6.0 + level * 14.0);
@@ -5835,10 +5856,7 @@ fn inline_md_job(
         if buf.is_empty() {
             return;
         }
-        let mut fmt = TextFormat::simple(
-            body_font.clone(),
-            if bold { strong_col } else { base },
-        );
+        let mut fmt = TextFormat::simple(body_font.clone(), if bold { strong_col } else { base });
         fmt.italics = italic;
         job.append(buf, 0.0, fmt);
         buf.clear();

@@ -4273,7 +4273,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "update_artboard",
-            "description": "Edit an existing artboard's name, position (x, y = top-left) and/or size (width, height). Only the fields you pass change; others are left as-is. One undoable step. Get the artboard_id from list_artboards.",
+            "description": "Edit an existing artboard's name, position (x, y = top-left) and/or size (width, height). Only the fields you pass change; others are left as-is. Repositioning with this tool moves only the artboard frame, not its contents. One undoable step. Get the artboard_id from list_artboards.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4285,6 +4285,33 @@ pub fn tool_list() -> Value {
                     "height": { "type": "number", "exclusiveMinimum": 0, "description": "New height in document units (> 0). Default: unchanged." }
                 },
                 "required": ["artboard_id"]
+            }
+        },
+        {
+            "name": "duplicate_artboard",
+            "description": "Duplicate an artboard together with all content/nodes inside it, as one undoable step. The copy becomes active. By default it is placed to the right of the original with a 40-unit gutter (offset_x = original width + 40, offset_y = 0). Get the artboard_id from list_artboards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artboard_id": { "type": "string", "description": "UUID of the artboard to duplicate (from list_artboards)." },
+                    "offset_x": { "type": "number", "description": "Horizontal offset for the copy in document units. Default: original width + 40." },
+                    "offset_y": { "type": "number", "description": "Vertical offset for the copy in document units. Default: 0." },
+                    "new_name": { "type": "string", "description": "Optional name for the copy. Default: '{original name} copy'." }
+                },
+                "required": ["artboard_id"]
+            }
+        },
+        {
+            "name": "move_artboard",
+            "description": "Move an artboard together with all content/nodes inside it by (dx, dy), as one undoable step. Unlike update_artboard, which repositions only the frame, this tool also moves the artboard's contents. Get the artboard_id from list_artboards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "artboard_id": { "type": "string", "description": "UUID of the artboard to move (from list_artboards)." },
+                    "dx": { "type": "number", "description": "Horizontal movement in document units." },
+                    "dy": { "type": "number", "description": "Vertical movement in document units." }
+                },
+                "required": ["artboard_id", "dx", "dy"]
             }
         },
         {

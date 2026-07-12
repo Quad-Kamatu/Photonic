@@ -13,8 +13,8 @@
 //! area-type spines. References that point *outside* the subtree (e.g. a symbol
 //! master) are deliberately left untouched.
 
-use crate::layer::LayerId;
 use crate::node::{NodeId, SceneNode, SceneNodeKind};
+use crate::{layer::LayerId, transform::Transform};
 use std::collections::HashMap;
 
 /// Deep-clone the subtree rooted at `root_id` from a node snapshot.
@@ -75,6 +75,13 @@ pub fn clone_subtree(
         if idx == 0 {
             node.transform.matrix[4] += dx;
             node.transform.matrix[5] += dy;
+        }
+        // A root translate moves the entire subtree in world space, including
+        // descendants. User-space gradients are document-anchored, so every
+        // cloned descendant needs the same coordinate delta to keep its paint
+        // locked to the copied geometry.
+        if dx != 0.0 || dy != 0.0 {
+            node.transform_user_space_gradients(&Transform::translate(dx, dy));
         }
 
         match &mut node.kind {

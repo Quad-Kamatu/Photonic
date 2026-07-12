@@ -1,8 +1,8 @@
-use serde_json::Value;
-use photonic_core::{audit_timestamp, AuditEntry};
-use crate::server::{AppState, ToolOutput};
-use crate::protocol::*;
 use crate::handlers;
+use crate::protocol::*;
+use crate::server::{AppState, ToolOutput};
+use photonic_core::{audit_timestamp, AuditEntry};
+use serde_json::Value;
 
 /// Notify the checkpoint system that a mutation has occurred.
 /// Resets the 60-second debounce window; the background task flushes it.
@@ -14,7 +14,11 @@ async fn post_mutation(state: &AppState, tool_name: &str) {
         .schedule_mcp_checkpoint(tool_name);
 }
 
-pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<ToolResult, String> {
+pub(crate) async fn dispatch_tool(
+    state: &AppState,
+    name: &str,
+    args: Value,
+) -> Result<ToolResult, String> {
     let start = std::time::Instant::now();
     let output = dispatch_tool_inner(state, name, args.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -1523,7 +1527,9 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "set_paint" => {
             let a: SetPaintArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-            Ok(ToolOutput::mutating(handlers::nodes::set_paint(state, a).await))
+            Ok(ToolOutput::mutating(
+                handlers::nodes::set_paint(state, a).await,
+            ))
         }
         "delete_gradient_swatch" => {
             let a: DeleteGradientSwatchArgs =
@@ -1736,6 +1742,19 @@ pub(crate) async fn dispatch_tool_inner(
             let a: UpdateArtboardArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(
                 handlers::artboards::update_artboard(state, a).await,
+            ))
+        }
+        "duplicate_artboard" => {
+            let a: DuplicateArtboardArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::artboards::duplicate_artboard(state, a).await,
+            ))
+        }
+        "move_artboard" => {
+            let a: MoveArtboardArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::artboards::move_artboard(state, a).await,
             ))
         }
         "remove_artboard" => {

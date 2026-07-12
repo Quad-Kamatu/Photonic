@@ -1,7 +1,6 @@
+use super::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use super::*;
-
 
 // ─── select_by_kind ──────────────────────────────────────────────────────────
 
@@ -778,6 +777,33 @@ pub struct UpdateArtboardArgs {
     pub height: Option<f64>,
 }
 
+/// Arguments for the `duplicate_artboard` tool.
+#[derive(Debug, Deserialize)]
+pub struct DuplicateArtboardArgs {
+    /// UUID of the artboard to duplicate (from `list_artboards`).
+    pub artboard_id: Uuid,
+    /// Horizontal offset in document units. Defaults to the artboard width plus 40.
+    #[serde(default)]
+    pub offset_x: Option<f64>,
+    /// Vertical offset in document units. Defaults to 0.
+    #[serde(default)]
+    pub offset_y: Option<f64>,
+    /// Optional name for the new artboard. Defaults to "{original name} copy".
+    #[serde(default)]
+    pub new_name: Option<String>,
+}
+
+/// Arguments for the `move_artboard` tool.
+#[derive(Debug, Deserialize)]
+pub struct MoveArtboardArgs {
+    /// UUID of the artboard to move (from `list_artboards`).
+    pub artboard_id: Uuid,
+    /// Horizontal movement in document units.
+    pub dx: f64,
+    /// Vertical movement in document units.
+    pub dy: f64,
+}
+
 /// Arguments for the `remove_artboard` tool.
 #[derive(Debug, Deserialize)]
 pub struct RemoveArtboardArgs {
@@ -1279,4 +1305,3 @@ pub struct ClearTabStopsArgs {
     /// UUID or name of the text node to reset to default tab stops.
     pub node_id: String,
 }
-

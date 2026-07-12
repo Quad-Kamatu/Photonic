@@ -362,7 +362,7 @@ pub fn export_nodes_as_svg_opts(
 
 /// Compute the world-space axis-aligned bounding box of a node by applying its
 /// affine transform to its local bounding box.  Groups are handled recursively.
-fn node_world_bbox(node: &SceneNode, doc: &Document) -> Option<kurbo::Rect> {
+pub(crate) fn node_world_bbox(node: &SceneNode, doc: &Document) -> Option<kurbo::Rect> {
     let local = match &node.kind {
         SceneNodeKind::Path(p) => p.path_data.bounding_box()?,
         SceneNodeKind::Group(g) => {
@@ -376,7 +376,9 @@ fn node_world_bbox(node: &SceneNode, doc: &Document) -> Option<kurbo::Rect> {
             }
             combined?
         }
-        SceneNodeKind::Text(_) => return None,
+        // Text has no path outline, but its measured local bounds still define
+        // a world-space extent for export, selection, and artboard ownership.
+        SceneNodeKind::Text(_) => node.local_bounds()?,
         SceneNodeKind::Raster(r) => {
             if r.is_adjustment_layer() {
                 return None;

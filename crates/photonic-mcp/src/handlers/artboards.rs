@@ -9,7 +9,11 @@
 
 use crate::protocol::*;
 use crate::server::AppState;
-use photonic_core::{history::Command, Artboard};
+use photonic_core::{
+    history::Command,
+    ops::artboard_ops::{owned_root_nodes, plan_duplicate_artboard, plan_move_artboard},
+    Artboard,
+};
 use serde_json::json;
 
 /// Serialize one artboard for tool output.
@@ -130,7 +134,9 @@ pub async fn remove_artboard(state: &AppState, args: RemoveArtboardArgs) -> Tool
     tracing::debug!("tool: remove_artboard");
     let mut doc = state.document.lock().await;
     if doc.artboards.len() <= 1 {
-        return ToolResult::error("Cannot remove the last artboard — a document needs at least one");
+        return ToolResult::error(
+            "Cannot remove the last artboard — a document needs at least one",
+        );
     }
     let old = doc.artboards.clone();
     if !old.iter().any(|a| a.id == args.artboard_id) {
@@ -163,11 +169,76 @@ pub async fn set_active_artboard(state: &AppState, args: SetActiveArtboardArgs) 
         .with_data(json!({ "active_artboard": args.artboard_id }))
 }
 
+/// Duplicate an artboard and every content subtree it owns. One undoable step.
+pub async fn duplicate_artboard(state: &AppState, args: DuplicateArtboardArgs) -> ToolResult {
+    tracing::debug!("tool: duplicate_artboard");
+    let mut doc = state.document.lock().await;
+    let Some(original) = doc
+        .artboards
+        .iter()
+        .find(|artboard| artboard.id == args.artboard_id)
+    else {
+        return ToolResult::error(format!("Artboard {} not found", args.artboard_id));
+    };
+
+    let original_name = original.name.clone();
+    let dx = args.offset_x.unwrap_or(original.width + 40.0);
+    let dy = args.offset_y.unwrap_or(0.0);
+    let copied_roots = owned_root_nodes(&doc, args.artboard_id).len();
+    let Some((cmd, new_id)) =
+        plan_duplicate_artboard(&doc, args.artboard_id, dx, dy, args.new_name)
+    else {
+        return ToolResult::error(format!("Could not duplicate artboard {}", args.artboard_id));
+    };
+
+    let mut history = state.history.lock().await;
+    history.execute_discrete(cmd, &mut doc);
+    // `SetArtboards` preserves the original active board; select the new copy.
+    doc.active_artboard = Some(new_id);
+
+    ToolResult::text(format!(
+        "Duplicated artboard '{}' → new artboard {} at ({:+.0}, {:+.0}) with {} root node{}",
+        original_name,
+        new_id,
+        dx,
+        dy,
+        copied_roots,
+        if copied_roots == 1 { "" } else { "s" },
+    ))
+    .with_data(json!({ "artboard_id": new_id }))
+}
+
+/// Move an artboard and every content subtree it owns. One undoable step.
+pub async fn move_artboard(state: &AppState, args: MoveArtboardArgs) -> ToolResult {
+    tracing::debug!("tool: move_artboard");
+    let mut doc = state.document.lock().await;
+    if !doc
+        .artboards
+        .iter()
+        .any(|artboard| artboard.id == args.artboard_id)
+    {
+        return ToolResult::error(format!("Artboard {} not found", args.artboard_id));
+    }
+
+    let Some(cmd) = plan_move_artboard(&doc, args.artboard_id, args.dx, args.dy) else {
+        return ToolResult::text("No movement — dx and dy are both 0");
+    };
+
+    let mut history = state.history.lock().await;
+    history.execute_discrete(cmd, &mut doc);
+
+    ToolResult::text(format!(
+        "Moved artboard {} by ({:+.1}, {:+.1}) with its content",
+        args.artboard_id, args.dx, args.dy
+    ))
+    .with_data(json!({ "artboard_id": args.artboard_id }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::{AppState, McpServerConfig};
-    use photonic_core::{AuditLog, Document};
+    use photonic_core::{node::PathNode, AuditLog, Document, PathData, SceneNode, SceneNodeKind};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Mutex;
 
@@ -185,6 +256,23 @@ mod tests {
 
     async fn count(state: &AppState) -> usize {
         state.document.lock().await.artboards.len()
+    }
+
+    fn seed_path(doc: &mut Document) -> uuid::Uuid {
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let node = SceneNode::new(
+            "Seed path",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(10.0, 10.0, 20.0, 20.0))),
+        );
+        let node_id = node.id;
+        doc.nodes.insert(node_id, node);
+        doc.layers
+            .get_mut(&layer_id)
+            .expect("default layer")
+            .node_ids
+            .push(node_id);
+        node_id
     }
 
     #[tokio::test]
@@ -259,7 +347,13 @@ mod tests {
         }
 
         // Remove it.
-        let r = remove_artboard(&state, RemoveArtboardArgs { artboard_id: new_id }).await;
+        let r = remove_artboard(
+            &state,
+            RemoveArtboardArgs {
+                artboard_id: new_id,
+            },
+        )
+        .await;
         assert_ne!(r.is_error, Some(true));
         assert_eq!(count(&state).await, start);
     }
@@ -269,7 +363,11 @@ mod tests {
         let state = test_state();
         let id = state.document.lock().await.artboards[0].id;
         let r = remove_artboard(&state, RemoveArtboardArgs { artboard_id: id }).await;
-        assert_eq!(r.is_error, Some(true), "removing the last artboard must error");
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "removing the last artboard must error"
+        );
         assert_eq!(count(&state).await, 1);
     }
 
@@ -278,7 +376,13 @@ mod tests {
         let state = test_state();
         let bad = add_artboard(
             &state,
-            AddArtboardArgs { name: None, x: 0.0, y: 0.0, width: 0.0, height: 10.0 },
+            AddArtboardArgs {
+                name: None,
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 10.0,
+            },
         )
         .await;
         assert_eq!(bad.is_error, Some(true));
@@ -296,5 +400,105 @@ mod tests {
         )
         .await;
         assert_eq!(missing.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn duplicate_artboard_copies_content_and_undoes_in_one_step() {
+        let state = test_state();
+        let (original_id, source_node_id, source_width) = {
+            let mut doc = state.document.lock().await;
+            let original_id = doc.artboards[0].id;
+            let source_width = doc.artboards[0].width;
+            let source_node_id = seed_path(&mut doc);
+            (original_id, source_node_id, source_width)
+        };
+
+        let result = duplicate_artboard(
+            &state,
+            DuplicateArtboardArgs {
+                artboard_id: original_id,
+                offset_x: None,
+                offset_y: None,
+                new_name: None,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true));
+
+        let new_id = {
+            let doc = state.document.lock().await;
+            assert_eq!(doc.artboards.len(), 2);
+            let new_id = doc.active_artboard.expect("copy becomes active");
+            assert_ne!(new_id, original_id);
+            let copy = doc
+                .artboards
+                .iter()
+                .find(|artboard| artboard.id == new_id)
+                .unwrap();
+            assert_eq!(copy.x, source_width + 40.0);
+            assert_eq!(doc.nodes.len(), 2, "the source node was cloned");
+            new_id
+        };
+        assert_ne!(new_id, original_id);
+
+        let mut doc = state.document.lock().await;
+        let mut history = state.history.lock().await;
+        assert_eq!(history.undo_depth(), 1);
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.artboards.len(), 1);
+        assert_eq!(doc.nodes.len(), 1);
+        assert!(doc.nodes.contains_key(&source_node_id));
+    }
+
+    #[tokio::test]
+    async fn move_artboard_moves_content_and_zero_offset_is_a_noop() {
+        let state = test_state();
+        let (artboard_id, node_id, original_x) = {
+            let mut doc = state.document.lock().await;
+            let artboard_id = doc.artboards[0].id;
+            let node_id = seed_path(&mut doc);
+            let original_x = doc.artboards[0].x;
+            (artboard_id, node_id, original_x)
+        };
+
+        let result = move_artboard(
+            &state,
+            MoveArtboardArgs {
+                artboard_id,
+                dx: 50.0,
+                dy: 0.0,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true));
+        {
+            let doc = state.document.lock().await;
+            assert_eq!(doc.artboards[0].x, original_x + 50.0);
+            assert_eq!(doc.nodes[&node_id].transform.matrix[4], 50.0);
+        }
+        {
+            let mut doc = state.document.lock().await;
+            let mut history = state.history.lock().await;
+            assert_eq!(history.undo_depth(), 1);
+            assert!(history.undo(&mut doc));
+            assert_eq!(doc.artboards[0].x, original_x);
+            assert_eq!(doc.nodes[&node_id].transform.matrix[4], 0.0);
+        }
+
+        let result = move_artboard(
+            &state,
+            MoveArtboardArgs {
+                artboard_id,
+                dx: 0.0,
+                dy: 0.0,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true));
+        let ContentItem::Text { text } = &result.content[0] else {
+            panic!("expected text result");
+        };
+        assert!(text.contains("No movement"));
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
     }
 }

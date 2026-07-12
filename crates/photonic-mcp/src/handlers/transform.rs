@@ -1,6 +1,4 @@
-use crate::handlers::shared::{
-    cloning::*, random::*,
-};
+use crate::handlers::shared::{cloning::*, random::*};
 use crate::protocol::*;
 use crate::server::AppState;
 use kurbo;
@@ -2598,5 +2596,148 @@ pub async fn rotate_copies(state: &AppState, args: RotateCopiesArgs) -> ToolResu
             "count": args.count,
             "center": [cx, cy],
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::{AppState, McpServerConfig};
+    use photonic_core::{
+        color::Color,
+        node::PathNode,
+        style::{Fill, FillKind, Gradient, GradientStop, Stroke},
+        AuditLog, Document,
+    };
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("t", 200.0, 100.0))),
+            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    fn gradient() -> Gradient {
+        Gradient::linear(
+            10.0,
+            20.0,
+            30.0,
+            20.0,
+            vec![
+                GradientStop::new(0.0, Color::BLACK),
+                GradientStop::new(1.0, Color::WHITE),
+            ],
+        )
+    }
+
+    async fn seed_gradient_path(state: &AppState) -> uuid::Uuid {
+        let mut doc = state.document.lock().await;
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let mut stroke = Stroke::solid(Color::BLACK, 1.0);
+        stroke.paint = Some(FillKind::Gradient(gradient()));
+        let node = SceneNode::new(
+            "gradient path",
+            layer_id,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(10.0, 20.0, 20.0, 10.0))
+                    .with_fill(Fill::gradient(gradient()))
+                    .with_stroke(stroke),
+            ),
+        );
+        let id = node.id;
+        doc.nodes.insert(id, node);
+        doc.layers
+            .get_mut(&layer_id)
+            .expect("default layer")
+            .node_ids
+            .push(id);
+        id
+    }
+
+    fn paint_coords(node: &SceneNode) -> (Vec<f64>, Vec<f64>) {
+        let SceneNodeKind::Path(path) = &node.kind else {
+            panic!("expected path")
+        };
+        let FillKind::Gradient(fill) = &path.fill.kind else {
+            panic!("expected gradient fill")
+        };
+        let Some(FillKind::Gradient(stroke)) = &path.stroke.paint else {
+            panic!("expected gradient stroke")
+        };
+        (fill.coords.clone(), stroke.coords.clone())
+    }
+
+    #[tokio::test]
+    async fn duplicate_nodes_offsets_fill_and_stroke_user_space_gradients() {
+        let state = test_state();
+        let source_id = seed_gradient_path(&state).await;
+
+        let result = duplicate_nodes(
+            &state,
+            DuplicateNodesArgs {
+                node_ids: vec![source_id],
+                count: Some(1),
+                offset: Some(TranslateArg { x: 40.0, y: 700.0 }),
+                layer_id: None,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true));
+
+        let doc = state.document.lock().await;
+        let copy = doc
+            .nodes
+            .values()
+            .find(|node| node.id != source_id)
+            .expect("duplicated node");
+        assert_eq!(copy.transform.matrix[4], 40.0);
+        assert_eq!(copy.transform.matrix[5], 700.0);
+        assert_eq!(
+            paint_coords(copy),
+            (
+                vec![50.0, 720.0, 70.0, 720.0],
+                vec![50.0, 720.0, 70.0, 720.0]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_transform_translate_offsets_fill_and_stroke_user_space_gradients() {
+        let state = test_state();
+        let source_id = seed_gradient_path(&state).await;
+
+        let result = apply_transform(
+            &state,
+            ApplyTransformArgs {
+                node_ids: vec![source_id],
+                operation: TransformOperation::Translate,
+                translate: Some(TranslateArg { x: 40.0, y: 700.0 }),
+                rotate: None,
+                scale: None,
+                matrix: None,
+                shear: None,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true));
+
+        let doc = state.document.lock().await;
+        let node = &doc.nodes[&source_id];
+        assert_eq!(node.transform.matrix[4], 40.0);
+        assert_eq!(node.transform.matrix[5], 700.0);
+        assert_eq!(
+            paint_coords(node),
+            (
+                vec![50.0, 720.0, 70.0, 720.0],
+                vec![50.0, 720.0, 70.0, 720.0]
+            )
+        );
     }
 }

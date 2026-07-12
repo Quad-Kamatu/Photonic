@@ -53,6 +53,13 @@ pub(crate) fn clone_subtree(
                 // Keep the original layer_id (they're owned by the group, not the layer).
             }
 
+            // The root's translate moves the complete subtree in world space.
+            // Keep document-space gradient fills and stroke paints aligned on
+            // every cloned descendant as well.
+            if dx != 0.0 || dy != 0.0 {
+                cloned.transform_user_space_gradients(&Transform::translate(dx, dy));
+            }
+
             // Remap group children.
             if let SceneNodeKind::Group(ref mut g) = cloned.kind {
                 g.children = g.children.iter().map(|cid| id_map[cid]).collect();
@@ -63,4 +70,3 @@ pub(crate) fn clone_subtree(
     }
     result
 }
-

@@ -1,5 +1,6 @@
 use crate::color::Color;
 use crate::raster::image::RasterImage;
+use crate::transform::Transform;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -81,6 +82,22 @@ pub enum FillKind {
 }
 
 impl FillKind {
+    /// Move a user-space linear or radial gradient with the geometry that owns
+    /// it. Object-bounding-box gradients already follow their geometry through
+    /// bbox resolution, so their coordinates must remain untouched.
+    ///
+    /// Returns whether this fill contained a moved gradient. This lets callers
+    /// avoid emitting no-op node updates for unpainted group descendants.
+    pub fn transform_user_space_gradient(&mut self, transform: &Transform) -> bool {
+        match self {
+            FillKind::Gradient(gradient) if gradient.units == GradientUnits::UserSpaceOnUse => {
+                gradient.transform_coords(transform);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Resolve an object-bounding-box gradient against the filled object's
     /// document-space bbox so it can be sampled at document coordinates. Returns
     /// `self` borrowed for every other fill (no allocation).
@@ -510,6 +527,36 @@ impl Gradient {
     pub fn with_units(mut self, units: GradientUnits) -> Self {
         self.units = units;
         self
+    }
+
+    /// Apply an affine transform to user-space coordinates. Linear gradients
+    /// transform both endpoints. Radial gradients transform their center and
+    /// focal point; their scalar radius is measured from the transformed
+    /// center to the transformed positive-x radius point. (The current model
+    /// stores a circular radial gradient, so a non-uniform affine cannot retain
+    /// an elliptical radius exactly.)
+    pub fn transform_coords(&mut self, transform: &Transform) {
+        match self.kind {
+            GradientKind::Linear if self.coords.len() >= 4 => {
+                let (x0, y0) = transform.apply(self.coords[0], self.coords[1]);
+                let (x1, y1) = transform.apply(self.coords[2], self.coords[3]);
+                self.coords[0..4].copy_from_slice(&[x0, y0, x1, y1]);
+            }
+            GradientKind::Radial if self.coords.len() >= 5 => {
+                let (old_cx, old_cy, old_r) = (self.coords[0], self.coords[1], self.coords[4]);
+                let (cx, cy) = transform.apply(old_cx, old_cy);
+                let (fx, fy) = transform.apply(self.coords[2], self.coords[3]);
+                let (rx, ry) = transform.apply(old_cx + old_r, old_cy);
+                self.coords[0..5].copy_from_slice(&[
+                    cx,
+                    cy,
+                    fx,
+                    fy,
+                    ((rx - cx).powi(2) + (ry - cy).powi(2)).sqrt(),
+                ]);
+            }
+            _ => {}
+        }
     }
 
     /// If this gradient is in [`GradientUnits::ObjectBoundingBox`] space, return
@@ -1097,6 +1144,30 @@ mod gradient_interp_tests {
     fn user_space_gradient_unchanged_by_resolve() {
         let g = Gradient::linear(10.0, 0.0, 90.0, 0.0, stops());
         assert_eq!(g.resolved_for_bbox(0.0, 0.0, 5.0, 5.0).coords, g.coords);
+    }
+
+    #[test]
+    fn user_space_gradient_transforms_with_its_node() {
+        let mut linear = Gradient::linear(10.0, 20.0, 30.0, 20.0, stops());
+        linear.transform_coords(&Transform::translate(0.0, 700.0));
+        assert_eq!(linear.coords, vec![10.0, 720.0, 30.0, 720.0]);
+
+        let mut radial = Gradient::radial(10.0, 20.0, 8.0, stops());
+        radial.transform_coords(&Transform::scale_around(2.0, 2.0, 0.0, 0.0));
+        assert_eq!(radial.coords, vec![20.0, 40.0, 20.0, 40.0, 16.0]);
+    }
+
+    #[test]
+    fn object_bbox_gradient_does_not_take_user_space_transform() {
+        let mut fill = FillKind::Gradient(
+            Gradient::linear(0.0, 0.0, 1.0, 0.0, stops())
+                .with_units(GradientUnits::ObjectBoundingBox),
+        );
+        assert!(!fill.transform_user_space_gradient(&Transform::translate(4.0, 5.0)));
+        let FillKind::Gradient(g) = fill else {
+            unreachable!()
+        };
+        assert_eq!(g.coords, vec![0.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]

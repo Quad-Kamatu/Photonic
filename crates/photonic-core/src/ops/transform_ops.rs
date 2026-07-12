@@ -4,11 +4,13 @@ use kurbo::{Affine, BezPath, PathEl};
 /// Apply a transform to a node's existing transform (concatenates).
 pub fn apply_transform(node: &mut SceneNode, t: &Transform) {
     node.transform = node.transform.then(t);
+    node.transform_user_space_gradients(t);
 }
 
 /// Set a node's transform to an absolute value.
 pub fn set_transform(node: &mut SceneNode, t: Transform) {
     node.transform = t;
+    node.transform_user_space_gradients(&t);
 }
 
 /// Translate a node by (dx, dy).
@@ -65,4 +67,88 @@ pub fn apply_affine_to_path(path: &PathData, affine: Affine) -> PathData {
         }
     }
     PathData::from_bez_path(&result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        color::Color,
+        layer::LayerId,
+        node::{PathNode, SceneNodeKind},
+        style::{Fill, FillKind, Gradient, GradientStop, Stroke},
+    };
+
+    fn gradient() -> Gradient {
+        Gradient::linear(
+            10.0,
+            20.0,
+            30.0,
+            20.0,
+            vec![
+                GradientStop::new(0.0, Color::BLACK),
+                GradientStop::new(1.0, Color::WHITE),
+            ],
+        )
+    }
+
+    #[test]
+    fn transforms_fill_and_stroke_user_space_gradients() {
+        let layer = LayerId::new_v4();
+        let mut stroke = Stroke::solid(Color::BLACK, 1.0);
+        stroke.paint = Some(FillKind::Gradient(gradient()));
+        let mut node = SceneNode::new(
+            "gradient path",
+            layer,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(10.0, 20.0, 20.0, 20.0))
+                    .with_fill(Fill::gradient(gradient()))
+                    .with_stroke(stroke),
+            ),
+        );
+
+        translate(&mut node, 0.0, 700.0);
+        let SceneNodeKind::Path(path) = node.kind else {
+            unreachable!()
+        };
+        let FillKind::Gradient(fill) = path.fill.kind else {
+            unreachable!()
+        };
+        let FillKind::Gradient(stroke) = path.stroke.paint.expect("gradient stroke") else {
+            unreachable!()
+        };
+        assert_eq!(fill.coords, vec![10.0, 720.0, 30.0, 720.0]);
+        assert_eq!(stroke.coords, fill.coords);
+    }
+
+    #[test]
+    fn full_transform_maps_gradient_coordinates_with_geometry() {
+        let layer = LayerId::new_v4();
+        let mut node = SceneNode::new(
+            "gradient path",
+            layer,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(10.0, 20.0, 20.0, 20.0))
+                    .with_fill(Fill::gradient(gradient())),
+            ),
+        );
+
+        apply_transform(&mut node, &Transform::scale(2.0, 3.0));
+        let SceneNodeKind::Path(path) = &node.kind else {
+            unreachable!()
+        };
+        let FillKind::Gradient(fill) = &path.fill.kind else {
+            unreachable!()
+        };
+        assert_eq!(fill.coords, vec![20.0, 60.0, 60.0, 60.0]);
+
+        set_transform(&mut node, Transform::translate(5.0, 7.0));
+        let SceneNodeKind::Path(path) = &node.kind else {
+            unreachable!()
+        };
+        let FillKind::Gradient(fill) = &path.fill.kind else {
+            unreachable!()
+        };
+        assert_eq!(fill.coords, vec![25.0, 67.0, 65.0, 67.0]);
+    }
 }

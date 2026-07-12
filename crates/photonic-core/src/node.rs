@@ -422,6 +422,28 @@ impl SceneNode {
             )),
         }
     }
+
+    /// Transform document-space gradient coordinates in this node's fill and
+    /// stroke paint. A node transform changes its geometry, but a
+    /// `userSpaceOnUse` gradient is otherwise anchored to the document.
+    ///
+    /// Returns whether paint coordinates changed.
+    pub fn transform_user_space_gradients(&mut self, transform: &Transform) -> bool {
+        let transform_paint = |fill: &mut Fill, stroke: &mut Stroke| {
+            let fill_changed = fill.kind.transform_user_space_gradient(transform);
+            let stroke_changed = stroke
+                .paint
+                .as_mut()
+                .is_some_and(|paint| paint.transform_user_space_gradient(transform));
+            fill_changed || stroke_changed
+        };
+
+        match &mut self.kind {
+            SceneNodeKind::Path(path) => transform_paint(&mut path.fill, &mut path.stroke),
+            SceneNodeKind::Text(text) => transform_paint(&mut text.fill, &mut text.stroke),
+            SceneNodeKind::Group(_) | SceneNodeKind::Raster(_) => false,
+        }
+    }
 }
 
 /// The type-specific data of a scene node.

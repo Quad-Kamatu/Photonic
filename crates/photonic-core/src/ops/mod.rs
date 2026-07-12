@@ -1,3 +1,4 @@
+pub mod artboard_ops;
 pub mod boolean;
 pub mod cloning;
 pub mod constraints;
