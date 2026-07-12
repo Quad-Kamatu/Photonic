@@ -3056,6 +3056,13 @@ pub struct CommandHistory {
     /// gesture that created it — never into a step left over from before the
     /// gesture began.
     coalesce_started: bool,
+    /// Memoized `(fingerprint, serialized_byte_size)` for [`history_byte_size`].
+    /// The full serialize it wraps PNG-encodes every raster in the history, so
+    /// repeating it while nothing changed — e.g. an idle raster document, which
+    /// `enforce_size` / `size_pressure` re-measure on a timer — would pin a CPU
+    /// core. The fingerprint is cheap and changes on any mutation that alters the
+    /// serialized output. Not part of the persisted/observable state.
+    size_cache: std::cell::Cell<Option<(u64, u64)>>,
 }
 
 impl Default for CommandHistory {

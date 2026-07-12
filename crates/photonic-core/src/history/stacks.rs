@@ -30,6 +30,7 @@ impl CommandHistory {
             revision: 0,
             coalescing: false,
             coalesce_started: false,
+            size_cache: std::cell::Cell::new(None),
         }
     }
 
@@ -72,9 +73,26 @@ impl CommandHistory {
     /// what gets written into the `.photon` file. This is the "history size"
     /// the size cap constrains (the document is measured separately).
     pub fn history_byte_size(&self) -> u64 {
-        serde_json::to_vec(&self.snapshot_state())
+        // The serialize below PNG-encodes every raster in the history, so repeating
+        // it while nothing changed (an idle raster document is re-measured on the
+        // enforce_size / size_pressure timer) would pin a CPU core. Memoize it,
+        // keyed by a cheap fingerprint that changes on any mutation altering the
+        // serialized output: content revision (execute/undo/redo/restore),
+        // edit-tree node count (trim), and checkpoint / branch counts.
+        let fingerprint = self.revision
+            ^ (self.nodes.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (self.checkpoints.len() as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)
+            ^ (self.branches.len() as u64).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        if let Some((fp, size)) = self.size_cache.get() {
+            if fp == fingerprint {
+                return size;
+            }
+        }
+        let size = serde_json::to_vec(&self.snapshot_state())
             .map(|v| v.len() as u64)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        self.size_cache.set(Some((fingerprint, size)));
+        size
     }
 
     /// Rough **in-memory** footprint of the retained edit tree, in bytes —
