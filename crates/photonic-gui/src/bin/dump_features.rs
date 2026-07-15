@@ -132,7 +132,10 @@ fn main() {
         for e in &errors {
             eprintln!("error: {e}");
         }
-        fail(&format!("{} catalog problem(s); refusing to emit", errors.len()));
+        fail(&format!(
+            "{} catalog problem(s); refusing to emit",
+            errors.len()
+        ));
     }
 
     let manifest = Manifest {
