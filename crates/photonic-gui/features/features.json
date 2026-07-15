@@ -1,0 +1,1269 @@
+{
+  "generatedBy": "photonic-gui dump_features",
+  "note": "GENERATED. Do not hand-edit. Source: crates/photonic-gui/features/catalog.json. Regenerate with `cargo run -p photonic-gui --bin dump_features`.",
+  "categories": [
+    "AI & automation",
+    "Vector & pen",
+    "Shapes & primitives",
+    "Pathfinder & booleans",
+    "Path effects & distortion",
+    "Type & text",
+    "Color & swatches",
+    "Stroke & effects",
+    "Layers & masks",
+    "Artboards & layout",
+    "Guides & measurement",
+    "Raster & image",
+    "Charts & data",
+    "Selection",
+    "Transform & arrange",
+    "Symbols & styles",
+    "Version history",
+    "Export & print"
+  ],
+  "features": [
+    {
+      "category": "AI & automation",
+      "avail": "gui",
+      "name": "Claude chat assistant",
+      "desc": "A design co-pilot built right into the studio. Ask for what you want in plain words."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "gui",
+      "name": "Describe to design",
+      "desc": "Turn an English request into real edits on the canvas, then refine every detail by hand."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "gui",
+      "name": "Style suggestions",
+      "desc": "Get AI-driven color and type recommendations tailored to your artwork."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Object prompts",
+      "desc": "Attach an instruction to any object so the AI knows how to regenerate or adjust it."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Record actions",
+      "desc": "Capture a sequence of steps as a macro and replay it whenever you need it."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "ai",
+      "name": "Event triggers",
+      "desc": "Run an action automatically on events like save or export."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Grammar rules",
+      "desc": "Define content rules and validate the whole document against them."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Analyze composition",
+      "desc": "Evaluate visual balance, center of mass, and color distribution."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Detect rhythms",
+      "desc": "Surface repeating patterns and consistent spacing across a layout."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "ai",
+      "name": "Style-continuity check",
+      "desc": "Get warned when objects drift away from your named styles."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "ai",
+      "name": "Audit log",
+      "desc": "Export a record of every AI-driven change for review or automation."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Auto-name objects",
+      "desc": "Generate sensible layer and object names from type and position."
+    },
+    {
+      "category": "AI & automation",
+      "avail": "both",
+      "name": "Document templates",
+      "desc": "Save a document’s structure as JSON and recreate it later for repeatable layouts."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Pen tool",
+      "desc": "Draw precise paths point by point, with full control over curve handles."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Freehand pencil",
+      "desc": "Sketch arbitrary curves and let Photonic fit a clean path."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "ai",
+      "name": "Curvature path",
+      "desc": "Generate smooth curves that flow naturally through your points."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "gui",
+      "name": "Edit anchor points",
+      "desc": "Add, delete, move, and convert anchors, and drag handles to reshape a curve."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Add anchors",
+      "desc": "Insert new anchor points along a path for finer control."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Convert corner / smooth",
+      "desc": "Toggle any anchor between a sharp corner and a smooth join."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Average anchors",
+      "desc": "Collapse selected anchors to a shared point to true up a shape."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "ai",
+      "name": "Smooth path",
+      "desc": "Relax a jagged path into a flowing curve while keeping its shape."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Simplify path",
+      "desc": "Cut down anchor count with an adjustable tolerance for lighter files."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Join paths",
+      "desc": "Connect two open endpoints or close a subpath."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "ai",
+      "name": "Scissors cut",
+      "desc": "Split a path at any point into separate pieces."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Offset path",
+      "desc": "Create an inset or outset copy of a path at a set distance."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Reverse direction",
+      "desc": "Flip a path’s winding, which controls how compound shapes fill."
+    },
+    {
+      "category": "Vector & pen",
+      "avail": "both",
+      "name": "Outline stroke",
+      "desc": "Convert a stroked line into an editable filled shape."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "gui",
+      "name": "Rectangle",
+      "desc": "Draw rectangles with optional live corner radius."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "gui",
+      "name": "Ellipse",
+      "desc": "Draw circles and ovals from center and radii."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "gui",
+      "name": "Polygon",
+      "desc": "Regular shapes with any number of sides."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "gui",
+      "name": "Star",
+      "desc": "Multi-pointed stars with inner and outer radius control."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "gui",
+      "name": "Line & arc",
+      "desc": "Straight segments and open or closed arcs by angle."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Heart",
+      "desc": "Ready-made heart outline."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Gear",
+      "desc": "Toothed gear wheels with a configurable tooth count."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Arrow",
+      "desc": "Directional arrows with adjustable head and shaft."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Cross",
+      "desc": "Plus and cross shapes."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Donut",
+      "desc": "Ring and annulus shapes."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Speech bubble",
+      "desc": "Comic-style speech balloons."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "QR code",
+      "desc": "Generate a scannable QR code from any text."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Spiral",
+      "desc": "Arithmetic or logarithmic spirals."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Wave pattern",
+      "desc": "Sine or sawtooth wave shapes."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Truchet tiling",
+      "desc": "Procedural Truchet tile patterns."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Grid & polar grid",
+      "desc": "Rectangular grids or concentric rings with radial spokes."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "both",
+      "name": "Parametric shapes",
+      "desc": "Lissajous, superellipse, rose, and other math-driven curves."
+    },
+    {
+      "category": "Shapes & primitives",
+      "avail": "ai",
+      "name": "Shape from points",
+      "desc": "Interpolate a smooth path through an array of coordinates."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Union",
+      "desc": "Merge overlapping shapes into one."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Subtract",
+      "desc": "Punch one shape out of another."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Intersect",
+      "desc": "Keep only the overlapping region."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Exclude",
+      "desc": "Keep everything except the overlap (XOR)."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "ai",
+      "name": "Live boolean",
+      "desc": "Keep a boolean editable by retaining its source shapes."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Divide",
+      "desc": "Cut shapes into separate faces along every intersection."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Crop",
+      "desc": "Clip everything to the frontmost shape’s boundary."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Merge",
+      "desc": "Trim overlaps and fuse same-colored faces."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Trim",
+      "desc": "Remove the hidden parts of shapes behind others."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Outline",
+      "desc": "Turn overlapping fills into stroked outlines."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Minus front / back",
+      "desc": "Subtract the front or back objects from the rest."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Divide below",
+      "desc": "Use one path as a knife to cut every shape beneath it."
+    },
+    {
+      "category": "Pathfinder & booleans",
+      "avail": "both",
+      "name": "Compound path",
+      "desc": "Combine subpaths with a shared even-odd fill (holes and rings)."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Round corners",
+      "desc": "Fillet sharp corners into smooth arcs."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Zig-zag",
+      "desc": "Turn edges into alternating ridges and valleys."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Scallop",
+      "desc": "Add a wavy, scalloped edge to a path."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Crystallize",
+      "desc": "Push edges into spiky, crystalline points."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Pucker & bloat",
+      "desc": "Contract a shape inward or swell it outward."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Roughen",
+      "desc": "Randomly jitter points for a hand-drawn feel."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Twirl",
+      "desc": "Spiral a shape around its center."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Warp envelope",
+      "desc": "Bend artwork with arc, arch, bulge, and other warp presets."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Noise deform",
+      "desc": "Displace points with sine or Perlin noise."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "both",
+      "name": "Width profile",
+      "desc": "Vary stroke thickness along a path for a calligraphic look."
+    },
+    {
+      "category": "Path effects & distortion",
+      "avail": "gui",
+      "name": "Proportional nudge",
+      "desc": "Move one anchor and let neighbors follow with a soft falloff."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Text",
+      "desc": "Set type with font, size, weight, color, and alignment."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Character styles",
+      "desc": "Save and reuse font, size, weight, color, and spacing as a named style."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Paragraph styles",
+      "desc": "Save spacing, indents, and alignment as reusable paragraph styles."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Font weight & style",
+      "desc": "Dial in weight (100 to 900) and italic, oblique, or normal."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Line & letter spacing",
+      "desc": "Control leading and tracking for tight, readable type."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Area text",
+      "desc": "Flow text inside any closed shape."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Text on a path",
+      "desc": "Run type along a curve with offset control."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Threaded frames",
+      "desc": "Link text boxes so copy flows from one to the next."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "OpenType features",
+      "desc": "Switch on ligatures, small caps, and alternate glyphs."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Baseline & scripts",
+      "desc": "Shift baselines and set superscript or subscript."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Tab stops",
+      "desc": "Set custom tab positions for aligned columns."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Vertical text",
+      "desc": "Set type horizontally or vertically."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Text decoration",
+      "desc": "Underline, strike-through, or overline."
+    },
+    {
+      "category": "Type & text",
+      "avail": "both",
+      "name": "Find & replace text",
+      "desc": "Search and swap copy across the whole document."
+    },
+    {
+      "category": "Type & text",
+      "avail": "ai",
+      "name": "Bind text to variables",
+      "desc": "Drive copy from document variables for templated designs."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "ai",
+      "name": "Color guide",
+      "desc": "Generate complementary, analogous, triadic, and other harmony palettes."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Color swatches",
+      "desc": "Save named solid colors to the document palette."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Gradient swatches",
+      "desc": "Save linear, radial, and fluid gradients as reusable swatches."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Spot colors",
+      "desc": "Define named inks with overprint control for print work."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Swatch libraries",
+      "desc": "Load ready-made palettes like Material and Tailwind."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Solid fill",
+      "desc": "Fill any shape with a solid RGBA color."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Gradient fill",
+      "desc": "Apply linear, radial, fluid, or mesh gradients."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Pattern fill",
+      "desc": "Fill shapes with a repeating image pattern."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Hatch & stipple fill",
+      "desc": "Line- and dot-pattern fills for prints and technical art."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "gui",
+      "name": "Eyedropper",
+      "desc": "Sample any color straight off the canvas."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Adjust colors",
+      "desc": "Shift RGBA channels across a selection."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Blend colors",
+      "desc": "Interpolate fills evenly across three or more objects."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Recolor artwork",
+      "desc": "Remap fills to the nearest colors in a target palette."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Grayscale & invert",
+      "desc": "Desaturate to mono or flip to inverse colors."
+    },
+    {
+      "category": "Color & swatches",
+      "avail": "both",
+      "name": "Import design tokens",
+      "desc": "Pull colors, type, and spacing from JSON tokens (e.g. Figma exports).",
+      "commandId": "assets.import_design_tokens"
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Stroke color & width",
+      "desc": "Set line color and thickness on any shape."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Dashes, caps & joins",
+      "desc": "Control dash patterns and how lines end and turn."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Swap fill & stroke",
+      "desc": "Exchange fill and stroke colors in one move."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Drop shadow",
+      "desc": "Offset shadow with blur and opacity."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Outer & inner glow",
+      "desc": "Add a halo around a shape or a glow inside its edge."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Blend modes",
+      "desc": "Composite with multiply, screen, overlay, color burn, and more."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Opacity",
+      "desc": "Set overall transparency on any object or layer."
+    },
+    {
+      "category": "Stroke & effects",
+      "avail": "both",
+      "name": "Flatten transparency",
+      "desc": "Bake opacity into the alpha channel for predictable output."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Layers",
+      "desc": "Organize artwork into layers and sublayers."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Show / hide",
+      "desc": "Toggle visibility of layers or individual objects."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Lock",
+      "desc": "Protect layers or objects from accidental edits."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Layer opacity & blend",
+      "desc": "Composite a whole layer with its own opacity and blend mode."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "gui",
+      "name": "Reorder & restack",
+      "desc": "Drag layers to reorder, or send objects forward and back."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Duplicate layer",
+      "desc": "Deep-clone a layer and everything on it."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Merge & flatten",
+      "desc": "Combine layers, or flatten the whole document to one."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Release to layers",
+      "desc": "Split a selection so each object lands on its own layer."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Clipping mask",
+      "desc": "Use the top shape in a group to clip everything below it."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Layer mask",
+      "desc": "Non-destructive alpha or vector mask on any layer."
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "both",
+      "name": "Group & ungroup",
+      "desc": "Nest objects into containers and dissolve them again.",
+      "keybind": "Ctrl+G",
+      "keybindStorage": "ctrl+g",
+      "commandId": "object.group"
+    },
+    {
+      "category": "Layers & masks",
+      "avail": "gui",
+      "name": "Isolation mode",
+      "desc": "Focus on one group’s contents without disturbing the rest."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Artboards",
+      "desc": "Multiple named canvases for organizing and exporting work."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Artboard margins",
+      "desc": "Set safe-area insets to design against."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Duplicate artboard",
+      "desc": "Clone an artboard with all of its contents."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Resize canvas",
+      "desc": "Grow or shrink the working area."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Align",
+      "desc": "Line objects up by edge or center."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Distribute",
+      "desc": "Space objects evenly, along a path, or so none overlap."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Flex layout",
+      "desc": "Arrange objects in a row or column with gaps and alignment."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Grid layout",
+      "desc": "Lay objects out on a multi-column grid."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Stack layout",
+      "desc": "Overlay objects at one spot with shared alignment."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Fit to margins",
+      "desc": "Scale and place artwork to fill the safe area."
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Snap to pixel",
+      "desc": "Round positions to whole pixels for crisp edges.",
+      "commandId": "view.toggle_snap_pixel"
+    },
+    {
+      "category": "Artboards & layout",
+      "avail": "both",
+      "name": "Split into grid",
+      "desc": "Slice a shape into an even grid of pieces."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "both",
+      "name": "Guides",
+      "desc": "Drop horizontal and vertical guides to align to.",
+      "keybind": "Ctrl+;",
+      "keybindStorage": "ctrl+semicolon",
+      "commandId": "view.toggle_guides"
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "ai",
+      "name": "Construction lines",
+      "desc": "Angled guides set to an exact degree."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "both",
+      "name": "Object guides",
+      "desc": "Pin guides to an object’s edges and centers."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "gui",
+      "name": "Smart guides",
+      "desc": "Live alignment hints appear as you drag."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "both",
+      "name": "Dimensions",
+      "desc": "Add measurement annotations between objects."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "ai",
+      "name": "Measure distance",
+      "desc": "Read the exact distance between objects or points."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "ai",
+      "name": "Measure path length",
+      "desc": "Get the total length of any path."
+    },
+    {
+      "category": "Guides & measurement",
+      "avail": "ai",
+      "name": "Point on path",
+      "desc": "Find the coordinates a set distance along a path."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "both",
+      "name": "Place image",
+      "desc": "Bring in PNG, JPEG, or WebP artwork."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "both",
+      "name": "Raster layers",
+      "desc": "Paint on true pixel layers alongside your vectors."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Brush",
+      "desc": "Paint with adjustable size, opacity, and hardness."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Bucket & gradient fill",
+      "desc": "Flood a region with color or a gradient."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Transform image",
+      "desc": "Scale, rotate, skew, and perspective-warp pixels."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Filters",
+      "desc": "Blur, sharpen, distort, and stylize with pro-grade filters."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Adjustments",
+      "desc": "Levels, curves, hue/saturation, and brightness/contrast."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "both",
+      "name": "Remove background",
+      "desc": "Cut out a subject with a local matting model and no cloud round-trip."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "both",
+      "name": "Color-range mask",
+      "desc": "Hide pixels within a tolerance of a sampled color."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Liquify",
+      "desc": "Push and pull pixels with a mesh warp."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "ai",
+      "name": "Retouch",
+      "desc": "Clone and heal to fix blemishes."
+    },
+    {
+      "category": "Raster & image",
+      "avail": "both",
+      "name": "Adjustment layers",
+      "desc": "Stack non-destructive color and tone adjustments."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Bar chart",
+      "desc": "Single or multi-series column charts from your numbers."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Stacked bar chart",
+      "desc": "Stacked columns for compositional data."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Line chart",
+      "desc": "Multi-series line graphs with styled strokes."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Pie chart",
+      "desc": "Labeled circular segment charts."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Scatter plot",
+      "desc": "XY point clouds with sizing and color."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Radar chart",
+      "desc": "Multi-axis polygon charts."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "ai",
+      "name": "Sunburst",
+      "desc": "Hierarchical radial trees."
+    },
+    {
+      "category": "Charts & data",
+      "avail": "both",
+      "name": "Editable vector output",
+      "desc": "Every chart lands as real, styleable vector shapes instead of a flat image."
+    },
+    {
+      "category": "Selection",
+      "avail": "both",
+      "name": "Select by kind",
+      "desc": "Grab every path, or all text, in one action."
+    },
+    {
+      "category": "Selection",
+      "avail": "both",
+      "name": "Select same",
+      "desc": "Select everything sharing a fill, stroke, opacity, or blend mode."
+    },
+    {
+      "category": "Selection",
+      "avail": "both",
+      "name": "Select similar",
+      "desc": "Match objects by fill, stroke, type, or composition."
+    },
+    {
+      "category": "Selection",
+      "avail": "both",
+      "name": "Select inside group",
+      "desc": "Target a group’s contents without breaking it open."
+    },
+    {
+      "category": "Selection",
+      "avail": "ai",
+      "name": "Lasso select",
+      "desc": "Freehand marquee around exactly what you want."
+    },
+    {
+      "category": "Selection",
+      "avail": "ai",
+      "name": "Magic wand",
+      "desc": "Select by attribute within a tolerance."
+    },
+    {
+      "category": "Selection",
+      "avail": "both",
+      "name": "Find nodes",
+      "desc": "Search objects by name, tag, or content."
+    },
+    {
+      "category": "Selection",
+      "avail": "ai",
+      "name": "Find & replace style",
+      "desc": "Change every matching style at once, such as all blue fills to red."
+    },
+    {
+      "category": "Selection",
+      "avail": "both",
+      "name": "Tag objects",
+      "desc": "Attach string tags to objects to find and batch them later."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Move, scale, rotate",
+      "desc": "Core transforms, numerically or by hand."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Shear & skew",
+      "desc": "Slant objects for parallel or perspective effects."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Flip & mirror",
+      "desc": "Mirror horizontally or vertically, or duplicate into symmetry.",
+      "keybind": "Ctrl+Shift+H",
+      "keybindStorage": "ctrl+shift+h",
+      "commandId": "object.flip_horizontal"
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Rotate copies",
+      "desc": "Spin evenly spaced duplicates around a center."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Scatter copies",
+      "desc": "Randomly distribute duplicates around a point."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Array",
+      "desc": "Repeat an object across rows and columns."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Blend objects",
+      "desc": "Morph between two shapes across a number of steps."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "ai",
+      "name": "Blend along a spine",
+      "desc": "Guide a blend’s in-between shapes along a path."
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Reorder (z-order)",
+      "desc": "Send objects to front, back, forward, or backward.",
+      "keybind": "Ctrl+Shift+]",
+      "keybindStorage": "ctrl+shift+closebracket",
+      "commandId": "object.bring_to_front"
+    },
+    {
+      "category": "Transform & arrange",
+      "avail": "both",
+      "name": "Center & fit",
+      "desc": "Center an object on the artboard or scale it to fill.",
+      "commandId": "view.fit"
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Symbols",
+      "desc": "Save an object as a reusable master and place instances."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Instance overrides",
+      "desc": "Recolor a single instance without touching the master."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Symbol libraries",
+      "desc": "Load ready-made symbol sets to drop in."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Spray symbols",
+      "desc": "Scatter many instances of a symbol at once."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Graphic styles",
+      "desc": "Bundle fill, stroke, and opacity into a named, reusable style."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Copy appearance",
+      "desc": "Paint one object’s look onto others."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "ai",
+      "name": "Style transfer",
+      "desc": "Apply a reference object’s fill and stroke to a target."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Variables",
+      "desc": "Define text and color tokens to template a design."
+    },
+    {
+      "category": "Symbols & styles",
+      "avail": "both",
+      "name": "Export design tokens",
+      "desc": "Ship colors, type, and spacing out as CSS or JSON."
+    },
+    {
+      "category": "Version history",
+      "avail": "both",
+      "name": "Full undo history",
+      "desc": "Every edit is tracked so you can step back and forward freely.",
+      "keybind": "Ctrl+Z",
+      "keybindStorage": "ctrl+z",
+      "commandId": "edit.undo"
+    },
+    {
+      "category": "Version history",
+      "avail": "both",
+      "name": "Jump to any point",
+      "desc": "Leap straight to any moment in the timeline."
+    },
+    {
+      "category": "Version history",
+      "avail": "both",
+      "name": "Branches",
+      "desc": "Try an idea on a branch, like code, without losing the original."
+    },
+    {
+      "category": "Version history",
+      "avail": "gui",
+      "name": "Edit tree",
+      "desc": "Navigate a full history graph instead of a single straight line."
+    },
+    {
+      "category": "Version history",
+      "avail": "ai",
+      "name": "Diff versions",
+      "desc": "See exactly what changed between two saved states."
+    },
+    {
+      "category": "Version history",
+      "avail": "ai",
+      "name": "Per-object undo",
+      "desc": "Roll back a single object without undoing everything else."
+    },
+    {
+      "category": "Version history",
+      "avail": "ai",
+      "name": "Paste from history",
+      "desc": "Recover an object from an earlier state."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Export SVG",
+      "desc": "Clean vector output, one file or many."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Export PDF",
+      "desc": "Export a print-ready PDF as a single page, multiple pages, or one file per artboard."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Export raster",
+      "desc": "PNG, JPEG, WebP, or TIFF at any DPI."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Print bleed",
+      "desc": "Add a bleed region in millimeters so trims stay clean."
+    },
+    {
+      "category": "Export & print",
+      "avail": "ai",
+      "name": "CMYK / FOGRA39 PDF",
+      "desc": "Export a color-correct, transparency-free PDF/X-1a for commercial print."
+    },
+    {
+      "category": "Export & print",
+      "avail": "ai",
+      "name": "RGB / CMYK color mode",
+      "desc": "Switch the document between screen and print color."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Export icon set",
+      "desc": "Ship a multi-size SVG sprite or individual icon files.",
+      "commandId": "document.export_icon_set"
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Export selection",
+      "desc": "Export just what’s selected as SVG."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Tagged asset export",
+      "desc": "Batch out objects marked with a name and format."
+    },
+    {
+      "category": "Export & print",
+      "avail": "both",
+      "name": "Export profiles",
+      "desc": "Save format, DPI, scale, and naming as a one-click preset."
+    }
+  ]
+}
