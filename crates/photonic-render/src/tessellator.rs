@@ -1,6 +1,25 @@
 use photonic_core::path::PathData;
 use photonic_core::style::{LineCap, LineJoin};
 
+/// Maximum permitted device-space deviation while flattening curves.
+pub const TARGET_FLATTENING_ERROR_PX: f64 = 0.25;
+
+const MIN_EFFECTIVE_SCALE: f64 = 0.01;
+const MAX_EFFECTIVE_SCALE: f64 = 64.0;
+
+/// Return a path-space flattening tolerance for a view and object transform.
+///
+/// Lyon and kurbo flatten paths before the object and camera transforms are
+/// applied. Scale the tolerance inversely so their device-space error remains
+/// bounded, while clamping the scale to keep extreme transforms practical.
+pub fn adaptive_tolerance(view_scale: f64, matrix: &[f64; 6]) -> f32 {
+    let [a, b, c, d, _, _] = *matrix;
+    let object_scale = (a * d - b * c).abs().sqrt();
+    let effective_scale = (view_scale.abs() * object_scale)
+        .clamp(MIN_EFFECTIVE_SCALE, MAX_EFFECTIVE_SCALE);
+    (TARGET_FLATTENING_ERROR_PX / effective_scale) as f32
+}
+
 // ── Corner rounding ────────────────────────────────────────────────────────────
 
 /// Returns a new `BezPath` where every sharp LineTo→LineTo corner is replaced
@@ -367,7 +386,7 @@ pub fn refine_mesh(mesh: &Mesh, max_edge: f32) -> Mesh {
 /// Tessellate a filled `PathData` into a `Mesh` using lyon.
 /// Vertices are returned in path-local coordinates (transforms applied by the renderer).
 /// When `even_odd` is true, uses the even-odd fill rule (for compound paths with holes).
-pub fn tessellate_fill(path: &PathData, even_odd: bool) -> Mesh {
+pub fn tessellate_fill(path: &PathData, even_odd: bool, tolerance: f32) -> Mesh {
     use lyon::tessellation::{
         BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers,
     };
@@ -388,7 +407,7 @@ pub fn tessellate_fill(path: &PathData, even_odd: bool) -> Mesh {
         FillRule::NonZero
     };
     let opts = FillOptions::default()
-        .with_tolerance(0.1)
+        .with_tolerance(tolerance)
         .with_fill_rule(fill_rule);
 
     if tess
@@ -417,6 +436,7 @@ pub fn tessellate_stroke(
     cap: LineCap,
     join: LineJoin,
     miter_limit: f32,
+    tolerance: f32,
 ) -> Mesh {
     use lyon::tessellation::{
         BuffersBuilder, LineCap as LyonCap, LineJoin as LyonJoin, StrokeOptions, StrokeTessellator,
@@ -443,7 +463,7 @@ pub fn tessellate_stroke(
 
     let opts = StrokeOptions::default()
         .with_line_width(width)
-        .with_tolerance(0.1)
+        .with_tolerance(tolerance)
         .with_start_cap(lyon_cap)
         .with_end_cap(lyon_cap)
         .with_line_join(lyon_join)
@@ -479,6 +499,7 @@ pub fn tessellate_stroke_bez(
     cap: LineCap,
     join: LineJoin,
     miter_limit: f32,
+    tolerance: f32,
 ) -> Mesh {
     use lyon::tessellation::{
         BuffersBuilder, LineCap as LyonCap, LineJoin as LyonJoin, StrokeOptions, StrokeTessellator,
@@ -504,7 +525,7 @@ pub fn tessellate_stroke_bez(
 
     let opts = StrokeOptions::default()
         .with_line_width(width)
-        .with_tolerance(0.1)
+        .with_tolerance(tolerance)
         .with_start_cap(lyon_cap)
         .with_end_cap(lyon_cap)
         .with_line_join(lyon_join)
@@ -563,7 +584,7 @@ fn sample_width_profile(widths: &[f64], t: f64) -> f64 {
 ///
 /// Falls back to producing an empty mesh when fewer than two width samples are
 /// supplied; callers should use the uniform path in that case.
-pub fn tessellate_stroke_variable(path: &PathData, widths: &[f64]) -> Mesh {
+pub fn tessellate_stroke_variable(path: &PathData, widths: &[f64], tolerance: f64) -> Mesh {
     if widths.len() < 2 {
         return Mesh::default();
     }
@@ -574,7 +595,6 @@ pub fn tessellate_stroke_variable(path: &PathData, widths: &[f64]) -> Mesh {
     }
 
     // Flatten the (possibly curved, multi-subpath) outline into polylines.
-    let tolerance = 0.1;
     let mut subpaths: Vec<(Vec<kurbo::Point>, bool)> = Vec::new();
     let mut cur: Vec<kurbo::Point> = Vec::new();
     let mut closed = false;
@@ -756,7 +776,7 @@ mod tests {
     fn variable_stroke_widens_with_profile() {
         // A horizontal line from (0,0) to (100,0); width ramps 2 → 20.
         let path = PathData::line(0.0, 0.0, 100.0, 0.0);
-        let mesh = tessellate_stroke_variable(&path, &[2.0, 20.0]);
+        let mesh = tessellate_stroke_variable(&path, &[2.0, 20.0], 0.1);
         assert!(!mesh.is_empty(), "variable stroke should produce geometry");
 
         // The ribbon spans the line's normal (the y axis). Vertical extent near
@@ -790,8 +810,8 @@ mod tests {
     #[test]
     fn variable_stroke_needs_two_samples() {
         let path = PathData::line(0.0, 0.0, 10.0, 0.0);
-        assert!(tessellate_stroke_variable(&path, &[5.0]).is_empty());
-        assert!(tessellate_stroke_variable(&path, &[]).is_empty());
+        assert!(tessellate_stroke_variable(&path, &[5.0], 0.1).is_empty());
+        assert!(tessellate_stroke_variable(&path, &[], 0.1).is_empty());
     }
 
     // Extract the end point of each path element (start for MoveTo, end for
@@ -975,7 +995,7 @@ mod refine_diag {
         // A 400px circle (lyon fan, edges up to 400px) must refine so every
         // edge meets the target — no huge leftover triangles (the wedge bug).
         let p = PathData::ellipse(200.0, 200.0, 200.0, 200.0);
-        let mesh = tessellate_fill(&p, false);
+        let mesh = tessellate_fill(&p, false, 0.1);
         let target = 400.0 / 48.0; // ~8.3px
         let refined = refine_mesh(&mesh, target);
         let tris = refined.indices.len() / 3;
@@ -994,5 +1014,50 @@ mod refine_diag {
         }
         assert!(maxe <= target * 1.05, "max edge {maxe} exceeds target {target}");
         assert!(tris < 60_000, "triangle count {tris} hit the budget");
+    }
+}
+
+#[cfg(test)]
+mod adaptive_tolerance_tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_tolerance_tracks_zoom_and_bounds_extremes() {
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert_eq!(adaptive_tolerance(1.0, &identity), 0.25);
+        assert!(adaptive_tolerance(32.0, &identity) < adaptive_tolerance(1.0, &identity));
+        assert_eq!(
+            adaptive_tolerance(1.0e9, &identity),
+            adaptive_tolerance(MAX_EFFECTIVE_SCALE, &identity)
+        );
+        assert_eq!(
+            adaptive_tolerance(0.0, &identity),
+            adaptive_tolerance(MIN_EFFECTIVE_SCALE, &identity)
+        );
+    }
+
+    #[test]
+    fn adaptive_tolerance_tracks_anisotropic_object_scale() {
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        // sqrt(|det|) for this non-uniform scale is sqrt(9 * 4) = 6.
+        let anisotropic = [9.0, 0.0, 0.0, 4.0, 0.0, 0.0];
+        let tolerance = adaptive_tolerance(1.0, &anisotropic);
+
+        assert!((tolerance - adaptive_tolerance(1.0, &identity) / 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zoomed_out_paths_use_fewer_triangles() {
+        let path = PathData::ellipse(0.0, 0.0, 100.0, 100.0);
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let zoomed_out = tessellate_fill(&path, false, adaptive_tolerance(0.01, &identity));
+        let zoomed_in = tessellate_fill(&path, false, adaptive_tolerance(64.0, &identity));
+
+        assert!(
+            zoomed_out.indices.len() < zoomed_in.indices.len(),
+            "zoomed-out mesh should have fewer triangles: {} >= {}",
+            zoomed_out.indices.len(),
+            zoomed_in.indices.len()
+        );
     }
 }
