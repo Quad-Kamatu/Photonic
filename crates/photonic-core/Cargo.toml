@@ -23,3 +23,11 @@ miniz_oxide = { workspace = true }
 moxcms = "0.8"
 qrcodegen = "1.8"
 tracing = { workspace = true }
+rayon = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "convolution"
+harness = false
