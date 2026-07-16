@@ -61,7 +61,14 @@ fn build_card() -> (Document, PdfExportOptions) {
     // Studio name, tagline, contact.
     add_text(&mut doc, "KAMATU STUDIO", 18.0, 78.0, 15.0, gold);
     add_text(&mut doc, "Design & Brand Systems", 18.0, 96.0, 8.0, white);
-    add_text(&mut doc, "hello@kamatu.studio  ·  kamatu.studio", 18.0, 120.0, 7.0, white);
+    add_text(
+        &mut doc,
+        "hello@kamatu.studio  ·  kamatu.studio",
+        18.0,
+        120.0,
+        7.0,
+        white,
+    );
 
     let opts = PdfExportOptions {
         background: Some(navy),
@@ -104,9 +111,9 @@ fn dogfood_export_business_card_pdfx() {
     assert!(bytes.starts_with(b"%PDF-1.3"), "must be a PDF 1.3 file");
     assert!(bytes.len() > 1000, "PDF should be non-trivial");
 
-    let out = std::env::var("DOGFOOD_OUT").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        std::env::temp_dir().join("kamatu-business-card.pdf")
-    });
+    let out = std::env::var("DOGFOOD_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("kamatu-business-card.pdf"));
     std::fs::write(&out, &bytes).unwrap();
     println!("DOGFOOD wrote {} ({} bytes)", out.display(), bytes.len());
 }

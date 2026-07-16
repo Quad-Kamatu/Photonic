@@ -5,8 +5,8 @@ use crate::{
         blend_mode_index, coalesce_segments, create_blur_bgl, create_blur_pipeline,
         create_blur_pipeline_with_blend, create_camera_bind_group_layout, create_composite_bgl,
         create_composite_pipeline, create_fill_pipeline, create_fill_pipeline_with_blend,
-        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, CompositeParams,
-        DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
+        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform,
+        CompositeParams, DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::{adaptive_tolerance, tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
 };
@@ -29,13 +29,13 @@ use tokio::sync::Mutex;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-mod text_renderer;
-mod glow_renderer;
-mod effects_renderer;
-mod scene_renderer;
-mod frame_manager;
-mod capture;
 mod camera;
+mod capture;
+mod effects_renderer;
+mod frame_manager;
+mod glow_renderer;
+mod scene_renderer;
+mod text_renderer;
 
 // ─── Background colour (deep violet-dark canvas surround) ─────────────────────
 // Linear values for sRGB target #0D0D14 (r:13 g:13 b:20).
@@ -121,7 +121,7 @@ pub struct PhotonicRenderer {
     // ── Gaussian glow blur ────────────────────────────────────────────────────
     pub(crate) fill_pipeline_1spp: wgpu::RenderPipeline, // sample_count=1 for offscreen silhouette
     pub(crate) blur_pipeline_h: wgpu::RenderPipeline,    // H blur (alpha-blend output)
-    blur_pipeline_v: wgpu::RenderPipeline,    // V blur (additive composite to surface)
+    blur_pipeline_v: wgpu::RenderPipeline,               // V blur (additive composite to surface)
     pub(crate) blur_bgl: wgpu::BindGroupLayout,
     pub(crate) blur_sampler: wgpu::Sampler,
     pub(crate) glow_tex_a: wgpu::Texture, // silhouette & V-blur source
@@ -497,8 +497,7 @@ impl PhotonicRenderer {
 
         // Per-layer compositing (#226): shader + a filtering sampler.
         let composite_bgl = create_composite_bgl(&device);
-        let composite_pipeline =
-            create_composite_pipeline(&device, surface_format, &composite_bgl);
+        let composite_pipeline = create_composite_pipeline(&device, surface_format, &composite_bgl);
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1057,8 +1056,7 @@ impl PhotonicRenderer {
             e: f64,
             f: f64,
         ) -> (f64, f64, f64, f64) {
-            let (mut minx, mut miny, mut maxx, mut maxy) =
-                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for p in verts {
                 let x = a * p[0] as f64 + c * p[1] as f64 + e;
                 let y = b * p[0] as f64 + d * p[1] as f64 + f;
@@ -1075,8 +1073,7 @@ impl PhotonicRenderer {
         }
         // Local (pre-transform) bounds of a mesh.
         fn local_bounds(verts: &[[f32; 2]]) -> (f64, f64, f64, f64) {
-            let (mut minx, mut miny, mut maxx, mut maxy) =
-                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for p in verts {
                 minx = minx.min(p[0] as f64);
                 miny = miny.min(p[1] as f64);
@@ -1176,8 +1173,11 @@ impl PhotonicRenderer {
                     for p in tri {
                         // Nudge toward the centroid so boundary vertices sample
                         // inside their own cell (crisp edges at blend 0).
-                        let color =
-                            fill_kind.sample_at(p[0] + (cx - p[0]) * 0.02, p[1] + (cy - p[1]) * 0.02, opacity);
+                        let color = fill_kind.sample_at(
+                            p[0] + (cx - p[0]) * 0.02,
+                            p[1] + (cy - p[1]) * 0.02,
+                            opacity,
+                        );
                         let (wx, wy) = if rotated {
                             (a * p[0] + c * p[1] + e, b * p[0] + d * p[1] + f)
                         } else {
@@ -1515,7 +1515,10 @@ impl PhotonicRenderer {
             if end <= start {
                 return;
             }
-            let (opacity, blend) = layer_meta.get(ord as usize).copied().unwrap_or((1.0, BlendMode::Normal));
+            let (opacity, blend) = layer_meta
+                .get(ord as usize)
+                .copied()
+                .unwrap_or((1.0, BlendMode::Normal));
             runs.push(LayerRun {
                 opacity,
                 blend,

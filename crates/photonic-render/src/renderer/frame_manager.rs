@@ -82,4 +82,3 @@ impl PhotonicRenderer {
         handle.surface_texture.present();
     }
 }
-

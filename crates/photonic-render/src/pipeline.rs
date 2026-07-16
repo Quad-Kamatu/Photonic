@@ -910,7 +910,10 @@ mod tests {
         ];
         let mut seen = std::collections::HashSet::new();
         for m in all {
-            assert!(seen.insert(blend_mode_index(m)), "duplicate index for {m:?}");
+            assert!(
+                seen.insert(blend_mode_index(m)),
+                "duplicate index for {m:?}"
+            );
         }
         assert_eq!(seen, (0u32..=15).collect());
         for m in [Hue, Saturation, Color, Luminosity] {

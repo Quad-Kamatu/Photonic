@@ -189,7 +189,14 @@ impl PhotonicRenderer {
         let n = self.layer_runs.len();
         if n == 0 {
             // No shape geometry: pass the (opaque) artboard through to the target.
-            self.composite_over(enc, target_view, &acc_view, &acc_view, blend_mode_index(BlendMode::Normal), 1.0);
+            self.composite_over(
+                enc,
+                target_view,
+                &acc_view,
+                &acc_view,
+                blend_mode_index(BlendMode::Normal),
+                1.0,
+            );
             return;
         }
 
@@ -218,8 +225,7 @@ impl PhotonicRenderer {
                 .any(|j| j.layer_ordinal == run.ordinal && !j.idxs.is_empty());
             let combined_tex;
             let layer_view = if has_fx {
-                let (_fx_tex, fx_view) =
-                    self.render_effects_layer(enc, w, h, Some(run.ordinal));
+                let (_fx_tex, fx_view) = self.render_effects_layer(enc, w, h, Some(run.ordinal));
                 combined_tex = self.make_fx_tex(w, h);
                 let combined_view = combined_tex.create_view(&Default::default());
                 self.stack_effects_under_shapes(enc, &combined_view, &fx_view, &shapes_view);
