@@ -9,6 +9,10 @@ pub struct Args {
     #[arg(long)]
     pub headless: bool,
 
+    /// Force the X11/XWayland backend on Linux (enables winit file drag-and-drop)
+    #[arg(long)]
+    pub x11: bool,
+
     /// MCP server port
     #[arg(long, default_value_t = 7842)]
     pub mcp_port: u16,
@@ -219,4 +223,19 @@ pub enum CliCommand {
     /// Proxy stdin MCP messages to the running Photonic HTTP MCP server (internal)
     #[command(name = "mcp-proxy", hide = true)]
     McpProxy,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn x11_flag_is_opt_in() {
+        let default_args = Args::try_parse_from(["photonic"]).expect("default CLI arguments parse");
+        assert!(!default_args.x11);
+
+        let x11_args = Args::try_parse_from(["photonic", "--x11"]).expect("--x11 parses");
+        assert!(x11_args.x11);
+    }
 }

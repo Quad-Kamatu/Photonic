@@ -55,6 +55,11 @@ pub struct AppPreferences {
 
     // BEHAVIOR
     pub console_open_on_start: bool,
+    /// Prefer winit's X11/XWayland backend on Linux. This is an opt-in
+    /// workaround for winit 0.30 Wayland's missing file drag-and-drop support
+    /// (#198), and takes effect on the next launch.
+    #[serde(default)]
+    pub force_x11_backend: bool,
     /// Arrow-key nudge distance in document pixels (Shift multiplies by 10).
     #[serde(default = "default_nudge_distance")]
     pub nudge_distance: f64,
@@ -215,6 +220,7 @@ impl Default for AppPreferences {
             default_stroke_color: [0.0, 0.0, 0.0, 1.0],
             default_stroke_width: 1.0,
             console_open_on_start: false,
+            force_x11_backend: false,
             nudge_distance: 1.0,
             autosave_enabled: true,
             autosave_interval_secs: 300.0,
@@ -324,5 +330,26 @@ impl AppPreferences {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppPreferences;
+
+    #[test]
+    fn x11_backend_is_opt_in_and_backwards_compatible() {
+        assert!(!AppPreferences::default().force_x11_backend);
+
+        let mut old_preferences =
+            serde_json::to_value(AppPreferences::default()).expect("preferences serialize");
+        old_preferences
+            .as_object_mut()
+            .expect("preferences are a JSON object")
+            .remove("force_x11_backend");
+
+        let loaded: AppPreferences =
+            serde_json::from_value(old_preferences).expect("older preferences deserialize");
+        assert!(!loaded.force_x11_backend);
     }
 }
