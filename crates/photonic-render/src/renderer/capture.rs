@@ -48,7 +48,9 @@ impl PhotonicRenderer {
     /// the exact editor draw path (`render_scene` + the glyphon text pass), so any
     /// caller — the interactive screenshot ([`capture_png`](Self::capture_png)) and
     /// PNG/artboard export ([`render_export_rgba`](Self::render_export_rgba)) —
-    /// produces pixel-identical output. Returns an empty vec on readback failure.
+    /// produces pixel-identical output. Raster nodes are composited here as the
+    /// final shared step because they are CPU-painted over the GPU vector result.
+    /// Returns an empty vec on readback failure.
     pub(crate) fn capture_rgba(&mut self, vertices: &[Vertex], indices: &[u32]) -> Vec<u8> {
         let w = self.width;
         let h = self.height;
@@ -255,6 +257,14 @@ impl PhotonicRenderer {
         drop(raw);
         staging.unmap();
 
+        // Raster/pixel layers are painted after the GPU vector and text passes.
+        // Keep this in the common capture path so an editor screenshot cannot
+        // omit nodes that artboard export includes.
+        {
+            let document = self.document.blocking_lock();
+            crate::headless::composite_raster_nodes(&mut pixels, w, h, &document, &self.view);
+        }
+
         pixels
     }
 
@@ -266,9 +276,9 @@ impl PhotonicRenderer {
     /// 1:1 onto the `w×h` output, and `opts.background` selects the white artboard
     /// or full transparency. Because it shares `render_scene` + the glyphon text
     /// pass with the on-canvas frame, text layout, gradient shading, stroke width
-    /// and opacity are identical to what the editor shows. Raster (pixel) nodes are
-    /// composited over the vector result afterwards, matching the editor's raster
-    /// overlay. `opts.crop_to_content`, `ico_sizes`, `jpeg_quality` and
+    /// and opacity are identical to what the editor shows. Raster (pixel) nodes
+    /// are composited by the shared capture path, so screenshot and export cannot
+    /// diverge. `opts.crop_to_content`, `ico_sizes`, `jpeg_quality` and
     /// `overprint_preview` are not consulted here. Empty pixels on readback failure.
     pub fn render_export_rgba(
         &mut self,
@@ -303,19 +313,11 @@ impl PhotonicRenderer {
         // normal editor mode so a later interactive frame is unaffected.
         self.export_bg = Some(opts.background);
         let (verts, idxs) = self.update();
-        let mut pixels = self.capture_rgba(&verts, &idxs);
+        let pixels = self.capture_rgba(&verts, &idxs);
         self.export_bg = None;
 
         if pixels.is_empty() {
             return (vec![], w, h);
-        }
-
-        // Composite raster (pixel) layers over the GPU vector output, aligned via
-        // the same camera — the editor paints these as textured quads on top, so
-        // export must too.
-        {
-            let guard = self.document.blocking_lock();
-            crate::headless::composite_raster_nodes(&mut pixels, w, h, &guard, &self.view);
         }
 
         (pixels, w, h)
@@ -505,6 +507,67 @@ mod offscreen_tests {
         );
     }
 
+    /// #233: screenshots must use the same raster compositing step as artboard
+    /// export. The placed red image has a half-width mask, exercising both image
+    /// placement and mask coverage rather than only the GPU vector path.
+    #[test]
+    fn screenshot_and_export_both_render_masked_raster() {
+        use crate::headless::{ExportBackground, ExportOptions};
+        use photonic_core::{
+            node::RasterNode, raster::image::RasterImage, transform::Transform, Mask,
+        };
+
+        const W: u32 = 64;
+        const H: u32 = 48;
+        let mut doc = Document::new("raster parity", W as f64, H as f64);
+        let layer_id = doc.active_layer_id.unwrap();
+        let image = RasterImage::from_rgba(24, 20, vec![255, 0, 0, 255].repeat(24 * 20))
+            .expect("valid raster image");
+        let mut raster = RasterNode::new(image);
+        raster.mask = Some(Mask::rect(24, 20, 0, 0, 12, 20));
+        doc.add_node(
+            SceneNode::new("placed raster", layer_id, SceneNodeKind::Raster(raster))
+                .with_transform(Transform::translate(16.0, 12.0)),
+            None,
+        );
+
+        let Some(mut renderer) = offscreen(doc.clone(), W, H) else {
+            eprintln!("no GPU adapter — skipping masked-raster screenshot parity test");
+            return;
+        };
+        renderer.view.screen_width = W;
+        renderer.view.screen_height = H;
+        renderer
+            .view
+            .fit_to_rect_exact(0.0, 0.0, W as f64, H as f64);
+        let screenshot = image::load_from_memory(&renderer.render_capture())
+            .expect("screenshot png")
+            .to_rgba8();
+
+        let opts = ExportOptions {
+            background: ExportBackground::Artboard,
+            region: Some((0.0, 0.0, W as f64, H as f64)),
+            ..Default::default()
+        };
+        let (pixels, ew, eh) = renderer.render_export_rgba(&doc, W, H, &opts);
+        let export = image::RgbaImage::from_raw(ew, eh, pixels).expect("export rgba");
+
+        assert!(
+            screenshot.get_pixel(20, 20).0[0] > 220,
+            "screenshot omitted the visible raster pixels"
+        );
+        assert_eq!(
+            screenshot.get_pixel(34, 20).0,
+            [255, 255, 255, 255],
+            "screenshot must retain the artboard behind the masked-out raster pixels"
+        );
+        assert_eq!(
+            screenshot.as_raw(),
+            export.as_raw(),
+            "screenshot and export diverged for a placed masked raster"
+        );
+    }
+
     /// Live-context regression: TWO `PhotonicRenderer`s sharing ONE GPU device in
     /// ONE process must both render — the scenario that crashed the running GUI when
     /// export created a *second* wgpu device alongside the windowed one. Here the
@@ -581,8 +644,7 @@ mod offscreen_tests {
             lc[2] > 150 && lc[3] > 200,
             "live renderer broke after shared export: center={lc:?}"
         );
-    }
-
+}
     /// Stage 0 smoke test: the windowless renderer drives the real GPU pipeline
     /// and reads pixels back. A red rect filling a 20×20 doc → red at the centre.
     #[test]
@@ -813,4 +875,3 @@ mod offscreen_tests {
         );
     }
 }
-
