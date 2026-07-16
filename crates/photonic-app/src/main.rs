@@ -19,6 +19,8 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -136,8 +138,8 @@ fn main() -> Result<()> {
     // size-mode history isn't truncated to the default step ceiling on the
     // launch path (the GUI applies limits per-frame, but restore_state enforces
     // immediately, so the limits must already be set here).
-    let (hist_steps, hist_size) =
-        photonic_gui::preferences::AppPreferences::load().history_limits();
+    let preferences = photonic_gui::preferences::AppPreferences::load();
+    let (hist_steps, hist_size) = preferences.history_limits();
     let mut initial_history = CommandHistory::new(hist_steps);
     initial_history.set_limits(hist_steps, hist_size);
     if let Some(snap) = loaded_history {
@@ -191,7 +193,18 @@ fn main() -> Result<()> {
         Arc::clone(&mcp_document_path),
     );
 
-    let event_loop = EventLoop::new()?;
+    // winit 0.30's Wayland backend does not emit file-drop events. Keep the
+    // default backend selection unchanged, but let an explicit CLI flag or
+    // persisted preference opt into XWayland, where the existing drop handler
+    // receives `WindowEvent::DroppedFile`.
+    #[allow(unused_mut)]
+    let mut event_loop_builder = EventLoop::builder();
+    #[cfg(target_os = "linux")]
+    if args.x11 || preferences.force_x11_backend {
+        info!("Forcing the X11/XWayland winit backend for file drag-and-drop");
+        event_loop_builder.with_x11();
+    }
+    let event_loop = event_loop_builder.build()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = PhotonicWinitApp {
