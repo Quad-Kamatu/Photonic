@@ -21,6 +21,7 @@ use crate::raster::{
     image::{luma, RasterImage},
     mask::Mask,
 };
+use rayon::prelude::*;
 
 // ── Input sanitizers (BUG 1: never panic / overflow on hostile inputs) ──────────
 
@@ -28,6 +29,14 @@ use crate::raster::{
 /// size so the `as usize` / `as i64` computations derived from it can never
 /// overflow, regardless of the f32/u32 the caller passes in.
 pub(crate) const MAX_RADIUS: u32 = 1024;
+
+/// Below this many output pixels Rayon scheduling costs more than it saves.
+const PARALLEL_PIXEL_THRESHOLD: usize = 256 * 1024;
+
+#[inline]
+fn should_parallelize(w: usize, h: usize) -> bool {
+    w.saturating_mul(h) >= PARALLEL_PIXEL_THRESHOLD && h > 1
+}
 
 /// Sanitize a floating radius/sigma: non-finite (NaN/±inf) → `0.0` (no-op),
 /// otherwise clamp into `0..=MAX_RADIUS` so derived kernel sizes stay bounded.
@@ -104,28 +113,38 @@ fn separable_blur_f32(data: &[f32], w: usize, h: usize, kernel: &[f32]) -> Vec<f
     let r = (kernel.len() / 2) as i64;
 
     let mut tmp = vec![0f32; w * h];
-    for y in 0..h {
+    let horizontal = |(y, out_row): (usize, &mut [f32])| {
         let row = y * w;
-        for x in 0..w {
+        for (x, out) in out_row.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let sx = (x as i64 + ki as i64 - r).clamp(0, w as i64 - 1) as usize;
                 acc += data[row + sx] * kv;
             }
-            tmp[row + x] = acc;
+            *out = acc;
         }
+    };
+    if should_parallelize(w, h) {
+        tmp.par_chunks_mut(w).enumerate().for_each(horizontal);
+    } else {
+        tmp.chunks_mut(w).enumerate().for_each(horizontal);
     }
 
     let mut out = vec![0f32; w * h];
-    for y in 0..h {
-        for x in 0..w {
+    let vertical = |(y, out_row): (usize, &mut [f32])| {
+        for (x, out) in out_row.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let sy = (y as i64 + ki as i64 - r).clamp(0, h as i64 - 1) as usize;
                 acc += tmp[sy * w + x] * kv;
             }
-            out[y * w + x] = acc;
+            *out = acc;
         }
+    };
+    if should_parallelize(w, h) {
+        out.par_chunks_mut(w).enumerate().for_each(vertical);
+    } else {
+        out.chunks_mut(w).enumerate().for_each(vertical);
     }
     out
 }
@@ -181,29 +200,39 @@ pub fn gaussian_blur_gray(data: &[u8], width: u32, height: u32, radius: f32) -> 
 
     // Horizontal pass → f32 intermediate.
     let mut tmp = vec![0f32; w * h];
-    for y in 0..h {
+    let horizontal = |(y, out_row): (usize, &mut [f32])| {
         let row = y * w;
-        for x in 0..w {
+        for (x, out) in out_row.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let sx = (x as i64 + ki as i64 - r).clamp(0, w as i64 - 1) as usize;
                 acc += data[row + sx] as f32 * kv;
             }
-            tmp[row + x] = acc;
+            *out = acc;
         }
+    };
+    if should_parallelize(w, h) {
+        tmp.par_chunks_mut(w).enumerate().for_each(horizontal);
+    } else {
+        tmp.chunks_mut(w).enumerate().for_each(horizontal);
     }
 
     // Vertical pass → u8 output.
     let mut out = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
+    let vertical = |(y, out_row): (usize, &mut [u8])| {
+        for (x, out) in out_row.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let sy = (y as i64 + ki as i64 - r).clamp(0, h as i64 - 1) as usize;
                 acc += tmp[sy * w + x] * kv;
             }
-            out[y * w + x] = acc.round().clamp(0.0, 255.0) as u8;
+            *out = acc.round().clamp(0.0, 255.0) as u8;
         }
+    };
+    if should_parallelize(w, h) {
+        out.par_chunks_mut(w).enumerate().for_each(vertical);
+    } else {
+        out.chunks_mut(w).enumerate().for_each(vertical);
     }
     out
 }
@@ -278,8 +307,13 @@ pub fn motion_blur(img: &mut RasterImage, angle_deg: f32, distance: u32, sel: Op
     let half = (n - 1) as f32 / 2.0;
 
     let mut result = RasterImage::new(img.width, img.height);
-    for y in 0..img.height as i64 {
-        for x in 0..img.width as i64 {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let blur_row = |(y, out_row): (usize, &mut [u8])| {
+        for (x, out_pixel) in out_row.chunks_exact_mut(4).enumerate() {
             let mut acc = [0f32; 4]; // premultiplied R,G,B + accumulated alpha
             for i in 0..n {
                 let t = i as f32 - half;
@@ -306,8 +340,21 @@ pub fn motion_blur(img: &mut RasterImage, angle_deg: f32, distance: u32, sel: Op
                     ap.round().clamp(0.0, 255.0) as u8,
                 ]
             };
-            result.set_pixel(x as u32, y as u32, out);
+            out_pixel.copy_from_slice(&out);
         }
+    };
+    if should_parallelize(w, h) {
+        result
+            .pixels
+            .par_chunks_mut(w * 4)
+            .enumerate()
+            .for_each(blur_row);
+    } else {
+        result
+            .pixels
+            .chunks_mut(w * 4)
+            .enumerate()
+            .for_each(blur_row);
     }
     blend_result(img, &result, sel);
 }
@@ -317,23 +364,38 @@ pub fn motion_blur(img: &mut RasterImage, angle_deg: f32, distance: u32, sel: Op
 /// Apply a 3×3 kernel to the RGB channels (alpha preserved from the source).
 fn conv3x3_rgb(img: &RasterImage, kernel: [[f32; 3]; 3]) -> RasterImage {
     let mut out = img.clone();
-    for y in 0..img.height as i64 {
-        for x in 0..img.width as i64 {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let convolution_row = |(y, out_row): (usize, &mut [u8])| {
+        for (x, out_pixel) in out_row.chunks_exact_mut(4).enumerate() {
             let mut acc = [0f32; 3];
             for ky in 0..3i64 {
                 for kx in 0..3i64 {
-                    let p = img.sample_clamped(x + kx - 1, y + ky - 1);
+                    let p = img.sample_clamped(x as i64 + kx - 1, y as i64 + ky - 1);
                     let kv = kernel[ky as usize][kx as usize];
                     for c in 0..3 {
                         acc[c] += p[c] as f32 * kv;
                     }
                 }
             }
-            let i = img.index(x as u32, y as u32);
             for c in 0..3 {
-                out.pixels[i + c] = acc[c].round().clamp(0.0, 255.0) as u8;
+                out_pixel[c] = acc[c].round().clamp(0.0, 255.0) as u8;
             }
         }
+    };
+    if should_parallelize(w, h) {
+        out.pixels
+            .par_chunks_mut(w * 4)
+            .enumerate()
+            .for_each(convolution_row);
+    } else {
+        out.pixels
+            .chunks_mut(w * 4)
+            .enumerate()
+            .for_each(convolution_row);
     }
     out
 }
@@ -497,22 +559,39 @@ pub fn emboss(img: &mut RasterImage, sel: Option<&Mask>) {
     // Sum-zero emboss kernel so flat regions land exactly on the 128 bias.
     const K: [[f32; 3]; 3] = [[-1.0, -1.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 1.0, 1.0]];
     let mut result = img.clone();
-    for y in 0..img.height as i64 {
-        for x in 0..img.width as i64 {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let emboss_row = |(y, out_row): (usize, &mut [u8])| {
+        for (x, out_pixel) in out_row.chunks_exact_mut(4).enumerate() {
             let mut acc = 0.0f32;
             for ky in 0..3i64 {
                 for kx in 0..3i64 {
-                    let p = img.sample_clamped(x + kx - 1, y + ky - 1);
+                    let p = img.sample_clamped(x as i64 + kx - 1, y as i64 + ky - 1);
                     let l = luma([p[0] as f32, p[1] as f32, p[2] as f32]);
                     acc += l * K[ky as usize][kx as usize];
                 }
             }
             let g = (acc + 128.0).round().clamp(0.0, 255.0) as u8;
-            let i = img.index(x as u32, y as u32);
-            result.pixels[i] = g;
-            result.pixels[i + 1] = g;
-            result.pixels[i + 2] = g;
+            out_pixel[0] = g;
+            out_pixel[1] = g;
+            out_pixel[2] = g;
         }
+    };
+    if should_parallelize(w, h) {
+        result
+            .pixels
+            .par_chunks_mut(w * 4)
+            .enumerate()
+            .for_each(emboss_row);
+    } else {
+        result
+            .pixels
+            .chunks_mut(w * 4)
+            .enumerate()
+            .for_each(emboss_row);
     }
     blend_result(img, &result, sel);
 }
@@ -525,24 +604,41 @@ pub fn find_edges(img: &mut RasterImage, sel: Option<&Mask>) {
     const GX: [[f32; 3]; 3] = [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]];
     const GY: [[f32; 3]; 3] = [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]];
     let mut result = img.clone();
-    for y in 0..img.height as i64 {
-        for x in 0..img.width as i64 {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let edge_row = |(y, out_row): (usize, &mut [u8])| {
+        for (x, out_pixel) in out_row.chunks_exact_mut(4).enumerate() {
             let mut gx = 0.0f32;
             let mut gy = 0.0f32;
             for ky in 0..3i64 {
                 for kx in 0..3i64 {
-                    let p = img.sample_clamped(x + kx - 1, y + ky - 1);
+                    let p = img.sample_clamped(x as i64 + kx - 1, y as i64 + ky - 1);
                     let l = luma([p[0] as f32, p[1] as f32, p[2] as f32]);
                     gx += l * GX[ky as usize][kx as usize];
                     gy += l * GY[ky as usize][kx as usize];
                 }
             }
             let mag = (gx * gx + gy * gy).sqrt().round().clamp(0.0, 255.0) as u8;
-            let i = img.index(x as u32, y as u32);
-            result.pixels[i] = mag;
-            result.pixels[i + 1] = mag;
-            result.pixels[i + 2] = mag;
+            out_pixel[0] = mag;
+            out_pixel[1] = mag;
+            out_pixel[2] = mag;
         }
+    };
+    if should_parallelize(w, h) {
+        result
+            .pixels
+            .par_chunks_mut(w * 4)
+            .enumerate()
+            .for_each(edge_row);
+    } else {
+        result
+            .pixels
+            .chunks_mut(w * 4)
+            .enumerate()
+            .for_each(edge_row);
     }
     blend_result(img, &result, sel);
 }
@@ -659,6 +755,26 @@ mod tests {
     fn gaussian_gray_bad_length_is_passthrough() {
         let data = vec![1u8, 2, 3];
         assert_eq!(gaussian_blur_gray(&data, 4, 4, 1.5), data);
+    }
+
+    #[test]
+    fn gaussian_gray_parallel_matches_one_worker() {
+        let width = 512;
+        let height = 512;
+        let data: Vec<u8> = (0..width * height)
+            .map(|i| ((i * 31 + i / width * 17) % 256) as u8)
+            .collect();
+        let serial_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let serial =
+            serial_pool.install(|| gaussian_blur_gray(&data, width as u32, height as u32, 4.0));
+
+        assert_eq!(
+            gaussian_blur_gray(&data, width as u32, height as u32, 4.0),
+            serial
+        );
     }
 
     // ── gaussian_blur ─────────────────────────────────────────────────────────
