@@ -13,6 +13,7 @@
 
 use crate::Tool;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::OnceLock;
 
 /// Stable identifier for a command. Used as the keymap key and palette id.
 pub type CommandId = &'static str;
@@ -344,6 +345,16 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Open Command Palette",
         default: Some(KeyBinding::ctrl(Key::K)),
     },
+    CommandDef {
+        id: "keymap.import",
+        label: "Import Keyboard Shortcuts…",
+        default: None,
+    },
+    CommandDef {
+        id: "keymap.export",
+        label: "Export Keyboard Shortcuts…",
+        default: None,
+    },
 ];
 
 /// Tool-activation commands surfaced in the palette. Labels come from
@@ -391,32 +402,53 @@ pub fn default_binding(id: &str) -> Option<KeyBinding> {
 }
 
 /// A flattened command for the palette + settings list (core + tool commands).
+#[derive(Clone)]
 pub struct CommandEntry {
-    pub id: CommandId,
+    pub id: String,
     pub label: String,
     /// `true` for tool-activation entries (no remappable default binding).
     pub is_tool: bool,
 }
 
-/// All commands the palette can list and run: registry commands first, then
-/// tool activations.
+/// All commands the palette can list and run: editor commands, tool
+/// activations, then the canonical MCP operation schema.
 pub fn all_commands() -> Vec<CommandEntry> {
     let mut v: Vec<CommandEntry> = REGISTRY
         .iter()
         .map(|d| CommandEntry {
-            id: d.id,
+            id: d.id.to_string(),
             label: d.label.to_string(),
             is_tool: false,
         })
         .collect();
     for (id, t) in TOOL_COMMANDS {
         v.push(CommandEntry {
-            id,
+            id: id.to_string(),
             label: format!("Tool: {}", t.label()),
             is_tool: true,
         });
     }
+    // The MCP schema is the canonical operation registry. Keeping this derived
+    // means newly-added AI operations automatically become palette-searchable.
+    v.extend(mcp_command_entries().iter().cloned());
     v
+}
+
+fn mcp_command_entries() -> &'static Vec<CommandEntry> {
+    static ENTRIES: OnceLock<Vec<CommandEntry>> = OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        photonic_mcp::server::tool_list()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool.get("name").and_then(|v| v.as_str()))
+            .map(|name| CommandEntry {
+                id: format!("mcp.{name}"),
+                label: format!("MCP: {name}"),
+                is_tool: false,
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -466,6 +498,20 @@ mod tests {
         for id in ids {
             assert!(seen.insert(id), "duplicate command id: {id}");
         }
+    }
+
+    #[test]
+    fn palette_includes_every_mcp_operation() {
+        let mcp_count = photonic_mcp::server::tool_list()
+            .as_array()
+            .expect("MCP tool list is an array")
+            .len();
+        let palette_mcp_count = all_commands()
+            .iter()
+            .filter(|entry| entry.id.starts_with("mcp."))
+            .count();
+        assert_eq!(palette_mcp_count, mcp_count);
+        assert!(palette_mcp_count >= 260);
     }
 
     #[test]

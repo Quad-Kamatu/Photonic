@@ -10,6 +10,7 @@ kurbo = { workspace = true }
 photonic-render = { path = "../photonic-render" }
 photonic-embed = { path = "../photonic-embed" }
 photonic-matte = { path = "../photonic-matte" }
+photonic-mcp = { path = "../photonic-mcp" }
 egui = { workspace = true }
 egui-phosphor = { workspace = true }
 egui-wgpu = { workspace = true }

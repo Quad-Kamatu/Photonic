@@ -4,6 +4,16 @@ use crate::panels::{DrawerGroup, RightDrawerGroup};
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
+
+/// Standalone, portable representation of the user's shortcut overrides.
+/// Keep this deliberately narrower than `AppPreferences`: importing a keymap
+/// must not overwrite unrelated preferences such as theme or autosave settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KeymapFile {
+    version: u32,
+    keymap: HashMap<String, KeyBinding>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPreferences {
@@ -244,6 +254,28 @@ impl Default for AppPreferences {
 }
 
 impl AppPreferences {
+    /// Write only the shortcut overrides as a human-readable JSON file.
+    pub fn export_keymap(&self, path: &Path) -> Result<(), String> {
+        let file = KeymapFile {
+            version: 1,
+            keymap: self.keymap.clone(),
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// Replace shortcut overrides from a portable keymap file and persist them.
+    pub fn import_keymap(&mut self, path: &Path) -> Result<usize, String> {
+        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let file: KeymapFile = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if file.version != 1 {
+            return Err(format!("unsupported keymap file version {}", file.version));
+        }
+        let count = file.keymap.len();
+        self.keymap = file.keymap;
+        self.save();
+        Ok(count)
+    }
     /// The active binding for a command: the user override if present, otherwise
     /// the registry default. `None` means the command has no shortcut.
     pub fn resolve_binding(&self, id: &str) -> Option<KeyBinding> {
@@ -335,7 +367,7 @@ impl AppPreferences {
 
 #[cfg(test)]
 mod tests {
-    use super::AppPreferences;
+    use super::*;
 
     #[test]
     fn x11_backend_is_opt_in_and_backwards_compatible() {
@@ -351,5 +383,23 @@ mod tests {
         let loaded: AppPreferences =
             serde_json::from_value(old_preferences).expect("older preferences deserialize");
         assert!(!loaded.force_x11_backend);
+    }
+
+    #[test]
+    fn keymap_file_roundtrips_without_other_preferences() {
+        let path =
+            std::env::temp_dir().join(format!("photonic-keymap-{}.json", uuid::Uuid::new_v4()));
+        let mut prefs = AppPreferences::default();
+        prefs
+            .keymap
+            .insert("edit.undo".into(), KeyBinding::ctrl(egui::Key::U));
+        prefs.export_keymap(&path).expect("export keymap");
+
+        let mut imported = AppPreferences::default();
+        imported.dark_mode = false;
+        assert_eq!(imported.import_keymap(&path).expect("import keymap"), 1);
+        assert_eq!(imported.keymap, prefs.keymap);
+        assert!(!imported.dark_mode);
+        let _ = std::fs::remove_file(path);
     }
 }
