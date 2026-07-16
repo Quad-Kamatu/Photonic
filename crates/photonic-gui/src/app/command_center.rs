@@ -48,11 +48,15 @@ impl PhotonicApp {
     /// Run a registered command. Returns `true` if the document changed.
     pub(crate) fn dispatch_command(
         &mut self,
-        id: CommandId,
+        id: &str,
         doc: &mut Document,
         history: &mut CommandHistory,
     ) -> bool {
         let mut modified = false;
+        if let Some(tool) = id.strip_prefix("mcp.") {
+            self.run_mcp_operation(tool);
+            return false;
+        }
         match id {
             "edit.undo" => {
                 if history.undo(doc) {
@@ -139,6 +143,8 @@ impl PhotonicApp {
             "view.fit" => self.fit_pending = true,
             "view.toggle_audit" => self.audit.panel_open = !self.audit.panel_open,
             "palette.open" => self.command_palette_open = true,
+            "keymap.import" => self.import_keymap_dialog(),
+            "keymap.export" => self.export_keymap_dialog(),
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the
@@ -149,6 +155,77 @@ impl PhotonicApp {
             }
         }
         modified
+    }
+
+    fn import_keymap_dialog(&mut self) {
+        let Some(path) = run_file_dialog(|| {
+            rfd::FileDialog::new()
+                .add_filter("Photonic keymap", &["json"])
+                .pick_file()
+        }) else {
+            return;
+        };
+        self.file_status = Some(match self.prefs.import_keymap(&path) {
+            Ok(count) => format!("Imported {count} keyboard shortcut override(s)"),
+            Err(e) => format!("Could not import keyboard shortcuts: {e}"),
+        });
+    }
+
+    fn export_keymap_dialog(&mut self) {
+        let Some(path) = run_file_dialog(|| {
+            rfd::FileDialog::new()
+                .add_filter("Photonic keymap", &["json"])
+                .set_file_name("photonic-keymap.json")
+                .save_file()
+        }) else {
+            return;
+        };
+        self.file_status = Some(match self.prefs.export_keymap(&path) {
+            Ok(()) => format!("Exported keyboard shortcuts to {}", path.display()),
+            Err(e) => format!("Could not export keyboard shortcuts: {e}"),
+        });
+    }
+
+    /// Run a palette-selected MCP operation against the local server. Most MCP
+    /// tools accept useful defaults; tools that require structured input return
+    /// their schema validation error in the status bar, keeping the command
+    /// discoverable and directly runnable from the palette.
+    fn run_mcp_operation(&mut self, tool: &str) {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": {} },
+        })
+        .to_string();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+        let result = (|| -> Result<String, String> {
+            let mut stream = TcpStream::connect("127.0.0.1:7842").map_err(|e| e.to_string())?;
+            stream
+                .write_all(request.as_bytes())
+                .map_err(|e| e.to_string())?;
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .map_err(|e| e.to_string())?;
+            Ok(response
+                .split("\r\n\r\n")
+                .nth(1)
+                .unwrap_or(&response)
+                .to_string())
+        })();
+        self.file_status = Some(match result {
+            Ok(body) if body.contains("\"error\"") => format!("MCP {tool}: {body}"),
+            Ok(_) => format!("Ran MCP operation: {tool}"),
+            Err(e) => format!("Could not run MCP {tool}: {e}"),
+        });
     }
 
     /// #207 (GUI equivalent of the `import_design_tokens` MCP tool): pick a
@@ -538,9 +615,9 @@ impl PhotonicApp {
                 (self.command_palette_sel + filtered.len() - 1) % filtered.len();
         }
 
-        let mut chosen: Option<CommandId> = None;
+        let mut chosen: Option<String> = None;
         if enter {
-            chosen = filtered.get(self.command_palette_sel).map(|c| c.id);
+            chosen = filtered.get(self.command_palette_sel).map(|c| c.id.clone());
         }
 
         let screen = ctx.screen_rect();
@@ -592,7 +669,7 @@ impl PhotonicApp {
                                     let binding = if c.is_tool {
                                         None
                                     } else {
-                                        self.prefs.resolve_binding(c.id)
+                                        self.prefs.resolve_binding(&c.id)
                                     };
                                     let row = ui.horizontal(|ui| {
                                         ui.set_width(ui.available_width());
@@ -613,7 +690,7 @@ impl PhotonicApp {
                                         lbl
                                     });
                                     if row.inner.clicked() {
-                                        chosen = Some(c.id);
+                                        chosen = Some(c.id.clone());
                                     }
                                 }
                             });
@@ -623,7 +700,7 @@ impl PhotonicApp {
         if let Some(id) = chosen {
             self.command_palette_open = false;
             self.command_palette_query.clear();
-            return self.dispatch_command(id, doc, history);
+            return self.dispatch_command(&id, doc, history);
         }
         false
     }

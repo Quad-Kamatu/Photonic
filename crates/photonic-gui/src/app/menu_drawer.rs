@@ -464,6 +464,16 @@ impl PhotonicApp {
                                         );
                                         ui.add_space(6.0);
 
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Import Keymap…").clicked() {
+                                                self.import_keymap_dialog();
+                                            }
+                                            if ui.button("Export Keymap…").clicked() {
+                                                self.export_keymap_dialog();
+                                            }
+                                        });
+                                        ui.add_space(6.0);
+
                                         // While capturing, the next non-modifier key press becomes the
                                         // new binding. Escape cancels.
                                         if let Some(cap_id) = self.shortcut_capture.clone() {
