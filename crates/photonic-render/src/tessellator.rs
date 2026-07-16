@@ -1037,6 +1037,16 @@ mod adaptive_tolerance_tests {
     }
 
     #[test]
+    fn adaptive_tolerance_tracks_anisotropic_object_scale() {
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        // sqrt(|det|) for this non-uniform scale is sqrt(9 * 4) = 6.
+        let anisotropic = [9.0, 0.0, 0.0, 4.0, 0.0, 0.0];
+        let tolerance = adaptive_tolerance(1.0, &anisotropic);
+
+        assert!((tolerance - adaptive_tolerance(1.0, &identity) / 6.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn zoomed_out_paths_use_fewer_triangles() {
         let path = PathData::ellipse(0.0, 0.0, 100.0, 100.0);
         let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
