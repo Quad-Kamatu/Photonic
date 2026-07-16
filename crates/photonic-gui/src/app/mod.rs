@@ -825,6 +825,9 @@ pub struct PhotonicApp {
     command_palette_sel: usize,
     /// Request focus for the palette input on the frame it opens.
     command_palette_focus: bool,
+    /// MCP tool selected from the palette. The host drains this only after the
+    /// egui closure releases its document lock.
+    mcp_operation_request: Option<String>,
     /// Command id currently capturing a new key in the Keyboard Shortcuts page.
     shortcut_capture: Option<String>,
     /// In-flight self-update check (result polled each frame).
@@ -1388,6 +1391,7 @@ impl Default for PhotonicApp {
             command_palette_query: String::new(),
             command_palette_sel: 0,
             command_palette_focus: false,
+            mcp_operation_request: None,
             shortcut_capture: None,
             update_rx: None,
             update_check_rx: None,
@@ -1896,6 +1900,14 @@ fn write_photon_file(
 }
 
 impl PhotonicApp {
+    /// Take a palette MCP request for execution by the application host.
+    pub fn take_mcp_operation_request(&mut self) -> Option<String> {
+        self.mcp_operation_request.take()
+    }
+
+    pub fn set_mcp_operation_status(&mut self, status: String) {
+        self.file_status = Some(status);
+    }
     pub fn new() -> Self {
         let prefs = AppPreferences::load();
         let fill_color = prefs.default_fill_color;

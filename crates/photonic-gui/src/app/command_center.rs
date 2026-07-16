@@ -186,46 +186,11 @@ impl PhotonicApp {
         });
     }
 
-    /// Run a palette-selected MCP operation against the local server. Most MCP
-    /// tools accept useful defaults; tools that require structured input return
-    /// their schema validation error in the status bar, keeping the command
-    /// discoverable and directly runnable from the palette.
+    /// Queue a palette-selected MCP operation for the application host. The
+    /// host runs it after this egui frame has released the document lock.
     fn run_mcp_operation(&mut self, tool: &str) {
-        use std::io::{Read, Write};
-        use std::net::TcpStream;
-
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": tool, "arguments": {} },
-        })
-        .to_string();
-        let request = format!(
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body,
-        );
-        let result = (|| -> Result<String, String> {
-            let mut stream = TcpStream::connect("127.0.0.1:7842").map_err(|e| e.to_string())?;
-            stream
-                .write_all(request.as_bytes())
-                .map_err(|e| e.to_string())?;
-            let mut response = String::new();
-            stream
-                .read_to_string(&mut response)
-                .map_err(|e| e.to_string())?;
-            Ok(response
-                .split("\r\n\r\n")
-                .nth(1)
-                .unwrap_or(&response)
-                .to_string())
-        })();
-        self.file_status = Some(match result {
-            Ok(body) if body.contains("\"error\"") => format!("MCP {tool}: {body}"),
-            Ok(_) => format!("Ran MCP operation: {tool}"),
-            Err(e) => format!("Could not run MCP {tool}: {e}"),
-        });
+        self.mcp_operation_request = Some(tool.to_string());
+        self.file_status = Some(format!("Running MCP operation: {tool}"));
     }
 
     /// #207 (GUI equivalent of the `import_design_tokens` MCP tool): pick a

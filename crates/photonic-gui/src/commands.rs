@@ -13,6 +13,7 @@
 
 use crate::Tool;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::OnceLock;
 
 /// Stable identifier for a command. Used as the keymap key and palette id.
 pub type CommandId = &'static str;
@@ -401,6 +402,7 @@ pub fn default_binding(id: &str) -> Option<KeyBinding> {
 }
 
 /// A flattened command for the palette + settings list (core + tool commands).
+#[derive(Clone)]
 pub struct CommandEntry {
     pub id: String,
     pub label: String,
@@ -428,19 +430,25 @@ pub fn all_commands() -> Vec<CommandEntry> {
     }
     // The MCP schema is the canonical operation registry. Keeping this derived
     // means newly-added AI operations automatically become palette-searchable.
-    if let Some(tools) = photonic_mcp::server::tool_list().as_array() {
-        for tool in tools {
-            let Some(name) = tool.get("name").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            v.push(CommandEntry {
+    v.extend(mcp_command_entries().iter().cloned());
+    v
+}
+
+fn mcp_command_entries() -> &'static Vec<CommandEntry> {
+    static ENTRIES: OnceLock<Vec<CommandEntry>> = OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        photonic_mcp::server::tool_list()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool.get("name").and_then(|v| v.as_str()))
+            .map(|name| CommandEntry {
                 id: format!("mcp.{name}"),
                 label: format!("MCP: {name}"),
                 is_tool: false,
-            });
-        }
-    }
-    v
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
