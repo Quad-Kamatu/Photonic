@@ -11,7 +11,7 @@ use crate::{
         draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, DrawSegment,
         Vertex, SEPARABLE_BLEND_MODES,
     },
-    tessellator::{tessellate_fill, tessellate_stroke},
+    tessellator::{adaptive_tolerance, tessellate_fill, tessellate_stroke},
 };
 use image::{ImageBuffer, Rgba};
 use photonic_core::{
@@ -1023,7 +1023,7 @@ fn silhouette_job(
     color: [f32; 4],
     radius_doc: f64,
 ) -> Option<BlurJob> {
-    let mesh = tessellate_fill(path, false);
+    let mesh = tessellate_fill(path, false, adaptive_tolerance(1.0, m));
     if mesh.is_empty() {
         return None;
     }
@@ -1160,7 +1160,11 @@ fn build_geometry(
             && !matches!(&path_node.fill.kind, FillKind::None)
         {
             let opacity = path_node.fill.opacity * node.opacity * gop;
-            let mesh = tessellate_fill(&path_node.path_data, false);
+            let mesh = tessellate_fill(
+                &path_node.path_data,
+                false,
+                adaptive_tolerance(1.0, &node.transform.matrix),
+            );
             if !mesh.is_empty() {
                 // Non-linear fills sample per vertex → refine the triangulation.
                 let mesh = if path_node.fill.kind.is_nonlinear() {
@@ -1293,6 +1297,7 @@ fn build_geometry(
                 sc.line_cap,
                 sc.line_join,
                 sc.miter_limit as f32,
+                adaptive_tolerance(1.0, &node.transform.matrix),
             );
             if !mesh.is_empty() {
                 let base = verts.len() as u32;
