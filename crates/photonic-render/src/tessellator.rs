@@ -992,7 +992,10 @@ mod refine_diag {
                 maxe = maxe.max((dx * dx + dy * dy).sqrt());
             }
         }
-        assert!(maxe <= target * 1.05, "max edge {maxe} exceeds target {target}");
+        assert!(
+            maxe <= target * 1.05,
+            "max edge {maxe} exceeds target {target}"
+        );
         assert!(tris < 60_000, "triangle count {tris} hit the budget");
     }
 }

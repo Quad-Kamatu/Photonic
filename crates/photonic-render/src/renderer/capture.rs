@@ -552,9 +552,10 @@ mod offscreen_tests {
         let (pixels, ew, eh) = renderer.render_export_rgba(&doc, W, H, &opts);
         let export = image::RgbaImage::from_raw(ew, eh, pixels).expect("export rgba");
 
+        let visible_raster = screenshot.get_pixel(20, 20).0;
         assert!(
-            screenshot.get_pixel(20, 20).0[0] > 220,
-            "screenshot omitted the visible raster pixels"
+            visible_raster[0] > 220 && visible_raster[1] < 60 && visible_raster[2] < 60,
+            "screenshot omitted the visible red raster pixels: {visible_raster:?}"
         );
         assert_eq!(
             screenshot.get_pixel(34, 20).0,
@@ -622,7 +623,11 @@ mod offscreen_tests {
 
         // The export renderer renders the doc through the shared device.
         let (px, ew, eh) = export.render_export_rgba(&doc, W, H, &opts);
-        assert_eq!((ew, eh), (W, H), "shared export must honor the requested size");
+        assert_eq!(
+            (ew, eh),
+            (W, H),
+            "shared export must honor the requested size"
+        );
         let img = image::RgbaImage::from_raw(ew, eh, px).expect("shared export rgba");
         let center = img.get_pixel(W / 2, H / 2).0;
         assert!(
@@ -644,7 +649,7 @@ mod offscreen_tests {
             lc[2] > 150 && lc[3] > 200,
             "live renderer broke after shared export: center={lc:?}"
         );
-}
+    }
     /// Stage 0 smoke test: the windowless renderer drives the real GPU pipeline
     /// and reads pixels back. A red rect filling a 20×20 doc → red at the centre.
     #[test]
