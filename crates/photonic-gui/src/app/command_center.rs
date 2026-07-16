@@ -157,7 +157,7 @@ impl PhotonicApp {
         modified
     }
 
-    fn import_keymap_dialog(&mut self) {
+    pub(crate) fn import_keymap_dialog(&mut self) {
         let Some(path) = run_file_dialog(|| {
             rfd::FileDialog::new()
                 .add_filter("Photonic keymap", &["json"])
@@ -171,7 +171,7 @@ impl PhotonicApp {
         });
     }
 
-    fn export_keymap_dialog(&mut self) {
+    pub(crate) fn export_keymap_dialog(&mut self) {
         let Some(path) = run_file_dialog(|| {
             rfd::FileDialog::new()
                 .add_filter("Photonic keymap", &["json"])
