@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use photonic_core::timeline::{
-    AssetKind, Clip, ClipSource, FrameRate, MediaAsset, ProxyRef, ProxyStatus, Sequence, Tick,
-    TimelineProject, Track, TrackKind,
+    AssetKind, Clip, ClipSource, FrameRate, MediaAsset, ProxyRef, Sequence, Tick, TimelineProject,
+    Track, TrackKind,
 };
 use photonic_core::{CommandHistory, Document};
 

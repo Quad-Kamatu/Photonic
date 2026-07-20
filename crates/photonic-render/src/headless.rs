@@ -114,11 +114,6 @@ pub struct HeadlessRenderer {
     /// vector layer into a linear premultiplied `Rgba16Float` working texture.
     convert_bgl: wgpu::BindGroupLayout,
     convert_pipeline: wgpu::RenderPipeline,
-    // ── Headless text (TD-018) ─────────────────────────────────────────────────
-    /// glyphon state driving text rasterization on the headless device, behind a
-    /// `Mutex` because this renderer is shared via `Arc` and rendered through
-    /// `&self` while glyphon needs `&mut`.
-    text: std::sync::Mutex<crate::headless_text::HeadlessText>,
 }
 
 impl HeadlessRenderer {
@@ -217,8 +212,6 @@ impl HeadlessRenderer {
         let convert_bgl = create_convert_bgl(&device);
         let convert_pipeline = create_convert_pipeline(&device, &convert_bgl);
 
-        let text = std::sync::Mutex::new(crate::headless_text::HeadlessText::new(&device, &queue));
-
         Self {
             device,
             queue,
@@ -236,7 +229,6 @@ impl HeadlessRenderer {
             composite_sampler,
             convert_bgl,
             convert_pipeline,
-            text,
         }
     }
 
@@ -366,9 +358,6 @@ impl HeadlessRenderer {
                 }
             }
             crate::compositor::composite_document(&mut pixels, w, h, document, &view);
-            // Text on top (TD-018) — the CPU compositor doesn't paint glyphs, so
-            // rasterize them via glyphon onto the finished pixels.
-            self.composite_text_over_cpu(&mut pixels, document, w, h, &view);
             return (pixels, w, h);
         }
 
@@ -385,9 +374,6 @@ impl HeadlessRenderer {
             w,
             h,
         );
-        // Text on top (TD-018): glyphon pass onto the scene texture before
-        // readback, so exported pixels include text (matches the canvas).
-        self.paint_text(&tex, document, w, h, &view);
 
         // Copy texture → staging buffer (row stride must be aligned to 256)
         let bpr = align256(w * 4);
@@ -878,69 +864,6 @@ impl HeadlessRenderer {
             );
             let src_view = src.create_view(&Default::default());
             self.convert_srgb_texture_to_working(&src_view, w, h)
-        }
-    }
-
-    /// Rasterize `document`'s flat text nodes onto `target` via glyphon
-    /// (`LoadOp::Load`), on top of whatever the texture already holds (TD-018).
-    /// No-op when there is no text. `target` must be a `FORMAT` render attachment.
-    fn paint_text(
-        &self,
-        target: &wgpu::Texture,
-        document: &Document,
-        w: u32,
-        h: u32,
-        view: &CanvasView,
-    ) {
-        let snaps = crate::headless_text::collect_text_snapshots(document, view);
-        if snaps.is_empty() {
-            return;
-        }
-        let target_view = target.create_view(&Default::default());
-        let mut text = self.text.lock().expect("headless text mutex poisoned");
-        text.render(&self.device, &self.queue, &target_view, &snaps, w, h);
-    }
-
-    /// Composite `document`'s text onto CPU-composited `pixels` (TD-018, the
-    /// raster/pattern/effect path). Uploads the finished pixels to a texture,
-    /// paints text over them via glyphon, and reads the result back — so text
-    /// looks identical to the pure-GPU path. No-op when there is no text.
-    fn composite_text_over_cpu(
-        &self,
-        pixels: &mut Vec<u8>,
-        document: &Document,
-        w: u32,
-        h: u32,
-        view: &CanvasView,
-    ) {
-        if crate::headless_text::collect_text_snapshots(document, view).is_empty() {
-            return;
-        }
-        let tex = self.make_color_tex(
-            w,
-            h,
-            1,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-        );
-        self.queue.write_texture(
-            tex.as_image_copy(),
-            pixels,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.paint_text(&tex, document, w, h, view);
-        if let Some(out) = self.readback_rgba8(&tex, w, h) {
-            *pixels = out;
         }
     }
 

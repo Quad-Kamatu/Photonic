@@ -229,6 +229,8 @@ Requires changing `send_message`'s call signature or initialization to accept/fe
 
 **Resolution (TD-014):** Deleted `photonic_tools()` entirely. Added `fetch_mcp_tools()` which calls `tools/list` on the local MCP server at startup of each `send_message` call using the same `reqwest::blocking` client already used by `call_mcp_tool`. Renames `inputSchema` → `input_schema` for Anthropic API compatibility. If the MCP server is unreachable, `send_message` returns an error immediately. Committed on 2026-03-23.
 
+**Superseded 2026-07-20:** `claude_client.rs` was deleted outright. It had no `mod claude_client;` declaration in `photonic-app/src/main.rs`, so it was never part of any build — the in-app chat panel it belonged to does not exist, and nothing referenced `send_message`/`fetch_mcp_tools`. The tool-surface drift this entry describes was therefore unreachable in shipped binaries. Recover from git history if the chat panel is ever revived.
+
 ---
 
 ### TD-010: GUI and MCP Maintain Separate CommandHistory Instances (Split Undo) *(solved)*

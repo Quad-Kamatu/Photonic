@@ -5,7 +5,6 @@ pub mod compositor;
 pub mod grade;
 pub mod grade_gpu;
 pub mod headless;
-mod headless_text;
 pub mod lut;
 pub mod pipeline;
 pub mod renderer;

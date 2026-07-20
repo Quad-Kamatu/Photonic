@@ -3,11 +3,15 @@
 //! This is the public entry point the video-engine evaluator (`photonic-video`
 //! `graph::eval`) uses to burn a compiled `CaptionBatch` of styled,
 //! karaoke-resolved caption cues onto a working frame. It is the same glyphon
-//! pipeline the interactive canvas and headless-text export use (TD-018), so
-//! burned captions match preview. `headless_text`'s twin is `pub(crate)` and
-//! keyed to the sRGB8 export target; captions instead composite **directly onto
-//! the `Rgba16Float`, premultiplied, linear-light working texture** (D-09) the
-//! evaluator carries, which glyphon does correctly for free:
+//! pipeline the interactive canvas uses, so burned captions match preview.
+//!
+//! (A `headless_text` sibling once rasterized document text for raster export
+//! against an sRGB8 target. It was removed as dead code — headless export
+//! outlines text to filled paths up front via `outline_document_text`, so no
+//! `Text` node ever survived to reach it.) Captions instead composite
+//! **directly onto the `Rgba16Float`, premultiplied, linear-light working
+//! texture** (D-09) the evaluator carries, which glyphon does correctly for
+//! free:
 //!
 //! - The atlas is created in glyphon's default [`ColorMode::Accurate`], whose
 //!   shader converts each sRGB vertex colour to linear before output — so the

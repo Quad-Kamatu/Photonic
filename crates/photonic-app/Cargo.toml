@@ -32,7 +32,7 @@ base64 = "0.22"
 ico = "0.3"
 image = { workspace = true }
 # Cross-platform deps. These power modules compiled on every OS — mlua/uuid
-# (repl.rs, script.rs, cli.rs) and reqwest (mcp_proxy.rs, claude_client.rs) —
+# (repl.rs, script.rs, cli.rs) and reqwest (mcp_proxy.rs) —
 # so they must NOT live under [target.'cfg(windows)'.dependencies].
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 uuid = { workspace = true }
