@@ -20,7 +20,12 @@ pub(crate) fn apply_affine_to_path(path: &PathData, affine: kurbo::Affine) -> Pa
 }
 
 /// Apply zig-zag distortion to every segment of a BezPath.
-pub(crate) fn apply_zig_zag(bez: &kurbo::BezPath, size: f64, ridges: usize, smooth: bool) -> kurbo::BezPath {
+pub(crate) fn apply_zig_zag(
+    bez: &kurbo::BezPath,
+    size: f64,
+    ridges: usize,
+    smooth: bool,
+) -> kurbo::BezPath {
     use kurbo::{PathEl, Point};
 
     let mut result = kurbo::BezPath::new();
@@ -158,7 +163,11 @@ pub(crate) fn zig_zag_segment(
 
 /// Displace every point in a BezPath radially from `center`.
 /// Positive strength = bloat (outward), negative = pucker (inward).
-pub(crate) fn apply_pucker_bloat(bez: &kurbo::BezPath, strength: f64, center: kurbo::Point) -> kurbo::BezPath {
+pub(crate) fn apply_pucker_bloat(
+    bez: &kurbo::BezPath,
+    strength: f64,
+    center: kurbo::Point,
+) -> kurbo::BezPath {
     let displace = |p: kurbo::Point| -> kurbo::Point {
         let dx = p.x - center.x;
         let dy = p.y - center.y;
@@ -219,7 +228,11 @@ pub(crate) fn apply_roughen(bez: &kurbo::BezPath, size: f64, seed: u64) -> kurbo
 
 /// Twirl: rotate each point around `center` by an angle that decreases
 /// with distance from center (points near center rotate more → spiral).
-pub(crate) fn apply_twirl(bez: &kurbo::BezPath, angle_rad: f64, center: kurbo::Point) -> kurbo::BezPath {
+pub(crate) fn apply_twirl(
+    bez: &kurbo::BezPath,
+    angle_rad: f64,
+    center: kurbo::Point,
+) -> kurbo::BezPath {
     // Find max distance from center to determine falloff.
     let mut max_dist = 0.0f64;
     for el in bez.elements() {
@@ -420,7 +433,6 @@ pub(crate) fn apply_round_corners(bez: &kurbo::BezPath, radius: f64) -> kurbo::B
 
     result
 }
-
 
 #[cfg(test)]
 mod round_corners_tests {

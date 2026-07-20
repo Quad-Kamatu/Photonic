@@ -103,7 +103,9 @@ pub fn compute_weights(
         let Some(d) = primary_pts
             .iter()
             .map(|q| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt())
-            .fold(None, |acc: Option<f64>, d| Some(acc.map_or(d, |a| a.min(d))))
+            .fold(None, |acc: Option<f64>, d| {
+                Some(acc.map_or(d, |a| a.min(d)))
+            })
         else {
             continue; // no primaries → nothing to weight against
         };
@@ -215,7 +217,10 @@ mod tests {
         let linear = falloff(0.5, 1.0);
         let soft = falloff(0.5, 0.3);
         assert!(approx(linear, 0.5), "linear at half radius is 0.5");
-        assert!(sharp < linear, "higher k concentrates influence near primary");
+        assert!(
+            sharp < linear,
+            "higher k concentrates influence near primary"
+        );
         assert!(soft > linear, "lower k broadens influence");
     }
 
@@ -236,8 +241,14 @@ mod tests {
         assert!(!w.contains_key(&1), "anchor beyond radius is omitted");
         let moved = bez_move_anchors_weighted(&bez, &w, 3.0, 7.0);
         let pts = anchor_points(&moved);
-        assert!(approx(pts[0].1.x, 3.0) && approx(pts[0].1.y, 7.0), "primary moved fully");
-        assert!(approx(pts[1].1.x, 10.0) && approx(pts[1].1.y, 0.0), "far anchor untouched");
+        assert!(
+            approx(pts[0].1.x, 3.0) && approx(pts[0].1.y, 7.0),
+            "primary moved fully"
+        );
+        assert!(
+            approx(pts[1].1.x, 10.0) && approx(pts[1].1.y, 0.0),
+            "far anchor untouched"
+        );
     }
 
     #[test]
@@ -263,8 +274,14 @@ mod tests {
         }
         let moved = bez_move_anchors_weighted(&bez, &w, 5.0, -3.0);
         for (before, after) in anchor_points(&bez).iter().zip(anchor_points(&moved).iter()) {
-            assert!(approx(after.1.x, before.1.x + 5.0), "every anchor shifts +5 in x");
-            assert!(approx(after.1.y, before.1.y - 3.0), "every anchor shifts -3 in y");
+            assert!(
+                approx(after.1.x, before.1.x + 5.0),
+                "every anchor shifts +5 in x"
+            );
+            assert!(
+                approx(after.1.y, before.1.y - 3.0),
+                "every anchor shifts -3 in y"
+            );
         }
     }
 

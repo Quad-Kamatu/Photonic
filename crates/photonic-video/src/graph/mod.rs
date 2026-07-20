@@ -14,5 +14,7 @@ pub mod compile;
 pub mod eval;
 pub mod eval_cpu;
 pub mod ops;
+pub mod panorama;
+pub mod panorama_gpu;
 
 pub use compile::{compile, CompileDiagnostic, CompiledFrame, Quality, ViewNodeOverride};

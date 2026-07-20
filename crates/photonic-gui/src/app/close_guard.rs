@@ -232,11 +232,13 @@ impl PhotonicApp {
                     unsaved.len()
                 ));
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                    for name in &unsaved {
-                        ui.label(RichText::new(format!("  • {name}")).weak());
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for name in &unsaved {
+                            ui.label(RichText::new(format!("  • {name}")).weak());
+                        }
+                    });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save all & quit").clicked() {

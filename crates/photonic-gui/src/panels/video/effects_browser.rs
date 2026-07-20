@@ -91,7 +91,15 @@ pub(crate) fn draw_effects_browser(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     }
 
     let mut action: Option<PanelAction> = None;
-    draw_family(ui, ctx, project, &selection, "FILTERS", FILTERS, &mut action);
+    draw_family(
+        ui,
+        ctx,
+        project,
+        &selection,
+        "FILTERS",
+        FILTERS,
+        &mut action,
+    );
     draw_family(ui, ctx, project, &selection, "KEYS", KEYS, &mut action);
     draw_family(
         ui,
@@ -190,12 +198,12 @@ fn draw_row(
 
 fn effect_glyph(kind: EffectKind) -> &'static str {
     match kind {
-        EffectKind::Blur => "\u{25CF}",       // ● generic filter dot
-        EffectKind::Sharpen => "\u{25C6}",    // ♦
-        EffectKind::Glow => "\u{2726}",       // ✦
-        EffectKind::ChromaKey => "\u{25D1}",  // ◑ key
-        EffectKind::LumaKey => "\u{25D0}",    // ◐ key
-        EffectKind::Invert => "\u{25D3}",     // ◓
+        EffectKind::Blur => "\u{25CF}",         // ● generic filter dot
+        EffectKind::Sharpen => "\u{25C6}",      // ♦
+        EffectKind::Glow => "\u{2726}",         // ✦
+        EffectKind::ChromaKey => "\u{25D1}",    // ◑ key
+        EffectKind::LumaKey => "\u{25D0}",      // ◐ key
+        EffectKind::Invert => "\u{25D3}",       // ◓
         EffectKind::MaskShapeGen => "\u{25A1}", // □ mask
         _ => "\u{25CF}",
     }

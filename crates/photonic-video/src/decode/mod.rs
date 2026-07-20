@@ -19,6 +19,7 @@ pub mod reader;
 pub mod ring;
 pub mod scheduler;
 pub mod sidecar;
+pub mod worker;
 
 use photonic_core::timeline::Tick;
 use photonic_render::video::YuvPlanes;
@@ -27,6 +28,7 @@ pub use reader::{FrameReader, PtsModel};
 pub use ring::{FrameRing, SharedRing};
 pub use scheduler::DecodeSource;
 pub use sidecar::{Sidecar, SidecarConfig};
+pub use worker::DecodeWorker;
 
 /// Decode quality: the ring/cache and process are keyed by this so preview and
 /// full-res streams don't collide (02 §3 "one process per (asset, quality)").

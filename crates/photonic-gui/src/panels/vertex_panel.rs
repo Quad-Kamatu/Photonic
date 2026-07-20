@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Context-aware inspector shown while the Direct Selection tool is editing a
 /// path. Displays only anchor/vertex properties for the current selection.
 pub(crate) fn draw_vertex_panel(
@@ -164,4 +163,3 @@ pub(crate) fn draw_vertex_panel(
         });
     }
 }
-

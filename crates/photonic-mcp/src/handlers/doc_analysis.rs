@@ -1,12 +1,9 @@
 use crate::protocol::{
-    AnalyzeCompositionArgs,
-    DetectRhythmsArgs,
-    MeasureDistancesArgs,
-    ToolResult,
+    AnalyzeCompositionArgs, DetectRhythmsArgs, MeasureDistancesArgs, ToolResult,
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
-use photonic_core::style::{FillKind};
+use photonic_core::style::FillKind;
 use serde_json::json;
 
 /// Analyze the composition of the current document and return advisory findings.
@@ -307,7 +304,6 @@ pub async fn analyze_composition(state: &AppState, args: AnalyzeCompositionArgs)
         "findings": findings,
     }))
 }
-
 
 /// Detect visual rhythms (spacing, size, rotation patterns) in the document.
 pub async fn detect_rhythms(state: &AppState, args: DetectRhythmsArgs) -> ToolResult {
@@ -614,7 +610,6 @@ pub async fn detect_rhythms(state: &AppState, args: DetectRhythmsArgs) -> ToolRe
         "patterns": patterns,
     }))
 }
-
 
 /// Measure edge-to-edge gaps, center-to-center distances, and alignment between nodes.
 pub async fn measure_distances(state: &AppState, args: MeasureDistancesArgs) -> ToolResult {

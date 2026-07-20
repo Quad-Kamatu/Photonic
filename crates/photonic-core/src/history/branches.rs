@@ -52,7 +52,11 @@ impl CommandHistory {
 
     /// All named states, sorted by name.
     pub fn branch_list(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.nodes.values().filter_map(|n| n.label.clone()).collect();
+        let mut names: Vec<String> = self
+            .nodes
+            .values()
+            .filter_map(|n| n.label.clone())
+            .collect();
         names.sort();
         names
     }

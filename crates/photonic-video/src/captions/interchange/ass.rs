@@ -29,7 +29,9 @@ fn parse_ass_time(s: &str) -> Option<Tick> {
     let s = s.trim();
     let (hms, cs) = s.split_once('.')?;
     let parts: Vec<&str> = hms.split(':').collect();
-    let [h, m, sec] = parts.as_slice() else { return None };
+    let [h, m, sec] = parts.as_slice() else {
+        return None;
+    };
     let h: i64 = h.parse().ok()?;
     let m: i64 = m.parse().ok()?;
     let sec: i64 = sec.parse().ok()?;
@@ -71,7 +73,12 @@ fn parse_ass_color(s: &str) -> Option<Color> {
             (value & 0xFF) as u8,
         )
     } else {
-        (0u8, ((value >> 16) & 0xFF) as u8, ((value >> 8) & 0xFF) as u8, (value & 0xFF) as u8)
+        (
+            0u8,
+            ((value >> 16) & 0xFF) as u8,
+            ((value >> 8) & 0xFF) as u8,
+            (value & 0xFF) as u8,
+        )
     };
     Some(Color {
         r: rr as f32 / 255.0,
@@ -106,7 +113,11 @@ fn split_fields(v: &str, field_count: usize) -> Vec<String> {
 }
 
 fn field_map<'a>(names: &'a [String], values: &'a [String]) -> HashMap<&'a str, &'a str> {
-    names.iter().map(String::as_str).zip(values.iter().map(String::as_str)).collect()
+    names
+        .iter()
+        .map(String::as_str)
+        .zip(values.iter().map(String::as_str))
+        .collect()
 }
 
 // ── Style mapping (06 §7.1's table, both directions) ────────────────────────
@@ -117,7 +128,10 @@ fn build_caption_style(map: &HashMap<&str, &str>, res_x: f32, res_y: f32) -> Cap
     if let Some(v) = map.get("Fontname") {
         style.font_family = v.trim().to_string();
     }
-    if let Some(v) = map.get("Fontsize").and_then(|s| s.trim().parse::<f32>().ok()) {
+    if let Some(v) = map
+        .get("Fontsize")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+    {
         style.font_size = v;
     }
     if let Some(bold) = map.get("Bold").and_then(|s| s.trim().parse::<i32>().ok()) {
@@ -127,21 +141,38 @@ fn build_caption_style(map: &HashMap<&str, &str>, res_x: f32, res_y: f32) -> Cap
         style.fill = c;
     }
 
-    let outline_w = map.get("Outline").and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
+    let outline_w = map
+        .get("Outline")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
     style.stroke = if outline_w > 0.0 {
-        let color = map.get("OutlineColour").and_then(|s| parse_ass_color(s)).unwrap_or(Color::BLACK);
+        let color = map
+            .get("OutlineColour")
+            .and_then(|s| parse_ass_color(s))
+            .unwrap_or(Color::BLACK);
         Some((color, outline_w))
     } else {
         None
     };
 
-    let border_style = map.get("BorderStyle").and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(1);
+    let border_style = map
+        .get("BorderStyle")
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(1);
     style.background = if border_style == 3 {
         let color = map
             .get("BackColour")
             .and_then(|s| parse_ass_color(s))
-            .unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.5 });
-        let margin_v = map.get("MarginV").and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
+            .unwrap_or(Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.5,
+            });
+        let margin_v = map
+            .get("MarginV")
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .unwrap_or(0.0);
         Some(CaptionBackground {
             color,
             corner_radius: 0.0,
@@ -151,17 +182,36 @@ fn build_caption_style(map: &HashMap<&str, &str>, res_x: f32, res_y: f32) -> Cap
         None
     };
 
-    let alignment = map.get("Alignment").and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(2);
-    let margin_l = map.get("MarginL").and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
-    let margin_r = map.get("MarginR").and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
-    let margin_v = map.get("MarginV").and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
+    let alignment = map
+        .get("Alignment")
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(2);
+    let margin_l = map
+        .get("MarginL")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let margin_r = map
+        .get("MarginR")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let margin_v = map
+        .get("MarginV")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
     style.position = alignment_to_position(alignment, margin_l, margin_r, margin_v, res_x, res_y);
 
     style
 }
 
 /// ASS v4+ numpad alignment (1-9) + margins → normalized `[x, y]` position.
-fn alignment_to_position(alignment: i32, margin_l: f32, margin_r: f32, margin_v: f32, res_x: f32, res_y: f32) -> [f32; 2] {
+fn alignment_to_position(
+    alignment: i32,
+    margin_l: f32,
+    margin_r: f32,
+    margin_v: f32,
+    res_x: f32,
+    res_y: f32,
+) -> [f32; 2] {
     let res_x = res_x.max(1.0);
     let res_y = res_y.max(1.0);
     let x = match alignment {
@@ -181,11 +231,27 @@ fn alignment_to_position(alignment: i32, margin_l: f32, margin_r: f32, margin_v:
 /// position into the nearest of the 9 zones rather than reproducing an
 /// arbitrary continuous position exactly (ASS has no continuous position
 /// primitive at the style level).
-fn position_to_alignment_and_margins(position: [f32; 2], res_x: f32, res_y: f32) -> (i32, f32, f32, f32) {
+fn position_to_alignment_and_margins(
+    position: [f32; 2],
+    res_x: f32,
+    res_y: f32,
+) -> (i32, f32, f32, f32) {
     let [x, y] = position;
-    let col = if x < 1.0 / 3.0 { 0 } else if x > 2.0 / 3.0 { 2 } else { 1 };
-    let row = if y < 1.0 / 3.0 { 0 } else if y > 2.0 / 3.0 { 2 } else { 1 }; // 0=top,1=mid,2=bottom
-    // Numpad layout: row 0 (top) -> 7/8/9, row 1 (mid) -> 4/5/6, row 2 (bottom) -> 1/2/3.
+    let col = if x < 1.0 / 3.0 {
+        0
+    } else if x > 2.0 / 3.0 {
+        2
+    } else {
+        1
+    };
+    let row = if y < 1.0 / 3.0 {
+        0
+    } else if y > 2.0 / 3.0 {
+        2
+    } else {
+        1
+    }; // 0=top,1=mid,2=bottom
+       // Numpad layout: row 0 (top) -> 7/8/9, row 1 (mid) -> 4/5/6, row 2 (bottom) -> 1/2/3.
     let alignment = match row {
         0 => 7 + col,
         1 => 4 + col,
@@ -202,14 +268,21 @@ fn position_to_alignment_and_margins(position: [f32; 2], res_x: f32, res_y: f32)
 }
 
 const STYLE_FORMAT_FIELDS: &str = "Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding";
-const EVENT_FORMAT_FIELDS: &str = "Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text";
+const EVENT_FORMAT_FIELDS: &str =
+    "Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text";
 
 fn style_to_ass_line(name: &str, style: &CaptionStyle, res: (f32, f32)) -> String {
     let bold = if style.weight >= 700 { -1 } else { 0 };
     let (outline_color, outline_w) = style.stroke.unwrap_or((Color::BLACK, 0.0));
     let border_style = if style.background.is_some() { 3 } else { 1 };
-    let back_color = style.background.map(|b| b.color).unwrap_or(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
-    let (alignment, margin_l, margin_r, margin_v) = position_to_alignment_and_margins(style.position, res.0, res.1);
+    let back_color = style.background.map(|b| b.color).unwrap_or(Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    });
+    let (alignment, margin_l, margin_r, margin_v) =
+        position_to_alignment_and_margins(style.position, res.0, res.1);
 
     format!(
         "Style: {name},{font},{size},{primary},{secondary},{outline_color},{back},{bold},0,0,0,100,100,0,0,{border},{outline},0,{align},{ml},{mr},{mv},1",
@@ -415,7 +488,10 @@ pub fn parse_ass(input: &str, track_name: &str) -> Result<AssImportResult, Inter
                     if values.len() == style_fields.len() {
                         let map = field_map(&style_fields, &values);
                         if let Some(name) = map.get("Name") {
-                            styles.insert(name.trim().to_string(), build_caption_style(&map, res_x, res_y));
+                            styles.insert(
+                                name.trim().to_string(),
+                                build_caption_style(&map, res_x, res_y),
+                            );
                         }
                     }
                 }
@@ -435,10 +511,16 @@ pub fn parse_ass(input: &str, track_name: &str) -> Result<AssImportResult, Inter
                     ) else {
                         continue;
                     };
-                    let style_name = map.get("Style").copied().unwrap_or("Default").trim().to_string();
+                    let style_name = map
+                        .get("Style")
+                        .copied()
+                        .unwrap_or("Default")
+                        .trim()
+                        .to_string();
                     let text_raw = map.get("Text").copied().unwrap_or("");
 
-                    let (words, used_karaoke, dropped) = words_from_dialogue_text(text_raw, start, end);
+                    let (words, used_karaoke, dropped) =
+                        words_from_dialogue_text(text_raw, start, end);
                     dropped_directives += dropped;
                     if !used_karaoke {
                         any_approximated = true;
@@ -490,7 +572,8 @@ pub fn write_ass(track: &CaptionTrack) -> (String, ExportSummary) {
     out.push_str("\n[V4+ Styles]\n");
     out.push_str(&format!("Format: {STYLE_FORMAT_FIELDS}\n"));
 
-    let mut style_names: Vec<(String, CaptionStyle)> = vec![("Default".to_string(), track.style.clone())];
+    let mut style_names: Vec<(String, CaptionStyle)> =
+        vec![("Default".to_string(), track.style.clone())];
     for (i, cue) in track.cues.iter().enumerate() {
         if let Some(style) = &cue.style_override {
             style_names.push((format!("Cue{i}"), style.clone()));
@@ -513,7 +596,10 @@ pub fn write_ass(track: &CaptionTrack) -> (String, ExportSummary) {
             Some(s) => (format!("Cue{i}"), s),
             None => ("Default".to_string(), &track.style),
         };
-        let mode = style.highlight.map(|h| h.mode).unwrap_or(KaraokeMode::WordPop);
+        let mode = style
+            .highlight
+            .map(|h| h.mode)
+            .unwrap_or(KaraokeMode::WordPop);
         out.push_str(&format!(
             "Dialogue: 0,{},{},{},,0,0,0,,{}\n",
             format_ass_time(cue.start),
@@ -551,7 +637,10 @@ mod tests {
         assert_eq!(words[0].text, "Hello");
         assert_eq!(words[0].start, Tick::from_seconds(1));
         // 50cs = 500ms
-        assert_eq!(words[0].end, Tick::from_seconds(1) + centiseconds_to_ticks(50));
+        assert_eq!(
+            words[0].end,
+            Tick::from_seconds(1) + centiseconds_to_ticks(50)
+        );
         assert_eq!(words[1].text, "there");
         assert_eq!(words[1].start, words[0].end);
         assert_eq!(words[2].text, "friend");
@@ -590,7 +679,11 @@ mod tests {
 
         assert_eq!(reimported.track.cues.len(), imported.track.cues.len());
         let tolerance = centiseconds_to_ticks(1).0; // rounding to whole centiseconds
-        for (a, b) in imported.track.cues[0].words.iter().zip(reimported.track.cues[0].words.iter()) {
+        for (a, b) in imported.track.cues[0]
+            .words
+            .iter()
+            .zip(reimported.track.cues[0].words.iter())
+        {
             assert_eq!(a.text, b.text);
             assert!((a.start.0 - b.start.0).abs() <= tolerance, "{a:?} vs {b:?}");
             assert!((a.end.0 - b.end.0).abs() <= tolerance, "{a:?} vs {b:?}");
@@ -617,7 +710,12 @@ mod tests {
 
     #[test]
     fn color_round_trips_through_ass_hex_format() {
-        let c = Color { r: 1.0, g: 0.5, b: 0.25, a: 0.75 };
+        let c = Color {
+            r: 1.0,
+            g: 0.5,
+            b: 0.25,
+            a: 0.75,
+        };
         let hex = format_ass_color(c);
         let back = parse_ass_color(&hex).unwrap();
         assert!((back.r - c.r).abs() < 0.01);

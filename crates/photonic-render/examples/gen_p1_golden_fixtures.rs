@@ -22,15 +22,14 @@ use photonic_core::ops::boolean::BooleanOp;
 use photonic_core::raster::adjust::AdjustmentSpec;
 use photonic_core::raster::mask::Mask;
 use photonic_core::style::{
-    ArrowheadStyle, FluidGradient, FluidGradientPoint, LineCap, LineJoin, MeshGradient,
-    PatternFill,
+    ArrowheadStyle, FluidGradient, FluidGradientPoint, LineCap, LineJoin, MeshGradient, PatternFill,
 };
+use photonic_core::Document;
 use photonic_core::{
     save_photon, BlendMode, Color, DropShadow, Feather, Fill, GaussianGlow, GlowEffect, Gradient,
     GradientStop, PathData, RasterImage, RasterNode, SceneNode, SceneNodeKind, Stroke, Symbol,
     Transform, WidthProfile,
 };
-use photonic_core::Document;
 
 fn main() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
@@ -60,12 +59,24 @@ fn fixtures() -> Vec<(&'static str, Document)> {
         ("text_styled", text_styled()),
         ("raster_placement", raster_placement()),
         ("effect_stack_color_overlay_stroke", effect_stack()),
-        ("boolean_groups", boolean_group("boolean-groups", BooleanOp::Union)),
+        (
+            "boolean_groups",
+            boolean_group("boolean-groups", BooleanOp::Union),
+        ),
         // ── Batch 2 (corpus expansion, P1 architect-gate finding [1]) ──────────
         ("symbol_instances", symbol_instances()),
-        ("boolean_subtract", boolean_group("boolean-subtract", BooleanOp::Subtract)),
-        ("boolean_intersect", boolean_group("boolean-intersect", BooleanOp::Intersect)),
-        ("boolean_exclude", boolean_group("boolean-exclude", BooleanOp::Exclude)),
+        (
+            "boolean_subtract",
+            boolean_group("boolean-subtract", BooleanOp::Subtract),
+        ),
+        (
+            "boolean_intersect",
+            boolean_group("boolean-intersect", BooleanOp::Intersect),
+        ),
+        (
+            "boolean_exclude",
+            boolean_group("boolean-exclude", BooleanOp::Exclude),
+        ),
         ("variable_width_stroke", variable_width_stroke()),
         ("effect_glow_stack", effect_glow_stack()),
         ("effect_shadow_feather", effect_shadow_feather()),
@@ -154,8 +165,9 @@ fn gradient_linear() -> Document {
         "gradient-rect",
         doc.active_layer_id.unwrap(),
         SceneNodeKind::Path(
-            PathNode::new(PathData::rect(10.0, 10.0, 100.0, 100.0))
-                .with_fill(Fill::gradient(Gradient::linear(10.0, 10.0, 110.0, 110.0, stops))),
+            PathNode::new(PathData::rect(10.0, 10.0, 100.0, 100.0)).with_fill(Fill::gradient(
+                Gradient::linear(10.0, 10.0, 110.0, 110.0, stops),
+            )),
         ),
     );
     doc.add_node(rect, None);
@@ -695,7 +707,11 @@ fn mixed_vector_raster_zorder() -> Document {
     let mut raster_a = SceneNode::new(
         "raster-back",
         lid,
-        SceneNodeKind::Raster(RasterNode::new(RasterImage::filled(60, 60, [80, 80, 220, 255]))),
+        SceneNodeKind::Raster(RasterNode::new(RasterImage::filled(
+            60,
+            60,
+            [80, 80, 220, 255],
+        ))),
     );
     raster_a.transform = Transform::translate(10.0, 10.0);
     doc.add_node(raster_a, Some(lid));
@@ -713,7 +729,11 @@ fn mixed_vector_raster_zorder() -> Document {
     let mut raster_b = SceneNode::new(
         "raster-front",
         lid,
-        SceneNodeKind::Raster(RasterNode::new(RasterImage::filled(40, 40, [220, 80, 80, 200]))),
+        SceneNodeKind::Raster(RasterNode::new(RasterImage::filled(
+            40,
+            40,
+            [220, 80, 80, 200],
+        ))),
     );
     raster_b.transform = Transform::translate(60.0, 60.0);
     doc.add_node(raster_b, Some(lid));
@@ -748,9 +768,8 @@ fn dense_many_nodes() -> Document {
                 format!("cell-{row}-{col}"),
                 lid,
                 SceneNodeKind::Path(
-                    PathNode::new(PathData::ellipse(cx, cy, cell * 0.35, cell * 0.35)).with_fill(
-                        Fill::solid(Color::new(hue_t, 1.0 - hue_t, 0.5, 1.0)),
-                    ),
+                    PathNode::new(PathData::ellipse(cx, cy, cell * 0.35, cell * 0.35))
+                        .with_fill(Fill::solid(Color::new(hue_t, 1.0 - hue_t, 0.5, 1.0))),
                 ),
             );
             doc.add_node(node, Some(lid));
@@ -768,7 +787,11 @@ fn compound_path() -> Document {
         .expect("valid compound SVG path data");
     let mut pn = PathNode::new(path).with_fill(Fill::solid(Color::new(0.3, 0.5, 0.9, 1.0)));
     pn.is_compound = true;
-    let node = SceneNode::new("compound", doc.active_layer_id.unwrap(), SceneNodeKind::Path(pn));
+    let node = SceneNode::new(
+        "compound",
+        doc.active_layer_id.unwrap(),
+        SceneNodeKind::Path(pn),
+    );
     doc.add_node(node, None);
     doc
 }
@@ -807,7 +830,9 @@ fn nested_groups() -> Document {
     // node_ids by add_node; strip them so only the outer group is a
     // top-level draw root (mirrors the boolean-group fixtures' pattern).
     if let Some(layer) = doc.layers.get_mut(&lid) {
-        layer.node_ids.retain(|id| *id != leaf_id && *id != inner_id);
+        layer
+            .node_ids
+            .retain(|id| *id != leaf_id && *id != inner_id);
     }
     doc
 }
@@ -860,10 +885,12 @@ fn adjustment_layer_raster() -> Document {
     let adjustment = SceneNode::new(
         "brightness-contrast",
         lid,
-        SceneNodeKind::Raster(RasterNode::adjustment_layer(AdjustmentSpec::BrightnessContrast {
-            brightness: 0.3,
-            contrast: 0.2,
-        })),
+        SceneNodeKind::Raster(RasterNode::adjustment_layer(
+            AdjustmentSpec::BrightnessContrast {
+                brightness: 0.3,
+                contrast: 0.2,
+            },
+        )),
     );
     doc.add_node(adjustment, Some(lid));
     doc

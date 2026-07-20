@@ -196,6 +196,8 @@ Toggleable magnet (toolbar icon in the timeline panel's own mini-toolbar + keybi
 
 The **existing canvas** (`egui::CentralPanel` at `app/mod.rs:3119`) is the program monitor while `self.mode == AppMode::Video` — not a second viewport. D-02 requires this literally: same rect, same `last_canvas_rect` bookkeeping, same fit/zoom/pan session state (`view: &mut CanvasView`), reused rather than duplicated.
 
+**Single context-driven monitor (normative):** there is one preview surface. What it shows is retargeted by focus and transport state (`PreviewTarget` in [24-preview-media-load.md](24-preview-media-load.md)) — sequence under the playhead by default; media-pool / Match Frame **source peek** replaces the same surface rather than opening a dual source|program layout. Play always wins over selection retarget. Load/preview performance budgets and Draft/Full tiers are owned by 24.
+
 ### 3.1 Composition with existing canvas rendering
 
 Today the canvas area's GPU content comes from `state.renderer` (document geometry + text + glow passes, `main.rs:594` `render_frame`) composited *before* egui runs, then egui draws overlays. For the video-mode monitor:

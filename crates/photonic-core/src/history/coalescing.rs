@@ -53,5 +53,4 @@ impl CommandHistory {
             self.create_checkpoint(desc, doc);
         }
     }
-
 }

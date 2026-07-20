@@ -772,3 +772,148 @@ fn sidecar_kill_mid_decode_never_blocks_the_engine() {
     }
     session.shutdown();
 }
+
+// ── Cut-ahead prefetch + hold-last-frame (Phase 1) ───────────────────────────
+
+/// Playing across a hard cut A→B must not flash a transparent placeholder:
+/// cut-ahead warms B's decoder before the boundary, and hold-last-frame covers
+/// any residual worker catch-up. Asserts every frame presented in the ±3-frame
+/// window around the cut is opaque (real content, not `Evaluator::transparent`).
+#[test]
+fn cut_ahead_crosses_hard_cut_without_transparent_frame() {
+    let gpu = gpu_or_skip!();
+    let _tools = tools_or_skip!();
+
+    let (w, h) = (320u32, 180u32);
+    let rate = FrameRate::FPS_30;
+    let tpf = rate.ticks_per_frame().0;
+    let cut = Tick::from_seconds(2);
+
+    // Single video track, two clips of different assets: counter.mp4 [0,2s),
+    // color_bars.mp4 [2s,4s). Single track ⇒ the composite is exactly one
+    // source, so a transparent frame can only come from a source miss.
+    let mut project = TimelineProject::new();
+    let a = project.media.insert(MediaAsset::from_file(
+        AssetKind::Video,
+        fixture("counter.mp4"),
+    ));
+    let b = project.media.insert(MediaAsset::from_file(
+        AssetKind::Video,
+        fixture("color_bars.mp4"),
+    ));
+    let mut seq = Sequence::new("seq", rate, w, h);
+    let seq_id = seq.id;
+    let mut v1 = Track::new(TrackKind::Video, "V1");
+    v1.clips
+        .push(Clip::new(ClipSource::Asset { asset: a }, Tick(0), cut));
+    v1.clips
+        .push(Clip::new(ClipSource::Asset { asset: b }, cut, cut));
+    seq.video_tracks.push(v1);
+    project.insert_sequence(seq);
+    project.active_sequence = Some(seq_id);
+
+    let doc = doc_with_project(project, w as f64, h as f64);
+    let history = Arc::new(Mutex::new(CommandHistory::new(64)));
+    let session = VideoEngine::new(gpu.clone()).open_session(doc, history);
+
+    // Warm clip A at ~1.4s so its own cold-start isn't in the measured window.
+    let start = Tick(cut.0 - 20 * tpf);
+    session.send(EngineCmd::Seek(start));
+    wait_frame(&session, Duration::from_secs(30), |f| f.time >= start)
+        .expect("clip A frame before the cut");
+
+    session.send(EngineCmd::Play);
+    let mut samples: Vec<(Tick, f32)> = Vec::new();
+    let end = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < end {
+        if let Some(f) = session.latest_frame() {
+            if samples.last().map(|(t, _)| *t) != Some(f.time) {
+                let px = read_texture_rgba16f(&gpu, &f.texture, w, h);
+                samples.push((f.time, mean_alpha(&px)));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    session.send(EngineCmd::Pause);
+    session.shutdown();
+
+    let lo = Tick(cut.0 - 3 * tpf);
+    let hi = Tick(cut.0 + 3 * tpf);
+    let in_window: Vec<_> = samples
+        .iter()
+        .filter(|(t, _)| *t >= lo && *t <= hi)
+        .collect();
+    assert!(
+        in_window.iter().any(|(t, _)| *t < cut) && in_window.iter().any(|(t, _)| *t >= cut),
+        "captured frames on both sides of the cut (window={in_window:?})"
+    );
+    for (t, alpha) in &in_window {
+        assert!(
+            *alpha > 0.5,
+            "frame at {t:?} across the cut is opaque, not a transparent placeholder \
+             (alpha {alpha}); window={in_window:?}"
+        );
+    }
+}
+
+/// While playing, a transient source miss must hold the previous frame, never a
+/// transparent placeholder. Plays from a cold start (after warming frame 0) and
+/// asserts no presented frame is the transparent substitute.
+#[test]
+fn hold_last_frame_keeps_playback_opaque() {
+    let gpu = gpu_or_skip!();
+    let _tools = tools_or_skip!();
+
+    let (w, h) = (320u32, 180u32);
+    let rate = FrameRate::FPS_30;
+
+    let mut project = TimelineProject::new();
+    let a = project.media.insert(MediaAsset::from_file(
+        AssetKind::Video,
+        fixture("counter.mp4"),
+    ));
+    let mut seq = Sequence::new("seq", rate, w, h);
+    let seq_id = seq.id;
+    let mut v1 = Track::new(TrackKind::Video, "V1");
+    v1.clips.push(Clip::new(
+        ClipSource::Asset { asset: a },
+        Tick(0),
+        Tick::from_seconds(9),
+    ));
+    seq.video_tracks.push(v1);
+    project.insert_sequence(seq);
+    project.active_sequence = Some(seq_id);
+
+    let doc = doc_with_project(project, w as f64, h as f64);
+    let history = Arc::new(Mutex::new(CommandHistory::new(64)));
+    let session = VideoEngine::new(gpu.clone()).open_session(doc, history);
+
+    session.send(EngineCmd::Seek(Tick(0)));
+    wait_frame(&session, Duration::from_secs(30), |f| f.time == Tick(0)).expect("frame 0");
+
+    session.send(EngineCmd::Play);
+    let mut count = 0usize;
+    let end = Instant::now() + Duration::from_millis(1000);
+    let mut last = Tick(-1);
+    while Instant::now() < end {
+        if let Some(f) = session.latest_frame() {
+            if f.time != last {
+                last = f.time;
+                let px = read_texture_rgba16f(&gpu, &f.texture, w, h);
+                assert!(
+                    mean_alpha(&px) > 0.5,
+                    "playing frame at {:?} is opaque (held or real), not transparent",
+                    f.time
+                );
+                count += 1;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    session.send(EngineCmd::Pause);
+    session.shutdown();
+    assert!(
+        count >= 3,
+        "several frames presented while playing (got {count})"
+    );
+}

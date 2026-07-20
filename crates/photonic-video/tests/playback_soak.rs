@@ -207,7 +207,11 @@ fn playback_soak_1080p30_three_tracks_zero_dropped_frames() {
     // blows past 10% no matter how loaded the host is.
     let presented_est = (measure_for.as_secs_f64() * 30.0).ceil() as u64;
     let strict = std::env::var_os("PHOTONIC_SOAK_STRICT").is_some();
-    let drop_budget: u64 = if strict { 2 + measure_for.as_secs() } else { 8 + presented_est / 10 };
+    let drop_budget: u64 = if strict {
+        2 + measure_for.as_secs()
+    } else {
+        8 + presented_est / 10
+    };
 
     // Real-time headroom probe: a large cold-start baseline means the host
     // couldn't even feed the pipeline through warm-up, so it has no spare

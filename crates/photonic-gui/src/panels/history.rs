@@ -89,7 +89,10 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
         let name = ctx.branch_name_input.trim().to_string();
         if ui
-            .add_enabled(!name.is_empty(), egui::Button::new(ph::BOOKMARK_SIMPLE).small())
+            .add_enabled(
+                !name.is_empty(),
+                egui::Button::new(ph::BOOKMARK_SIMPLE).small(),
+            )
             .on_hover_text("Name this branch — the name follows your edits along this line")
             .clicked()
         {
@@ -176,17 +179,14 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                         {
                             action = Some(PanelAction::JumpToHistoryNode { id: node.id });
                         }
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    RichText::new(short_hash(node.id as usize, &node.description))
-                                        .monospace()
-                                        .weak()
-                                        .small(),
-                                );
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(short_hash(node.id as usize, &node.description))
+                                    .monospace()
+                                    .weak()
+                                    .small(),
+                            );
+                        });
                     });
                 }
             });
@@ -282,8 +282,10 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     // runs vertically through that row. Labels anchor just past this, so each title
     // sits directly beside its own node instead of aligning to the single furthest
     // lane, while still clearing pass-through branch lines.
-    let mut row_max_lane: Vec<usize> =
-        graph.iter().map(|node| *col.get(&node.id).unwrap_or(&0)).collect();
+    let mut row_max_lane: Vec<usize> = graph
+        .iter()
+        .map(|node| *col.get(&node.id).unwrap_or(&0))
+        .collect();
     for node in graph.iter() {
         let (Some(&i), Some(&c)) = (index.get(&node.id), col.get(&node.id)) else {
             continue;
@@ -329,8 +331,10 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         let bright = onpath.contains(&node.id);
         let base = if bright { lane_color(c) } else { dim };
 
-        let row_rect =
-            egui::Rect::from_min_size(egui::pos2(left, y_of(i) - row_h * 0.5), egui::vec2(block.width(), row_h));
+        let row_rect = egui::Rect::from_min_size(
+            egui::pos2(left, y_of(i) - row_h * 0.5),
+            egui::vec2(block.width(), row_h),
+        );
         let resp = ui.interact(
             row_rect,
             ui.id().with(("hist_row", node.id)),
@@ -410,12 +414,14 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         let text_left = x_of(row_max_lane[i]) + node_r + 10.0;
         let mut msg_left = text_left;
         if saved_here {
-            let fg = ui.painter().layout_no_wrap(
-                ph::FLOPPY_DISK.to_string(),
-                font.clone(),
+            let fg =
+                ui.painter()
+                    .layout_no_wrap(ph::FLOPPY_DISK.to_string(), font.clone(), save_col);
+            painter.galley(
+                egui::pos2(text_left, cy - fg.size().y * 0.5),
+                fg.clone(),
                 save_col,
             );
-            painter.galley(egui::pos2(text_left, cy - fg.size().y * 0.5), fg.clone(), save_col);
             msg_left = text_left + fg.size().x + 4.0;
         }
         // Named states render a purple ref pill (like a git branch tag) before the
@@ -535,4 +541,3 @@ pub(crate) fn draw_edit_history(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ctx.action = action;
     }
 }
-

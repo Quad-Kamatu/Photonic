@@ -15,7 +15,7 @@ use crate::app::engine;
 use crate::app::timeline::ops_bridge;
 use crate::commands;
 use photonic_core::timeline::{FrameRate, Sequence, SequenceFormat, TICKS_PER_SECOND};
-use photonic_video::ProxyMode;
+use photonic_video::{PreviewQuality, PreviewTarget, ProxyMode};
 
 // ── Monitor toolbar polish: playback resolution + image zoom (14 §M-5) ─────
 //
@@ -26,42 +26,43 @@ use photonic_video::ProxyMode;
 // `color_popup.rs`, `panels/modify.rs`). Written and read every frame, so it
 // persists for the life of the session like a normal field would.
 
-/// GUI-only playback-preview resolution levels for the monitor toolbar. The
-/// engine exposes only a binary proxy-media switch today
-/// (`photonic_video::ProxyMode` — `Auto`/`ForceProxy`/`ForceOriginal`, see
-/// `session.rs`), not a graduated preview-scale command, so `Half` and
-/// `Quarter` both collapse onto `ForceProxy` (documented seam: a real
-/// half/quarter preview-scale primitive is the engine-side follow-up). The
-/// three-way GUI selection is still tracked distinctly so the user's choice
-/// reads back correctly and the collapse is the only compromise.
+/// Interactive preview quality levels (24-preview-media-load §4).
+/// `Draft` is the default — proxy when Auto + long edge ≤ 960. `Full` uses
+/// sequence size + original media. `Proxy` forces proxy media when ready.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum PlaybackResolution {
+    Draft,
     Full,
-    Half,
-    Quarter,
+    Proxy,
 }
 
 impl PlaybackResolution {
     const ALL: [PlaybackResolution; 3] = [
+        PlaybackResolution::Draft,
         PlaybackResolution::Full,
-        PlaybackResolution::Half,
-        PlaybackResolution::Quarter,
+        PlaybackResolution::Proxy,
     ];
 
     fn label(self) -> &'static str {
         match self {
+            PlaybackResolution::Draft => "Draft",
             PlaybackResolution::Full => "Full",
-            PlaybackResolution::Half => "1/2",
-            PlaybackResolution::Quarter => "1/4",
+            PlaybackResolution::Proxy => "Proxy",
         }
     }
 
-    /// Map to the engine's actual proxy-mode knob (documented collapse, see
-    /// the type doc above).
     fn to_proxy_mode(self) -> ProxyMode {
         match self {
+            PlaybackResolution::Draft => ProxyMode::Auto,
             PlaybackResolution::Full => ProxyMode::ForceOriginal,
-            PlaybackResolution::Half | PlaybackResolution::Quarter => ProxyMode::ForceProxy,
+            PlaybackResolution::Proxy => ProxyMode::ForceProxy,
+        }
+    }
+
+    fn to_preview_quality(self) -> PreviewQuality {
+        match self {
+            PlaybackResolution::Draft | PlaybackResolution::Proxy => PreviewQuality::Draft,
+            PlaybackResolution::Full => PreviewQuality::Full,
         }
     }
 }
@@ -100,19 +101,16 @@ impl PhotonicApp {
 
     fn monitor_playback_resolution(&self, ctx: &egui::Context) -> PlaybackResolution {
         ctx.data(|d| d.get_temp(egui::Id::new(MONITOR_RESOLUTION_STATE_ID)))
-            .unwrap_or(PlaybackResolution::Full)
+            .unwrap_or(PlaybackResolution::Draft)
     }
 
     /// Persist the chosen resolution and — when an engine is attached —
-    /// apply it immediately via the bridge's `proxy_mode` intent field
-    /// (reconciled into a real `EngineCmd::SetProxyMode` by
-    /// `EngineBridge::apply_proxy_mode`, called each frame from
-    /// `drive_playback`). A no-op on engine-less hosts (tests, GPU-free
-    /// machines) beyond remembering the GUI selection.
+    /// apply proxy mode + PreviewQuality (24 §4) via the bridge.
     fn set_monitor_playback_resolution(&mut self, ctx: &egui::Context, res: PlaybackResolution) {
         ctx.data_mut(|d| d.insert_temp(egui::Id::new(MONITOR_RESOLUTION_STATE_ID), res));
         if let Some(bridge) = self.engine.as_mut() {
             bridge.proxy_mode = res.to_proxy_mode();
+            bridge.preview_quality = res.to_preview_quality();
         }
     }
 }
@@ -158,6 +156,17 @@ const MASTER_METER_MID: egui::Color32 = egui::Color32::from_rgb(251, 191, 36); /
 const MASTER_METER_HIGH: egui::Color32 = egui::Color32::from_rgb(248, 113, 113); // #F87171
 
 const MASTER_METER_STATE_ID: &str = "photonic.video_monitor.master_meter_state";
+
+/// egui temp-storage key for the "user is holding a scrub drag" flag, shared
+/// between `drive_playback` (which sets it) and `draw_master_meter` (which
+/// reads it to decide whether the monitor is still animating). Kept as one
+/// const so the two call sites can never drift apart.
+const MONITOR_SCRUB_DRAGGING_ID: &str = "monitor_scrub_dragging";
+
+/// How far above the meter's silence floor (dB) a channel must still be for its
+/// ballistics to count as "moving". Once every value has settled to within this
+/// of the floor the meter is visually static and needs no further repaints.
+const MASTER_METER_ANIM_EPS_DB: f32 = 0.05;
 
 /// Fraction 0..1 of a dB value across the meter's floor..ceiling range.
 fn master_meter_db_to_frac(db: f32) -> f32 {
@@ -247,6 +256,17 @@ impl MasterMeterChannel {
             self.clip = true;
         }
     }
+
+    /// True while any of this channel's ballistics are still above the silence
+    /// floor — i.e. the peak/RMS is still releasing or the peak-hold marker is
+    /// still dwelling/falling, so the bar is visibly moving and wants another
+    /// frame. The latched clip LED is deliberately excluded: it's a static
+    /// indicator, not an animation, so a cleared-but-latched clip must not by
+    /// itself pin the monitor at 60fps.
+    fn is_animating(&self) -> bool {
+        let floor = MASTER_METER_FLOOR_DB + MASTER_METER_ANIM_EPS_DB;
+        self.peak_db > floor || self.rms_db > floor || self.hold_db > floor
+    }
 }
 
 /// Stereo (L/R) ballistics pair, persisted across frames in egui temp storage
@@ -282,6 +302,14 @@ impl MasterMeterState {
 
     fn clipped(&self) -> bool {
         self.l.clip || self.r.clip
+    }
+
+    /// True while either channel is still settling (see
+    /// [`MasterMeterChannel::is_animating`]). Drives the monitor's repaint
+    /// throttle: continuous frames while the meter is moving, an idle heartbeat
+    /// once it has come to rest at the floor.
+    fn is_animating(&self) -> bool {
+        self.l.is_animating() || self.r.is_animating()
     }
 
     /// The louder channel's instantaneous peak, for the numeric hover readout.
@@ -343,8 +371,24 @@ impl PhotonicApp {
         state.update(level, dt);
         self.set_master_meter_state(ctx, state);
         if self.engine.is_some() {
-            // Keep ballistics animating like the mixer drawer's own meter.
-            ctx.request_repaint();
+            // P1-5: only drive continuous 60fps repaints while something is
+            // actually moving — the engine playing back, the meter ballistics
+            // still settling toward the floor, or the user holding a scrub
+            // drag. When none of those hold (a paused, attached engine with the
+            // meter parked at silence), fall back to a slow heartbeat so the
+            // monitor drops out of the hot loop and idles instead of pinning
+            // the whole app at 60fps merely because an engine is attached.
+            // Playback smoothness and meter animation are unchanged WHILE
+            // playing (both keep hitting the `request_repaint()` branch).
+            let scrubbing = ctx.data(|d| {
+                d.get_temp::<bool>(egui::Id::new(MONITOR_SCRUB_DRAGGING_ID))
+                    .unwrap_or(false)
+            });
+            if self.monitor_playing || state.is_animating() || scrubbing {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
         }
 
         let bars_w = MASTER_METER_BAR_W * 2.0 + MASTER_METER_BAR_GAP;
@@ -708,15 +752,43 @@ impl PhotonicApp {
         let shuttle =
             self.monitor_playing && (self.monitor_play_reverse || self.monitor_play_speed != 1.0);
         let dt = ctx.input(|i| i.unstable_dt as f64).min(0.25);
+        // Take before borrowing the bridge (distinct fields, but keep explicit).
+        let want_peek = self.media_pool_ui.want_peek.take();
 
         let bridge = self.engine.as_mut().expect("checked above");
         bridge.set_active_sequence(active_seq);
         bridge.apply_proxy_mode();
+        bridge.apply_preview_quality();
         bridge.set_loop(loop_range);
 
-        // User scrub (ruler drag, Home/End, marker jump): the playhead moved
-        // without the bridge agreeing to it → Seek.
+        // Media-pool click → source peek on the single monitor (24 §3).
+        if let Some(asset) = want_peek {
+            bridge.peek_asset(asset, Tick::ZERO);
+        }
+
+        // User scrub (ruler drag, scrubber, Home/End, marker jump): the playhead
+        // moved without the bridge agreeing to it. While the pointer is held
+        // down (an active drag), issue a cheap keyframe-preview ScrubSeek so
+        // dragging stays live; otherwise a normal Seek. On drag-release, force a
+        // settling Seek so the exact frame lands (the last ScrubSeek already
+        // recorded agreement, so this else-if is what guarantees the settle).
+        // Sequence scrub also returns the monitor to program view (24 §3.2).
+        let scrub_id = egui::Id::new(MONITOR_SCRUB_DRAGGING_ID);
+        let was_dragging = ctx.data(|d| d.get_temp::<bool>(scrub_id).unwrap_or(false));
+        let pointer_down = ctx.input(|i| i.pointer.primary_down());
         if bridge.agreed_playhead != Some(self.playhead) {
+            if let Some(seq) = active_seq {
+                bridge.peek_sequence(seq);
+            }
+            if pointer_down {
+                ctx.data_mut(|d| d.insert_temp(scrub_id, true));
+                bridge.scrub_seek(self.playhead);
+            } else {
+                ctx.data_mut(|d| d.insert_temp(scrub_id, false));
+                bridge.seek(self.playhead);
+            }
+        } else if was_dragging && !pointer_down {
+            ctx.data_mut(|d| d.insert_temp(scrub_id, false));
             bridge.seek(self.playhead);
         }
 
@@ -748,6 +820,21 @@ impl PhotonicApp {
                     // The engine's clock is authoritative at 1× (02 §4).
                     self.playhead = status.playhead;
                     bridge.note_agreed(self.playhead);
+                }
+            } else {
+                // Paused: a step / seek / scrub-release-settle just issued an
+                // engine command; the target frame is decoded asynchronously on
+                // the engine thread and only appears via `present_latest` on a
+                // repaint. The idle path throttles to the ~250ms meter heartbeat,
+                // which would leave precise stepping/scrubbing frames unshown for
+                // up to a quarter second. Keep repainting until the engine has
+                // actually presented the frame for the current playhead, then go
+                // idle. Self-terminating: the engine always publishes a frame
+                // (real or transparent) stamped at the requested tick.
+                let want = active_frame_rate(doc).snap(self.playhead);
+                let shown = bridge.presented_frame.map(|(t, _)| t);
+                if shown != Some(want) {
+                    ctx.request_repaint();
                 }
             }
         }
@@ -918,17 +1005,19 @@ impl PhotonicApp {
             draw_safe_area_guides(&content_painter, video_rect);
         }
 
-        // Reframe transform handles (04 §3.3, 05 §4.2, CAP-012) — same overlay
-        // family as the safe-area guides just above, drawn/driven by the
-        // export-dialog story's `app/reframe.rs` (real, undoable edits via
-        // `ops::set_clip_prop`, not a preview-only gizmo).
-        super::reframe::draw_reframe_handles(
-            ui,
-            video_rect,
-            doc,
-            history,
-            &self.timeline_selection,
-        );
+        // Reframe transform handles (04 §3.3, 05 §4.2, CAP-012) — real, undoable
+        // edits via `ops::set_clip_prop`. Opt-in: only drawn when the Transform
+        // tool is toggled on, so the handles don't sit over the picture whenever
+        // a clip merely happens to be selected.
+        if self.monitor_transform_tool {
+            super::reframe::draw_reframe_handles(
+                ui,
+                video_rect,
+                doc,
+                history,
+                &self.timeline_selection,
+            );
+        }
 
         if self.engine.is_none() {
             painter.text(
@@ -1073,8 +1162,8 @@ impl PhotonicApp {
             })
             .response
             .on_hover_text(
-                "Playback resolution — Full plays originals, 1/2 and 1/4 both \
-                 preview at the engine's proxy-media scale",
+                "Preview quality — Draft (default) caps resolution + uses proxies \
+                 when ready; Full is originals at sequence size; Proxy forces proxy media",
             );
         ui.label(egui::RichText::new(ph::GAUGE).weak())
             .on_hover_text("Playback resolution");
@@ -1172,6 +1261,26 @@ impl PhotonicApp {
                 }
 
                 ui.separator();
+                // Single-monitor mode badge (24 §3.3): SOURCE vs SEQUENCE.
+                let badge = self
+                    .engine
+                    .as_ref()
+                    .map(|b| match &b.status().preview_target {
+                        PreviewTarget::Asset { .. } => "SOURCE",
+                        PreviewTarget::Sequence { .. } => "SEQUENCE",
+                    })
+                    .unwrap_or("SEQUENCE");
+                ui.label(
+                    egui::RichText::new(badge)
+                        .small()
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x7a, 0x9e, 0xb8)),
+                )
+                .on_hover_text(
+                    "Single monitor — SEQUENCE is the timeline; SOURCE is a media-pool peek",
+                );
+
+                ui.separator();
                 // Prominent current / total timecode readout (pro-NLE feel):
                 // large accent-colored playhead time, muted total after it.
                 let fr = active_frame_rate(doc);
@@ -1213,6 +1322,13 @@ impl PhotonicApp {
                     .clicked()
                 {
                     self.monitor_safe_area = !self.monitor_safe_area;
+                }
+                if ui
+                    .selectable_label(self.monitor_transform_tool, ph::ARROWS_OUT_CARDINAL)
+                    .on_hover_text("Transform tool — reposition/scale/rotate the selected clip")
+                    .clicked()
+                {
+                    self.monitor_transform_tool = !self.monitor_transform_tool;
                 }
             });
         });
@@ -1583,6 +1699,38 @@ mod master_meter_tests {
         }
         assert!(!state.clipped());
         assert!((state.peak_db() - MASTER_METER_FLOOR_DB).abs() < 1.0);
+    }
+
+    #[test]
+    fn is_animating_gates_repaints_on_movement_not_idle_or_latched_clip() {
+        // A fresh, silent meter is static → no continuous repaint wanted.
+        let mut state = MasterMeterState::default();
+        assert!(
+            !state.is_animating(),
+            "a meter parked at the floor must let the monitor idle"
+        );
+
+        // A live (clipping) level makes it move → wants frames.
+        state.update(
+            Some(engine::MasterLevel {
+                peak: [1.0, 1.0],
+                rms: [0.4, 0.4],
+            }),
+            0.05,
+        );
+        assert!(state.is_animating(), "a moving meter must keep repainting");
+
+        // After long silence it releases back to the floor and goes static
+        // again — even with the clip LED still latched, which must NOT by
+        // itself pin the monitor at 60fps.
+        for _ in 0..200 {
+            state.update(None, 0.05);
+        }
+        assert!(state.clipped(), "the loud block latched the clip LED");
+        assert!(
+            !state.is_animating(),
+            "a settled meter idles even while a clip stays latched"
+        );
     }
 
     #[test]

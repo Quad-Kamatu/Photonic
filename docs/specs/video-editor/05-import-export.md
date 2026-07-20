@@ -34,20 +34,23 @@ Name-pattern scan on multi-select/folder-drop: files matching `<base>[._-]?(\d{2
 
 ### 1.4 On-import pipeline
 
+Normative readiness stages, poster priority (L3 before full thumb strips), and play/scrub gates: [24-preview-media-load.md](24-preview-media-load.md) §2. Summary:
+
 ```
 drop/select file(s)
       │
       ▼
-register MediaAsset (probe=None, content_hash=None) ── media pool row visible, spinner
+register MediaAsset (probe=None, content_hash=None) ── media pool row visible, spinner (L0)
       │
-      ├──▶ hash job (xxh3 head+tail+len)
-      ├──▶ probe job (ffprobe / RasterImage::from_encoded / import_svg)      ──▶ MediaProbe filled
-      ├──▶ keyframe-index job (video only, ffprobe -skip_frame nokey)        ──▶ scrub-ready
-      ├──▶ thumbnail job                                                    ──▶ row thumbnail
-      └──▶ waveform job (audio only)                                        ──▶ clip waveform ready
+      ├──▶ hash job (xxh3 head+tail+len)                                    ── L1
+      ├──▶ probe job (ffprobe / RasterImage::from_encoded / import_svg)      ── L2 MediaProbe
+      ├──▶ poster-frame job (single still)                                 ── L3 instant monitor/bin paint
+      ├──▶ keyframe-index job (video only, ffprobe -skip_frame nokey)        ── L4 scrub-ready
+      ├──▶ thumbnail strip job (low priority / visible-range)               ── L6
+      └──▶ waveform job (audio only)                                        ── L5 clip waveform ready
                       │
                       ▼
-        proxy policy check (02 §6) ──▶ inline "Generate proxy" affordance (never blocking)
+        proxy policy check (02 §6) ──▶ L7 inline "Generate proxy" affordance (never blocking)
 ```
 
 All five background jobs are independent and idempotent — a project reopened with a warm sidecar cache (same content hash) skips straight to "ready," no re-probe/re-hash. Steps, in prose:

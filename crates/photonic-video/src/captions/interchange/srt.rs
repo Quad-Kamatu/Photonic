@@ -25,20 +25,21 @@ pub fn parse_srt(input: &str) -> Result<(Vec<CaptionCue>, ImportSummary), Interc
 
         let timestamp_line = if first.trim().parse::<u64>().is_ok() {
             // Numeric cue index — the real timestamp line follows.
-            lines
-                .next()
-                .ok_or_else(|| InterchangeError::Parse(format!("cue with no timestamp line: {first:?}")))?
+            lines.next().ok_or_else(|| {
+                InterchangeError::Parse(format!("cue with no timestamp line: {first:?}"))
+            })?
         } else {
             // Lenient: tolerate a missing/non-numeric index line.
             first
         };
 
-        let (start_str, rest) = timestamp_line
-            .split_once("-->")
-            .ok_or_else(|| InterchangeError::Parse(format!("malformed timestamp line: {timestamp_line:?}")))?;
+        let (start_str, rest) = timestamp_line.split_once("-->").ok_or_else(|| {
+            InterchangeError::Parse(format!("malformed timestamp line: {timestamp_line:?}"))
+        })?;
         let end_token = rest.split_whitespace().next().unwrap_or("");
-        let start = parse_ms_timestamp(start_str.trim(), ',')
-            .ok_or_else(|| InterchangeError::Parse(format!("bad start timestamp: {start_str:?}")))?;
+        let start = parse_ms_timestamp(start_str.trim(), ',').ok_or_else(|| {
+            InterchangeError::Parse(format!("bad start timestamp: {start_str:?}"))
+        })?;
         let end = parse_ms_timestamp(end_token, ',')
             .ok_or_else(|| InterchangeError::Parse(format!("bad end timestamp: {end_token:?}")))?;
 

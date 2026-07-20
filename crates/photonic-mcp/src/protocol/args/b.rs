@@ -1,10 +1,10 @@
+use super::*;
 use photonic_core::{
     color::Color, layer::BlendMode, ops::boolean::BooleanOp, style::LineJoin, DropShadow, Feather,
     GaussianGlow, GlowEffect, ObjectBlur,
 };
 use serde::Deserialize;
 use uuid::Uuid;
-use super::*;
 
 fn default_spiral_segs() -> usize {
     16
@@ -1113,7 +1113,9 @@ impl FillArg {
                             .ok_or_else(|| format!("Invalid color: {}", v.color))
                     })
                     .collect();
-                Ok(Fill::mesh_gradient(MeshGradient::grid(*rows, *cols, colors?)))
+                Ok(Fill::mesh_gradient(MeshGradient::grid(
+                    *rows, *cols, colors?,
+                )))
             }
             FillArg::Pattern {
                 tile_base64,

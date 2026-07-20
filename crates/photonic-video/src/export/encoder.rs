@@ -1,25 +1,24 @@
 //! FFmpeg **encode** sidecar (02-engine.md §7, 05-import-export.md §3.5/§3.7).
 //!
-//! ## Two piped inputs: video (stdin) + audio (a named FIFO)
+//! ## Two piped inputs: video (stdin) + audio (second input)
 //!
 //! 02 §7 asks for rawvideo on stdin plus "audio mixed offline (09), piped as
 //! f32le on a second input." A single process has exactly one stdin, so a
 //! *second* live/pipe input cannot also be `pipe:0` — ffmpeg has no
-//! multi-stream stdin demux. The researched, working answer (verified against
-//! this workstation's ffmpeg build, both codec-arg shapes and the dual-input
-//! wiring itself): video stays on `pipe:0`; audio goes through a **Unix named
-//! pipe** (`mkfifo`, via a direct `libc::mkfifo` call — `[target.'cfg(unix)']`
-//! dependency, no external `mkfifo` binary required) opened by ffmpeg as an
-//! ordinary second `-i` path. A background thread opens the FIFO for writing
-//! (blocking until ffmpeg's reader opens its end — effectively immediate,
-//! since ffmpeg opens all declared inputs before it starts consuming stdin)
-//! and writes the whole pre-mixed PCM buffer in one shot, then the FIFO file
-//! is closed and unlinked. Audio is mixed offline in full before export starts
-//! (09's mixer, not this module's concern), so there is no need for a
-//! streaming/chunked write API here — one buffer, one write, EOF on close.
-//! Windows has no equivalent zero-ceremony second pipe; [`EncoderProcess::spawn`]
-//! returns [`EncodeError::AudioPipingUnsupportedOnPlatform`] there for now
-//! (video-only / no-audio exports are unaffected on any platform).
+//! multi-stream stdin demux.
+//!
+//! Platform strategy (24-preview-media-load / Windows export path):
+//! - **Unix:** audio via a **named FIFO** (`mkfifo` / `libc::mkfifo`). A
+//!   background thread opens the FIFO for writing (blocks until ffmpeg opens
+//!   its reader) and writes the whole pre-mixed PCM buffer, then the FIFO is
+//!   closed and unlinked.
+//! - **Windows (and any non-unix):** audio is written to a **temp f32le file**
+//!   *before* ffmpeg is spawned, then passed as a second `-i` path. The temp
+//!   file is deleted on `finish`/`cancel`/drop. Same ffmpeg arg shape; no
+//!   concurrent open race.
+//!
+//! Audio is mixed offline in full before export starts (09's mixer), so there
+//! is no streaming/chunked write API — one buffer, one write, EOF.
 //!
 //! ## Encoder selection (D-03, §3.4, §3.7)
 //!
@@ -65,7 +64,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use photonic_core::timeline::FrameRate;
@@ -84,14 +83,12 @@ pub enum EncodeError {
     Probe(#[source] std::io::Error),
     #[error("io error: {0}")]
     Io(#[source] std::io::Error),
-    #[error("invalid fifo path (non-UTF8 / contains NUL)")]
+    #[error("invalid audio sidecar path (non-UTF8 / contains NUL)")]
     InvalidFifoPath,
     #[error("audio writer thread panicked")]
     AudioWriterPanicked,
     #[error("encoder exited with status {status:?}; stderr tail:\n{stderr}")]
     EncoderExited { status: Option<i32>, stderr: String },
-    #[error("dual-input audio piping (named FIFO) is only implemented for unix targets")]
-    AudioPipingUnsupportedOnPlatform,
 }
 
 // ── Encoder capability probing (§3.4/§3.7) ───────────────────────────────────
@@ -529,7 +526,7 @@ pub fn build_ffmpeg_args(
 
 const STDERR_TAIL: usize = 32;
 
-fn unique_fifo_path() -> PathBuf {
+fn unique_audio_sidecar_path(ext: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -537,7 +534,7 @@ fn unique_fifo_path() -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     std::env::temp_dir().join(format!(
-        "photonic-export-audio-{}-{n}-{nanos}.fifo",
+        "photonic-export-audio-{}-{n}-{nanos}.{ext}",
         std::process::id()
     ))
 }
@@ -557,61 +554,142 @@ fn create_fifo(path: &Path) -> Result<(), EncodeError> {
     Ok(())
 }
 
+/// Write interleaved f32le PCM to `path` (Windows / non-unix second input).
+#[cfg_attr(unix, allow(dead_code))]
+fn write_pcm_file(path: &Path, samples: &[f32]) -> Result<(), EncodeError> {
+    let mut bytes = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, bytes).map_err(EncodeError::Io)
+}
+
+/// Stage PCM for a second ffmpeg `-i` without requiring a platform FIFO.
+/// Public for headless tests of the Windows/non-unix path on any OS.
+pub fn stage_audio_tempfile(samples: &[f32]) -> Result<PathBuf, EncodeError> {
+    let p = unique_audio_sidecar_path("f32le");
+    write_pcm_file(&p, samples)?;
+    Ok(p)
+}
+
+/// Second (audio) input path staged for this encode job (FIFO or temp file).
+#[derive(Debug)]
+struct AudioSidecar {
+    path: PathBuf,
+}
+
+impl AudioSidecar {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup(self) {
+        let _ = std::fs::remove_file(self.path);
+    }
+}
+
 /// A running ffmpeg encode process: video frames go to stdin; if the preset
-/// has an audio track, a background thread owns writing the pre-mixed PCM
-/// buffer to the audio FIFO (see module docs).
+/// has an audio track, a second input carries pre-mixed f32le PCM (FIFO on
+/// unix, temp file elsewhere — see module docs).
 pub struct EncoderProcess {
     child: Child,
     video_stdin: Option<ChildStdin>,
     audio_writer: Option<JoinHandle<Result<(), EncodeError>>>,
-    fifo_path: Option<PathBuf>,
+    audio_sidecar: Option<AudioSidecar>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
 }
 
 impl EncoderProcess {
     /// Spawn the encoder. `audio_samples`, when present, is the **whole**
     /// pre-mixed interleaved `f32` PCM track (09's offline mix) at
-    /// `spec.audio`'s sample rate/channel count — written to the FIFO in one
-    /// shot by a background thread, not streamed incrementally.
+    /// `spec.audio`'s sample rate/channel count.
     pub fn spawn(
         tools: &FfmpegTools,
         caps: &EncoderCapabilities,
         spec: &EncodeSpec,
         audio_samples: Option<Vec<f32>>,
     ) -> Result<Self, EncodeError> {
-        let plane_kind = plane_kind_for(spec.preset.video.as_ref().map(|v| v.codec), spec.preset.alpha);
+        let plane_kind = plane_kind_for(
+            spec.preset.video.as_ref().map(|v| v.codec),
+            spec.preset.alpha,
+        );
         let video_pix_fmt = plane_kind.ffmpeg_pix_fmt();
 
-        let wants_audio_pipe =
+        let wants_audio =
             spec.preset.audio.is_some() && spec.audio.is_some() && audio_samples.is_some();
 
-        let fifo_path = if wants_audio_pipe {
-            if !cfg!(unix) {
-                return Err(EncodeError::AudioPipingUnsupportedOnPlatform);
-            }
-            let p = unique_fifo_path();
+        let (audio_sidecar, audio_writer) = if wants_audio {
+            let samples = audio_samples.expect("checked wants_audio");
             #[cfg(unix)]
-            create_fifo(&p)?;
-            Some(p)
+            {
+                let p = unique_audio_sidecar_path("fifo");
+                create_fifo(&p)?;
+                let path_for_writer = p.clone();
+                let writer = std::thread::spawn(move || -> Result<(), EncodeError> {
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path_for_writer)
+                        .map_err(EncodeError::Io)?;
+                    let mut bytes = Vec::with_capacity(samples.len() * 4);
+                    for s in &samples {
+                        bytes.extend_from_slice(&s.to_le_bytes());
+                    }
+                    f.write_all(&bytes).map_err(EncodeError::Io)?;
+                    Ok(())
+                });
+                (Some(AudioSidecar { path: p }), Some(writer))
+            }
+            #[cfg(not(unix))]
+            {
+                // Pre-write so ffmpeg can open a regular file as second -i.
+                let p = unique_audio_sidecar_path("f32le");
+                write_pcm_file(&p, &samples)?;
+                (Some(AudioSidecar { path: p }), None)
+            }
         } else {
-            None
+            (None, None)
         };
 
-        let args = build_ffmpeg_args(caps, spec, video_pix_fmt, fifo_path.as_deref());
+        let audio_path = audio_sidecar.as_ref().map(|s| s.path().to_path_buf());
+        let args = build_ffmpeg_args(caps, spec, video_pix_fmt, audio_path.as_deref());
 
         if let Some(parent) = spec.out_path.parent() {
             std::fs::create_dir_all(parent).map_err(EncodeError::Io)?;
         }
 
-        let mut child = Command::new(&tools.ffmpeg)
+        let mut child = match Command::new(&tools.ffmpeg)
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(EncodeError::Spawn)?;
+        {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(s) = audio_sidecar {
+                    s.cleanup();
+                }
+                return Err(EncodeError::Spawn(e));
+            }
+        };
 
-        let video_stdin = child.stdin.take().expect("stdin was piped");
+        // We requested `Stdio::piped()`, so stdin should be present — but if
+        // ffmpeg was killed / exited between spawn and here, `take` yields None.
+        // Return a typed error instead of panicking, and clean up.
+        let video_stdin = match child.stdin.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(s) = audio_sidecar {
+                    s.cleanup();
+                }
+                return Err(EncodeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "ffmpeg stdin pipe unavailable (process exited during spawn)",
+                )));
+            }
+        };
 
         let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
         if let Some(stderr) = child.stderr.take() {
@@ -620,7 +698,10 @@ impl EncoderProcess {
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    let mut t = tail.lock().unwrap();
+                    // Poison-tolerant: a panic elsewhere holding this lock must
+                    // not wedge stderr draining (a full pipe would deadlock
+                    // ffmpeg). The tail is advisory diagnostics, not invariants.
+                    let mut t = tail.lock().unwrap_or_else(PoisonError::into_inner);
                     if t.len() == STDERR_TAIL {
                         t.remove(0);
                     }
@@ -629,29 +710,11 @@ impl EncoderProcess {
             });
         }
 
-        let audio_writer = match (fifo_path.clone(), audio_samples) {
-            (Some(path), Some(samples)) => {
-                Some(std::thread::spawn(move || -> Result<(), EncodeError> {
-                    let mut f = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&path)
-                        .map_err(EncodeError::Io)?;
-                    let mut bytes = Vec::with_capacity(samples.len() * 4);
-                    for s in &samples {
-                        bytes.extend_from_slice(&s.to_le_bytes());
-                    }
-                    f.write_all(&bytes).map_err(EncodeError::Io)?;
-                    Ok(())
-                }))
-            }
-            _ => None,
-        };
-
         Ok(EncoderProcess {
             child,
             video_stdin: Some(video_stdin),
             audio_writer,
-            fifo_path,
+            audio_sidecar,
             stderr_tail,
         })
     }
@@ -660,11 +723,16 @@ impl EncoderProcess {
     /// encoder's rawvideo stdin.
     pub fn write_video_frame(&mut self, planes: &EncodePlanes) -> Result<(), EncodeError> {
         let bytes = planes.to_bytes();
-        self.video_stdin
-            .as_mut()
-            .expect("stdin still open (finish/cancel not yet called)")
-            .write_all(&bytes)
-            .map_err(EncodeError::Io)
+        // `video_stdin` is `Some` for the whole life of a live `EncoderProcess`
+        // (only `finish`/`cancel`, which consume `self`, take it). Guard against
+        // a None anyway so a misuse surfaces as a typed error, not a panic.
+        let stdin = self.video_stdin.as_mut().ok_or_else(|| {
+            EncodeError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "video stdin already closed (finish/cancel called)",
+            ))
+        })?;
+        stdin.write_all(&bytes).map_err(EncodeError::Io)
     }
 
     /// Close stdin (signals video EOF), wait for the audio writer and the
@@ -678,13 +746,19 @@ impl EncoderProcess {
             }
         }
         let status = self.child.wait().map_err(EncodeError::Io)?;
-        if let Some(fifo) = self.fifo_path.take() {
-            let _ = std::fs::remove_file(fifo);
+        if let Some(sidecar) = self.audio_sidecar.take() {
+            sidecar.cleanup();
         }
         if !status.success() {
             return Err(EncodeError::EncoderExited {
                 status: status.code(),
-                stderr: self.stderr_tail.lock().unwrap().join("\n"),
+                // Poison-tolerant: recover the tail even if the drain thread
+                // panicked, so the exit error still carries diagnostics.
+                stderr: self
+                    .stderr_tail
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .join("\n"),
             });
         }
         Ok(())
@@ -696,8 +770,8 @@ impl EncoderProcess {
         drop(self.video_stdin.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(fifo) = self.fifo_path.take() {
-            let _ = std::fs::remove_file(fifo);
+        if let Some(sidecar) = self.audio_sidecar.take() {
+            sidecar.cleanup();
         }
     }
 }
@@ -708,8 +782,8 @@ impl Drop for EncoderProcess {
         // panic unwind) — kill-on-drop, mirroring decode/sidecar.rs.
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(fifo) = self.fifo_path.take() {
-            let _ = std::fs::remove_file(fifo);
+        if let Some(sidecar) = self.audio_sidecar.take() {
+            sidecar.cleanup();
         }
     }
 }

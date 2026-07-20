@@ -47,8 +47,10 @@ pub fn read_wav_info(bytes: &[u8]) -> Option<WavInfo> {
         }
 
         if id == b"fmt " && size >= 16 {
-            let channels = u16::from_le_bytes(bytes[body_start + 2..body_start + 4].try_into().ok()?);
-            let sample_rate = u32::from_le_bytes(bytes[body_start + 4..body_start + 8].try_into().ok()?);
+            let channels =
+                u16::from_le_bytes(bytes[body_start + 2..body_start + 4].try_into().ok()?);
+            let sample_rate =
+                u32::from_le_bytes(bytes[body_start + 4..body_start + 8].try_into().ok()?);
             let bits_per_sample =
                 u16::from_le_bytes(bytes[body_start + 14..body_start + 16].try_into().ok()?);
             fmt = Some((channels, sample_rate, bits_per_sample));

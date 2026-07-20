@@ -53,7 +53,7 @@ Per-clip node compositions (D-06) are user-authored subgraphs stored in the data
 
 ### Working color space (D-09)
 
-Video path: linear-light Rec.709 primaries, premultiplied alpha, `Rgba16Float` textures. Decoded YUV converts to linear at GPU upload; encode converts back at export. Vector/raster assets entering the video graph convert sRGB→linear at the boundary (`03-render-color-pipeline.md` §4 defines exact transfer functions and the reconciliation with the existing renderer's sRGB conventions).
+Video working state is explicit per sequence. `LinearRec709Sdr` remains default for new and existing projects: linear-light Rec.709 primaries, premultiplied alpha, `Rgba16Float` textures. `LinearRec2020Hdr` is opt-in for approved HLG/PQ workflows; `1.0` = 203 cd/m² HDR Reference White and default mastering peak = 1,000 cd/m². Decoded media converts into selected linear working state at upload; export converts from it. Existing SDR goldens remain pixel-stable. `03-render-color-pipeline.md` owns SDR boundaries; `22-dji-advanced-workflows.md` §7 owns HDR substitutions.
 
 ## 4. Locked decisions
 
@@ -75,6 +75,13 @@ D-01…D-10 in [SPEC.md](SPEC.md#decisions). Every doc cites decisions it depend
 | 10-mcp-tools.md | Tool surface for all video domains, schema/dispatch/args wiring, headless renderer access | all |
 | 11-testing-phasing.md | Golden-frame corpus, A/V sync tests, perf budgets, per-phase exit criteria | all |
 | 12-agent-execution-plan.md | Implementation agent roles, model tiers (Fable/Opus/Sonnet), parallelism waves, file-conflict boundaries | 11 |
+| ROADMAP.md | Live authoritative G/D inventory, priorities, gates, waves, owner links | SPEC, 01–23 |
+| 19-editing-velocity-shot-management.md | G-1–G-5, G-7–G-9 residual editing velocity; G-6 protected context; G-13–G-15, G-21 | 01, 02, 04, 09–11, 13 |
+| 20-pro-workflows.md | G-10–G-12 and G-16–G-20 pro workflows and product gates | 01, 02, 04, 11, 13, 19 |
+| 21-dji-core-workflows.md | D-1–D-9 core DJI workflows, including D-5 completion context | 01–11, ROADMAP |
+| 22-dji-advanced-workflows.md | D-10–D-15 advanced/gated DJI workflows | 11, 21, ROADMAP |
+| 23-legal-open-source-implementation-routes.md | Accepted S1–S5 amendments, permissive/native routes, provenance gates, and evidence-based stop/go policy for G-20/D-3/D-8/D-12/D-13/D-14 | SPEC, ROADMAP, 20–22 |
+| 24-preview-media-load.md | Single context-driven monitor; import readiness ladder; Draft/Full preview tiers; time-to-paint and scrub budgets; thread ownership for load/preview | 01, 02, 04, 05, CAP-001/004/014 |
 
 ## 6. Phases
 

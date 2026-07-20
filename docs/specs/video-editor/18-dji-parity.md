@@ -1,11 +1,13 @@
 # 18 — DJI-Editor Parity Gap-List (drone / action-cam distinctive features)
 
+> **Status: Historical; superseded for live status.** Use [ROADMAP.md](ROADMAP.md), [21](21-dji-core-workflows.md), and [22](22-dji-advanced-workflows.md). This file preserves research and original ranking rationale; its HAVE claims predate the status audit.
+
 **Depends on:** 07-color-grading.md (grade + `.cube` LUT infra), 03-render-color-pipeline.md (working space, scopes), 05-import-export.md (presets, ingest), 04-ui-mode-timeline.md (timeline surface + markers), 01-data-model.md (`ClipTransform`, `ClipEffect`, `Marker`, `ProbedColor`), 09-audio-mixer.md (DSP), 17-nle-parity-round2.md (the pro-editing spine this rides on).
 **Owns:** the prioritized backlog of **DJI-distinctive** features — the drone/action-cam things DJI's own apps (LightCut / Fly / Mimo) do that a general NLE does not. Does **not** re-own NLE editing parity (that is 14/16/17) or generic color/caption/audio parity — only the drone-specific layer on top.
 **Source:** DJI product research (LightCut / DJI Fly / Mimo / Studio, D-Log/D-Log M/HLG LUTs, flight-telemetry SRT, QuickShots/MasterShots, Hyperlapse, Panorama, RockSteady/HorizonSteady) cross-audited (2026-07-10) against Photonic's shipped surfaces: `crates/photonic-render/src/{lut,grade,scopes}.rs`, `crates/photonic-video/src/{media/probe,decode/sidecar,captions/interchange/srt,export/presets,graph}.rs`, `crates/photonic-gui/src/panels/video/{color_page,export_dialog}.rs`, and `app/reframe.rs`.
 
-> **Dedupe against the HAVE list.** Photonic already ships: multi-track NLE (trim/ripple/roll/slip/slide/3-4-point/razor), thumbnails+waveforms, color grading (CDL wheels/curves/HSL qualifier/**3D-LUT `.cube` + scopes**), node compositing, audio mixer (EQ/comp/limiter), captions+auto-caption+TTS, keyframes, adjustment layers, titles/text clips, **aspect switch + auto-reframe**, export (H264/AV1/VP9-alpha/ProRes/GIF) **with built-in Social 9:16 / 1:1 / 16:9 presets at −14 LUFS** (`export/presets.rs:365-372`), and full MCP tool parity. Everything below is the residue *after* subtracting all of that. Concretely:
-> - **3D-LUT support is DONE**, so "apply a D-Log→709 LUT" is *not* new infra — it is shipping DJI's `.cube` files as bundled assets + a one-click convert preset + metadata auto-detect (**D-1**), riding `lut.rs` + `color_page.rs` + `ProbedColor` verbatim.
+> **Audited foundation list.** Photonic has substantial NLE, LUT/grade, caption, mixer, export, and MCP infrastructure. Adjustment layers and titles/text are partial foundations with residual GUI/responsive work (G-7/G-12); MCP parity is continuous, not globally complete (G-21/D-9). Everything below is DJI-specific residue on top.
+> - **Generic 3D-LUT support is foundation only for D-1.** [21 §4](21-dji-core-workflows.md#4-d-1--dji-log-and-hlg-normalization) supersedes this file's GradeOp-only path with source-boundary classification/conversion, proxy-domain, range/matrix, cache, and no-double-conversion contracts. Preferred delivery is a validated Photonic-authored analytical or clean-room transform; sampled Photonic `.cube` is optional. Vendor LUTs are optional user-installed or redistribution-licensed fallbacks, never calibration oracles.
 > - **Aspect switch + Social vertical export presets are DONE**, so "vertical export for TikTok/Reels" is **excluded** — it is already HAVE. The DJI-distinctive residue on framing is *little-planet pano reframe* (**D-8**), not generic 9:16.
 > - **Rotation on `ClipTransform` + the reframe transform overlay are DONE** (`clip.rs:327`, `reframe.rs`), so horizon-level is a rotation-correction *effect + auto-crop* (**D-5**), not new transform math.
 > - **Markers + the timeline command spine are DONE**, so music editing is a *beat-detection DSP that drops markers + snaps cuts* (**D-4**), not new marker infra.
@@ -32,7 +34,9 @@ Each gap carries: **DJI** (which DJI app ships it) · **Impact** (for a drone / 
 
 ---
 
-## Ranked top-10 (builder pick-order — value × how well it rides shipped infra)
+## Historical ranked top-10 (original builder pick-order)
+
+Not live queue. See [ROADMAP.md §4](ROADMAP.md#4-corrected-priority-bands). D-5 is completed for v1 and must not be selected as open work.
 
 | # | Gap | Territory | Class | Effort |
 |---|-----|-----------|-------|--------|
@@ -56,6 +60,9 @@ Territory spread for a 6-lane wave: `panels-video` ×1 (D-1), `photonic-video-en
 ## 1. Quick wins to do now
 
 ### D-1 — D-Log / D-Log M / HLG → Rec.709 one-click convert · `panels-video` (+`photonic-video-engine`)
+
+> **Superseded implementation path:** do not implement the GradeOp-only/bundle-vendor-LUT plan below. [21 §4](21-dji-core-workflows.md#4-d-1--dji-log-and-hlg-normalization) owns source-boundary conversion and the Photonic-authored analytical/clean-room route. Vendor LUTs remain optional licensed/user-installed fallbacks.
+
 - **DJI:** LightCut ships a device-specific **LUT library** and a **"Color Recovery"** one-tap ("recover colour for footage shot in D-Log or D-Cinelike"); DJI publishes official per-camera `.cube` conversion LUTs (D-Log→709, D-Log M→709, plus vivid variants) at dji.com/lut.
 - **Impact:** *every* DJI clip shot for grading comes off the camera flat (D-Log / D-Log M) or HDR (HLG) and is unwatchable until normalized. This is the first thing a drone editor does to every clip, on every project. A **correctness trap** DJI itself warns about: a D-Log LUT applied to D-Log M footage (or vice-versa) gives wrong color — the convert must match the exact profile.
 - **On-device:** 100% local, and near-free on shipped infra. (a) **Bundle DJI's per-camera `.cube` files** as built-in read-only LUT assets (the parser + trilinear/tetrahedral sampler already exist, `lut.rs`; a LUT is just an `AssetKind::Lut3d`, `media.rs:90`). (b) A **"Convert Log → Rec.709"** button on the color page that appends a `GradeOpKind::Lut3d` op bound to the profile-matched bundled LUT (the op-builder `default_op` in `color_page.rs:177` already knows how to make a Lut3d op — this just pre-selects the right asset). (c) **Auto-detect the profile** from `ProbedColor.transfer` / `color_primaries` (`probe.rs:124`, already parsed) with a make/model + filename-tag fallback (DJI does not always tag D-Log in a standard transfer field), to pre-pick the correct LUT and surface a "looks like D-Log M — convert?" nudge on import.
@@ -185,4 +192,4 @@ Everything else in this list — telemetry parse+overlay, log→709 convert, bea
 
 ## Bottom line
 
-Subtracting Photonic's HAVE list leaves a tight, high-leverage drone layer. Manual horizon leveling + auto-crop (**D-5 v1**) is now shipped. The next cheapest, highest-value move is **D-1** — one-click D-Log→709 once real LUT asset resolution and redistribution are cleared. The **strongest differentiator** remains the flight-telemetry overlay (**D-7 → D-10**), and the **social-edit heart** remains beat detection → templates (**D-4 → D-11**). Timelapse assembly and pano reframe (**D-6 / D-8**) remain open capture-parity work. Cloud/ML remains explicitly outside the v1 boundary.
+Subtracting Photonic's HAVE list leaves a tight, high-leverage drone layer. Manual horizon leveling + auto-crop (**D-5 v1**) is now shipped. The next high-value move is **D-1** through the validated Photonic-authored analytical/clean-room route in [21 §4](21-dji-core-workflows.md#4-d-1--dji-log-and-hlg-normalization) and [ROADMAP S6](ROADMAP.md#8-architecture-decisions-and-defaults); vendor LUT redistribution is optional, not the primary blocker. The **strongest differentiator** remains the flight-telemetry overlay (**D-7 → D-10**), and the **social-edit heart** remains beat detection → templates (**D-4 → D-11**). Timelapse assembly and pano reframe (**D-6 / D-8**) remain open capture-parity work. Cloud/ML remains explicitly outside the v1 boundary.

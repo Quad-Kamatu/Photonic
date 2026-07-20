@@ -105,7 +105,12 @@ impl SvgCtx {
 
     /// Intern a paint def by its structural signature `sig`. Returns the shared id
     /// (emitting the def via `make_def(id)` only the first time it is seen).
-    fn intern(&mut self, prefix: &str, sig: String, make_def: impl FnOnce(&str) -> String) -> String {
+    fn intern(
+        &mut self,
+        prefix: &str,
+        sig: String,
+        make_def: impl FnOnce(&str) -> String,
+    ) -> String {
         if let Some(id) = self.cache.get(&sig) {
             return id.clone();
         }
@@ -1675,8 +1680,7 @@ fn build_page_content(
             Some(l) if l.visible && l.print => l,
             _ => continue,
         };
-        let needs_gs =
-            layer.opacity < 1.0 || layer.blend_mode != crate::layer::BlendMode::Normal;
+        let needs_gs = layer.opacity < 1.0 || layer.blend_mode != crate::layer::BlendMode::Normal;
         if needs_gs {
             let name = format!("gs{gs_counter}");
             gs_counter += 1;
@@ -3134,7 +3138,10 @@ mod tests {
             layer.blend_mode = BlendMode::Screen;
         }
         let svg = export_svg(&doc, &SvgExportOptions::default());
-        assert!(svg.contains("opacity=\"0.5"), "layer opacity on <g>:\n{svg}");
+        assert!(
+            svg.contains("opacity=\"0.5"),
+            "layer opacity on <g>:\n{svg}"
+        );
         assert!(
             svg.contains("mix-blend-mode:screen"),
             "layer blend mode on <g>:\n{svg}"
@@ -3198,8 +3205,14 @@ mod tests {
         let bytes = export_pdf(&doc, &PdfExportOptions::default());
         let text = String::from_utf8_lossy(&bytes);
         assert!(bytes.starts_with(b"%PDF-1"), "missing PDF header");
-        assert!(text.contains("/BM /Multiply"), "missing blend mode:\n{text}");
-        assert!(text.contains("/gs0 gs"), "content not wrapped with the ExtGState");
+        assert!(
+            text.contains("/BM /Multiply"),
+            "missing blend mode:\n{text}"
+        );
+        assert!(
+            text.contains("/gs0 gs"),
+            "content not wrapped with the ExtGState"
+        );
         assert!(
             text.contains("/ExtGState") && text.contains("/ca 0.5"),
             "missing ExtGState alpha:\n{text}"
@@ -3483,7 +3496,10 @@ mod tests {
         }
         let svg = export_svg(&doc, &SvgExportOptions::default());
         let def_count = svg.matches("<linearGradient").count();
-        assert_eq!(def_count, 1, "identical gradients should dedupe to 1 def:\n{svg}");
+        assert_eq!(
+            def_count, 1,
+            "identical gradients should dedupe to 1 def:\n{svg}"
+        );
         assert_eq!(
             svg.matches("url(#grad-0)").count(),
             2,

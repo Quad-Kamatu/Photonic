@@ -73,19 +73,15 @@ impl DialogState {
         let preset = find_preset(last_preset_name)
             .or_else(|| find_preset("Web H.264"))
             .unwrap_or_else(|| presets::built_in_presets().remove(0));
-        let (formats_checked, range_start_s, range_end_s) =
-            seq_id.and_then(|id| doc.timeline.as_ref()?.sequences.get(&id)).map_or(
-                (vec![true], 0.0, 0.0),
-                |seq| {
-                    let checked = (0..seq.formats.len().max(1))
-                        .map(|i| i == seq.active_format)
-                        .collect();
-                    let (s, e) = seq
-                        .work_range
-                        .unwrap_or((Tick::ZERO, seq.content_end()));
-                    (checked, s.as_seconds_f64(), e.as_seconds_f64())
-                },
-            );
+        let (formats_checked, range_start_s, range_end_s) = seq_id
+            .and_then(|id| doc.timeline.as_ref()?.sequences.get(&id))
+            .map_or((vec![true], 0.0, 0.0), |seq| {
+                let checked = (0..seq.formats.len().max(1))
+                    .map(|i| i == seq.active_format)
+                    .collect();
+                let (s, e) = seq.work_range.unwrap_or((Tick::ZERO, seq.content_end()));
+                (checked, s.as_seconds_f64(), e.as_seconds_f64())
+            });
         DialogState {
             picker_label: preset.name.clone(),
             base_name: Some(preset.name.clone()),
@@ -357,7 +353,11 @@ fn draw_preset_picker(ui: &mut egui::Ui, state: &mut DialogState) {
                             state.base_name = Some(p.name.clone());
                             state.preset = p.clone();
                         }
-                        if ui.small_button("\u{2715}").on_hover_text("Delete").clicked() {
+                        if ui
+                            .small_button("\u{2715}")
+                            .on_hover_text("Delete")
+                            .clicked()
+                        {
                             let mut remaining = presets::load_custom_presets().unwrap_or_default();
                             remaining.retain(|c| c.name != p.name);
                             let _ = presets::save_custom_presets(&remaining);
@@ -456,7 +456,10 @@ fn draw_fields(ui: &mut egui::Ui, state: &mut DialogState) {
                         v.quality = QualityMode::Crf(20.0);
                         changed = true;
                     }
-                    if ui.selectable_label(!is_crf && !is_lossless, "Bitrate").clicked() {
+                    if ui
+                        .selectable_label(!is_crf && !is_lossless, "Bitrate")
+                        .clicked()
+                    {
                         v.quality = QualityMode::Bitrate {
                             target_kbps: 6000,
                             max_kbps: 9000,
@@ -559,10 +562,7 @@ fn draw_fields(ui: &mut egui::Ui, state: &mut DialogState) {
                     changed = true;
                 }
                 if ui
-                    .selectable_label(
-                        matches!(p.resolution, ResolutionSpec::Scale(_)),
-                        "Scale",
-                    )
+                    .selectable_label(matches!(p.resolution, ResolutionSpec::Scale(_)), "Scale")
                     .clicked()
                 {
                     p.resolution = ResolutionSpec::Scale(1.0);
@@ -593,10 +593,7 @@ fn draw_fields(ui: &mut egui::Ui, state: &mut DialogState) {
                     p.frame_rate = FrameRatePolicy::MatchSequence;
                     changed = true;
                 }
-                if ui
-                    .selectable_label(!is_match, "Explicit")
-                    .clicked()
-                {
+                if ui.selectable_label(!is_match, "Explicit").clicked() {
                     p.frame_rate = FrameRatePolicy::Explicit(FrameRate::FPS_30);
                     changed = true;
                 }
@@ -606,10 +603,7 @@ fn draw_fields(ui: &mut egui::Ui, state: &mut DialogState) {
                         .selected_text(rate_label(*r))
                         .show_ui(ui, |ui| {
                             for choice in RATE_CHOICES {
-                                if ui
-                                    .selectable_value(r, choice, rate_label(choice))
-                                    .clicked()
-                                {
+                                if ui.selectable_value(r, choice, rate_label(choice)).clicked() {
                                     changed = true;
                                 }
                             }
@@ -656,7 +650,10 @@ fn draw_fields(ui: &mut egui::Ui, state: &mut DialogState) {
                     Some(_) => "Custom",
                 })
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(p.loudness_target.is_none(), "Off").clicked() {
+                    if ui
+                        .selectable_label(p.loudness_target.is_none(), "Off")
+                        .clicked()
+                    {
                         p.loudness_target = None;
                         changed = true;
                     }
@@ -889,7 +886,10 @@ fn default_output_path(preset: &ExportPreset, seq_name: &str) -> std::path::Path
         Container::ImageSequence => "%05d.png",
         Container::Apng => "apng.png",
     };
-    std::env::temp_dir().join(format!("{seq_name}_{}.{ext}", preset.name.replace(' ', "_")))
+    std::env::temp_dir().join(format!(
+        "{seq_name}_{}.{ext}",
+        preset.name.replace(' ', "_")
+    ))
 }
 
 #[cfg(test)]
@@ -904,7 +904,10 @@ mod tests {
             Some(VideoCodec::ProResLikeMezzanine)
         ));
         assert!(alpha_allowed(Container::Apng, Some(VideoCodec::Apng)));
-        assert!(alpha_allowed(Container::ImageSequence, Some(VideoCodec::Png)));
+        assert!(alpha_allowed(
+            Container::ImageSequence,
+            Some(VideoCodec::Png)
+        ));
         assert!(!alpha_allowed(Container::Mp4, Some(VideoCodec::H264)));
         assert!(!alpha_allowed(Container::WebM, None));
     }

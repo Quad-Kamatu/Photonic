@@ -412,12 +412,8 @@ impl PhotonicApp {
                             let mut old_node = node.clone();
                             let mut new_node = node.clone();
                             match &mut old_node.kind {
-                                SceneNodeKind::Path(p) => {
-                                    p.fill.kind = FillKind::Solid(from_color)
-                                }
-                                SceneNodeKind::Text(t) => {
-                                    t.fill.kind = FillKind::Solid(from_color)
-                                }
+                                SceneNodeKind::Path(p) => p.fill.kind = FillKind::Solid(from_color),
+                                SceneNodeKind::Text(t) => t.fill.kind = FillKind::Solid(from_color),
                                 _ => {}
                             }
                             match &mut new_node.kind {
@@ -463,9 +459,8 @@ impl PhotonicApp {
                 if let Some(mut grade) = grade {
                     let mut seeded = false;
                     if let Some(o) = grade.ops.iter_mut().find(|o| o.id == op) {
-                        if let GradeOpParams::HslQualifier {
-                            hue, sat, lum, ..
-                        } = &mut o.params.base
+                        if let GradeOpParams::HslQualifier { hue, sat, lum, .. } =
+                            &mut o.params.base
                         {
                             *hue = nh;
                             *sat = ns;
@@ -474,12 +469,9 @@ impl PhotonicApp {
                         }
                     }
                     if seeded {
-                        let cmd = doc
-                            .timeline
-                            .as_ref()
-                            .and_then(|proj| {
-                                tlops::set_grade(proj, seq, track, clip, Some(grade)).ok()
-                            });
+                        let cmd = doc.timeline.as_ref().and_then(|proj| {
+                            tlops::set_grade(proj, seq, track, clip, Some(grade)).ok()
+                        });
                         if let Some(cmd) = cmd {
                             history.execute_discrete(Command::Timeline(cmd), doc);
                             *doc_modified = true;
@@ -625,5 +617,4 @@ impl PhotonicApp {
             v
         }
     }
-
 }

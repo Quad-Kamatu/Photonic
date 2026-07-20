@@ -9,7 +9,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use photonic_core::timeline::Tick;
 
@@ -68,7 +68,21 @@ impl Sidecar {
             .spawn()
             .map_err(DecodeError::Spawn)?;
 
-        let stdout = child.stdout.take().expect("stdout was piped");
+        // We requested `Stdio::piped()`, so stdout should be present — but if
+        // ffmpeg was killed / exited between spawn and here, `take` yields None.
+        // Return a typed error instead of panicking, and don't leak the child
+        // (std's `Child` drop does not kill the process).
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DecodeError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "ffmpeg stdout pipe unavailable (process exited during spawn)",
+                )));
+            }
+        };
 
         // Drain stderr on a worker thread; a full pipe would wedge ffmpeg.
         let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -77,7 +91,10 @@ impl Sidecar {
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    let mut t = tail.lock().unwrap();
+                    // Poison-tolerant: a panic elsewhere holding this lock must
+                    // not wedge stderr draining (a full pipe would deadlock
+                    // ffmpeg). The tail is advisory diagnostics, not invariants.
+                    let mut t = tail.lock().unwrap_or_else(PoisonError::into_inner);
                     if t.len() == STDERR_TAIL {
                         t.remove(0);
                     }
@@ -91,7 +108,11 @@ impl Sidecar {
 
     /// The last lines ffmpeg wrote to stderr (for a `DecodeError` message).
     pub fn stderr_tail(&self) -> String {
-        self.stderr_tail.lock().unwrap().join("\n")
+        // Poison-tolerant: recover the tail even if the drain thread panicked.
+        self.stderr_tail
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .join("\n")
     }
 
     /// Whether the process has exited (non-blocking check).

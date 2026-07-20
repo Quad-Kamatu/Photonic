@@ -20,7 +20,7 @@ use crate::protocol::{
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
-use photonic_core::style::{FillKind};
+use photonic_core::style::FillKind;
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -115,7 +115,6 @@ pub async fn get_document_state(state: &AppState, args: GetDocumentStateArgs) ->
     ))
     .with_data(state_value)
 }
-
 
 pub async fn get_document_info(state: &AppState) -> ToolResult {
     tracing::debug!("tool: get_document_info");
@@ -225,7 +224,6 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
     }))
 }
 
-
 pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
     tracing::debug!("tool: undo");
     let steps = args.steps.unwrap_or(1);
@@ -248,7 +246,6 @@ pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
     }
 }
 
-
 pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
     tracing::debug!("tool: redo");
     let steps = args.steps.unwrap_or(1);
@@ -268,7 +265,6 @@ pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
         ToolResult::text("Nothing to redo")
     }
 }
-
 
 pub async fn resize_canvas(state: &AppState, args: ResizeCanvasArgs) -> ToolResult {
     tracing::debug!("tool: resize_canvas");
@@ -304,7 +300,6 @@ pub async fn resize_canvas(state: &AppState, args: ResizeCanvasArgs) -> ToolResu
     }))
 }
 
-
 /// List all saved checkpoints.
 pub async fn list_checkpoints(state: &AppState) -> ToolResult {
     let infos = state.history.lock().await.list_checkpoints();
@@ -315,7 +310,6 @@ pub async fn list_checkpoints(state: &AppState) -> ToolResult {
     ToolResult::text(format!("{} checkpoint(s)", list.len()))
         .with_data(json!({ "checkpoints": list }))
 }
-
 
 /// Restore the document to a saved checkpoint, clearing undo/redo history.
 pub async fn restore_checkpoint(state: &AppState, args: RestoreCheckpointArgs) -> ToolResult {
@@ -333,7 +327,6 @@ pub async fn restore_checkpoint(state: &AppState, args: RestoreCheckpointArgs) -
         None => ToolResult::error(format!("Checkpoint '{}' not found", args.checkpoint_id)),
     }
 }
-
 
 /// Compare two checkpoint snapshots and return a structured diff of
 /// added/removed/modified nodes and layers.
@@ -506,7 +499,6 @@ pub async fn diff_checkpoints(state: &AppState, args: DiffCheckpointsArgs) -> To
 
 // ─── export profiles ─────────────────────────────────────────────────────────
 
-
 /// Return the current document as a reusable template: canvas size, layers,
 /// guides, and export profiles are preserved; all node content is stripped.
 pub async fn get_document_template(state: &AppState) -> ToolResult {
@@ -541,7 +533,6 @@ pub async fn get_document_template(state: &AppState) -> ToolResult {
         Err(e) => ToolResult::error(format!("Failed to serialize template: {e}")),
     }
 }
-
 
 /// Apply a template (from `get_document_template`) to the current document.
 /// Canvas size, guides, and export profiles from the template are merged in;
@@ -640,7 +631,6 @@ pub async fn apply_document_template(
 }
 
 // ─── Color Swatches ───────────────────────────────────────────────────────────
-
 
 /// Return a compact spatial overview of all visible nodes: bounding boxes and fill colors.
 /// Useful for AI agents to understand document layout without loading the full document state.
@@ -763,7 +753,6 @@ pub async fn get_canvas_overview(state: &AppState, args: GetCanvasOverviewArgs) 
     }))
 }
 
-
 /// Add an angled construction line (infinite guide) through a point at any angle.
 pub async fn add_construction_line(state: &AppState, args: AddConstructionLineArgs) -> ToolResult {
     tracing::debug!("tool: add_construction_line");
@@ -805,7 +794,6 @@ pub async fn add_construction_line(state: &AppState, args: AddConstructionLineAr
     .with_data(json!({ "id": id.to_string(), "x": args.x, "y": args.y, "angle_degrees": args.angle_degrees }))
 }
 
-
 /// Set the document bleed and/or slug margins for print production.
 pub async fn set_document_bleed(state: &AppState, args: SetDocumentBleedArgs) -> ToolResult {
     tracing::debug!("tool: set_document_bleed");
@@ -830,7 +818,6 @@ pub async fn set_document_bleed(state: &AppState, args: SetDocumentBleedArgs) ->
     ))
     .with_data(json!({ "bleed_mm": doc.bleed_mm, "slug_mm": doc.slug_mm }))
 }
-
 
 /// Return the current document bleed and slug values.
 pub async fn get_document_bleed(state: &AppState) -> ToolResult {
@@ -975,7 +962,6 @@ pub async fn set_artboard_margins(state: &AppState, args: SetArtboardMarginsArgs
     }))
 }
 
-
 /// Return the current artboard safe-area margin values.
 pub async fn get_artboard_margins(state: &AppState) -> ToolResult {
     tracing::debug!("tool: get_artboard_margins");
@@ -989,7 +975,6 @@ pub async fn get_artboard_margins(state: &AppState) -> ToolResult {
         "bottom": doc.margin_bottom, "left": doc.margin_left
     }))
 }
-
 
 /// Return the most recent edit history entries from the undo stack.
 pub async fn list_history(state: &AppState, args: ListHistoryArgs) -> ToolResult {
@@ -1014,7 +999,6 @@ pub async fn list_history(state: &AppState, args: ListHistoryArgs) -> ToolResult
     ToolResult::text(summary)
         .with_data(json!({ "total": total, "returned": items.len(), "entries": items }))
 }
-
 
 /// Jump to a specific position in the undo/redo history.
 /// index=0 is the empty-document state; index=undo_depth() is the current state.
@@ -1065,7 +1049,6 @@ pub async fn jump_to_history(state: &AppState, args: JumpToHistoryArgs) -> ToolR
         "total": max_index,
     }))
 }
-
 
 /// Scale and position nodes to fill the artboard safe area (artboard minus margins).
 pub async fn fit_to_margins(state: &AppState, args: FitToMarginsArgs) -> ToolResult {
@@ -1199,7 +1182,6 @@ pub async fn fit_to_margins(state: &AppState, args: FitToMarginsArgs) -> ToolRes
 
 // ─── Dimension Annotations ────────────────────────────────────────────────────
 
-
 fn node_center(doc: &photonic_core::Document, id_str: &str) -> Option<(f64, f64)> {
     let uid = uuid::Uuid::parse_str(id_str)
         .ok()
@@ -1214,7 +1196,6 @@ fn node_center(doc: &photonic_core::Document, id_str: &str) -> Option<(f64, f64)
         Some((wx, wy))
     }
 }
-
 
 /// Add a dimension annotation showing the distance between two nodes.
 pub async fn add_dimension(state: &AppState, args: AddDimensionArgs) -> ToolResult {
@@ -1270,7 +1251,6 @@ pub async fn add_dimension(state: &AppState, args: AddDimensionArgs) -> ToolResu
     }))
 }
 
-
 /// List all dimension annotations in the document.
 pub async fn list_dimensions(state: &AppState) -> ToolResult {
     tracing::debug!("tool: list_dimensions");
@@ -1297,7 +1277,6 @@ pub async fn list_dimensions(state: &AppState) -> ToolResult {
     ToolResult::text(format!("{} dimension annotation(s).", count))
         .with_data(serde_json::json!({ "dimensions": items, "count": count }))
 }
-
 
 /// Remove a dimension annotation by ID.
 pub async fn remove_dimension(state: &AppState, args: RemoveDimensionArgs) -> ToolResult {

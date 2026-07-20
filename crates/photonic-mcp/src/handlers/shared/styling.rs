@@ -46,4 +46,3 @@ pub(crate) fn apply_stroke_paint(
         }
     }
 }
-

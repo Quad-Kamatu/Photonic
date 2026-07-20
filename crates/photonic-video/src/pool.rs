@@ -95,7 +95,9 @@ impl<A: TextureAllocator> TexturePool<A> {
     /// bucket equality is insufficient because downstream sampling uses the
     /// logical width and height.
     pub fn contains_desc(&self, hash: ContentHash, desc: TextureDesc) -> bool {
-        self.entries.get(&hash).is_some_and(|entry| entry.desc == desc)
+        self.entries
+            .get(&hash)
+            .is_some_and(|entry| entry.desc == desc)
     }
 
     pub(crate) fn desc(&self, hash: ContentHash) -> Option<TextureDesc> {

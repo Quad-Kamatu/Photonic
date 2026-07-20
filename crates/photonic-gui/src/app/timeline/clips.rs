@@ -154,9 +154,17 @@ const THUMB_SLICE_SPACING_PX: f32 = 120.0;
 const THUMB_TARGET_HEIGHT_PX: u32 = 64;
 /// Target on-screen width of one waveform peak bucket (spec 15 §1: "≈ 1–2 px").
 const WAVEFORM_TARGET_BUCKET_PX: f32 = 1.5;
-/// Screen-pixel stride between sampled waveform columns — coarser than 1px so
-/// the envelope shape count stays bounded on a wide, long clip.
+/// Minimum screen-pixel stride between sampled waveform columns — coarser than
+/// 1px so the envelope shape count stays bounded on a wide, long clip.
 const WAVEFORM_COLUMN_STRIDE_PX: f32 = 2.0;
+/// Hard ceiling for waveform columns in a single visible clip segment. At 4K
+/// widths this prevents waveform painting from becoming thousands of individual
+/// shapes per lane while preserving the same 2px detail for normal clips.
+const MAX_WAVEFORM_COLUMNS_PER_SEGMENT: f32 = 512.0;
+
+fn waveform_column_stride(visible_width: f32) -> f32 {
+    WAVEFORM_COLUMN_STRIDE_PX.max(visible_width.max(0.0) / MAX_WAVEFORM_COLUMNS_PER_SEGMENT)
+}
 /// Per-frame cap on new egui texture registrations from thumbnail requests
 /// (spec 15 §4). `mod.rs::draw_timeline_panel` owns one per frame and threads
 /// it through every `paint_lane` call so the cap is global across all visible
@@ -474,6 +482,10 @@ fn paint_waveform(
     }
     let mid_y = visible_rect.center().y;
     let amp_px = (visible_rect.height() * 0.5 - 1.0).max(0.0);
+    // The visible segment is the only part that can affect this frame. Scale
+    // the sampling stride on very wide displays rather than emitting an
+    // unbounded number of tiny line shapes (a common 4K timeline hot path).
+    let column_stride = waveform_column_stride(visible_rect.width());
     let mut x = visible_rect.left();
     while x <= visible_rect.right() {
         let x_local = x - clip_left_x;
@@ -502,7 +514,7 @@ fn paint_waveform(
                 }
             }
         }
-        x += WAVEFORM_COLUMN_STRIDE_PX;
+        x += column_stride;
     }
 }
 
@@ -558,7 +570,7 @@ pub(crate) fn paint_lane(
         // the flat fill so a cache miss or a non-asset source (Vector/
         // NestedSequence/SolidColor/Adjustment) just leaves that fill showing.
         match track.kind {
-            TrackKind::Video => {
+            TrackKind::Video | TrackKind::Text => {
                 if let (ClipSource::Asset { asset }, Some(cache)) = (&c.source, thumbnails) {
                     paint_thumbnails(
                         &mut shapes,
@@ -1022,6 +1034,14 @@ mod tests {
     fn waveform_level_selection_empty_pyramid_returns_zero() {
         let pyramid = fixture_pyramid(&[]);
         assert_eq!(select_waveform_level(&pyramid, 1.0, 1.5), 0);
+    }
+
+    #[test]
+    fn waveform_column_stride_caps_wide_viewport_work() {
+        assert_eq!(waveform_column_stride(800.0), WAVEFORM_COLUMN_STRIDE_PX);
+        let stride = waveform_column_stride(4096.0);
+        assert!(stride > WAVEFORM_COLUMN_STRIDE_PX);
+        assert!(4096.0 / stride <= MAX_WAVEFORM_COLUMNS_PER_SEGMENT + f32::EPSILON);
     }
 
     // ── Waveform bucket mapping + channel merge ─────────────────────────────

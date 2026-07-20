@@ -112,6 +112,10 @@ pub struct ThumbnailConfig {
     /// so an offline / un-decodable asset can't storm the worker with an ffmpeg
     /// spawn every frame.
     pub retry_cooldown: Duration,
+    /// Upper bound on queued + running decode work. This prevents a wide
+    /// timeline from turning a scroll/zoom into an unbounded ffmpeg backlog;
+    /// visible requests are retried naturally as earlier work finishes.
+    pub max_inflight: usize,
 }
 
 impl Default for ThumbnailConfig {
@@ -120,6 +124,7 @@ impl Default for ThumbnailConfig {
             capacity: 256,
             bucket_ticks: TICKS_PER_SECOND / 2,
             retry_cooldown: Duration::from_secs(2),
+            max_inflight: 32,
         }
     }
 }
@@ -177,7 +182,12 @@ impl ThumbnailCache {
             Some(Arc::new(thumb))
         });
         ThumbnailCache {
-            store: AsyncStore::new(cfg.capacity, cfg.retry_cooldown, producer),
+            store: AsyncStore::new(
+                cfg.capacity,
+                cfg.retry_cooldown,
+                cfg.max_inflight,
+                producer,
+            ),
             bucket_ticks,
         }
     }
@@ -212,6 +222,13 @@ impl ThumbnailCache {
     /// Whether the in-memory cache is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Whether visible thumbnail requests are still being decoded. UI hosts
+    /// use this to request a modest delayed repaint rather than a permanent
+    /// polling timer.
+    pub fn has_pending(&self) -> bool {
+        self.store.has_pending()
     }
 }
 
@@ -252,7 +269,12 @@ impl WaveformCache {
             Some(Arc::new(pyramid))
         });
         WaveformCache {
-            store: AsyncStore::new(WAVEFORM_CAPACITY, Duration::from_secs(2), producer),
+            store: AsyncStore::new(
+                WAVEFORM_CAPACITY,
+                Duration::from_secs(2),
+                4,
+                producer,
+            ),
         }
     }
 
@@ -266,6 +288,11 @@ impl WaveformCache {
     /// export / tests only — blocks).
     pub fn block_until_idle(&self) {
         self.store.block_until_idle();
+    }
+
+    /// Whether waveform sidecar loading/building is still in flight.
+    pub fn has_pending(&self) -> bool {
+        self.store.has_pending()
     }
 }
 
@@ -509,6 +536,7 @@ type Producer<K, V> = Box<dyn Fn(&K) -> Option<Arc<V>> + Send>;
 struct AsyncStore<K, V> {
     shared: Arc<Shared<K, V>>,
     cooldown: Duration,
+    max_inflight: usize,
     tx: Option<Sender<K>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -531,7 +559,12 @@ where
     K: Eq + std::hash::Hash + Clone + Send + 'static,
     V: Send + Sync + 'static,
 {
-    fn new(capacity: usize, cooldown: Duration, producer: Producer<K, V>) -> Self {
+    fn new(
+        capacity: usize,
+        cooldown: Duration,
+        max_inflight: usize,
+        producer: Producer<K, V>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 lru: Lru::new(capacity),
@@ -568,6 +601,7 @@ where
         AsyncStore {
             shared,
             cooldown,
+            max_inflight: max_inflight.max(1),
             tx: Some(tx),
             worker: Some(worker),
         }
@@ -588,6 +622,9 @@ where
                 return None; // still cooling down after a failure
             }
             st.failed.remove(&key);
+        }
+        if st.inflight.len() >= self.max_inflight {
+            return None; // bounded background work; a later visible frame retries
         }
         st.inflight.insert(key.clone());
         drop(st);
@@ -614,6 +651,10 @@ where
 
     fn len(&self) -> usize {
         self.shared.state.lock().unwrap().lru.len()
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.shared.state.lock().unwrap().inflight.is_empty()
     }
 }
 
@@ -879,6 +920,7 @@ mod tests {
                 capacity: 4,
                 bucket_ticks: super::TICKS_PER_SECOND / 2,
                 retry_cooldown: Duration::from_secs(2),
+                max_inflight: 32,
             },
         );
         let asset = AssetId::new();

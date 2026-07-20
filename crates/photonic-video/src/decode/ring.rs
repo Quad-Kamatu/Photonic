@@ -55,6 +55,16 @@ impl FrameRing {
         self.playhead
     }
 
+    /// Lowest resident pts (oldest decoded frame), if any.
+    pub fn oldest(&self) -> Option<Tick> {
+        self.frames.keys().next().copied()
+    }
+
+    /// Highest resident pts (decode frontier), if any.
+    pub fn newest(&self) -> Option<Tick> {
+        self.frames.keys().next_back().copied()
+    }
+
     /// Insert a decoded frame (idempotent on pts) and prune to the window.
     pub fn push(&mut self, frame: DecodedFrame) {
         self.frames.insert(frame.pts, Arc::new(frame));
@@ -141,20 +151,23 @@ impl SharedRing {
     /// Reader worker: push a decoded frame and wake any waiting consumer.
     pub fn push(&self, frame: DecodedFrame) {
         let (lock, cvar) = &*self.inner;
-        lock.lock().unwrap().push(frame);
+        // Poison-tolerant: a panic in one worker must not wedge the ring for the
+        // engine present thread. The `FrameRing` has no cross-field invariant
+        // that a mid-operation panic could leave broken, so recover the guard.
+        lock.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
         cvar.notify_all();
     }
 
     /// Consumer: the frame covering `t` if resident, without blocking.
     pub fn frame_covering(&self, t: Tick) -> Option<Arc<DecodedFrame>> {
         let (lock, _) = &*self.inner;
-        lock.lock().unwrap().frame_covering(t)
+        lock.lock().unwrap_or_else(|e| e.into_inner()).frame_covering(t)
     }
 
     /// Exact-pts lookup without blocking.
     pub fn get(&self, pts: Tick) -> Option<Arc<DecodedFrame>> {
         let (lock, _) = &*self.inner;
-        lock.lock().unwrap().get(pts)
+        lock.lock().unwrap_or_else(|e| e.into_inner()).get(pts)
     }
 
     /// Consumer: block until a frame with `pts >= t` is resident (so the frame
@@ -162,7 +175,7 @@ impl SharedRing {
     /// frame, or `None` on timeout.
     pub fn wait_for_frame(&self, t: Tick, timeout: Duration) -> Option<Arc<DecodedFrame>> {
         let (lock, cvar) = &*self.inner;
-        let mut guard = lock.lock().unwrap();
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let deadline = std::time::Instant::now() + timeout;
         loop {
             // A frame at/after t means the covering frame won't change with more decode.
@@ -173,7 +186,13 @@ impl SharedRing {
             if now >= deadline {
                 return guard.frame_covering(t);
             }
-            let (g, res) = cvar.wait_timeout(guard, deadline - now).unwrap();
+            // Poison-tolerant: recover the guard out of a `PoisonError` returned
+            // by `wait_timeout` (a producer worker panicked) so the present
+            // thread keeps servicing frames rather than panicking in turn.
+            let (g, res) = match cvar.wait_timeout(guard, deadline - now) {
+                Ok(pair) => pair,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             guard = g;
             if res.timed_out() {
                 return guard.frame_covering(t);
@@ -181,19 +200,31 @@ impl SharedRing {
         }
     }
 
+    /// Lowest resident pts (oldest decoded frame), if any.
+    pub fn oldest(&self) -> Option<Tick> {
+        let (lock, _) = &*self.inner;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).oldest()
+    }
+
+    /// Highest resident pts (decode frontier), if any.
+    pub fn newest(&self) -> Option<Tick> {
+        let (lock, _) = &*self.inner;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).newest()
+    }
+
     pub fn set_playhead(&self, t: Tick) {
         let (lock, _) = &*self.inner;
-        lock.lock().unwrap().set_playhead(t);
+        lock.lock().unwrap_or_else(|e| e.into_inner()).set_playhead(t);
     }
 
     pub fn clear(&self) {
         let (lock, _) = &*self.inner;
-        lock.lock().unwrap().clear();
+        lock.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     pub fn len(&self) -> usize {
         let (lock, _) = &*self.inner;
-        lock.lock().unwrap().len()
+        lock.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -268,5 +299,40 @@ mod tests {
         let ring = SharedRing::new(FrameRing::new(16, 4));
         let got = ring.wait_for_frame(Tick(1000), Duration::from_millis(10));
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn poisoned_ring_stays_readable() {
+        // Simulate a decode worker panicking while holding the ring lock: the
+        // mutex is now poisoned. The engine present thread must still be able to
+        // read frames instead of panicking on a poisoned `lock().unwrap()`.
+        let ring = SharedRing::new(FrameRing::new(16, 4));
+        ring.push(frame(Tick(500)));
+
+        let poisoner = ring.clone();
+        let h = std::thread::spawn(move || {
+            // Poison the mutex by panicking while the guard is held.
+            poisoner.push(frame(Tick(600)));
+            let (lock, _) = &*poisoner.inner;
+            let _guard = lock.lock().unwrap();
+            panic!("decode worker died mid-operation");
+        });
+        assert!(h.join().is_err());
+
+        // All read/write paths must recover the poisoned guard, not panic.
+        assert_eq!(ring.frame_covering(Tick(550)).unwrap().pts, Tick(500));
+        assert_eq!(ring.get(Tick(600)).unwrap().pts, Tick(600));
+        assert_eq!(ring.oldest(), Some(Tick(500)));
+        assert_eq!(ring.newest(), Some(Tick(600)));
+        assert_eq!(ring.len(), 2);
+        ring.push(frame(Tick(700)));
+        assert_eq!(ring.newest(), Some(Tick(700)));
+        // A blocking wait must also read through poison (frame already resident).
+        // The frame covering t=500 is the 500 frame (greatest pts <= 500).
+        let got = ring.wait_for_frame(Tick(500), Duration::from_millis(10));
+        assert_eq!(got.unwrap().pts, Tick(500));
+        ring.set_playhead(Tick(600));
+        ring.clear();
+        assert!(ring.is_empty());
     }
 }

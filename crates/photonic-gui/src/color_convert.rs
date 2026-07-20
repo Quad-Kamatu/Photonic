@@ -335,8 +335,14 @@ mod tests {
     #[test]
     fn oklab_and_oklch_roundtrip() {
         for rgb in [[0.2, 0.7, 0.4], [0.95, 0.4, 0.1], [0.05, 0.05, 0.2]] {
-            assert!(close(oklab_to_rgb(rgb_to_oklab(rgb)), rgb, 2e-3), "lab {rgb:?}");
-            assert!(close(oklch_to_rgb(rgb_to_oklch(rgb)), rgb, 2e-3), "lch {rgb:?}");
+            assert!(
+                close(oklab_to_rgb(rgb_to_oklab(rgb)), rgb, 2e-3),
+                "lab {rgb:?}"
+            );
+            assert!(
+                close(oklch_to_rgb(rgb_to_oklch(rgb)), rgb, 2e-3),
+                "lch {rgb:?}"
+            );
         }
     }
 
@@ -352,7 +358,10 @@ mod tests {
         assert_eq!(parse_hex("#ff0000"), Some([1.0, 0.0, 0.0, 1.0]));
         assert_eq!(parse_hex("00ff00"), Some([0.0, 1.0, 0.0, 1.0]));
         assert_eq!(parse_hex("#fff"), Some([1.0, 1.0, 1.0, 1.0]));
-        assert_eq!(parse_hex("#12345678").map(|c| rgba_to_bytes(c)), Some([0x12, 0x34, 0x56, 0x78]));
+        assert_eq!(
+            parse_hex("#12345678").map(|c| rgba_to_bytes(c)),
+            Some([0x12, 0x34, 0x56, 0x78])
+        );
         assert_eq!(parse_hex("nope"), None);
         assert_eq!(format_hex([1.0, 0.0, 0.0, 1.0], false), "#FF0000");
         assert_eq!(format_hex([1.0, 0.0, 0.0, 0.5], true), "#FF000080");

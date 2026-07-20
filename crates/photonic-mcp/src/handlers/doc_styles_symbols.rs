@@ -1,4 +1,9 @@
-use crate::protocol::{ApplyGraphicStyleArgs, ApplyWidthProfileArgs, BreakLinkToSymbolArgs, DefineGraphicStyleArgs, DefineSymbolArgs, DefineWidthProfileArgs, DeleteGraphicStyleArgs, DeleteSymbolArgs, DeleteWidthProfileArgs, LoadSymbolLibraryArgs, PlaceSymbolArgs, SpraySymbolInstancesArgs, ToolResult};
+use crate::protocol::{
+    ApplyGraphicStyleArgs, ApplyWidthProfileArgs, BreakLinkToSymbolArgs, DefineGraphicStyleArgs,
+    DefineSymbolArgs, DefineWidthProfileArgs, DeleteGraphicStyleArgs, DeleteSymbolArgs,
+    DeleteWidthProfileArgs, LoadSymbolLibraryArgs, PlaceSymbolArgs, SpraySymbolInstancesArgs,
+    ToolResult,
+};
 use crate::server::AppState;
 
 /// Define (or update) a named graphic style.

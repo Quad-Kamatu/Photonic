@@ -39,7 +39,14 @@ use crate::graph::ops::{self, Image};
 /// canvas hint (the output format); a provider may return that size or a native
 /// size the evaluator resamples downstream.
 pub trait FrameProvider {
-    fn decode_video(&mut self, asset: AssetId, src_time: Tick, proxy: bool, w: u32, h: u32) -> Image;
+    fn decode_video(
+        &mut self,
+        asset: AssetId,
+        src_time: Tick,
+        proxy: bool,
+        w: u32,
+        h: u32,
+    ) -> Image;
     fn decode_still(&mut self, asset: AssetId, w: u32, h: u32) -> Image;
     fn raster_vector(&mut self, vref: VectorRef, key: VectorStateKey, w: u32, h: u32) -> Image;
 }
@@ -100,10 +107,19 @@ fn eval_op(
 ) -> Image {
     // Missing-input safety: the compiler always wires unary/binary ops, but be
     // defensive so a malformed graph degrades to transparent, never panics.
-    let in0 = || inputs.first().map(|i| (*i).clone()).unwrap_or_else(|| Image::new(cw, ch));
+    let in0 = || {
+        inputs
+            .first()
+            .map(|i| (*i).clone())
+            .unwrap_or_else(|| Image::new(cw, ch))
+    };
 
     match op {
-        IrOp::DecodeVideo { asset, src_time, proxy } => normalize_source(
+        IrOp::DecodeVideo {
+            asset,
+            src_time,
+            proxy,
+        } => normalize_source(
             provider.decode_video(*asset, *src_time, *proxy, cw, ch),
             cw,
             ch,
@@ -111,11 +127,12 @@ fn eval_op(
         IrOp::DecodeStill { asset } => {
             normalize_source(provider.decode_still(*asset, cw, ch), cw, ch)
         }
-        IrOp::RasterVector { vref, doc_state, w, h } => normalize_source(
-            provider.raster_vector(*vref, *doc_state, *w, *h),
-            cw,
-            ch,
-        ),
+        IrOp::RasterVector {
+            vref,
+            doc_state,
+            w,
+            h,
+        } => normalize_source(provider.raster_vector(*vref, *doc_state, *w, *h), cw, ch),
         IrOp::SolidColor { color } => ops::solid(cw, ch, *color),
         IrOp::Transform2D { mat, sampling } => match inputs.first() {
             Some(input) => ops::transform2d(input, *mat, *sampling),
@@ -130,7 +147,7 @@ fn eval_op(
         // Real kernel: the resolved grade stack (07 §3), the GPU-parity golden.
         IrOp::Grade { ops: grade_ops } => apply_grade_cpu_image(in0(), grade_ops),
         IrOp::CaptionOverlay { .. } => in0(), // GPU-only glyph composite (see header); CPU passes through
-        IrOp::MatteExtract { .. } => in0(), // P8 U²-Net inference
+        IrOp::MatteExtract { .. } => in0(),   // P8 U²-Net inference
         IrOp::ChannelSplit { .. } => in0(),
         IrOp::ChannelCombine => in0(),
         IrOp::TextGen { .. } => Image::new(cw, ch), // GPU-only glyph composite (see header); CPU emits transparent
@@ -205,7 +222,11 @@ mod tests {
     };
     use photonic_core::Color;
 
-    fn project_with_two_solids(top: Color, bottom: Color, top_opacity: f64) -> (TimelineProject, SequenceId) {
+    fn project_with_two_solids(
+        top: Color,
+        bottom: Color,
+        top_opacity: f64,
+    ) -> (TimelineProject, SequenceId) {
         let mut project = TimelineProject::new();
         let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
         let seq_id = seq.id;
@@ -234,10 +255,27 @@ mod tests {
     #[test]
     fn opaque_top_covers_backdrop() {
         // Colors are given in sRGB straight; the compiler converts to linear.
-        let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
-        let blue = Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+        let red = Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let blue = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
         let (project, seq_id) = project_with_two_solids(red, blue, 1.0);
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
         // Linear red premultiplied (alpha 1): srgb→linear(1.0) == 1.0, srgb→linear(0.0) == 0.
         for p in &img.pixels {
@@ -252,10 +290,27 @@ mod tests {
     #[test]
     fn half_opacity_blends_linearly() {
         // White over black at opacity 0.5. srgb→linear(1.0)=1, (0.0)=0.
-        let white = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-        let black = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        let white = Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let black = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
         let (project, seq_id) = project_with_two_solids(white, black, 0.5);
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
         for p in &img.pixels {
             #[allow(clippy::needless_range_loop)]
@@ -269,10 +324,27 @@ mod tests {
     /// Determinism (02 §2): the same graph evaluates byte-identically twice.
     #[test]
     fn evaluation_is_byte_identical() {
-        let c1 = Color { r: 0.2, g: 0.5, b: 0.9, a: 1.0 };
-        let c2 = Color { r: 0.7, g: 0.1, b: 0.3, a: 1.0 };
+        let c1 = Color {
+            r: 0.2,
+            g: 0.5,
+            b: 0.9,
+            a: 1.0,
+        };
+        let c2 = Color {
+            r: 0.7,
+            g: 0.1,
+            b: 0.3,
+            a: 1.0,
+        };
         let (project, seq_id) = project_with_two_solids(c1, c2, 0.4);
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         let a = evaluate(&out.graph, (8, 8), &mut EmptyProvider);
         let b = evaluate(&out.graph, (8, 8), &mut EmptyProvider);
         assert_eq!(a.pixels, b.pixels);
@@ -306,7 +378,12 @@ mod tests {
     #[test]
     fn grade_exposure_applies_non_passthrough() {
         // sRGB 0.5 → ~0.2140 linear; +1 stop (×2) → ~0.4280.
-        let (mut project, seq_id) = single_solid_project(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
+        let (mut project, seq_id) = single_solid_project(Color {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        });
         let mut grade = Grade::new();
         grade.ops.push(GradeOp::new(
             GradeOpKind::Exposure,
@@ -314,10 +391,20 @@ mod tests {
         ));
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[0].clips[0].grade = Some(grade);
 
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         // The graph must contain a real Grade node with one resolved op.
         assert!(
-            out.graph.nodes.iter().any(|n| matches!(&n.op, IrOp::Grade { ops } if ops.len() == 1)),
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(&n.op, IrOp::Grade { ops } if ops.len() == 1)),
             "a Grade IR op with one resolved op is present"
         );
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
@@ -326,7 +413,12 @@ mod tests {
             lin * 2.0
         };
         for p in &img.pixels {
-            assert!((p[0] - expected).abs() < 1e-3, "graded r={} want {}", p[0], expected);
+            assert!(
+                (p[0] - expected).abs() < 1e-3,
+                "graded r={} want {}",
+                p[0],
+                expected
+            );
         }
     }
 
@@ -334,11 +426,23 @@ mod tests {
     /// is a real kernel, not a passthrough.
     #[test]
     fn invert_effect_applies_non_passthrough() {
-        let (mut project, seq_id) = single_solid_project(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+        let (mut project, seq_id) = single_solid_project(Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        });
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[0].clips[0]
             .effects
             .push(ClipEffect::new(EffectKind::Invert));
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
         for p in &img.pixels {
             for (c, &v) in p[..3].iter().enumerate() {
@@ -359,22 +463,46 @@ mod tests {
         let mut t = Track::new(TrackKind::Video, "V1");
         // A: red [0,100); B: blue [100,200) transitioning in over 40 ticks.
         t.clips.push(Clip::new(
-            ClipSource::SolidColor { color: Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 } },
+            ClipSource::SolidColor {
+                color: Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            },
             crate::contract::Tick(0),
             crate::contract::Tick(100),
         ));
         let mut b = Clip::new(
-            ClipSource::SolidColor { color: Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 } },
+            ClipSource::SolidColor {
+                color: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            },
             crate::contract::Tick(100),
             crate::contract::Tick(100),
         );
-        b.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, crate::contract::Tick(40)));
+        b.transition_in = Some(Transition::new(
+            TransitionKind::CrossDissolve,
+            crate::contract::Tick(40),
+        ));
         t.clips.push(b);
         seq.video_tracks.push(t);
         project.insert_sequence(seq);
 
         // Midpoint of the [100,140) window → raw 0.5, EaseInOut(0.5)=0.5.
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(120), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(120),
+            Quality::FULL,
+            None,
+        );
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
         for p in &img.pixels {
@@ -401,7 +529,12 @@ mod tests {
         let mut solid = GraphNode::new(GraphOp::SolidColor);
         solid.params.base.0.set(
             "params.color",
-            photonic_core::timeline::PropValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+            photonic_core::timeline::PropValue::Color(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
         );
         let invert = GraphNode::new(GraphOp::Invert);
         let output = GraphNode::new(GraphOp::Output);
@@ -415,8 +548,14 @@ mod tests {
             name: "comp".into(),
             nodes,
             edges: vec![
-                GraphEdge { from: (so, GOutPort::PRIMARY), to: (iv, InPort::PRIMARY) },
-                GraphEdge { from: (iv, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) },
+                GraphEdge {
+                    from: (so, GOutPort::PRIMARY),
+                    to: (iv, InPort::PRIMARY),
+                },
+                GraphEdge {
+                    from: (iv, GOutPort::PRIMARY),
+                    to: (ou, InPort::PRIMARY),
+                },
             ],
             output: ou,
             ui: std::collections::HashMap::new(),
@@ -424,7 +563,14 @@ mod tests {
         let gid = graph.id;
         project.graphs.insert(gid, graph);
         let mut clip = Clip::new(
-            ClipSource::SolidColor { color: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 } },
+            ClipSource::SolidColor {
+                color: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            },
             crate::contract::Tick(0),
             crate::contract::Tick::from_seconds(2),
         );
@@ -432,10 +578,20 @@ mod tests {
         seq.video_tracks[tk].clips.push(clip);
         project.insert_sequence(seq);
 
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
-            out.graph.nodes.iter().any(|n| matches!(&n.op, IrOp::Effect { kind, .. } if *kind == EffectKind::Invert)),
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(&n.op, IrOp::Effect { kind, .. } if *kind == EffectKind::Invert)),
             "the composition's Invert lowered to an Effect{{Invert}} node"
         );
         let img = evaluate(&out.graph, (4, 4), &mut EmptyProvider);
@@ -456,14 +612,26 @@ mod tests {
         // 50% grey in sRGB → ~0.2140 linear.
         t.clips.push(Clip::new(
             ClipSource::SolidColor {
-                color: Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+                color: Color {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 1.0,
+                },
             },
             crate::contract::Tick(0),
             crate::contract::Tick::from_seconds(2),
         ));
         seq.video_tracks.push(t);
         project.insert_sequence(seq);
-        let out = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         let img = evaluate(&out.graph, (2, 2), &mut EmptyProvider);
         let expected = {
             let c = 0.5f32;
@@ -474,7 +642,12 @@ mod tests {
         }
         // Sanity on the constant used above.
         assert!((expected - 0.2140).abs() < 1e-3);
-        let _ = LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let _ = LinearColor {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
     }
 
     /// G7 adjustment layer (07 §2 / source-substitution): an Adjustment clip
@@ -545,7 +718,14 @@ mod tests {
         // sRGB→linear; the Exposure +1 stop doubles the linear value.
         let lin = |c: f32| ((c + 0.055) / 1.055).powf(2.4);
         let eval_at = |t: i64| {
-            let out = compile(&project, seq_id, 0, crate::contract::Tick(t), Quality::FULL, None);
+            let out = compile(
+                &project,
+                seq_id,
+                0,
+                crate::contract::Tick(t),
+                Quality::FULL,
+                None,
+            );
             evaluate(&out.graph, (4, 4), &mut EmptyProvider)
         };
 
@@ -586,18 +766,42 @@ mod tests {
         // Structural guard: the Adjustment introduces a Grade node within its span
         // and none past it, and never a track-fold Merge (it replaces the
         // accumulator rather than compositing over it).
-        let g50 = compile(&project, seq_id, 0, crate::contract::Tick(50), Quality::FULL, None);
+        let g50 = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(50),
+            Quality::FULL,
+            None,
+        );
         assert!(
-            g50.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Grade { .. })),
+            g50.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Grade { .. })),
             "Grade present under the Adjustment"
         );
         assert!(
-            !g50.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Merge { .. })),
+            !g50.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Merge { .. })),
             "Adjustment re-roots without introducing a Merge"
         );
-        let g250 = compile(&project, seq_id, 0, crate::contract::Tick(250), Quality::FULL, None);
+        let g250 = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(250),
+            Quality::FULL,
+            None,
+        );
         assert!(
-            !g250.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Grade { .. })),
+            !g250
+                .graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Grade { .. })),
             "no Grade past the Adjustment's span"
         );
     }

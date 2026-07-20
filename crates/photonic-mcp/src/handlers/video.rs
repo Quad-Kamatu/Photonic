@@ -634,6 +634,7 @@ pub async fn add_track(state: &AppState, args: AddTrackArgs) -> ToolResult {
     let name = args.name.unwrap_or_else(|| match args.kind {
         photonic_core::timeline::TrackKind::Video => "Video".into(),
         photonic_core::timeline::TrackKind::Audio => "Audio".into(),
+        photonic_core::timeline::TrackKind::Text => "Text".into(),
     });
     let track = Track::new(args.kind, name);
     let track_id = track.id;
@@ -1452,10 +1453,7 @@ pub async fn replace_clip_source(state: &AppState, args: ReplaceClipSourceArgs) 
 /// `split_targets` candidate) is silently skipped rather than aborting the
 /// whole batch.
 pub async fn add_edit_all_tracks(state: &AppState, args: AddEditAllTracksArgs) -> ToolResult {
-    tracing::debug!(
-        "tool: add_edit_all_tracks on sequence {}",
-        args.sequence_id
-    );
+    tracing::debug!("tool: add_edit_all_tracks on sequence {}", args.sequence_id);
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
     let Some(project) = doc.timeline.as_ref() else {
@@ -1560,8 +1558,10 @@ pub async fn close_gap(state: &AppState, args: CloseGapArgs) -> ToolResult {
             }
         }
         if cmds.is_empty() {
-            return ToolResult::text("No gap at the given tick on any unlocked track — nothing to close")
-                .with_data(json!({ "tracks_changed": 0 }));
+            return ToolResult::text(
+                "No gap at the given tick on any unlocked track — nothing to close",
+            )
+            .with_data(json!({ "tracks_changed": 0 }));
         }
         let n = cmds.len();
         history.execute_discrete(batch_or_single(cmds), &mut doc);
@@ -1588,7 +1588,12 @@ pub async fn match_frame(state: &AppState, args: MatchFrameArgs) -> ToolResult {
         return ToolResult::error(format!("clip {} not found", args.clip_id));
     };
     let fr = project.sequences.get(&seq_id).unwrap().frame_rate;
-    let at = match resolve_tick(args.at_ticks, args.at_tc.as_deref(), args.at_seconds, Some(fr)) {
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(fr),
+    ) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -1636,8 +1641,13 @@ pub async fn insert_adjustment_clip(
     if args.duration_ticks <= 0 {
         return err_code("TickOutOfRange", "duration_ticks must be > 0");
     }
-    match ops::add_adjustment_clip(project, seq_id, args.track_id, start, Tick(args.duration_ticks))
-    {
+    match ops::add_adjustment_clip(
+        project,
+        seq_id,
+        args.track_id,
+        start,
+        Tick(args.duration_ticks),
+    ) {
         Ok(cmd) => {
             let clip_id = match &cmd {
                 TimelineCmd::InsertClip { clip, .. } => Some(clip.id),
@@ -2836,8 +2846,8 @@ pub async fn set_proxy_mode(state: &AppState, args: SetProxyModeArgs) -> ToolRes
     bridge.set_proxy_mode(mode);
     ToolResult::text(format!("proxy mode set to {mode:?}")).with_data(json!({
         "mode": format!("{mode:?}"),
-        "note": "ForceProxy decodes generated proxies where present (see generate_proxies), \
-                 falling back to originals otherwise; Auto/ForceOriginal decode originals. \
+        "note": "Auto and ForceProxy decode generated proxies where present (see generate_proxies), \
+                 falling back to originals otherwise; ForceOriginal always decodes originals. \
                  Proxies are never required for correctness (CAP-014)."
     }))
 }
@@ -5415,9 +5425,11 @@ pub async fn set_grade(state: &AppState, args: SetGradeArgs) -> ToolResult {
         None | Some(serde_json::Value::Null) => None,
         Some(v) => match serde_json::from_value::<Grade>(v) {
             Ok(g) => Some(g),
-            Err(e) => return ToolResult::error(format!(
+            Err(e) => {
+                return ToolResult::error(format!(
                 "invalid grade object: {e} — see get_clip output / 07 §1 for the Grade serde shape"
-            )),
+            ))
+            }
         },
     };
     let mut doc = state.document.lock().await;

@@ -33,7 +33,7 @@ use super::clip::{Clip, ClipEffect};
 use super::grade::Grade;
 use super::graph::{GraphEdge, GraphNode, GraphNodeParams, NodePos};
 use super::ids::*;
-use super::media::{AssetSource, MediaAsset, MediaBin};
+use super::media::{AssetSource, MediaAsset, MediaBin, MediaProbe, ProxyRef};
 use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
 use super::time::Tick;
 use crate::document::Document;
@@ -380,6 +380,24 @@ pub enum TimelineCmd {
         asset: AssetId,
         old_path: PathBuf,
         new_path: PathBuf,
+    },
+    /// Update an asset's proxy attachment/status. Kept as an ordinary undoable
+    /// edit so async proxy generation never mutates a document behind history's
+    /// back and a ready/failed result can be reverted safely.
+    SetAssetProxy {
+        asset: AssetId,
+        old: Option<ProxyRef>,
+        new: Option<ProxyRef>,
+    },
+    /// Fill probe + content hash after L0 registration (24-preview-media-load
+    /// import ladder). Asset row is already in the pool; this is the L1/L2
+    /// completion step and is undoable so a failed/wrong probe can revert.
+    SetAssetMeta {
+        asset: AssetId,
+        old_probe: Option<MediaProbe>,
+        new_probe: Option<MediaProbe>,
+        old_hash: Option<String>,
+        new_hash: Option<String>,
     },
     AddSequence {
         sequence: Box<Sequence>,
@@ -1542,6 +1560,8 @@ impl TimelineCmd {
             TimelineCmd::AddAsset { .. } => "Add media".into(),
             TimelineCmd::RemoveAsset { .. } => "Remove media".into(),
             TimelineCmd::RelinkAsset { .. } => "Relink media".into(),
+            TimelineCmd::SetAssetProxy { .. } => "Update media proxy".into(),
+            TimelineCmd::SetAssetMeta { .. } => "Update media metadata".into(),
             TimelineCmd::AddSequence { sequence } => format!("Add sequence \"{}\"", sequence.name),
             TimelineCmd::RemoveSequence { .. } => "Remove sequence".into(),
             TimelineCmd::RenameSequence { new, .. } => format!("Rename sequence \"{new}\""),
@@ -1633,6 +1653,22 @@ impl TimelineCmd {
                     }
                 }
             }
+            TimelineCmd::SetAssetProxy { asset, new, .. } => {
+                if let Some(a) = p.media.assets.get_mut(asset) {
+                    a.proxy = new.clone();
+                }
+            }
+            TimelineCmd::SetAssetMeta {
+                asset,
+                new_probe,
+                new_hash,
+                ..
+            } => {
+                if let Some(a) = p.media.assets.get_mut(asset) {
+                    a.probe = new_probe.clone();
+                    a.content_hash = new_hash.clone();
+                }
+            }
             TimelineCmd::AddSequence { sequence } => {
                 let id = sequence.id;
                 p.sequences.insert(id, (**sequence).clone());
@@ -1701,10 +1737,7 @@ impl TimelineCmd {
                 track,
             } => {
                 if let Some(s) = p.sequences.get_mut(seq) {
-                    let v = match kind {
-                        TrackKind::Video => &mut s.video_tracks,
-                        TrackKind::Audio => &mut s.audio_tracks,
-                    };
+                    let v = s.tracks_for_mut(*kind);
                     let i = (*index).min(v.len());
                     v.insert(i, (**track).clone());
                 }
@@ -1713,10 +1746,7 @@ impl TimelineCmd {
                 seq, kind, index, ..
             } => {
                 if let Some(s) = p.sequences.get_mut(seq) {
-                    let v = match kind {
-                        TrackKind::Video => &mut s.video_tracks,
-                        TrackKind::Audio => &mut s.audio_tracks,
-                    };
+                    let v = s.tracks_for_mut(*kind);
                     if *index < v.len() {
                         v.remove(*index);
                     }
@@ -1989,6 +2019,24 @@ impl TimelineCmd {
                 asset: *asset,
                 old_path: new_path.clone(),
                 new_path: old_path.clone(),
+            },
+            TimelineCmd::SetAssetProxy { asset, old, new } => TimelineCmd::SetAssetProxy {
+                asset: *asset,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::SetAssetMeta {
+                asset,
+                old_probe,
+                new_probe,
+                old_hash,
+                new_hash,
+            } => TimelineCmd::SetAssetMeta {
+                asset: *asset,
+                old_probe: new_probe.clone(),
+                new_probe: old_probe.clone(),
+                old_hash: new_hash.clone(),
+                new_hash: old_hash.clone(),
             },
             TimelineCmd::AddSequence { sequence } => TimelineCmd::RemoveSequence {
                 sequence: sequence.clone(),

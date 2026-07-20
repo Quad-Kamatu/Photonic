@@ -6,7 +6,8 @@
 //! - [`convert`] — working format (`Rgba16Float` readback) → encoder pix_fmt
 //!   (§3.5 steps 2-6), the CPU-side inverse of decode's YUV→working pass.
 //! - [`encoder`] — the ffmpeg encode sidecar: process/arg building, codec
-//!   capability probing, the video-stdin + audio-FIFO dual-input pipe.
+//!   capability probing, video-stdin + second audio input (unix FIFO or
+//!   Windows/non-unix temp f32le file).
 //! - [`render_loop`] — the engine-independent `export_frames` shell (02 §7)
 //!   that the P3 evaluator feeds.
 

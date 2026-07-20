@@ -58,7 +58,11 @@ pub(crate) fn handle_center(video_rect: Rect, t: &ClipTransform, scale: f32) -> 
 /// A screen-space pointer delta, converted to a format-pixel delta (the
 /// inverse of the scale mapping above).
 pub(crate) fn screen_delta_to_format(delta: Vec2, scale: f32) -> (f64, f64) {
-    let s = if scale.abs() > f32::EPSILON { scale } else { 1.0 };
+    let s = if scale.abs() > f32::EPSILON {
+        scale
+    } else {
+        1.0
+    };
     ((delta.x / s) as f64, (delta.y / s) as f64)
 }
 
@@ -265,10 +269,19 @@ pub(crate) fn draw_reframe_handles(
 
     let painter = ui.painter();
     for i in 0..4 {
-        painter.line_segment([corners[i], corners[(i + 1) % 4]], egui::Stroke::new(1.0, ACCENT));
+        painter.line_segment(
+            [corners[i], corners[(i + 1) % 4]],
+            egui::Stroke::new(1.0, ACCENT),
+        );
     }
     painter.line_segment(
-        [Pos2::new((corners[0].x + corners[1].x) / 2.0, (corners[0].y + corners[1].y) / 2.0), rotate_handle],
+        [
+            Pos2::new(
+                (corners[0].x + corners[1].x) / 2.0,
+                (corners[0].y + corners[1].y) / 2.0,
+            ),
+            rotate_handle,
+        ],
         egui::Stroke::new(1.0, ACCENT),
     );
     painter.circle_filled(rotate_handle, HANDLE_RADIUS, ACCENT);
@@ -283,7 +296,15 @@ pub(crate) fn draw_reframe_handles(
         let mut new_t = base;
         new_t.x += dx;
         new_t.y += dy;
-        commit_reframe(doc, history, seq_id, track_id, clip.clone(), active_format, new_t);
+        commit_reframe(
+            doc,
+            history,
+            seq_id,
+            track_id,
+            clip.clone(),
+            active_format,
+            new_t,
+        );
     }
 
     // Scale: bottom-right corner handle.
@@ -296,7 +317,15 @@ pub(crate) fn draw_reframe_handles(
             let mut new_t = base;
             new_t.scale_x = (base.scale_x * ratio).max(0.01);
             new_t.scale_y = (base.scale_y * ratio).max(0.01);
-            commit_reframe(doc, history, seq_id, track_id, clip.clone(), active_format, new_t);
+            commit_reframe(
+                doc,
+                history,
+                seq_id,
+                track_id,
+                clip.clone(),
+                active_format,
+                new_t,
+            );
         }
     }
 
@@ -624,10 +653,7 @@ mod fit_clips_tests {
         let clip_id = clip.id;
         let mut track = Track::new(kind, "T");
         track.clips.push(clip);
-        match kind {
-            TrackKind::Video => seq.video_tracks.push(track),
-            TrackKind::Audio => seq.audio_tracks.push(track),
-        }
+        seq.tracks_for_mut(kind).push(track);
         clip_id
     }
 

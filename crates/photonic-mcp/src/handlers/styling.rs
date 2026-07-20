@@ -1,4 +1,6 @@
-use crate::handlers::nodes::{lerp_point, path_center_x, path_center_y, solid_fill_of, style_prop_enabled};
+use crate::handlers::nodes::{
+    lerp_point, path_center_x, path_center_y, solid_fill_of, style_prop_enabled,
+};
 use crate::handlers::shared::{random::*, styling::*};
 use crate::protocol::*;
 use crate::server::AppState;

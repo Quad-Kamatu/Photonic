@@ -65,8 +65,8 @@ struct Rendered {
 fn render_case(r: &HeadlessRenderer, project_photon: &Path) -> Rendered {
     let json = std::fs::read_to_string(project_photon)
         .unwrap_or_else(|e| panic!("read {}: {e}", project_photon.display()));
-    let (doc, _history) = load_photon(&json)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", project_photon.display()));
+    let (doc, _history) =
+        load_photon(&json).unwrap_or_else(|e| panic!("parse {}: {e}", project_photon.display()));
     let w = doc.width.round().max(1.0) as u32;
     let h = doc.height.round().max(1.0) as u32;
     let opts = ExportOptions {

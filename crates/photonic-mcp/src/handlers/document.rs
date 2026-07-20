@@ -20,13 +20,20 @@ pub use crate::handlers::doc_analysis::{
     analyze_composition, detect_rhythms, measure_distances,
 };
 pub use crate::handlers::doc_automation::{
-    define_grammar_rule, list_grammar_rules, delete_grammar_rule, check_grammar, define_action, list_actions, delete_action, branch_create, branch_list, branch_switch, branch_delete, register_event_trigger, list_event_triggers, remove_event_trigger, save_workspace, load_workspace, list_workspaces, delete_workspace,
+    branch_create, branch_delete, branch_list, branch_switch, check_grammar, define_action,
+    define_grammar_rule, delete_action, delete_grammar_rule, delete_workspace, list_actions,
+    list_event_triggers, list_grammar_rules, list_workspaces, load_workspace,
+    register_event_trigger, remove_event_trigger, save_workspace,
 };
 pub use crate::handlers::doc_data::{
-    set_constraint, list_constraints, remove_constraint, define_variable, list_variables, set_variable_value, delete_variable, apply_variables,
+    apply_variables, define_variable, delete_variable, list_constraints, list_variables,
+    remove_constraint, set_constraint, set_variable_value,
 };
 pub use crate::handlers::doc_styles_symbols::{
-    define_graphic_style, list_graphic_styles, apply_graphic_style, delete_graphic_style, define_width_profile, list_width_profiles, apply_width_profile, delete_width_profile, define_symbol, list_symbols, place_symbol, break_link_to_symbol, delete_symbol, spray_symbol_instances, load_symbol_library,
+    apply_graphic_style, apply_width_profile, break_link_to_symbol, define_graphic_style,
+    define_symbol, define_width_profile, delete_graphic_style, delete_symbol, delete_width_profile,
+    list_graphic_styles, list_symbols, list_width_profiles, load_symbol_library, place_symbol,
+    spray_symbol_instances,
 };
 
 /// Save the current document and persistent history in the same native
@@ -87,38 +94,13 @@ pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResu
 
 // ─── Variable Width Profiles ─────────────────────────────────────────────────
 
-
-
-
-
 // ─── Patterns ──────────────────────────────────────────────────────────────────
-
-
-
 
 // ─── Document Variables ───────────────────────────────────────────────────────
 
-
-
-
-
-
 // ─── Symbols ──────────────────────────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
-
 // ─── Actions ─────────────────────────────────────────────────────────────────
-
-
-
 
 /// Play a named action set, with optional node ID substitutions.
 pub fn play_action(
@@ -214,19 +196,5 @@ async fn play_action_inner(state: &AppState, args: PlayActionArgs) -> ToolResult
         )
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ─── Fit to Margins ───────────────────────────────────────────────────────────

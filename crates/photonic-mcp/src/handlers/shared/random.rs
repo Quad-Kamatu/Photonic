@@ -8,4 +8,3 @@ pub(crate) fn xorshift64(state: &mut u64) -> f64 {
     // Map to [-1, 1]
     (s as f64 / u64::MAX as f64) * 2.0 - 1.0
 }
-

@@ -624,6 +624,9 @@ pub fn apply_op(payload: &ResolvedGradePayload, rgb: [f32; 3], mask_w: f32) -> [
                 ResolvedGradePayload::Cdl(c) => apply_cdl(rgb, c),
                 ResolvedGradePayload::Curves(c) => apply_curves(rgb, c),
                 ResolvedGradePayload::Lut3d(l) => apply_lut3d(rgb, l),
+                // Unreachable by control flow: the outer `match payload` handles
+                // `HslQualifier` in its first arm, so this inner match (the `_`
+                // branch) can never see it, regardless of input data.
                 ResolvedGradePayload::HslQualifier(_) => unreachable!(),
             };
             lerp3(rgb, corrected, mask_w)

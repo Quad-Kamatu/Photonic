@@ -1,5 +1,7 @@
 # 16 — Insert / Overwrite / Lift / Extract — 3/4-Point Editing (parity: NLE gap 9)
 
+> **Status: Delivered.** The 3/4-point spine is shipped and protected. Live residuals are tracked in [ROADMAP.md](ROADMAP.md), [19](19-editing-velocity-shot-management.md), and [20](20-pro-workflows.md).
+
 **Why:** the spine of professional editing in Premiere/Resolve. Today Photonic edits by direct clip manipulation only (drag/trim). Reference NLEs let a user set a source range + a timeline point and *insert* (ripple everything right) or *overwrite* (replace in place), and *lift*/*extract* to remove. Wholly absent. Prerequisites: a source range concept, a target track, and a timeline in/out.
 
 **Scope:** the four core edit operations + the minimal supporting model (source in/out on a pending clip, target-track selection, timeline in/out reuse of `work_range`). A full source *monitor* (separate preview of the raw asset) is a related but separable feature (see §6) — this spec delivers the edit operations, driveable from the media pool / keyboard even before a source-monitor UI exists.

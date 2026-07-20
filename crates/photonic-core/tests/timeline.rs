@@ -139,6 +139,32 @@ fn create_and_remove_project_roundtrip() {
 }
 
 #[test]
+fn asset_proxy_update_is_undoable() {
+    let mut f = fixture();
+    let asset = MediaAsset::from_file(AssetKind::Video, "/tmp/proxy-source.mp4");
+    let id = asset.id;
+    f.doc
+        .timeline
+        .as_mut()
+        .unwrap()
+        .media
+        .assets
+        .insert(id, asset);
+    let proxy = ProxyRef {
+        path: "/tmp/proxy-source.proxy.mp4".into(),
+        status: ProxyStatus::Ready,
+    };
+    let cmd = ops::set_asset_proxy(f.project(), id, Some(proxy.clone())).unwrap();
+    assert_undo_roundtrip(&f.doc, &cmd);
+
+    Command::Timeline(cmd).apply(&mut f.doc);
+    assert_eq!(
+        f.project().media.assets.get(&id).and_then(|asset| asset.proxy.clone()),
+        Some(proxy)
+    );
+}
+
+#[test]
 fn clip_edit_ops_roundtrip() {
     let f = fixture();
     let p = f.project();
@@ -1242,6 +1268,8 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::AddAsset { .. } => {}
         TimelineCmd::RemoveAsset { .. } => {}
         TimelineCmd::RelinkAsset { .. } => {}
+        TimelineCmd::SetAssetProxy { .. } => {}
+        TimelineCmd::SetAssetMeta { .. } => {}
         // Sequences / formats / tracks.
         TimelineCmd::AddSequence { .. } => {}
         TimelineCmd::RemoveSequence { .. } => {}
@@ -1447,11 +1475,7 @@ fn v2_document_loads_as_current_without_timeline() {
     assert_eq!(detect_version(&value), 2);
 
     // Migrate forward to the current version and deserialize.
-    let out = run_migrations(
-        &mut value,
-        photonic_core::document::CURRENT_FORMAT_VERSION,
-    )
-    .unwrap();
+    let out = run_migrations(&mut value, photonic_core::document::CURRENT_FORMAT_VERSION).unwrap();
     assert_eq!(out, 4, "v2 must migrate through v3 to v4");
     let doc: Document = serde_json::from_value(value).unwrap();
     assert_eq!(doc.format_version, 4);

@@ -131,7 +131,8 @@ pub fn generate_proxy(
     }
     let tmp = staging_path(output);
 
-    let mut child = Command::new(&tools.ffmpeg)
+    let mut command = Command::new(&tools.ffmpeg);
+    command
         .arg("-y")
         .args(["-nostdin", "-loglevel", "error"])
         .arg("-i")
@@ -140,9 +141,9 @@ pub fn generate_proxy(
         .arg(&tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(ProxyError::Spawn)?;
+        .stderr(Stdio::piped());
+    lower_background_priority(&mut command);
+    let mut child = command.spawn().map_err(ProxyError::Spawn)?;
 
     let status = loop {
         if cancel() {
@@ -173,6 +174,28 @@ pub fn generate_proxy(
         })
     }
 }
+
+/// Make proxy transcodes cooperative with interactive playback on Unix. This
+/// runs in the child immediately before `exec`, so it cannot lower the UI
+/// process itself. Failure is deliberately non-fatal: containers and hardened
+/// desktops may forbid changing priority, but proxy generation must still work.
+#[cfg(unix)]
+fn lower_background_priority(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs in the newly-forked child. The closure performs
+    // only the async-signal-safe `setpriority` syscall and deliberately ignores
+    // a permission failure before returning to exec ffmpeg.
+    unsafe {
+        command.pre_exec(|| {
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn lower_background_priority(_command: &mut Command) {}
 
 /// Read the last ~500 chars ffmpeg wrote to stderr (for a `ProxyError` message).
 /// `-loglevel error` keeps this near-empty on success, so reading it after exit

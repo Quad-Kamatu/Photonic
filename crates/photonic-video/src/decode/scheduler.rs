@@ -187,6 +187,60 @@ impl DecodeSource {
         }
     }
 
+    /// Scrub preview: ensure the keyframe covering `target` is resident,
+    /// decoding **only that keyframe** (no forward-decode to `target`, no pump).
+    /// Returns `true` if it had to (re)seek, `false` if the keyframe was already
+    /// resident (a prior scrub landed in the same GOP). Cheap enough to run per
+    /// drag frame — the discard loop [`seek`](Self::seek) runs is what makes a
+    /// normal seek expensive on long GOPs.
+    pub fn scrub_to(&mut self, target: Tick) -> Result<bool, DecodeError> {
+        let kf = self.params.keyframes.keyframe_before(target);
+        if self.ring.get(kf).is_some() {
+            return Ok(false);
+        }
+        self.seek_keyframe(kf)?;
+        Ok(true)
+    }
+
+    /// Seek to keyframe tick `kf` and ring the first decoded frame (the
+    /// keyframe itself), skipping the `pts < target` discard loop.
+    fn seek_keyframe(&mut self, kf: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
+        self.ring.clear();
+        let mut last_err: Option<DecodeError> = None;
+        for attempt in 0..=MAX_RESTARTS {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(20u64 << (attempt - 1)));
+            }
+            match self.seek_keyframe_attempt(kf) {
+                Ok(frame) => {
+                    self.ring.set_playhead(frame.pts);
+                    return Ok(frame);
+                }
+                Err(DecodeError::EmptyDecode) => return Err(DecodeError::EmptyDecode),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(DecodeError::RestartsExhausted {
+            max: MAX_RESTARTS,
+            last: last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    fn seek_keyframe_attempt(&mut self, kf: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
+        self.start_process(kf)?;
+        let reader = self.reader.as_mut().expect("reader set by start_process");
+        match reader.next_frame()? {
+            Some(frame) => {
+                let pts = frame.pts;
+                self.ring.push(frame);
+                self.ring.get(pts).ok_or(DecodeError::EmptyDecode)
+            }
+            None => Err(DecodeError::EmptyDecode),
+        }
+    }
+
     /// Decode up to `n` more frames from the current process into the ring
     /// (sequential playback fill). Returns how many were decoded; fewer than
     /// `n` (possibly 0) at end-of-stream or with no active process.

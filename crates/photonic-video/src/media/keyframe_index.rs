@@ -52,8 +52,13 @@ pub fn cache_dir_for_project(project_path: &Path) -> PathBuf {
 }
 
 /// Path of the keyframe-index cache file for `content_hash` inside `cache_dir`.
-fn keyframe_cache_path(cache_dir: &Path, content_hash: &str) -> PathBuf {
+pub fn keyframe_cache_path(cache_dir: &Path, content_hash: &str) -> PathBuf {
     cache_dir.join(format!("{content_hash}.keyframes.json"))
+}
+
+/// True when a keyframe index for this hash already exists (24 L4 ready).
+pub fn keyframe_index_ready(cache_dir: &Path, content_hash: &str) -> bool {
+    keyframe_cache_path(cache_dir, content_hash).is_file()
 }
 
 /// Path of the pts-index cache file for `content_hash` inside `cache_dir`.

@@ -1096,7 +1096,7 @@ impl PhotonicApp {
     /// The session source-patch target for `kind` (spec 16 §1 M-3).
     fn target_track_for(&self, kind: TrackKind) -> Option<TrackId> {
         match kind {
-            TrackKind::Video => self.target_video_track,
+            TrackKind::Video | TrackKind::Text => self.target_video_track,
             TrackKind::Audio => self.target_audio_track,
         }
     }
@@ -1583,7 +1583,7 @@ fn plan_paste_placements(
         let start = if raw.0 < 0 { Tick::ZERO } else { raw };
         let end = start + *dur;
         let explicit = match kind {
-            TrackKind::Video => target_video,
+            TrackKind::Video | TrackKind::Text => target_video,
             TrackKind::Audio => target_audio,
         };
         let explicit_index = explicit.and_then(|id| tracks.iter().position(|track| track.id == id));

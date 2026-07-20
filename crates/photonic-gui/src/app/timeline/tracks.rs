@@ -4,7 +4,7 @@
 //! All undoable mutations route through `ops_bridge`; the one direct write is the
 //! height-drag (`height_px` is a persisted-but-non-undoable UI field, 04 §2.3).
 
-use super::ops_bridge;
+use super::{ops_bridge, put_fixed};
 use egui_phosphor::regular as ph;
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
@@ -25,14 +25,21 @@ pub(crate) struct TrackRow {
     pub count_in_kind: usize,
 }
 
-/// Row layout for a sequence: video tracks top-to-bottom, then audio.
+/// Row layout for a sequence: video tracks top-to-bottom (top row = topmost
+/// layer), then audio.
+///
+/// The compositor stacks `video_tracks` in Vec order — `video_tracks.last()` is
+/// composited on top (`graph/compile.rs` `fold_sequence`). So the video rows are
+/// displayed in **reverse** Vec order, putting the topmost layer at the top row,
+/// matching Premiere/Resolve/FCP. `index_in_kind` stays the true Vec index so
+/// reorder targets stay correct (the header menu flips up/down for video).
 pub(crate) fn track_rows(seq: &Sequence) -> Vec<TrackRow> {
     let mut rows = Vec::new();
     let vc = seq.video_tracks.len();
-    for (i, t) in seq.video_tracks.iter().enumerate() {
+    for (i, t) in seq.video_tracks.iter().enumerate().rev() {
         rows.push(TrackRow {
             id: t.id,
-            kind: TrackKind::Video,
+            kind: t.kind,
             height: t.height_px,
             locked: t.locked,
             index_in_kind: i,
@@ -113,17 +120,16 @@ pub(crate) fn draw_header(
     let enable_rect =
         egui::Rect::from_min_size(egui::pos2(rect.left() + pad, top), egui::vec2(btn, btn));
     let enable_glyph = match (row.kind, enabled) {
-        (TrackKind::Video, true) => "◉",
-        (TrackKind::Video, false) => "◌",
+        (TrackKind::Video | TrackKind::Text, true) => "◉",
+        (TrackKind::Video | TrackKind::Text, false) => "◌",
         (TrackKind::Audio, true) => "♪",
         (TrackKind::Audio, false) => "×",
     };
     let enable_tip = match row.kind {
-        TrackKind::Video => "Show / hide track",
+        TrackKind::Video | TrackKind::Text => "Show / hide track",
         TrackKind::Audio => "Mute / unmute track",
     };
-    if ui
-        .put(enable_rect, egui::Button::new(enable_glyph).small())
+    if put_fixed(ui, enable_rect, egui::Button::new(enable_glyph).small())
         .on_hover_text(enable_tip)
         .clicked()
     {
@@ -136,8 +142,7 @@ pub(crate) fn draw_header(
     let mut next_x = enable_rect.right() + 2.0;
     if row.kind == TrackKind::Audio {
         let solo_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
-        if ui
-            .put(solo_rect, egui::SelectableLabel::new(solo, "S"))
+        if put_fixed(ui, solo_rect, egui::SelectableLabel::new(solo, "S"))
             .on_hover_text("Solo (solo-safe)")
             .clicked()
         {
@@ -148,8 +153,8 @@ pub(crate) fn draw_header(
 
     // Lock toggle.
     let lock_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
-    if ui
-        .put(
+    if put_fixed(
+        ui,
             lock_rect,
             egui::Button::new(if locked { "L" } else { "·" }).small(),
         )
@@ -167,8 +172,8 @@ pub(crate) fn draw_header(
         egui::pos2(lock_rect.right() + 2.0, top),
         egui::vec2(btn, btn),
     );
-    if ui
-        .put(
+    if put_fixed(
+        ui,
             sync_rect,
             egui::Button::new(if sync_lock {
                 ph::ARROWS_CLOCKWISE
@@ -191,8 +196,8 @@ pub(crate) fn draw_header(
         egui::pos2(sync_rect.right() + 2.0, top),
         egui::vec2(btn, btn),
     );
-    if ui
-        .put(
+    if put_fixed(
+        ui,
             patch_rect,
             egui::SelectableLabel::new(is_target, ph::TARGET),
         )
@@ -208,8 +213,7 @@ pub(crate) fn draw_header(
         egui::pos2(rect.right() - pad - btn, top),
         egui::vec2(btn, btn),
     );
-    let wrench_resp = ui
-        .put(wrench_rect, egui::Button::new(ph::WRENCH).small())
+    let wrench_resp = put_fixed(ui, wrench_rect, egui::Button::new(ph::WRENCH).small())
         .on_hover_text("Track display");
     let wrench_popup_id = wrench_resp.id.with("track_display_popup");
     if wrench_resp.clicked() {
@@ -235,7 +239,7 @@ pub(crate) fn draw_header(
         .data(|d| d.get_temp::<(TrackId, String)>(rename_id()))
         .filter(|(tid, _)| *tid == row.id);
     if let Some((_, mut buf)) = editing {
-        let resp = ui.put(name_rect, egui::TextEdit::singleline(&mut buf));
+        let resp = put_fixed(ui, name_rect, egui::TextEdit::singleline(&mut buf));
         resp.request_focus();
         if resp.lost_focus() {
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !buf.trim().is_empty() {
@@ -246,7 +250,8 @@ pub(crate) fn draw_header(
             ui.data_mut(|d| d.insert_temp(rename_id(), (row.id, buf)));
         }
     } else {
-        let label = ui.put(
+        let label = put_fixed(
+            ui,
             name_rect,
             egui::Label::new(egui::RichText::new(&name).color(if locked {
                 ui.visuals().weak_text_color()
@@ -299,13 +304,31 @@ fn header_menu(
         ui.data_mut(|d| d.insert_temp(rename_id(), (row.id, name)));
         ui.close_menu();
     }
-    if row.index_in_kind > 0 && ui.button("Move up").clicked() {
-        ops_bridge::move_track(doc, history, seq_id, row.id, row.index_in_kind - 1);
-        ui.close_menu();
+    // Map visual up/down to a Vec index. Video is displayed reversed (top row =
+    // last Vec index = topmost layer), so "up" moves toward the end of the Vec;
+    // audio is displayed in natural order, so "up" moves toward index 0.
+    let i = row.index_in_kind;
+    let (up_target, down_target) = match row.kind {
+        TrackKind::Video => (
+            (i + 1 < row.count_in_kind).then_some(i + 1),
+            (i > 0).then_some(i - 1),
+        ),
+        _ => (
+            (i > 0).then_some(i - 1),
+            (i + 1 < row.count_in_kind).then_some(i + 1),
+        ),
+    };
+    if let Some(target) = up_target {
+        if ui.button("Move up").clicked() {
+            ops_bridge::move_track(doc, history, seq_id, row.id, target);
+            ui.close_menu();
+        }
     }
-    if row.index_in_kind + 1 < row.count_in_kind && ui.button("Move down").clicked() {
-        ops_bridge::move_track(doc, history, seq_id, row.id, row.index_in_kind + 1);
-        ui.close_menu();
+    if let Some(target) = down_target {
+        if ui.button("Move down").clicked() {
+            ops_bridge::move_track(doc, history, seq_id, row.id, target);
+            ui.close_menu();
+        }
     }
     ui.separator();
     if ui.button("Remove track").clicked() {
@@ -354,27 +377,29 @@ pub(crate) fn draw_add_controls(
     history: &mut CommandHistory,
     seq_id: SequenceId,
 ) {
+    // A single compact "+ Track" menu rather than three side-by-side buttons:
+    // the header column is too narrow to fit three "+ Word" labels without
+    // wrapping/clipping (they read as "Vide"/"Text"/"Audi"). The menu scales and
+    // matches the "+ Add corrector" pattern used elsewhere (color_page.rs).
     let inner = rect.shrink(4.0);
-    let half = (inner.width() - 4.0) * 0.5;
-    let v_rect = egui::Rect::from_min_size(inner.min, egui::vec2(half, inner.height()));
-    let a_rect = egui::Rect::from_min_size(
-        egui::pos2(v_rect.right() + 4.0, inner.top()),
-        egui::vec2(half, inner.height()),
-    );
-    if ui
-        .put(v_rect, egui::Button::new("+ Video").small())
-        .on_hover_text("Add a video track")
-        .clicked()
-    {
-        ops_bridge::add_track(doc, history, seq_id, TrackKind::Video);
-    }
-    if ui
-        .put(a_rect, egui::Button::new("+ Audio").small())
-        .on_hover_text("Add an audio track")
-        .clicked()
-    {
-        ops_bridge::add_track(doc, history, seq_id, TrackKind::Audio);
-    }
+    ui.allocate_ui_at_rect(inner, |ui| {
+        ui.menu_button(format!("{} Track", ph::PLUS), |ui| {
+            if ui.button(format!("{} Video track", ph::FILM_STRIP)).clicked() {
+                ops_bridge::add_track(doc, history, seq_id, TrackKind::Video);
+                ui.close_menu();
+            }
+            if ui.button(format!("{} Text track", ph::TEXT_T)).clicked() {
+                ops_bridge::add_track(doc, history, seq_id, TrackKind::Text);
+                ui.close_menu();
+            }
+            if ui.button(format!("{} Audio track", ph::WAVEFORM)).clicked() {
+                ops_bridge::add_track(doc, history, seq_id, TrackKind::Audio);
+                ui.close_menu();
+            }
+        })
+        .response
+        .on_hover_text("Add a video, text (title), or audio track");
+    });
 }
 
 /// Flip an audio track's `TrackAudio::solo` flag (14-nle-parity QW-6). The
@@ -439,5 +464,38 @@ fn toggle_sync_lock(
     };
     if let Ok(cmd) = ops::toggle_sync_lock(p, seq_id, track) {
         history.execute_discrete(Command::Timeline(cmd), doc);
+    }
+}
+
+#[cfg(test)]
+mod row_order_tests {
+    use super::track_rows;
+    use photonic_core::timeline::{FrameRate, Sequence, Track, TrackKind};
+
+    #[test]
+    fn top_row_is_topmost_video_layer() {
+        // video_tracks[last] composites on top, so it must be the first (top) row.
+        let mut seq = Sequence::new("s", FrameRate::FPS_30, 16, 16);
+        for n in ["V1", "V2", "V3"] {
+            seq.video_tracks.push(Track::new(TrackKind::Video, n));
+        }
+        seq.audio_tracks.push(Track::new(TrackKind::Audio, "A1"));
+        let rows = track_rows(&seq);
+
+        // Top three rows are the video tracks, reversed (last Vec index first).
+        assert_eq!(
+            rows[0].id, seq.video_tracks[2].id,
+            "top row = topmost layer"
+        );
+        assert_eq!(rows[1].id, seq.video_tracks[1].id);
+        assert_eq!(
+            rows[2].id, seq.video_tracks[0].id,
+            "bottom video row = layer 0"
+        );
+        // index_in_kind stays the true Vec index (for reorder targets).
+        assert_eq!(rows[0].index_in_kind, 2);
+        assert_eq!(rows[2].index_in_kind, 0);
+        // Audio follows, in natural order.
+        assert_eq!(rows[3].id, seq.audio_tracks[0].id);
     }
 }

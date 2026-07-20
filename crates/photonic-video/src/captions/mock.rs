@@ -72,7 +72,9 @@ impl TranscriptionProvider for MockTranscriptionProvider {
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
-        let _ = progress.send(ProviderProgress::Processing { percent: Some(50.0) });
+        let _ = progress.send(ProviderProgress::Processing {
+            percent: Some(50.0),
+        });
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
@@ -177,9 +179,9 @@ impl TtsProvider for MockTtsProvider {
 mod tests {
     use super::*;
     use crate::captions::grouping::{group_words_into_cues, GroupingParams};
-    use std::collections::HashMap;
     use crate::captions::wav::read_wav_info;
     use photonic_core::timeline::Tick;
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     #[test]

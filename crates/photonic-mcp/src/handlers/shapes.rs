@@ -1,11 +1,9 @@
 use crate::handlers::nodes::{
-    apply_crystallize, apply_scallop, apply_warp_envelope, catmull_rom_to_bezier,
-    path_centroid, reverse_bez, subdivide_bez,
+    apply_crystallize, apply_scallop, apply_warp_envelope, catmull_rom_to_bezier, path_centroid,
+    reverse_bez, subdivide_bez,
 };
 use crate::handlers::shared::{
-    paths::{
-        apply_pucker_bloat, apply_roughen, apply_round_corners, apply_twirl, apply_zig_zag,
-    },
+    paths::{apply_pucker_bloat, apply_roughen, apply_round_corners, apply_twirl, apply_zig_zag},
     styling::apply_style,
 };
 use crate::protocol::*;

@@ -194,7 +194,8 @@ mod tests {
                 assert_eq!(cb, &[100]);
                 assert_eq!(cr, &[200]);
             }
-            _ => panic!(),
+            // Test invariant: a Yuv420p reader only ever yields Yuv420 planes.
+            other => panic!("expected Yuv420 planes, got {other:?}"),
         }
 
         let f1 = r.next_frame().unwrap().unwrap();

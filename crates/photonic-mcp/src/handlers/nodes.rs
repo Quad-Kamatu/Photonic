@@ -1,19 +1,24 @@
-pub use crate::handlers::typography::{
-    create_text, create_character_style, delete_character_style, create_paragraph_style,
-    delete_paragraph_style, apply_character_style, apply_paragraph_style, list_character_styles,
-    list_paragraph_styles, set_character_metrics, set_font_style, set_font_weight,
-    set_text_decoration, set_text_direction, set_text_area, set_text_path, clear_text_area,
-    clear_text_path, set_paragraph_options, set_tab_stops, clear_tab_stops,
-    set_opentype_features, get_opentype_features, bind_text_variable, unbind_text_variable,
-    link_text_frames, unlink_text_frames,
+pub use crate::handlers::charts::{
+    create_bar_chart, create_line_chart, create_pie_chart, create_radar_chart, create_scatter_plot,
+    create_stacked_bar_chart,
 };
 pub use crate::handlers::shapes::{
     create_shape, create_path, create_curvature_path, create_flare, create_spiral, create_grid, create_polar_grid, create_heart, create_gear, create_qr_code, create_wave_pattern, create_freehand_path, build_shape_from_points, create_speech_bubble, create_cross, create_arrow_shape, create_donut, create_sunburst, create_parametric_shape, create_truchet_tiling, add_anchor_points, delete_anchor_point, average_anchor_points, convert_anchor_points, zig_zag_path, pucker_bloat, roughen_path, twirl_path, proportional_move_anchor, round_corners, scallop_path, crystallize_path, simplify_path, smooth_path, reverse_path_direction, offset_path, join_paths, scissors_cut, outline_stroke, point_on_path, measure_path, noise_deform, warp_envelope,
 };
+pub use crate::handlers::clipping::{
+    make_clipping_mask, make_compound_path, release_clipping_mask, release_compound_path,
+};
+pub use crate::handlers::guides::{
+    add_dimension_line, add_guide, clear_guides, list_guides, pin_object_guides, remove_guide,
+};
+pub use crate::handlers::pathfinder::{
+    boolean_operation, divide_objects_below, pathfinder_crop, pathfinder_divide, pathfinder_merge,
+    pathfinder_minus_back, pathfinder_minus_front, pathfinder_outline, pathfinder_trim,
+};
 pub use crate::handlers::selection::{
     deselect_all, find_nodes, find_replace_style, find_replace_text, get_selection, lasso_select,
-    magic_wand_select, select_all, select_by_kind, select_inside_group, select_same, select_similar,
-    set_selection,
+    magic_wand_select, select_all, select_by_kind, select_inside_group, select_same,
+    select_similar, set_selection,
 };
 pub use crate::handlers::transform::{
     align_nodes, apply_flex_layout, apply_grid_layout, apply_stack_layout, apply_transform,
@@ -22,44 +27,31 @@ pub use crate::handlers::transform::{
     reverse_node_order, rotate_copies, scatter_copies, snap_to_pixel, split_into_grid,
     transform_copies,
 };
-pub use crate::handlers::guides::{
-    add_dimension_line, add_guide, clear_guides, list_guides, pin_object_guides, remove_guide,
-};
-pub use crate::handlers::clipping::{
-    make_clipping_mask, make_compound_path, release_clipping_mask, release_compound_path,
-};
-pub use crate::handlers::pathfinder::{
-    boolean_operation, divide_objects_below, pathfinder_crop, pathfinder_divide,
-    pathfinder_merge, pathfinder_minus_back, pathfinder_minus_front, pathfinder_outline,
-    pathfinder_trim,
-};
-pub use crate::handlers::charts::{
-    create_bar_chart, create_line_chart, create_pie_chart, create_radar_chart,
-    create_scatter_plot, create_stacked_bar_chart,
+pub use crate::handlers::typography::{
+    apply_character_style, apply_paragraph_style, bind_text_variable, clear_tab_stops,
+    clear_text_area, clear_text_path, create_character_style, create_paragraph_style, create_text,
+    delete_character_style, delete_paragraph_style, get_opentype_features, link_text_frames,
+    list_character_styles, list_paragraph_styles, set_character_metrics, set_font_style,
+    set_font_weight, set_opentype_features, set_paragraph_options, set_tab_stops, set_text_area,
+    set_text_decoration, set_text_direction, set_text_path, unbind_text_variable,
+    unlink_text_frames,
 };
 use kurbo;
 use photonic_core::node::{SceneNode, SceneNodeKind};
 
-
-
-
-
-
-
 pub use crate::handlers::styling::{
     add_drop_shadow, adjust_colors, blend_colors, blend_objects, clear_blend_spine,
-    clear_symbol_overrides, convert_to_grayscale, copy_appearance, expand_blend,
-    get_recent_colors, hatch_fill, invert_colors, randomize_colors, recolor_artwork, remove_fill,
-    remove_stroke, reverse_blend_spine, sample_color_at, set_blend_mode, set_blend_spine,
-    set_opacity, set_paint, set_symbol_override, stipple_fill, style_transfer, swap_fill_stroke,
+    clear_symbol_overrides, convert_to_grayscale, copy_appearance, expand_blend, get_recent_colors,
+    hatch_fill, invert_colors, randomize_colors, recolor_artwork, remove_fill, remove_stroke,
+    reverse_blend_spine, sample_color_at, set_blend_mode, set_blend_spine, set_opacity, set_paint,
+    set_symbol_override, stipple_fill, style_transfer, swap_fill_stroke,
 };
 pub use crate::handlers::utility::{
     auto_name_nodes, check_style_continuity, clean_up, delete_nodes, enter_isolation_mode,
     exit_isolation_mode, export_tagged_assets, flatten_transparency, get_css_preview, get_node,
     get_node_prompts, group_nodes, inspect_node, make_live_boolean, measure_distance,
-    measure_nodes, move_to_layer,
-    set_locked, set_node_prompt, set_node_size, set_visibility, tag_node_for_export, tag_nodes,
-    undo_node, ungroup_nodes, update_node,
+    measure_nodes, move_to_layer, set_locked, set_node_prompt, set_node_size, set_visibility,
+    tag_node_for_export, tag_nodes, undo_node, ungroup_nodes, update_node,
 };
 
 /// Convert a sequence of points to a smooth cubic bezier path using Catmull-Rom interpolation.
@@ -136,27 +128,6 @@ pub(crate) fn catmull_rom_to_bezier(points: &[kurbo::Point], closed: bool) -> ku
     path
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// Returns true if `prop` should be copied given the optional property filter list.
 /// An absent or empty list means "copy everything".
 pub(crate) fn style_prop_enabled(properties: &Option<Vec<String>>, prop: &str) -> bool {
@@ -167,15 +138,9 @@ pub(crate) fn style_prop_enabled(properties: &Option<Vec<String>>, prop: &str) -
     }
 }
 
-
-
-
 // ─── find_replace_text ───────────────────────────────────────────────────────
 
-
 // ─── layout_nodes ────────────────────────────────────────────────────────────
-
-
 
 // ─── auto_name_nodes ──────────────────────────────────────────────────────────
 
@@ -312,18 +277,9 @@ pub(crate) fn generate_name(node: &SceneNode) -> String {
     }
 }
 
-
 // ─── CSS Preview ──────────────────────────────────────────────────────────────
 
-
 // ─── check_style_continuity ───────────────────────────────────────────────────
-
-
-
-
-
-
-
 
 /// Compute the centroid of all on-curve points in a BezPath.
 pub(crate) fn path_centroid(bez: &kurbo::BezPath) -> kurbo::Point {
@@ -349,9 +305,6 @@ pub(crate) fn path_centroid(bez: &kurbo::BezPath) -> kurbo::Point {
         kurbo::Point::new(sum_x / count as f64, sum_y / count as f64)
     }
 }
-
-
-
 
 /// Subdivide every segment of a BezPath once (insert midpoints).
 pub(crate) fn subdivide_bez(bez: &kurbo::BezPath) -> kurbo::BezPath {
@@ -402,51 +355,9 @@ pub(crate) fn mid(a: kurbo::Point, b: kurbo::Point) -> kurbo::Point {
     kurbo::Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
 }
 
-
-
-
-
 pub(crate) fn lerp_point(a: kurbo::Point, b: kurbo::Point, t: f64) -> kurbo::Point {
     kurbo::Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Reverse a sequence of BezPath elements.
 pub(crate) fn reverse_bez(els: &[kurbo::PathEl]) -> Vec<kurbo::PathEl> {
@@ -471,15 +382,6 @@ pub(crate) fn reverse_bez(els: &[kurbo::PathEl]) -> Vec<kurbo::PathEl> {
     result.push(kurbo::PathEl::ClosePath);
     result
 }
-
-
-
-
-
-
-
-
-
 
 /// Apply a named warp envelope to a BezPath.
 /// Points are normalized to [0,1] based on bounding box, warped, then scaled back.
@@ -642,7 +544,6 @@ pub(crate) fn apply_warp_envelope(
     result
 }
 
-
 /// Replace each line/curve segment with scallop arcs (smooth inward curves).
 pub(crate) fn apply_scallop(bez: &kurbo::BezPath, depth: f64, count: usize) -> kurbo::BezPath {
     let mut result = kurbo::BezPath::new();
@@ -737,7 +638,6 @@ pub(crate) fn scallop_segment(
     }
 }
 
-
 /// Add sharp outward spikes along each segment.
 pub(crate) fn apply_crystallize(bez: &kurbo::BezPath, size: f64, count: usize) -> kurbo::BezPath {
     let mut result = kurbo::BezPath::new();
@@ -827,67 +727,48 @@ pub(crate) fn crystallize_segment(
     }
 }
 
-pub(crate) fn solid_fill_of(fill: &photonic_core::style::Fill) -> Option<photonic_core::color::Color> {
+pub(crate) fn solid_fill_of(
+    fill: &photonic_core::style::Fill,
+) -> Option<photonic_core::color::Color> {
     match &fill.kind {
         photonic_core::style::FillKind::Solid(c) => Some(*c),
         _ => None,
     }
 }
 
-
 // ── simplify_path ─────────────────────────────────────────────────────────────
-
 
 // ── invert_colors ─────────────────────────────────────────────────────────────
 
-
 // ─── adjust_colors ─────────────────────────────────────────────────────────────
-
-
-
 
 // ── average_anchor_points ───────────────────────────────────────────────────────
 
-
 // ── outline_stroke ─────────────────────────────────────────────────────────────
-
-
 
 // ─── split_into_grid ─────────────────────────────────────────────────────────
 
-
 // ─── blend_colors ─────────────────────────────────────────────────────────────
-
 
 // ─── join_paths ───────────────────────────────────────────────────────────────
 
-
 // ─── pathfinder_crop ─────────────────────────────────────────────────────────
-
 
 // ─── pathfinder_minus_back ────────────────────────────────────────────────────
 
-
 // ─── pathfinder_minus_front ───────────────────────────────────────────────────
-
 
 // ─── pathfinder_trim ──────────────────────────────────────────────────────────
 
-
 // ─── pathfinder_outline ───────────────────────────────────────────────────────
-
 
 // ─── pathfinder_divide ────────────────────────────────────────────────────────
 
-
 // ─── divide_objects_below ─────────────────────────────────────────────────────
-
 
 // ─── pathfinder_merge ────────────────────────────────────────────────────────
 
-
 // ─── select_same ─────────────────────────────────────────────────────────────
-
 
 /// Extract the solid fill color from a node, or None if it has no solid fill.
 pub(crate) fn solid_fill_color(node: &SceneNode) -> Option<photonic_core::color::Color> {
@@ -903,14 +784,16 @@ pub(crate) fn solid_fill_color(node: &SceneNode) -> Option<photonic_core::color:
 }
 
 /// Euclidean distance between two RGBA colors in [0,1] space.
-pub(crate) fn color_distance(a: photonic_core::color::Color, b: photonic_core::color::Color) -> f32 {
+pub(crate) fn color_distance(
+    a: photonic_core::color::Color,
+    b: photonic_core::color::Color,
+) -> f32 {
     let dr = a.r - b.r;
     let dg = a.g - b.g;
     let db = a.b - b.b;
     let da = a.a - b.a;
     (dr * dr + dg * dg + db * db + da * da).sqrt()
 }
-
 
 /// Returns the horizontal center of a path node's bounding box (local space).
 pub(crate) fn path_center_x(node: &SceneNode) -> f32 {
@@ -934,23 +817,11 @@ pub(crate) fn path_center_y(node: &SceneNode) -> f32 {
 
 // ─── make_compound_path ───────────────────────────────────────────────────────
 
-
 // ─── release_compound_path ────────────────────────────────────────────────────
-
-
-
-
-
 
 // ─── Guide tools ─────────────────────────────────────────────────────────────
 
-
-
-
-
-
 // ─── magic_wand_select ────────────────────────────────────────────────────────
-
 
 /// Compute the world-space axis-aligned bounding box of a node using its
 /// transform and path bounding box (or a text fallback of 1×1 at origin).
@@ -982,25 +853,17 @@ pub(crate) fn node_world_aabb(node: &SceneNode) -> Option<(f64, f64, f64, f64)> 
 
 // ─── convert_anchor_points ────────────────────────────────────────────────────
 
-
 // ─── lasso_select ─────────────────────────────────────────────────────────────
-
 
 // ─── select_by_kind ──────────────────────────────────────────────────────────
 
-
 // ─── create_freehand_path ────────────────────────────────────────────────────
-
 
 // ─── Isolation Mode ──────────────────────────────────────────────────────────
 
-
-
 // ─── select_inside_group ─────────────────────────────────────────────────────
 
-
 // ─── get_recent_colors ───────────────────────────────────────────────────────
-
 
 /// Ray-casting point-in-polygon test (Jordan curve theorem).
 /// Returns true when `(px, py)` is strictly inside the polygon.
@@ -1023,86 +886,35 @@ pub(crate) fn point_in_polygon(px: f64, py: f64, poly: &[[f64; 2]]) -> bool {
 
 // ─── smooth_path ─────────────────────────────────────────────────────────────
 
-
 // ─── noise_deform ─────────────────────────────────────────────────────────────
-
 
 // ─── mirror_copy ──────────────────────────────────────────────────────────────
 
-
 // ─── pin_object_guides ────────────────────────────────────────────────────────
-
 
 // ─── reverse_node_order ───────────────────────────────────────────────────────
 
-
 // ─── prompt history ───────────────────────────────────────────────────────────
-
-
 
 // ─── Select Similar ───────────────────────────────────────────────────────────
 
-
 // ─── Asset Export ─────────────────────────────────────────────────────────────
-
-
 
 // ─── Character Styles ─────────────────────────────────────────────────────────
 
-
-
-
-
 // ─── Paragraph Styles ─────────────────────────────────────────────────────────
-
-
-
-
 
 // ─── Clipping Mask ────────────────────────────────────────────────────────────
 
-
-
 // ─── Type on a Path ───────────────────────────────────────────────────────────
-
-
 
 // ─── Text Direction ────────────────────────────────────────────────────────────
 
-
 // ─── Area Type ────────────────────────────────────────────────────────────────
-
-
 
 // ─── Text Frame Threading ─────────────────────────────────────────────────────
 
-
-
 // ─── Text Variable Binding ────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod create_shape_color_tests {
@@ -1125,7 +937,9 @@ mod create_shape_color_tests {
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
             video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),
-            video_jobs: Arc::new(StdMutex::new(crate::handlers::video_jobs::JobRegistry::new())),
+            video_jobs: Arc::new(StdMutex::new(
+                crate::handlers::video_jobs::JobRegistry::new(),
+            )),
         }
     }
 

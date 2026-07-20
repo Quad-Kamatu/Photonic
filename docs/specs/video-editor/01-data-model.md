@@ -180,13 +180,19 @@ their numeric values or keyframes.
 ### 5.1 Speed
 
 ```rust
+pub struct SpeedKey {
+    pub at: Tick,
+    pub ratio: Ratio,
+    pub interp: Interp,                          // Hold default; Linear/Bezier ease toward next key
+}
+
 pub enum SpeedMap {
     Constant(Ratio),                             // Ratio { num: i32, den: u32 }; 1/1 default; negative num = reverse
-    // Keyframed speed ramps: post-v1 (Non-goal for v1 phases; enum leaves room)
+    Keyframed { keys: Vec<SpeedKey> },            // additive serde tag
 }
 ```
 
-Mapping: source time = `source_in + (t - start) * speed` in exact rational arithmetic.
+Mapping: source time = `source_in + speed.source_delta(t - start)`. `Constant` and all-`Hold` ramps integrate with exact integer/rational arithmetic. `Linear`/`Bezier` ramps integrate deterministically and round to nearest source tick. First/last ratios hold outside keyed span; empty ramp is identity. Current code contract is normative. [20 §5](20-pro-workflows.md#5-g-11--speed-and-time-remap-ramps) owns residual on-clip UI, audio mapping, validation, and golden closure.
 
 ## 6. Animation (keyframes)
 

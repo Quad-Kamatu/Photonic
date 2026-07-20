@@ -29,10 +29,10 @@ use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
     self, AnchorSpace, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack,
-    CaptionWord, Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp, GradeOpKind,
-    GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode,
-    LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
-    TextClipContent, TimelineProject, TrackKind, TransitionKind,
+    CaptionWord, Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp,
+    GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort,
+    KaraokeMode, LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
+    TextClipContent, TimelineProject, TransitionKind,
 };
 use photonic_core::Color;
 use photonic_render::caption::CaptionWordRun;
@@ -110,6 +110,59 @@ pub struct CompiledFrame {
 /// 08 §3.4): beyond this a diagnostic warns but compilation still proceeds.
 pub const TIME_OFFSET_SOFT_CAP: usize = 4;
 
+/// Draft preview long-edge cap in pixels (24-preview-media-load §4).
+pub const DRAFT_MAX_LONG_EDGE: u32 = 960;
+
+/// Scale `(w, h)` so the long edge is ≤ `max_long_edge` (keeps aspect). No-op
+/// when already smaller or either dim is zero.
+pub fn fit_long_edge(w: u32, h: u32, max_long_edge: u32) -> (u32, u32) {
+    if w == 0 || h == 0 || max_long_edge == 0 {
+        return (w.max(1), h.max(1));
+    }
+    let long = w.max(h);
+    if long <= max_long_edge {
+        return (w, h);
+    }
+    let scale = max_long_edge as f64 / long as f64;
+    let nw = ((w as f64) * scale).round().max(1.0) as u32;
+    let nh = ((h as f64) * scale).round().max(1.0) as u32;
+    (nw, nh)
+}
+
+/// Single-asset source peek graph for the one-monitor `PreviewTarget::Asset`
+/// path (24-preview-media-load §3). Decode/still → Output at `out_w`×`out_h`.
+pub fn compile_asset_peek(
+    project: &TimelineProject,
+    asset: AssetId,
+    source_time: Tick,
+    quality: Quality,
+    out_w: u32,
+    out_h: u32,
+) -> CompiledFrame {
+    let mut b = Builder::new();
+    let w = out_w.max(1);
+    let h = out_h.max(1);
+    let kind = project
+        .media
+        .assets
+        .get(&asset)
+        .map(|a| a.kind)
+        .unwrap_or(AssetKind::Video);
+    let src = match kind {
+        AssetKind::Image => b.push(IrOp::DecodeStill { asset }, vec![]),
+        AssetKind::Video | AssetKind::Audio | AssetKind::VectorDoc | AssetKind::Lut3d => b.push(
+            IrOp::DecodeVideo {
+                asset,
+                src_time: source_time,
+                proxy: quality.proxy,
+            },
+            vec![],
+        ),
+    };
+    let output = b.push(IrOp::Output { w, h }, vec![(src, OutPort::default())]);
+    b.finish(Some(output))
+}
+
 /// Compile the active sequence at `tick` in `format_index` to a frame graph.
 ///
 /// `view_override` (08 §6.7) is session state — pass `None` for export/headless.
@@ -141,7 +194,16 @@ pub fn compile(
     cycle.insert(sequence);
 
     // Steps 1–4: fold the enabled video tracks bottom→top.
-    let program = fold_sequence(&mut b, project, seq, format_index, format, tick, quality, &mut cycle);
+    let program = fold_sequence(
+        &mut b,
+        project,
+        seq,
+        format_index,
+        format,
+        tick,
+        quality,
+        &mut cycle,
+    );
 
     // Step 5: caption overlay (enabled caption tracks with a cue covering t).
     let program = splice_captions(&mut b, seq, format, tick, program);
@@ -281,7 +343,7 @@ fn fold_sequence(
     let mut acc: Option<IrNodeId> = None;
 
     for track in &seq.video_tracks {
-        if track.kind != TrackKind::Video || !track.enabled {
+        if !track.kind.is_visual() || !track.enabled {
             continue;
         }
         let clips = track.clips.as_slice();
@@ -309,7 +371,16 @@ fn fold_sequence(
         // (each partner's own opacity is baked into its side of the mix).
         if let Some(tr) = active_transition(clips, idx, tick) {
             if let Some(node) = build_transition(
-                b, project, seq, format_index, format, clips, &tr, tick, quality, cycle,
+                b,
+                project,
+                seq,
+                format_index,
+                format,
+                clips,
+                &tr,
+                tick,
+                quality,
+                cycle,
             ) {
                 acc = Some(fold_over(b, acc, node, 1.0));
                 continue;
@@ -425,14 +496,32 @@ fn build_transition(
         return None;
     }
     let (out_img, out_op) = build_clip_chain(
-        b, project, seq, format_index, format, outgoing_clip, tick, quality, cycle,
+        b,
+        project,
+        seq,
+        format_index,
+        format,
+        outgoing_clip,
+        tick,
+        quality,
+        cycle,
     )?;
     let (in_img, in_op) = build_clip_chain(
-        b, project, seq, format_index, format, incoming_clip, tick, quality, cycle,
+        b,
+        project,
+        seq,
+        format_index,
+        format,
+        incoming_clip,
+        tick,
+        quality,
+        cycle,
     )?;
     let outgoing = bake_opacity(b, out_img, out_op);
     let incoming = bake_opacity(b, in_img, in_op);
-    Some(transition_mix(b, tr.kind, &tr.params, outgoing, incoming, tr.t))
+    Some(transition_mix(
+        b, tr.kind, &tr.params, outgoing, incoming, tr.t,
+    ))
 }
 
 /// Fade `node` toward transparent by `opacity` (premultiplied) when `opacity < 1`,
@@ -481,9 +570,13 @@ fn transition_mix(
     match kind {
         TransitionKind::CrossDissolve => merge_over(b, incoming, outgoing, t),
         TransitionKind::DipToBlack => dip_through(b, outgoing, incoming, t, opaque_black()),
-        TransitionKind::DipToColor => {
-            dip_through(b, outgoing, incoming, t, params.color.unwrap_or_else(opaque_black))
-        }
+        TransitionKind::DipToColor => dip_through(
+            b,
+            outgoing,
+            incoming,
+            t,
+            params.color.unwrap_or_else(opaque_black),
+        ),
         TransitionKind::Wipe | TransitionKind::Push => {
             b.diag(CompileDiagnostic::plain(format!(
                 "{kind:?} transition renders as a cross-dissolve in P3 \
@@ -624,9 +717,28 @@ fn build_clip_chain(
     // Step 3: composition substitutes the SOURCE op only; else the plain source.
     let source = match clip.composition {
         Some(graph_id) => lower_composition(
-            b, project, seq, format_index, format, clip, graph_id, tick, quality, cycle,
+            b,
+            project,
+            seq,
+            format_index,
+            format,
+            clip,
+            graph_id,
+            tick,
+            quality,
+            cycle,
         ),
-        None => build_clip_source(b, project, seq, format_index, format, clip, tick, quality, cycle),
+        None => build_clip_source(
+            b,
+            project,
+            seq,
+            format_index,
+            format,
+            clip,
+            tick,
+            quality,
+            cycle,
+        ),
     };
 
     // Remainder of step 2's chain, applied on top of the source/composition.
@@ -746,9 +858,16 @@ fn build_clip_source(
                 vec![],
             )
         }
-        ClipSource::NestedSequence { sequence } => {
-            build_nested_sequence(b, project, *sequence, format_index, format, src_time, quality, cycle)
-        }
+        ClipSource::NestedSequence { sequence } => build_nested_sequence(
+            b,
+            project,
+            *sequence,
+            format_index,
+            format,
+            src_time,
+            quality,
+            cycle,
+        ),
         ClipSource::SolidColor { color } => b.push(
             IrOp::SolidColor {
                 color: color_to_linear_premult(*color),
@@ -806,7 +925,9 @@ fn build_nested_sequence(
         return b.transparent(parent_format);
     };
 
-    let nested_format_index = nested.active_format.min(nested.formats.len().saturating_sub(1));
+    let nested_format_index = nested
+        .active_format
+        .min(nested.formats.len().saturating_sub(1));
     let Some(nested_format) = nested.formats.get(nested_format_index) else {
         b.diag(CompileDiagnostic::plain(format!(
             "nested sequence {sequence} has no formats; substituting transparent"
@@ -855,7 +976,17 @@ fn lower_composition(
         b.diag(CompileDiagnostic::plain(format!(
             "clip composition {graph_id} not found; using plain source"
         )));
-        return build_clip_source(b, project, seq, format_index, format, clip, tick, quality, cycle);
+        return build_clip_source(
+            b,
+            project,
+            seq,
+            format_index,
+            format,
+            clip,
+            tick,
+            quality,
+            cycle,
+        );
     };
 
     let mut lc = LowerCtx {
@@ -879,7 +1010,17 @@ fn lower_composition(
                 graph.output,
                 "composition Output has no input; falling back to plain clip source",
             ));
-            build_clip_source(b, project, seq, format_index, format, clip, tick, quality, cycle)
+            build_clip_source(
+                b,
+                project,
+                seq,
+                format_index,
+                format,
+                clip,
+                tick,
+                quality,
+                cycle,
+            )
         }
     }
 }
@@ -907,13 +1048,34 @@ fn splice_project_graph(
         return program;
     };
 
+    // The active sequence is normally present when a project graph splice runs
+    // (the engine only compiles a real sequence). But `project` is deserialized
+    // data — a project file could carry a `project_graph` with no sequences at
+    // all — so fall back to any sequence and, failing that, log-and-skip the
+    // splice rather than panic.
+    let Some(seq) = project
+        .active_sequence
+        .and_then(|id| project.sequences.get(&id))
+        // Deterministic fallback: pick the first sequence in insertion order, not
+        // an arbitrary HashMap iteration (which would splice a different sequence
+        // run-to-run for the same project file).
+        .or_else(|| {
+            project
+                .sequence_order
+                .first()
+                .and_then(|id| project.sequences.get(id))
+        })
+    else {
+        b.diag(CompileDiagnostic::plain(
+            "project graph splice requires at least one sequence; skipping splice".to_string(),
+        ));
+        return program;
+    };
+
     let mut cycle = HashSet::new();
     let mut lc = LowerCtx {
         project,
-        seq: project
-            .active_sequence
-            .and_then(|id| project.sequences.get(&id))
-            .unwrap_or_else(|| unreachable_seq(project)),
+        seq,
         format_index: 0,
         format,
         quality: Quality::FULL,
@@ -931,16 +1093,6 @@ fn splice_project_graph(
             program
         }
     }
-}
-
-/// The active sequence is always present when a project graph splice runs (the
-/// engine only compiles a real sequence); this helper keeps the borrow simple.
-fn unreachable_seq(project: &TimelineProject) -> &Sequence {
-    project
-        .sequences
-        .values()
-        .next()
-        .expect("project graph splice requires at least one sequence")
 }
 
 /// Per-instantiation lowering context for one graph (composition or project).
@@ -1186,7 +1338,9 @@ fn lower_node_uncached(
             // (08 §2 note). Per-out-port routing lands with multi-output lowering.
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
             b.push(
-                IrOp::ChannelSplit { channel: Channel::A },
+                IrOp::ChannelSplit {
+                    channel: Channel::A,
+                },
                 vec![(input, OutPort::default())],
             )
         }
@@ -1222,7 +1376,13 @@ fn lower_node_uncached(
             // `selected` resolves at compile time; P3 picks the primary input
             // (or first connected) — full selected-index eval lands with node
             // params (P8).
-            match primary().or_else(|| lc.graph.edges.iter().find(|e| e.to.0 == node.id).map(|e| e.from.0)) {
+            match primary().or_else(|| {
+                lc.graph
+                    .edges
+                    .iter()
+                    .find(|e| e.to.0 == node.id)
+                    .map(|e| e.from.0)
+            }) {
                 Some(src) => lower_node(b, lc, src, tick, cycle),
                 None => b.transparent(lc.format),
             }
@@ -1373,7 +1533,11 @@ fn splice_captions(
 /// positioned, styled, karaoke-resolved word runs for the render text pipeline
 /// (06 §5). Cues are non-overlapping (01 §4), so v1 collects at most one — the
 /// loop stays general. Deterministic in `tick` (no wall-clock).
-fn resolve_caption_batch(track: &CaptionTrack, tick: Tick, format: &SequenceFormat) -> CaptionBatch {
+fn resolve_caption_batch(
+    track: &CaptionTrack,
+    tick: Tick,
+    format: &SequenceFormat,
+) -> CaptionBatch {
     let mut cues = Vec::new();
     for cue in &track.cues {
         if cue.start <= tick && tick < cue.end {
@@ -1603,7 +1767,12 @@ fn eval_node_f32(anim: &AnimProps<GraphNodeParams>, path: &str, default: f32, t:
 }
 
 /// Evaluate a graph node's `Color` param lane at `t`.
-fn eval_node_color(anim: &AnimProps<GraphNodeParams>, path: &str, default: Color, t: Tick) -> Color {
+fn eval_node_color(
+    anim: &AnimProps<GraphNodeParams>,
+    path: &str,
+    default: Color,
+    t: Tick,
+) -> Color {
     let base = match anim.base.0.get(path) {
         Some(PropValue::Color(c)) => *c,
         _ => default,
@@ -1687,7 +1856,11 @@ fn vector_state_key(asset: AssetId, format: &SequenceFormat, src_time: Tick) -> 
     vector_state_key_for_ref(VectorRef::WholeDocument, format, src_time).combine(asset.0.as_u128())
 }
 
-fn vector_state_key_for_ref(vref: VectorRef, format: &SequenceFormat, src_time: Tick) -> VectorStateKey {
+fn vector_state_key_for_ref(
+    vref: VectorRef,
+    format: &SequenceFormat,
+    src_time: Tick,
+) -> VectorStateKey {
     use xxhash_rust::xxh3::Xxh3;
     let mut h = Xxh3::new();
     h.update(&[vref_tag(&vref)]);
@@ -1728,7 +1901,11 @@ impl CombineKey for VectorStateKey {
 /// Content hash of `(op discriminant, resolved params, input hashes)` — the
 /// cache identity of a node's result (02 §5). xxh3-128; deterministic across
 /// runs (no `Instant`/random state).
-pub fn content_hash(op: &IrOp, inputs: &[(IrNodeId, OutPort)], input_hashes: &[u128]) -> ContentHash {
+pub fn content_hash(
+    op: &IrOp,
+    inputs: &[(IrNodeId, OutPort)],
+    input_hashes: &[u128],
+) -> ContentHash {
     use xxhash_rust::xxh3::Xxh3;
     let mut h = Xxh3::new();
     hash_op(&mut h, op);
@@ -1747,7 +1924,11 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
     // so a mid-word highlight change is a distinct cache identity (06 §5).
     let f32b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f32| h.update(&v.to_bits().to_le_bytes());
     match op {
-        IrOp::DecodeVideo { asset, src_time, proxy } => {
+        IrOp::DecodeVideo {
+            asset,
+            src_time,
+            proxy,
+        } => {
             h.update(&[0]);
             h.update(&asset.0.as_u128().to_le_bytes());
             h.update(&src_time.0.to_le_bytes());
@@ -1757,7 +1938,12 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[1]);
             h.update(&asset.0.as_u128().to_le_bytes());
         }
-        IrOp::RasterVector { vref, doc_state, w, h: gh } => {
+        IrOp::RasterVector {
+            vref,
+            doc_state,
+            w,
+            h: gh,
+        } => {
             h.update(&[2]);
             h.update(&[vref_tag(vref)]);
             h.update(&doc_state.0.to_le_bytes());
@@ -1890,7 +2076,12 @@ fn hash_resolved_grade_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &crate::contract:
         Some(m) => {
             h.update(&[1, m.rectangle as u8, m.invert as u8]);
             for v in [
-                m.center[0], m.center[1], m.size[0], m.size[1], m.rotation, m.softness,
+                m.center[0],
+                m.center[1],
+                m.size[0],
+                m.size[1],
+                m.rotation,
+                m.softness,
             ] {
                 f32b(h, v);
             }
@@ -1985,8 +2176,8 @@ pub fn output_desc(format: &SequenceFormat) -> TextureDesc {
 mod tests {
     use super::*;
     use photonic_core::timeline::{
-        Clip, FrameRate, GraphEdge, GraphNode, GraphOp, InPort, MediaAsset, NodeGraph, OutPort as GOutPort,
-        Sequence, Track, TrackKind,
+        Clip, FrameRate, GraphEdge, GraphNode, GraphOp, InPort, MediaAsset, NodeGraph,
+        OutPort as GOutPort, Sequence, Track, TrackKind,
     };
     use photonic_core::Color;
 
@@ -2124,7 +2315,10 @@ mod tests {
         let ops: Vec<&str> = out.graph.nodes.iter().map(|n| op_name(&n.op)).collect();
         assert_eq!(ops, vec!["SolidColor", "Transform2D", "Output"]);
         let output = out.graph.output.unwrap();
-        assert!(matches!(out.graph.nodes[output.0 as usize].op, IrOp::Output { .. }));
+        assert!(matches!(
+            out.graph.nodes[output.0 as usize].op,
+            IrOp::Output { .. }
+        ));
     }
 
     #[test]
@@ -2203,7 +2397,11 @@ mod tests {
             out.graph.nodes[input.0 as usize].op,
             IrOp::Transform2D { .. }
         ));
-        assert!(!out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Merge { .. })));
+        assert!(!out
+            .graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, IrOp::Merge { .. })));
     }
 
     #[test]
@@ -2243,9 +2441,16 @@ mod tests {
         let mut solid = GraphNode::new(GraphOp::SolidColor);
         solid.params.base.0.set(
             "params.color",
-            PropValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+            PropValue::Color(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
         );
-        let merge = GraphNode::new(GraphOp::Merge { mode: BlendMode::Normal });
+        let merge = GraphNode::new(GraphOp::Merge {
+            mode: BlendMode::Normal,
+        });
         let output = GraphNode::new(GraphOp::Output);
         let (ci, so, mg, ou) = (clip_in.id, solid.id, merge.id, output.id);
         let mut nodes = std::collections::HashMap::new();
@@ -2257,9 +2462,18 @@ mod tests {
             name: "comp".into(),
             nodes,
             edges: vec![
-                GraphEdge { from: (so, GOutPort::PRIMARY), to: (mg, InPort::A) },
-                GraphEdge { from: (ci, GOutPort::PRIMARY), to: (mg, InPort::B) },
-                GraphEdge { from: (mg, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) },
+                GraphEdge {
+                    from: (so, GOutPort::PRIMARY),
+                    to: (mg, InPort::A),
+                },
+                GraphEdge {
+                    from: (ci, GOutPort::PRIMARY),
+                    to: (mg, InPort::B),
+                },
+                GraphEdge {
+                    from: (mg, GOutPort::PRIMARY),
+                    to: (ou, InPort::PRIMARY),
+                },
             ],
             output: ou,
             ui: std::collections::HashMap::new(),
@@ -2284,7 +2498,11 @@ mod tests {
             .position(|n| matches!(n.op, IrOp::Merge { .. }))
             .expect("composition Merge present");
         assert_eq!(
-            out.graph.nodes.iter().filter(|n| matches!(n.op, IrOp::Merge { .. })).count(),
+            out.graph
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.op, IrOp::Merge { .. }))
+                .count(),
             1,
             "only the composition's Merge — no spurious track-fold Merge"
         );
@@ -2296,7 +2514,10 @@ mod tests {
         assert_eq!(merge.inputs.len(), 2, "binary Merge has both inputs wired");
         for (input, _) in &merge.inputs {
             assert!(
-                matches!(out.graph.nodes[input.0 as usize].op, IrOp::SolidColor { .. }),
+                matches!(
+                    out.graph.nodes[input.0 as usize].op,
+                    IrOp::SolidColor { .. }
+                ),
                 "each Merge input is a SolidColor source"
             );
         }
@@ -2306,7 +2527,10 @@ mod tests {
             .iter()
             .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
             .count();
-        assert_eq!(solids, 2, "comp SolidColor + clip source via ClipIn stay distinct");
+        assert_eq!(
+            solids, 2,
+            "comp SolidColor + clip source via ClipIn stay distinct"
+        );
 
         // Source-substitution (08 §4): the composition replaces ONLY the source
         // op; the still-applied default chain rides on top. So the IR Output's
@@ -2346,7 +2570,10 @@ mod tests {
             id: GraphId::new(),
             name: "pg".into(),
             nodes,
-            edges: vec![GraphEdge { from: (bl, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) }],
+            edges: vec![GraphEdge {
+                from: (bl, GOutPort::PRIMARY),
+                to: (ou, InPort::PRIMARY),
+            }],
             output: ou,
             ui: std::collections::HashMap::new(),
         };
@@ -2371,7 +2598,10 @@ mod tests {
         // Output's input is the filter (splice sits between program and Output).
         let output = out.graph.output.unwrap();
         let out_in = out.graph.nodes[output.0 as usize].inputs[0].0;
-        assert!(matches!(out.graph.nodes[out_in.0 as usize].op, IrOp::Effect { .. }));
+        assert!(matches!(
+            out.graph.nodes[out_in.0 as usize].op,
+            IrOp::Effect { .. }
+        ));
     }
 
     #[test]
@@ -2412,12 +2642,26 @@ mod tests {
         let inner_id = inner.id;
         let mut bottom = Track::new(TrackKind::Video, "V1");
         bottom.clips.push(solid_clip(
-            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
             0,
             Tick::from_seconds(2).0,
         ));
         let mut top = Track::new(TrackKind::Video, "V2");
-        let mut blue = solid_clip(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }, 0, Tick::from_seconds(2).0);
+        let mut blue = solid_clip(
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            0,
+            Tick::from_seconds(2).0,
+        );
         blue.transform.base.opacity = 0.5;
         top.clips.push(blue);
         inner.video_tracks.push(bottom);
@@ -2450,7 +2694,10 @@ mod tests {
             .iter()
             .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
             .count();
-        assert!(solids >= 2, "inner composite lowers both source solids, got {solids}");
+        assert!(
+            solids >= 2,
+            "inner composite lowers both source solids, got {solids}"
+        );
 
         // The composited pixels match the inner sequence's blend, evaluated through
         // the deterministic CPU reference (03 §6).
@@ -2474,7 +2721,16 @@ mod tests {
         let (mut project, seq_id) = base_project();
         for _ in 0..2 {
             let tk = add_video_track(&mut project, seq_id);
-            let mut clip = solid_clip(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }, 0, Tick::from_seconds(2).0);
+            let mut clip = solid_clip(
+                Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.6,
+                    a: 1.0,
+                },
+                0,
+                Tick::from_seconds(2).0,
+            );
             // Make the top one semi-transparent so a Merge is forced but the
             // SolidColor + Transform2D still dedup.
             clip.transform.base.opacity = 1.0;
@@ -2494,12 +2750,49 @@ mod tests {
     }
 
     #[test]
+    fn fit_long_edge_caps_draft_size() {
+        assert_eq!(fit_long_edge(1920, 1080, DRAFT_MAX_LONG_EDGE), (960, 540));
+        assert_eq!(fit_long_edge(640, 360, DRAFT_MAX_LONG_EDGE), (640, 360));
+        assert_eq!(fit_long_edge(1080, 1920, DRAFT_MAX_LONG_EDGE), (540, 960));
+    }
+
+    #[test]
+    fn compile_asset_peek_emits_decode_and_output() {
+        use photonic_core::timeline::{AssetKind, MediaAsset, Sequence, TimelineProject};
+        let mut project = TimelineProject::new();
+        let asset = MediaAsset::from_file(AssetKind::Video, "/tmp/x.mp4");
+        let id = asset.id;
+        project.media.insert(asset);
+        let seq = Sequence::new("S", FrameRate::FPS_30, 1920, 1080);
+        project.sequences.insert(seq.id, seq);
+        let compiled =
+            compile_asset_peek(&project, id, Tick::ZERO, Quality::PREVIEW, 640, 360);
+        assert!(compiled.graph.nodes.iter().any(
+            |n| matches!(n.op, IrOp::DecodeVideo { asset: a, .. } if a == id)
+        ));
+        assert!(compiled
+            .graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, IrOp::Output { w: 640, h: 360 })));
+    }
+
+    #[test]
     fn compile_is_deterministic_across_runs() {
         let (mut project, seq_id) = base_project();
         let tk = add_video_track(&mut project, seq_id);
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
-            .push(solid_clip(Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }, 0, Tick::from_seconds(2).0));
+            .push(solid_clip(
+                Color {
+                    r: 0.1,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                },
+                0,
+                Tick::from_seconds(2).0,
+            ));
         let a = compile(&project, seq_id, 0, Tick(500), Quality::PREVIEW, None);
         let b = compile(&project, seq_id, 0, Tick(500), Quality::PREVIEW, None);
         let ha: Vec<u128> = a.graph.nodes.iter().map(|n| n.content_hash.0).collect();
@@ -2514,7 +2807,11 @@ mod tests {
         let aid = asset.id;
         project.media.insert(asset);
         let tk = add_video_track(&mut project, seq_id);
-        let mut clip = Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4));
+        let mut clip = Clip::new(
+            ClipSource::Asset { asset: aid },
+            Tick(0),
+            Tick::from_seconds(4),
+        );
         clip.source_in = Tick(1000);
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
@@ -2525,7 +2822,9 @@ mod tests {
             .nodes
             .iter()
             .find_map(|n| match &n.op {
-                IrOp::DecodeVideo { src_time, proxy, .. } => Some((*src_time, *proxy)),
+                IrOp::DecodeVideo {
+                    src_time, proxy, ..
+                } => Some((*src_time, *proxy)),
                 _ => None,
             })
             .expect("decode node present");
@@ -2540,7 +2839,16 @@ mod tests {
         let grade_node_hash = |stops: f32| -> u128 {
             let (mut project, seq_id) = base_project();
             let tk = add_video_track(&mut project, seq_id);
-            let mut clip = solid_clip(Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, 0, Tick::from_seconds(2).0);
+            let mut clip = solid_clip(
+                Color {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 1.0,
+                },
+                0,
+                Tick::from_seconds(2).0,
+            );
             let mut grade = Grade::new();
             grade.ops.push(GradeOp::new(
                 GradeOpKind::Exposure,
@@ -2588,7 +2896,10 @@ mod tests {
             id: GraphId::new(),
             name: "pg".into(),
             nodes,
-            edges: vec![GraphEdge { from: (tx, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) }],
+            edges: vec![GraphEdge {
+                from: (tx, GOutPort::PRIMARY),
+                to: (ou, InPort::PRIMARY),
+            }],
             output: ou,
             ui: std::collections::HashMap::new(),
         };
@@ -2628,9 +2939,18 @@ mod tests {
             name: "comp".into(),
             nodes,
             edges: vec![
-                GraphEdge { from: (ci, GOutPort::PRIMARY), to: (sp, InPort::PRIMARY) },
-                GraphEdge { from: (sp, GOutPort::PRIMARY), to: (ma, InPort::PRIMARY) },
-                GraphEdge { from: (ma, GOutPort::PRIMARY), to: (ou, InPort::PRIMARY) },
+                GraphEdge {
+                    from: (ci, GOutPort::PRIMARY),
+                    to: (sp, InPort::PRIMARY),
+                },
+                GraphEdge {
+                    from: (sp, GOutPort::PRIMARY),
+                    to: (ma, InPort::PRIMARY),
+                },
+                GraphEdge {
+                    from: (ma, GOutPort::PRIMARY),
+                    to: (ou, InPort::PRIMARY),
+                },
             ],
             output: ou,
             ui: std::collections::HashMap::new(),
@@ -2646,15 +2966,24 @@ mod tests {
         let out = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
-            out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::ChannelSplit { .. })),
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::ChannelSplit { .. })),
             "ChannelSplit lowered to its dedicated IR op"
         );
         assert!(
-            out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::MatteExtract { .. })),
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::MatteExtract { .. })),
             "MaskFromMatte lowered to MatteExtract"
         );
         assert!(
-            !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Effect { .. })),
+            !out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Effect { .. })),
             "no generic Effect placeholders for these ops"
         );
     }
@@ -2667,12 +2996,26 @@ mod tests {
         let tk = add_video_track(&mut project, seq_id);
         let clips = &mut project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk].clips;
         clips.push(Clip::new(
-            ClipSource::SolidColor { color: Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } },
+            ClipSource::SolidColor {
+                color: Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            },
             Tick(0),
             Tick(100),
         ));
         let mut b = Clip::new(
-            ClipSource::SolidColor { color: Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } },
+            ClipSource::SolidColor {
+                color: Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            },
             Tick(100),
             Tick(100),
         );
@@ -2711,6 +3054,8 @@ mod tests {
             .expect("a CaptionOverlay node is present");
         match &n.op {
             IrOp::CaptionOverlay { cue_batch } => (cue_batch, n.content_hash),
+            // Unreachable: `find` above already matched on `IrOp::CaptionOverlay`,
+            // so `n.op` is guaranteed to be that variant here.
             _ => unreachable!(),
         }
     }
@@ -2720,8 +3065,18 @@ mod tests {
         track.style = CaptionStyle {
             highlight: Some(KaraokeStyle {
                 mode: KaraokeMode::WordPop,
-                active_color: Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }, // yellow
-                inactive_color: Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, // grey
+                active_color: Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                }, // yellow
+                inactive_color: Color {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 1.0,
+                }, // grey
             }),
             ..CaptionStyle::default()
         };
@@ -2757,7 +3112,10 @@ mod tests {
         let out = compile(&project, seq_id, 0, Tick(50), Quality::FULL, None);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(
-            out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
             "graph has a CaptionOverlay node"
         );
         let (batch, _) = caption_node(&out.graph);
@@ -2787,19 +3145,20 @@ mod tests {
         // Tick 300 is past the cue's [0,200) span.
         let out = compile(&project, seq_id, 0, Tick(300), Quality::FULL, None);
         assert!(
-            !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            !out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
             "no covering cue ⇒ no CaptionOverlay"
         );
         // A disabled track never overlays even when a cue covers the tick.
-        project
-            .sequences
-            .get_mut(&seq_id)
-            .unwrap()
-            .caption_tracks[0]
-            .enabled = false;
+        project.sequences.get_mut(&seq_id).unwrap().caption_tracks[0].enabled = false;
         let out = compile(&project, seq_id, 0, Tick(50), Quality::FULL, None);
         assert!(
-            !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            !out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
             "disabled caption track ⇒ no CaptionOverlay"
         );
     }
@@ -2831,16 +3190,25 @@ mod tests {
         let g_before = at(50);
         let (b0, h0) = caption_node(&g_before);
         assert_eq!(b0.cues[0].words[0].color, active, "hello active at t=50");
-        assert_eq!(b0.cues[0].words[1].color, inactive, "world inactive at t=50");
+        assert_eq!(
+            b0.cues[0].words[1].color, inactive,
+            "world inactive at t=50"
+        );
 
         // t=150: swap — word1 ("world") active, word0 inactive.
         let g_mid = at(150);
         let (b1, h1) = caption_node(&g_mid);
-        assert_eq!(b1.cues[0].words[0].color, inactive, "hello inactive at t=150");
+        assert_eq!(
+            b1.cues[0].words[0].color, inactive,
+            "hello inactive at t=150"
+        );
         assert_eq!(b1.cues[0].words[1].color, active, "world active at t=150");
 
         // The sweep must change the CaptionOverlay content hash (drives re-render).
-        assert_ne!(h0, h1, "karaoke sweep changes the CaptionOverlay content hash");
+        assert_ne!(
+            h0, h1,
+            "karaoke sweep changes the CaptionOverlay content hash"
+        );
     }
 
     fn op_name(op: &IrOp) -> &'static str {

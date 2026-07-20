@@ -297,7 +297,9 @@ impl CommandHistory {
     /// old `undo_stack.last()`. (Test-only inspection helper.)
     #[cfg(test)]
     pub(crate) fn current_command(&self) -> Option<&Command> {
-        self.nodes.get(&self.current).and_then(|n| n.command.as_ref())
+        self.nodes
+            .get(&self.current)
+            .and_then(|n| n.command.as_ref())
     }
 
     /// Navigate the document to an arbitrary tree node: undo up to the lowest

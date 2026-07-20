@@ -20,13 +20,13 @@ mod document;
 mod editors;
 mod history;
 mod inspector;
-mod modify;
 mod layers_panel;
+pub(crate) mod media_pool;
+mod modify;
 mod navigator;
 mod toolbar;
 mod tools_panel;
 mod vertex_panel;
-pub(crate) mod media_pool;
 pub(crate) mod video;
 
 pub(crate) use video::{ColorPageTab, ScopeKind, VideoPanelUi};
@@ -149,7 +149,10 @@ pub enum PanelAction {
     UpdateNodesFill { node_ids: Vec<NodeId>, fill: Fill },
     /// Apply the same stroke to every listed node at once (multi-selection edit).
     /// Recorded as a single undoable batch.
-    UpdateNodesStroke { node_ids: Vec<NodeId>, stroke: Stroke },
+    UpdateNodesStroke {
+        node_ids: Vec<NodeId>,
+        stroke: Stroke,
+    },
     /// Convert each listed path's stroke into a filled outline shape (Illustrator
     /// "Outline Stroke"). Paths without an enabled, positive-width stroke are
     /// skipped. Recorded as a single undoable batch.
@@ -851,9 +854,7 @@ pub enum PanelAction {
         parent: Option<photonic_core::timeline::BinId>,
     },
     /// Remove a media bin (assets fall back to the root).
-    MediaRemoveBin {
-        bin: photonic_core::timeline::BinId,
-    },
+    MediaRemoveBin { bin: photonic_core::timeline::BinId },
     /// Remove an asset from the pool.
     MediaRemoveAsset {
         asset: photonic_core::timeline::AssetId,
@@ -869,6 +870,8 @@ pub enum PanelAction {
     },
     /// Engine-wide proxy playback mode (05 §4; `EngineCmd::SetProxyMode`).
     MediaSetProxyMode { mode: photonic_video::ProxyMode },
+    /// Build reusable editing proxies for every file-backed video in the pool.
+    MediaGenerateProxies,
     /// Insert the asset as a clip at the playhead on the first compatible
     /// track (double-click / context menu; drag-to-timeline is the primary
     /// path and is handled in the timeline panel itself).
@@ -1007,9 +1010,7 @@ impl PanelAction {
             WheelAction::AddAnchorPoints(id) => Self::AddAnchorPoints { node_id: id },
             WheelAction::SimplifyPath(id) => Self::OpenSimplifyDialog { node_id: id },
             WheelAction::MergeVertices(id) => Self::OpenMergeVerticesDialog { node_id: id },
-            WheelAction::OutlineStroke(id) => Self::OutlineStroke {
-                node_ids: vec![id],
-            },
+            WheelAction::OutlineStroke(id) => Self::OutlineStroke { node_ids: vec![id] },
             WheelAction::ReversePathDirection(id) => Self::ReversePathDirection { node_id: id },
             WheelAction::AverageAnchorPoints(id) => Self::AverageAnchorPoints { node_id: id },
             WheelAction::ClosePath(id) => Self::JoinPaths { node_ids: vec![id] },
@@ -1051,9 +1052,6 @@ pub enum ZOrderOp {
     SendBackward,
     BringForward,
 }
-
-
-
 
 /// Draw the right properties panel.
 /// Returns an optional action if the user clicked a boolean operation button.
@@ -1569,25 +1567,6 @@ pub(crate) fn draw_drawer(
 
     ctx.action.take()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ─── Fill editor ─────────────────────────────────────────────────────────────
 

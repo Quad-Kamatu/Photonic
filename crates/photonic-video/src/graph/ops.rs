@@ -284,7 +284,16 @@ mod tests {
 
     #[test]
     fn identity_transform_is_passthrough() {
-        let img = solid(3, 3, LinearColor { r: 0.1, g: 0.2, b: 0.3, a: 1.0 });
+        let img = solid(
+            3,
+            3,
+            LinearColor {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            },
+        );
         let out = transform2d(&img, Mat3::IDENTITY, Sampling::Bilinear);
         assert_eq!(out, img);
     }
@@ -307,8 +316,26 @@ mod tests {
     #[test]
     fn merge_opaque_over_replaces_backdrop() {
         // Opaque red over opaque blue with Normal, opacity 1 → red.
-        let top = solid(2, 2, LinearColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
-        let bottom = solid(2, 2, LinearColor { r: 0.0, g: 0.0, b: 1.0, a: 1.0 });
+        let top = solid(
+            2,
+            2,
+            LinearColor {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        let bottom = solid(
+            2,
+            2,
+            LinearColor {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
         let out = merge(&top, &bottom, BlendMode::Normal, 1.0);
         for p in &out.pixels {
             assert!((p[0] - 1.0).abs() < 1e-6);
@@ -321,8 +348,26 @@ mod tests {
     #[test]
     fn merge_half_opacity_is_linear_blend() {
         // Opaque white over opaque black at opacity 0.5 → premultiplied 0.5 grey.
-        let top = solid(1, 1, LinearColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-        let bottom = solid(1, 1, LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+        let top = solid(
+            1,
+            1,
+            LinearColor {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
+        let bottom = solid(
+            1,
+            1,
+            LinearColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
         let out = merge(&top, &bottom, BlendMode::Normal, 0.5);
         let p = out.pixels[0];
         #[allow(clippy::needless_range_loop)]
@@ -334,8 +379,26 @@ mod tests {
 
     #[test]
     fn merge_transparent_top_keeps_backdrop() {
-        let top = solid(1, 1, LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
-        let bottom = solid(1, 1, LinearColor { r: 0.3, g: 0.4, b: 0.5, a: 1.0 });
+        let top = solid(
+            1,
+            1,
+            LinearColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        );
+        let bottom = solid(
+            1,
+            1,
+            LinearColor {
+                r: 0.3,
+                g: 0.4,
+                b: 0.5,
+                a: 1.0,
+            },
+        );
         let out = merge(&top, &bottom, BlendMode::Normal, 1.0);
         let p = out.pixels[0];
         assert!((p[0] - 0.3).abs() < 1e-6);
@@ -347,7 +410,16 @@ mod tests {
     #[test]
     fn merge_over_transparent_backdrop_premultiplies_source() {
         // Opaque red over transparent, opacity 1 → premultiplied red, alpha 1.
-        let top = solid(1, 1, LinearColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+        let top = solid(
+            1,
+            1,
+            LinearColor {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
         let bottom = Image::new(1, 1);
         let out = merge(&top, &bottom, BlendMode::Normal, 1.0);
         assert_eq!(out.pixels[0], premult(1.0, 0.0, 0.0, 1.0));
@@ -355,7 +427,16 @@ mod tests {
 
     #[test]
     fn invert_opaque_is_one_minus_rgb() {
-        let img = solid(2, 2, LinearColor { r: 0.2, g: 0.6, b: 0.9, a: 1.0 });
+        let img = solid(
+            2,
+            2,
+            LinearColor {
+                r: 0.2,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            },
+        );
         let out = invert(&img);
         for p in &out.pixels {
             assert!((p[0] - 0.8).abs() < 1e-6, "r={}", p[0]);

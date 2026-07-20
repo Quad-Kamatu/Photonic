@@ -1403,7 +1403,13 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
-        history.execute(Command::AddNode { node, layer_id: None }, doc);
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            doc,
+        );
         *doc_modified = true;
     }
 

@@ -240,8 +240,10 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                 .on_hover_text("Edit fill — opens the color popup")
                                 .clicked()
                             {
-                                action =
-                                    Some(PanelAction::OpenColorPopup { node_id: nid, stroke: false });
+                                action = Some(PanelAction::OpenColorPopup {
+                                    node_id: nid,
+                                    stroke: false,
+                                });
                             }
                             let label = {
                                 use photonic_core::style::FillKind as FK;
@@ -293,10 +295,7 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                                 fill,
                                             }
                                         } else {
-                                            PanelAction::UpdateNodeFill {
-                                                node_id: nid,
-                                                fill,
-                                            }
+                                            PanelAction::UpdateNodeFill { node_id: nid, fill }
                                         });
                                     }
                                     if resp.hovered() {
@@ -637,8 +636,7 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                         changed = true;
                                     }
                                     if ui.button("+ Stroke").clicked() {
-                                        effects
-                                            .push(LayerEffect::Stroke(StrokeEffect::default()));
+                                        effects.push(LayerEffect::Stroke(StrokeEffect::default()));
                                         changed = true;
                                     }
                                 });
@@ -2468,10 +2466,9 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             if let Some((ids, from)) =
                 ui.data_mut(|d| d.remove_temp::<(Vec<NodeId>, [f32; 4])>(pending_pick_id))
             {
-                action = Some(PanelAction::StartEyedropper(EyedropperTarget::RecolorSwatch {
-                    ids,
-                    from,
-                }));
+                action = Some(PanelAction::StartEyedropper(
+                    EyedropperTarget::RecolorSwatch { ids, from },
+                ));
             }
 
             ui.horizontal_wrapped(|ui| {

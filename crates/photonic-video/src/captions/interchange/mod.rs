@@ -64,7 +64,9 @@ pub(crate) fn parse_ms_timestamp(s: &str, frac_sep: char) -> Option<Tick> {
     }
     let ms: i64 = frac.parse().ok()?;
     let total_ms = (h * 3600 + m * 60 + sec) * 1000 + ms;
-    Some(Tick(photonic_core::timeline::TICKS_PER_SECOND / 1000 * total_ms))
+    Some(Tick(
+        photonic_core::timeline::TICKS_PER_SECOND / 1000 * total_ms,
+    ))
 }
 
 /// Format a [`Tick`] as `HH:MM:SS<sep>mmm`.
@@ -86,7 +88,8 @@ mod shared_tests {
 
     #[test]
     fn ms_timestamp_round_trips() {
-        let t = Tick::from_seconds(3661) + Tick(photonic_core::timeline::TICKS_PER_SECOND / 1000 * 250);
+        let t =
+            Tick::from_seconds(3661) + Tick(photonic_core::timeline::TICKS_PER_SECOND / 1000 * 250);
         let formatted = format_ms_timestamp(t, ',');
         assert_eq!(formatted, "01:01:01,250");
         assert_eq!(parse_ms_timestamp(&formatted, ',').unwrap(), t);

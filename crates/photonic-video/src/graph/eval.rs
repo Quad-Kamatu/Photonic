@@ -131,7 +131,14 @@ impl GpuFrameSource for NullFrameSource {
     fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<GpuFrame> {
         None
     }
-    fn vector_texture(&mut self, _: &GpuContext, _: VectorRef, _: VectorStateKey, _: u32, _: u32) -> Option<GpuFrame> {
+    fn vector_texture(
+        &mut self,
+        _: &GpuContext,
+        _: VectorRef,
+        _: VectorStateKey,
+        _: u32,
+        _: u32,
+    ) -> Option<GpuFrame> {
         None
     }
 }
@@ -194,8 +201,7 @@ impl Evaluator {
         source: &mut dyn GpuFrameSource,
     ) -> Option<Arc<wgpu::Texture>> {
         let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
-        let mut results: Vec<Option<GpuFrame>> =
-            (0..graph.nodes.len()).map(|_| None).collect();
+        let mut results: Vec<Option<GpuFrame>> = (0..graph.nodes.len()).map(|_| None).collect();
 
         for (i, node) in graph.nodes.iter().enumerate() {
             let inputs: Vec<GpuFrame> = node
@@ -205,9 +211,11 @@ impl Evaluator {
                 .collect();
 
             let out = match &node.op {
-                IrOp::DecodeVideo { asset, src_time, proxy } => match source
-                    .video_texture(&self.gpu, *asset, *src_time, *proxy)
-                {
+                IrOp::DecodeVideo {
+                    asset,
+                    src_time,
+                    proxy,
+                } => match source.video_texture(&self.gpu, *asset, *src_time, *proxy) {
                     Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
                     None => self.transparent(cw, ch),
                 },
@@ -215,9 +223,12 @@ impl Evaluator {
                     Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
                     None => self.transparent(cw, ch),
                 },
-                IrOp::RasterVector { vref, doc_state, w, h } => match source
-                    .vector_texture(&self.gpu, *vref, *doc_state, *w, *h)
-                {
+                IrOp::RasterVector {
+                    vref,
+                    doc_state,
+                    w,
+                    h,
+                } => match source.vector_texture(&self.gpu, *vref, *doc_state, *w, *h) {
                     Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
                     None => self.transparent(cw, ch),
                 },
@@ -250,7 +261,10 @@ impl Evaluator {
         ch: u32,
     ) -> GpuFrame {
         let (w, h) = op_size(&node.op, cw, ch);
-        let desc = TextureDesc { width: w, height: h };
+        let desc = TextureDesc {
+            width: w,
+            height: h,
+        };
         let (target, valid) = self.cache.lookup_or_alloc(node.content_hash, desc);
         if valid {
             return GpuFrame::new(target, w, h);
@@ -304,13 +318,8 @@ impl Evaluator {
             }
             IrOp::Merge { opacity, .. } => match (inputs.first(), inputs.get(1)) {
                 (Some(top), Some(bottom)) => {
-                    self.passes.merge(
-                        &self.gpu,
-                        &top.texture,
-                        &bottom.texture,
-                        *opacity,
-                        target,
-                    );
+                    self.passes
+                        .merge(&self.gpu, &top.texture, &bottom.texture, *opacity, target);
                 }
                 (Some(only), None) | (None, Some(only)) => {
                     self.passes.blit(&self.gpu, &only.texture, target);
@@ -357,7 +366,10 @@ impl Evaluator {
             }
             // Real effect kernel: Invert (08 §3). Other kinds fall through to the
             // blit passthrough below until their `ResolvedParams` payload lands.
-            IrOp::Effect { kind: EffectKind::Invert, .. } => match inputs.first() {
+            IrOp::Effect {
+                kind: EffectKind::Invert,
+                ..
+            } => match inputs.first() {
                 Some(src) => self.passes.invert(&self.gpu, &src.texture, target),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
@@ -405,10 +417,15 @@ impl Evaluator {
         // Key transparents in a reserved high-bit namespace so fillers never
         // collide with real content hashes (xxh3 fills the low 120 bits; the top
         // byte 0xFE is reserved here).
-        let hash = crate::graph::ir::ContentHash(
-            (0xFE_u128 << 120) | ((w as u128) << 32) | h as u128,
+        let hash =
+            crate::graph::ir::ContentHash((0xFE_u128 << 120) | ((w as u128) << 32) | h as u128);
+        let (tex, valid) = self.cache.lookup_or_alloc(
+            hash,
+            TextureDesc {
+                width: w,
+                height: h,
+            },
         );
-        let (tex, valid) = self.cache.lookup_or_alloc(hash, TextureDesc { width: w, height: h });
         if !valid {
             self.passes.fill(&self.gpu, &tex, [0.0; 4]);
             self.cache.mark_rendered(hash);
@@ -513,7 +530,12 @@ impl Passes {
         // Merge: premultiplied `over`, Normal only (26-mode seam).
         let merge_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("merge_bgl"),
-            entries: &[tex_entry(0), tex_entry(1), sampler_entry(2), uniform_entry(3)],
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                sampler_entry(2),
+                uniform_entry(3),
+            ],
         });
         let merge_src = format!(
             "{QUAD_VS}\n@group(0) @binding(0) var t_top: texture_2d<f32>;\n@group(0) @binding(1) var t_bot: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct M {{ opacity: f32, _p0: f32, _p1: f32, _p2: f32 }}\n@group(0) @binding(3) var<uniform> m: M;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let top = textureSample(t_top, s, i.uv) * m.opacity;\n  let bot = textureSample(t_bot, s, i.uv);\n  return top + bot * (1.0 - top.a);\n}}\n"
@@ -611,11 +633,13 @@ impl Passes {
             source_w as f32,
             source_h as f32,
         ];
-        let buffer = gpu.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("transform_uniform"),
-            contents: bytemuck::cast_slice(&uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let buffer = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("transform_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
         let view = src.create_view(&Default::default());
         let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("transform_bg"),
@@ -815,7 +839,12 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 /// Read a `Rgba16Float` texture back to CPU as `[r, g, b, a]` f32 pixels
 /// (row-major, `w*h`). Used by tests and the engine's sampled-pixel status.
-pub fn read_texture_rgba16f(gpu: &GpuContext, tex: &wgpu::Texture, w: u32, h: u32) -> Vec<[f32; 4]> {
+pub fn read_texture_rgba16f(
+    gpu: &GpuContext,
+    tex: &wgpu::Texture,
+    w: u32,
+    h: u32,
+) -> Vec<[f32; 4]> {
     let bpp = 8u32; // Rgba16Float
     let unaligned = w * bpp;
     let bpr = align256(unaligned);
@@ -920,13 +949,7 @@ mod tests {
         fn decode_still(&mut self, _: AssetId, _: u32, _: u32) -> Image {
             self.image.clone()
         }
-        fn raster_vector(
-            &mut self,
-            _: VectorRef,
-            _: VectorStateKey,
-            _: u32,
-            _: u32,
-        ) -> Image {
+        fn raster_vector(&mut self, _: VectorRef, _: VectorStateKey, _: u32, _: u32) -> Image {
             self.image.clone()
         }
     }
@@ -1109,11 +1132,8 @@ mod tests {
             let mut cpu_source = PatternCpuSource {
                 image: image.clone(),
             };
-            let expected = crate::graph::eval_cpu::evaluate(
-                &graph,
-                (canvas_w, canvas_h),
-                &mut cpu_source,
-            );
+            let expected =
+                crate::graph::eval_cpu::evaluate(&graph, (canvas_w, canvas_h), &mut cpu_source);
             let mut gpu_source = PatternSource {
                 frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
             };
@@ -1190,7 +1210,12 @@ mod tests {
         let mut t = Track::new(TrackKind::Video, "V1");
         t.clips.push(Clip::new(
             ClipSource::SolidColor {
-                color: Color { r: 0.5, g: 0.25, b: 0.75, a: 1.0 },
+                color: Color {
+                    r: 0.5,
+                    g: 0.25,
+                    b: 0.75,
+                    a: 1.0,
+                },
             },
             crate::contract::Tick(0),
             crate::contract::Tick::from_seconds(2),
@@ -1198,7 +1223,14 @@ mod tests {
         seq.video_tracks.push(t);
         project.insert_sequence(seq);
 
-        let compiled = compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None);
+        let compiled = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        );
         let cpu = crate::graph::eval_cpu::evaluate(
             &compiled.graph,
             (8, 8),
@@ -1242,7 +1274,14 @@ mod tests {
         t.clips.push(clip);
         seq.video_tracks.push(t);
         project.insert_sequence(seq);
-        compile(&project, seq_id, 0, crate::contract::Tick(0), Quality::FULL, None)
+        compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(0),
+            Quality::FULL,
+            None,
+        )
     }
 
     fn assert_graph_gpu_matches_cpu(compiled: &crate::graph::compile::CompiledFrame, tol: f32) {
@@ -1279,7 +1318,12 @@ mod tests {
     fn graded_solid_gpu_matches_cpu_reference() {
         use photonic_core::timeline::grade::{Grade, GradeOp, GradeOpKind, GradeOpParams};
         let compiled = solid_project_graph(
-            Color { r: 0.5, g: 0.4, b: 0.6, a: 1.0 },
+            Color {
+                r: 0.5,
+                g: 0.4,
+                b: 0.6,
+                a: 1.0,
+            },
             |clip| {
                 let mut grade = Grade::new();
                 grade.ops.push(GradeOp::new(
@@ -1290,7 +1334,11 @@ mod tests {
             },
         );
         assert!(
-            compiled.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Grade { .. })),
+            compiled
+                .graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Grade { .. })),
             "a real Grade node is present"
         );
         assert_graph_gpu_matches_cpu(&compiled, 1e-3);
@@ -1301,7 +1349,12 @@ mod tests {
     fn inverted_solid_gpu_matches_cpu_reference() {
         use photonic_core::timeline::{ClipEffect, EffectKind};
         let compiled = solid_project_graph(
-            Color { r: 0.7, g: 0.2, b: 0.9, a: 1.0 },
+            Color {
+                r: 0.7,
+                g: 0.2,
+                b: 0.9,
+                a: 1.0,
+            },
             |clip| clip.effects.push(ClipEffect::new(EffectKind::Invert)),
         );
         assert_graph_gpu_matches_cpu(&compiled, 1e-3);
@@ -1318,7 +1371,12 @@ mod tests {
         let mut vt = Track::new(TrackKind::Video, "V1");
         vt.clips.push(Clip::new(
             ClipSource::SolidColor {
-                color: Color { r: 0.0, g: 0.0, b: 0.6, a: 1.0 },
+                color: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.6,
+                    a: 1.0,
+                },
             },
             crate::contract::Tick(0),
             crate::contract::Tick(1000),
@@ -1366,13 +1424,30 @@ mod tests {
         let (w, h) = (128u32, 64u32);
         let highlight = KaraokeStyle {
             mode: KaraokeMode::WordPop,
-            active_color: Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }, // yellow
-            inactive_color: Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, // grey
+            active_color: Color {
+                r: 1.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            }, // yellow
+            inactive_color: Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            }, // grey
         };
         let (project, seq_id) = captioned_project(Some(highlight));
         let mut eval = Evaluator::new(gpu.clone());
         let render = |eval: &mut Evaluator, t: i64| {
-            let c = compile(&project, seq_id, 0, crate::contract::Tick(t), Quality::FULL, None);
+            let c = compile(
+                &project,
+                seq_id,
+                0,
+                crate::contract::Tick(t),
+                Quality::FULL,
+                None,
+            );
             let out = eval
                 .evaluate(&c.graph, (w, h), &mut NullFrameSource)
                 .expect("output texture");
@@ -1418,7 +1493,12 @@ mod tests {
         // Red fill, no stroke, so lit glyph pixels isolate the fill colour.
         let style = CaptionStyle {
             font_size: 40.0,
-            fill: Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            fill: Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
             stroke: None,
             position: [0.5, 0.4],
             ..CaptionStyle::default()
@@ -1436,7 +1516,14 @@ mod tests {
         seq.video_tracks.push(vt);
         project.insert_sequence(seq);
 
-        let compiled = compile(&project, seq_id, 0, crate::contract::Tick(100), Quality::FULL, None);
+        let compiled = compile(
+            &project,
+            seq_id,
+            0,
+            crate::contract::Tick(100),
+            Quality::FULL,
+            None,
+        );
         assert!(
             compiled
                 .graph

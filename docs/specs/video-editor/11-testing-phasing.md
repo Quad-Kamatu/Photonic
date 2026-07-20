@@ -12,6 +12,10 @@ Today Photonic has **no snapshot/reference-corpus framework** — verification i
 
 **Why this is possible at all:** the frame-graph IR is defined as "a pure function of (document snapshot, sequence, format, tick, quality flags)... same inputs ⇒ identical graph ⇒ identical pixels" (`02-engine.md` §2). That determinism is the golden-test enabler — without it, corpus comparison would be chasing noise.
 
+### D-09 compatibility lock
+
+Every existing golden remains a `LinearRec709Sdr` compatibility test and must remain pixel-stable after HDR work. HDR cases use separate rights-cleared HLG/PQ/Rec.2020 vectors, explicit sequence color state, nit/code-value assertions, and decode-back bit-depth/tag checks from `22-dji-advanced-workflows.md` §7. No golden is silently reinterpreted as HDR; missing color state defaults to SDR.
+
 ### 1.1 Corpus layout
 
 ```
@@ -145,6 +149,22 @@ Checked: no egui-specific test-automation infra exists (the one GUI test today, 
 | Cold seek (index + 1 GOP decode, proxy) | < 150 ms | Same harness, ring cache cold-started (fresh `EngineSession`) |
 | Cut-ahead warmup | ≥ 500 ms before cut | Playback soak test (below) asserting prefetcher issues the next clip's decode request ≥ 500 ms before its `start` tick, using `counter.mp4` cut points |
 | Export overhead vs pure encode | < 25% wall time | Export a fixture sequence twice: once through `export::render_loop` (compile+eval+encode), once feeding the *same pre-rendered* rawvideo directly to the encoder sidecar (pure-encode baseline); compare wall time |
+
+### 4.1 Preview & media load budgets (24-preview-media-load §6)
+
+Owned by [24-preview-media-load.md](24-preview-media-load.md). Headless harness: `crates/photonic-video/tests/preview_media_load.rs` (skips when ffmpeg/GPU absent).
+
+| Metric | Budget | Measurement |
+|---|---|---|
+| L0 row register | ≤ 100 ms | Stub `MediaAsset::from_file` wall time (no I/O beyond path) |
+| L2 probe (typical short MP4) | ≤ 500 ms p95 product; test soft ≤ 5 s | `probe_asset` on `counter.mp4` |
+| L3 poster available | ≤ 1.0 s p95 product; test soft ≤ 10 s | `ensure_poster` + decode PNG |
+| L4 keyframe index | warm after import; test soft ≤ 15 s | `KeyframeIndex::load_or_build` |
+| Draft long-edge fit | 1920×1080 → 960×540 | pure unit (`fit_long_edge`) |
+| Dual-input audio (Windows path) | temp f32le file stages without FIFO | `stage_audio_tempfile` + `build_ffmpeg_args` second `-i` |
+| Preview cmd coalesce | latest Seek wins; quality/target pass through | `coalesce_commands` |
+
+Product p95 numbers remain the normative contract in 24 §6; the integration test asserts **functional readiness** and soft upper bounds suitable for shared CI.
 
 **Playback soak test** (SS-1 procedure): reference timeline = 1080p30, 3 concurrent video-track clips (using `color_bars.mp4` tiled/scaled — a real decode load, not a solid-color no-op), one grade node, one caption track with dense cues. Play the full fixture duration in a headless engine session, record `EngineStatus.dropped` (02 §1). **Pass threshold: zero dropped frames** on the reference dev machine (matches SS-1's literal wording — "plays at full frame rate without dropped frames"). Run as a `#[ignore]`-by-default long-running test (soak tests don't belong in the default fast `cargo test --workspace` path) invoked explicitly in a dedicated CI step or pre-release checklist — flag which; **recommendation: dedicated CI job, not blocking on PR, scheduled nightly on `main`** (mirrors the "advisory, not blocking" stance below).
 

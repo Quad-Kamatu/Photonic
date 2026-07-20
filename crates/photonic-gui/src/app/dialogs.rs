@@ -423,7 +423,13 @@ impl PhotonicApp {
             };
             let mut rgba = [seed.r, seed.g, seed.b, seed.a];
             let out = crate::color_popup::ColorPopup::window(
-                ctx, anchor, "Stroke Color", popup.pos, &mut rgba, &mut open, &color_cfg,
+                ctx,
+                anchor,
+                "Stroke Color",
+                popup.pos,
+                &mut rgba,
+                &mut open,
+                &color_cfg,
             );
             if out.changed {
                 let mut new_node = node.clone();
@@ -436,13 +442,21 @@ impl PhotonicApp {
                     };
                     pn.stroke.enabled = true;
                 }
-                history.execute(Command::UpdateNode { old: node, new: new_node }, doc);
+                history.execute(
+                    Command::UpdateNode {
+                        old: node,
+                        new: new_node,
+                    },
+                    doc,
+                );
                 doc_modified = true;
             }
             add_swatch = out.add_swatch;
             if out.eyedropper_clicked {
                 self.pending_panel_actions
-                    .push(PanelAction::StartEyedropper(EyedropperTarget::NodeStroke { node_id }));
+                    .push(PanelAction::StartEyedropper(EyedropperTarget::NodeStroke {
+                        node_id,
+                    }));
                 self.color_popup = None;
             }
         } else {
@@ -474,7 +488,13 @@ impl PhotonicApp {
                     fill.enabled = true;
                     pn.fill = fill;
                 }
-                history.execute(Command::UpdateNode { old: node, new: new_node }, doc);
+                history.execute(
+                    Command::UpdateNode {
+                        old: node,
+                        new: new_node,
+                    },
+                    doc,
+                );
                 doc_modified = true;
             }
             add_swatch = out.add_swatch;
@@ -496,7 +516,11 @@ impl PhotonicApp {
         // "Add to swatches": append a document color swatch for the picked color.
         if let Some(c) = add_swatch {
             let hex = crate::color_convert::format_hex(c, false);
-            if !doc.color_swatches.iter().any(|s| s.color_hex.eq_ignore_ascii_case(&hex)) {
+            if !doc
+                .color_swatches
+                .iter()
+                .any(|s| s.color_hex.eq_ignore_ascii_case(&hex))
+            {
                 let mut n = doc.color_swatches.len() + 1;
                 let name = loop {
                     let cand = format!("Swatch {n}");
@@ -623,9 +647,11 @@ impl PhotonicApp {
                         );
                     });
                     ui.label(
-                        RichText::new("Bends gentler than this smooth into a curve; sharper stay corners")
-                            .weak()
-                            .small(),
+                        RichText::new(
+                            "Bends gentler than this smooth into a curve; sharper stay corners",
+                        )
+                        .weak()
+                        .small(),
                     );
                     ui.add_space(2.0);
                     ui.checkbox(&mut dlg.refit_existing, "Refit existing curves")
@@ -680,16 +706,16 @@ impl PhotonicApp {
                 let dlg = self.simplify_dialog.take();
                 if let Some(node) = doc.nodes.get(&node_id) {
                     if let SceneNodeKind::Path(pn) = &node.kind {
-                        let result = dlg
-                            .as_ref()
-                            .and_then(|d| d.preview.clone())
-                            .unwrap_or_else(|| match &dlg {
-                                Some(d) => d.compute(&pn.path_data),
-                                None => photonic_core::ops::simplify::simplify_path(
-                                    &pn.path_data,
-                                    tolerance,
-                                ),
-                            });
+                        let result =
+                            dlg.as_ref()
+                                .and_then(|d| d.preview.clone())
+                                .unwrap_or_else(|| match &dlg {
+                                    Some(d) => d.compute(&pn.path_data),
+                                    None => photonic_core::ops::simplify::simplify_path(
+                                        &pn.path_data,
+                                        tolerance,
+                                    ),
+                                });
                         let mut new_path = pn.clone();
                         new_path.path_data = result;
                         let mut new_node = node.clone();
@@ -756,8 +782,13 @@ impl PhotonicApp {
             (Bm::DarkerColor, "Darker Color"),
             (Bm::LighterColor, "Lighter Color"),
         ];
-        let blend_label =
-            |m: Bm| MODES.iter().find(|(x, _)| *x == m).map(|(_, n)| *n).unwrap_or("Normal");
+        let blend_label = |m: Bm| {
+            MODES
+                .iter()
+                .find(|(x, _)| *x == m)
+                .map(|(_, n)| *n)
+                .unwrap_or("Normal")
+        };
 
         #[derive(PartialEq)]
         enum A {
@@ -886,8 +917,7 @@ impl PhotonicApp {
             if let Some(dlg) = self.object_options_dialog.take() {
                 match dlg.target {
                     OptionsTarget::Layer(lid) => {
-                        if let (Some(orig), Some(slot)) =
-                            (dlg.orig_layer, doc.layers.get_mut(&lid))
+                        if let (Some(orig), Some(slot)) = (dlg.orig_layer, doc.layers.get_mut(&lid))
                         {
                             *slot = orig;
                         }
@@ -918,7 +948,13 @@ impl PhotonicApp {
                             if let Some(slot) = doc.layers.get_mut(&layer_id) {
                                 *slot = orig.clone();
                             }
-                            history.execute(Command::ReplaceLayer { old: orig, new: edited }, doc);
+                            history.execute(
+                                Command::ReplaceLayer {
+                                    old: orig,
+                                    new: edited,
+                                },
+                                doc,
+                            );
                         }
                     }
                     OptionsTarget::Node(node_id) => {
@@ -1528,7 +1564,11 @@ impl PhotonicApp {
                         self.file_status = Some("Restarting MCP server…".to_string());
                     }
                     if mcp_running {
-                        ui.label(RichText::new("Already running — nothing to restart.").weak().small());
+                        ui.label(
+                            RichText::new("Already running — nothing to restart.")
+                                .weak()
+                                .small(),
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Close").clicked() {
@@ -1704,5 +1744,4 @@ impl PhotonicApp {
             Err(e) => format!("Export failed: {e}"),
         });
     }
-
 }

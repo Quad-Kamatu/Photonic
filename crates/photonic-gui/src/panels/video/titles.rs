@@ -226,7 +226,19 @@ fn insert_preset_at_playhead(
         style: (preset.style)(),
     };
     let duration = Tick::from_seconds(preset.duration_secs);
-    for track in &seq.video_tracks {
+    // Prefer a dedicated Text track (add one via "+ Text" in the timeline);
+    // fall back to any video track with room so titles still work without one.
+    use photonic_core::timeline::TrackKind;
+    let text_first = seq
+        .video_tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Text)
+        .chain(
+            seq.video_tracks
+                .iter()
+                .filter(|t| t.kind == TrackKind::Video),
+        );
+    for track in text_first {
         if let Ok(cmd) = ops::add_text_clip(
             project,
             seq_id,

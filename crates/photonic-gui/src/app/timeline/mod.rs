@@ -60,6 +60,58 @@ const NAV_H: f32 = 12.0;
 const DRAG_ID: &str = "timeline_drag_state";
 const MARQUEE_ID: &str = "timeline_marquee";
 
+/// Resolve the drop target for an in-flight track reorder: the nearest *same
+/// kind* visible header row to `pointer_y`, by row-center distance. `geom`
+/// entries are `(id, kind, index_in_kind, top_y, bot_y)` for the visible rows.
+/// Returns `(index_in_kind, top_y)` — the top edge feeds the drop indicator.
+///
+/// `index_in_kind` is the row's *true* `video_tracks` / `audio_tracks` Vec
+/// index, even for the reversed video lane (top row = last Vec index). The
+/// caller passes it straight to `ops::reorder_track`, which moves via
+/// remove-then-insert-at-index and so lands the dragged track on the target
+/// row's original slot with no per-orientation off-by-one — see the call site.
+fn nearest_drop_row(
+    geom: &[(TrackId, TrackKind, usize, f32, f32)],
+    kind: TrackKind,
+    pointer_y: f32,
+) -> Option<(usize, f32)> {
+    geom.iter()
+        .filter(|g| g.1 == kind)
+        .min_by(|a, b| {
+            let ca = (a.3 + a.4) * 0.5;
+            let cb = (b.3 + b.4) * 0.5;
+            (ca - pointer_y).abs().total_cmp(&(cb - pointer_y).abs())
+        })
+        .map(|g| (g.2, g.3))
+}
+
+/// Place a fixed-position widget without advancing the timeline panel's normal
+/// top-down layout cursor. The timeline is a canvas; using [`egui::Ui::put`]
+/// directly would make the resizable dock persist the widget's bottom edge
+/// (plus item spacing) as its next height.
+pub(crate) fn put_fixed(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    widget: impl egui::Widget,
+) -> egui::Response {
+    let mut fixed_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
+    );
+    fixed_ui.add(widget)
+}
+
+/// Set the program-monitor transport intent used after a successful
+/// media-pool → timeline drop. The engine bridge turns this into a seek and
+/// normal forward playback when the monitor draws later in the frame.
+fn start_dropped_media_preview(app: &mut PhotonicApp, at: Tick) {
+    app.playhead = at;
+    app.monitor_playing = true;
+    app.monitor_play_reverse = false;
+    app.monitor_play_speed = 1.0;
+}
+
 impl PhotonicApp {
     /// The bottom timeline panel's entry point (04 §1.1/§2). Registered by
     /// `app/mod.rs` as a `TopBottomPanel::bottom("timeline")` gated on
@@ -70,6 +122,11 @@ impl PhotonicApp {
         doc: &mut Document,
         history: &mut CommandHistory,
     ) {
+        // Reserve the dock's current content rect once. Fixed-position controls
+        // below use `put_fixed`, so they cannot extend this reservation.
+        let panel_rect = ui.max_rect();
+        ui.set_min_size(panel_rect.size());
+
         // Invariant: video mode ⇒ a project exists (04 §1.3). The first action on
         // a document with no project creates it lazily below.
         let frame_rate = active_frame_rate(doc);
@@ -151,6 +208,13 @@ impl PhotonicApp {
         let lanes_rect = egui::Rect::from_min_max(
             egui::pos2(lane_col.left(), ruler_rect.bottom()),
             lane_col.max,
+        );
+        // Track headers begin below the ruler, exactly where their matching
+        // lane rows begin. Keeping the two origins identical makes every row
+        // divider a continuous line across the timeline.
+        let header_rows_rect = egui::Rect::from_min_max(
+            egui::pos2(header_col.left(), lanes_rect.top()),
+            header_col.max,
         );
         view.last_lane_width_px = lanes_rect.width();
 
@@ -261,32 +325,146 @@ impl PhotonicApp {
             }
         }
 
+        // Cache workers deliberately never wake the GUI thread directly. While
+        // a visible thumbnail or waveform is pending, ask egui for one modest
+        // follow-up frame; this keeps the event loop idle otherwise and avoids
+        // the old unconditional 60 Hz poll.
+        if media_caches.as_ref().is_some_and(TimelineMediaCaches::has_pending) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
         // ── Track headers (drawn after lanes so widgets sit on top) ─────────
         {
-            let mut y = header_col.top() - view.track_scroll_px;
+            let drag_key = egui::Id::new(("track_reorder_active", seq_id));
+            let mut dragging: Option<TrackId> = ui
+                .data(|d| d.get_temp::<Option<TrackId>>(drag_key))
+                .flatten();
+            // (id, kind, index_in_kind, top_y, bot_y) for visible header rows —
+            // used to resolve a drop position after the loop.
+            let mut geom: Vec<(TrackId, TrackKind, usize, f32, f32)> = Vec::new();
+            let mut y = header_rows_rect.top() - view.track_scroll_px;
             for row in &rows {
                 let row_top = y;
                 let row_bot = y + row.height;
                 y = row_bot;
-                if row_bot < header_col.top() || row_top > header_col.bottom() - 28.0 {
+                if row_bot < header_rows_rect.top()
+                    || row_top > header_rows_rect.bottom() - 28.0
+                {
                     continue;
                 }
                 let hrect = egui::Rect::from_min_max(
                     egui::pos2(header_col.left(), row_top),
-                    egui::pos2(header_col.right(), row_bot.min(header_col.bottom() - 28.0)),
+                    egui::pos2(
+                        header_col.right(),
+                        row_bot.min(header_rows_rect.bottom() - 28.0),
+                    ),
                 );
+                // Drag-to-reorder: interact on the header background BEFORE the
+                // header's own buttons (drawn inside `draw_header`) so the buttons
+                // sit on top and still take their clicks; a drag on empty header
+                // space reorders the track within its lane.
+                let resp = ui.interact(
+                    hrect,
+                    ui.id().with(("track_reorder", row.id)),
+                    egui::Sense::drag(),
+                );
+                if resp.drag_started() {
+                    dragging = Some(row.id);
+                    ui.data_mut(|d| d.insert_temp(drag_key, Some(row.id)));
+                }
+                geom.push((
+                    row.id,
+                    row.kind,
+                    row.index_in_kind,
+                    hrect.top(),
+                    hrect.bottom(),
+                ));
                 // Source-patch target for this row's kind (spec 17 G6): the header
                 // draws a patch button + highlight and toggles it on click.
                 let target = match row.kind {
-                    TrackKind::Video => &mut target_video,
+                    TrackKind::Video | TrackKind::Text => &mut target_video,
                     TrackKind::Audio => &mut target_audio,
                 };
                 tracks::draw_header(ui, hrect, doc, history, seq_id, *row, target);
             }
+            // Resolve a drag in progress: highlight the drop slot, and on release
+            // reorder to the nearest same-kind row under the pointer.
+            //
+            // Reversed-index mapping: `index_in_kind` is the *true*
+            // `video_tracks` / `audio_tracks` Vec index of a row, even though the
+            // video lane is painted in reverse Vec order (top row = last Vec index
+            // = topmost composited layer — see `tracks::track_rows`). We therefore
+            // hand `move_track` the target row's raw Vec index as the drop
+            // position, unchanged. `ops::reorder_track` performs the move as
+            // remove-then-insert-at-index (`RemoveTrack` then `AddTrack { index }`,
+            // where `AddTrack` inserts, clamped to len). Removing the dragged
+            // track first shifts every later element down by one, so inserting at
+            // the target's raw index lands the dragged track on exactly the
+            // target row's original slot — for *both* drag directions and for
+            // *both* lane orientations (reversed video, in-order audio). Hence
+            // there is NO off-by-one at the lane boundaries and no per-orientation
+            // adjustment is needed here.
+            if let Some(drag_id) = dragging {
+                // The primary button being held is the single source of truth for
+                // "drag still live". It is a level, not the one-frame
+                // `any_released()` edge: if the release lands on a frame this panel
+                // did not lay out, an edge check would miss it and leave `drag_key`
+                // set forever, pinning `request_repaint` every frame. A level check
+                // can never get stuck that way.
+                let still_held = ui.input(|i| i.pointer.primary_down());
+                // `geom` holds only the *visible* header rows; if the dragged row
+                // is absent it has been scrolled out of view.
+                let row = geom.iter().find(|g| g.0 == drag_id).copied();
+                if let Some((_, dkind, didx, _, _)) = row {
+                    let pointer_y = ui.input(|i| {
+                        i.pointer
+                            .hover_pos()
+                            .or(i.pointer.interact_pos())
+                            .map(|p| p.y)
+                    });
+                    let nearest = pointer_y.and_then(|py| nearest_drop_row(&geom, dkind, py));
+                    if let Some((drop_idx, top)) = nearest {
+                        if still_held {
+                            // Drop indicator — only while the drag is live.
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(header_col.left(), top),
+                                    egui::pos2(header_col.right(), top),
+                                ],
+                                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                            );
+                        } else if drop_idx != didx {
+                            // Released over a different same-kind row → reorder.
+                            // `reorder_track` removes the dragged track FIRST, then
+                            // inserts at the target index. When the track sat ABOVE
+                            // the target (didx < drop_idx), that removal shifts the
+                            // target down one, so inserting at `drop_idx` would land
+                            // one slot too low (below the drawn indicator). Decrement
+                            // to make the landing match the indicator line. (Audio =
+                            // natural order; video/text rows are displayed reversed
+                            // but `index_in_kind` is the true Vec index, so the same
+                            // remove-then-insert correction applies.)
+                            let target = if didx < drop_idx { drop_idx - 1 } else { drop_idx };
+                            ops_bridge::move_track(doc, history, seq_id, drag_id, target);
+                        }
+                    }
+                }
+                // Clear the temp key on EVERY end-of-drag path so it can never
+                // stick and pin repaints: pointer released (button no longer down),
+                // the dragged row scrolled out of view, or a press that never
+                // became a real drag. Only a still-held, still-visible drag keeps
+                // the state alive (and keeps requesting repaints for the indicator).
+                if !still_held || row.is_none() {
+                    ui.data_mut(|d| d.insert_temp::<Option<TrackId>>(drag_key, None));
+                } else {
+                    ui.ctx().request_repaint();
+                }
+            }
             // Add-track controls pinned to the header column's bottom.
             let footer = egui::Rect::from_min_max(
-                egui::pos2(header_col.left(), header_col.bottom() - 28.0),
-                header_col.max,
+                egui::pos2(header_rows_rect.left(), header_rows_rect.bottom() - 28.0),
+                header_rows_rect.max,
             );
             tracks::draw_add_controls(ui, footer, doc, history, seq_id);
         }
@@ -376,15 +554,41 @@ impl PhotonicApp {
                 }
                 if ui.input(|i| i.pointer.any_released()) {
                     egui::DragAndDrop::clear_payload(ui.ctx());
-                    if let Some(track) = target {
-                        ops_bridge::insert_asset_clip(
+                    // Prefer the lane under the cursor; if there is none (empty
+                    // timeline / locked lane) or it has no room at `at`, fall back
+                    // to first-fit, which adds a track if needed — so a drop
+                    // always lands rather than silently doing nothing.
+                    let mut landed = match target {
+                        Some(track) => ops_bridge::insert_asset_clip(
+                            doc, history, seq_id, track, payload.asset, at,
+                        ),
+                        None => false,
+                    };
+                    if !landed {
+                        landed = ops_bridge::insert_asset_at_first_fit(
                             doc,
                             history,
-                            seq_id,
-                            track,
                             payload.asset,
                             at,
                         );
+                    }
+                    if landed {
+                        // A media-pool drop is also a preview gesture: park the
+                        // program monitor at the new clip's first frame and
+                        // start normal forward transport immediately. The
+                        // monitor later in this frame turns this intent into a
+                        // Seek + Play for the engine.
+                        start_dropped_media_preview(self, at);
+                        // `playhead` is borrowed into a local for this render
+                        // pass and written back below, so update both copies.
+                        playhead = at;
+                        if let Some(bridge) = self.engine.as_mut() {
+                            // The regular per-frame sync ran before UI input;
+                            // sync once more so this just-dropped clip is
+                            // available to the Seek/Play emitted below.
+                            bridge.sync_document(doc, history);
+                        }
+                        ui.ctx().request_repaint();
                     }
                 }
             }
@@ -627,8 +831,7 @@ fn draw_mini_toolbar(
     let y = rect.top() + (rect.height() - bh) * 0.5;
 
     let fit = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-    if ui
-        .put(fit, egui::Button::new("⤢").small())
+    if put_fixed(ui, fit, egui::Button::new("⤢").small())
         .on_hover_text("Zoom to fit (Shift+Z)")
         .clicked()
     {
@@ -643,8 +846,7 @@ fn draw_mini_toolbar(
     x += bh + 4.0;
 
     let zi = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-    if ui
-        .put(zi, egui::Button::new("+").small())
+    if put_fixed(ui, zi, egui::Button::new("+").small())
         .on_hover_text("Zoom in (+)")
         .clicked()
     {
@@ -652,8 +854,7 @@ fn draw_mini_toolbar(
     }
     x += bh + 2.0;
     let zo = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-    if ui
-        .put(zo, egui::Button::new("−").small())
+    if put_fixed(ui, zo, egui::Button::new("−").small())
         .on_hover_text("Zoom out (−)")
         .clicked()
     {
@@ -662,8 +863,7 @@ fn draw_mini_toolbar(
     x += bh + 8.0;
 
     let snap_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 24.0, bh));
-    if ui
-        .put(snap_rect, egui::SelectableLabel::new(*snap, "Snap"))
+    if put_fixed(ui, snap_rect, egui::SelectableLabel::new(*snap, "Snap"))
         .on_hover_text("Toggle snapping (N)")
         .clicked()
     {
@@ -674,7 +874,8 @@ fn draw_mini_toolbar(
     // Ripple-mode indicator: reflects whether Shift is held live (13 §1.1).
     let shift = ui.input(|i| i.modifiers.shift);
     let rip = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(56.0, bh));
-    ui.put(
+    put_fixed(
+        ui,
         rip,
         egui::Label::new(egui::RichText::new("Ripple").small().color(if shift {
             ui.visuals().selection.stroke.color
@@ -964,6 +1165,10 @@ impl TimelineMediaCaches {
             }
         }
     }
+
+    fn has_pending(&self) -> bool {
+        self.thumbnails.has_pending() || self.waveforms.has_pending()
+    }
 }
 
 /// The `Clone`-able parts of a [`ThumbnailDecodeSpec`] (the spec itself is not
@@ -1152,7 +1357,7 @@ fn self_interact(
                     .unwrap();
                 state.dest_track = track_at_y(rows, lanes_rect, view, pos.y).unwrap_or(state.track);
                 preview_drag(
-                    ui, seq, &state, view, lane_left, snap, frame_rate, pos, lanes_rect,
+                    ui, seq, &state, view, lane_left, snap, frame_rate, pos, lanes_rect, rows,
                 );
             }
             ui.data_mut(|d| d.insert_temp(drag_id, state));
@@ -1262,6 +1467,30 @@ fn track_at_y(
     None
 }
 
+/// The visible lane rectangle for one track. Drag previews use this instead of
+/// the full timeline body so a clip move highlights only its destination row.
+fn lane_rect_for_track(
+    rows: &[tracks::TrackRow],
+    lanes_rect: egui::Rect,
+    view: &TimelineView,
+    track: TrackId,
+) -> Option<egui::Rect> {
+    let mut top = lanes_rect.top() - view.track_scroll_px;
+    for row in rows {
+        let bottom = top + row.height;
+        if row.id == track {
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(lanes_rect.left(), top),
+                egui::pos2(lanes_rect.right(), bottom),
+            )
+            .intersect(lanes_rect);
+            return (!rect.is_negative()).then_some(rect);
+        }
+        top = bottom;
+    }
+    None
+}
+
 /// Resolve a drag-start into a [`DragState`] (04 §2.3/§2.4 modifier scheme).
 #[allow(clippy::too_many_arguments)]
 fn start_clip_drag(
@@ -1335,6 +1564,7 @@ fn preview_drag(
     frame_rate: FrameRate,
     pos: egui::Pos2,
     lanes_rect: egui::Rect,
+    rows: &[tracks::TrackRow],
 ) {
     let Some(t) = seq.track(state.track) else {
         return;
@@ -1344,6 +1574,9 @@ fn preview_drag(
     };
     let accent = ui.visuals().selection.stroke.color;
     let painter = ui.painter_at(lanes_rect);
+    let Some(track_rect) = lane_rect_for_track(rows, lanes_rect, view, state.dest_track) else {
+        return;
+    };
     let delta_raw = view.x_to_tick(pos.x, lane_left) - state.grab_tick;
 
     let (edge_tick, y_shift) = match state.kind {
@@ -1378,8 +1611,8 @@ fn preview_drag(
     let x0 = view.tick_to_x(gx0, lane_left);
     let x1 = view.tick_to_x(gx1, lane_left);
     let ghost = egui::Rect::from_min_max(
-        egui::pos2(x0.min(x1), lanes_rect.top() + 2.0),
-        egui::pos2(x0.max(x1), lanes_rect.bottom() - 2.0),
+        egui::pos2(x0.min(x1), track_rect.top() + 2.0),
+        egui::pos2(x0.max(x1), track_rect.bottom() - 2.0),
     );
     painter.rect(
         ghost,
@@ -1392,8 +1625,8 @@ fn preview_drag(
     let gx = view.tick_to_x(edge_tick, lane_left);
     painter.line_segment(
         [
-            egui::pos2(gx, lanes_rect.top()),
-            egui::pos2(gx, lanes_rect.bottom()),
+            egui::pos2(gx, track_rect.top()),
+            egui::pos2(gx, track_rect.bottom()),
         ],
         egui::Stroke::new(1.0, accent.gamma_multiply(0.6)),
     );
@@ -1833,5 +2066,203 @@ fn unlink_selected_clips(
     if !cmds.is_empty() {
         let batch = cmds.into_iter().map(Command::Timeline).collect();
         history.execute_discrete(Command::Batch(batch), doc);
+    }
+}
+
+#[cfg(test)]
+mod media_drop_preview_tests {
+    use super::{start_dropped_media_preview, PhotonicApp, Tick};
+
+    #[test]
+    fn successful_drop_starts_forward_preview_at_the_clip_start() {
+        let mut app = PhotonicApp::default();
+        app.monitor_play_reverse = true;
+        app.monitor_play_speed = 4.0;
+
+        start_dropped_media_preview(&mut app, Tick(42_000));
+
+        assert_eq!(app.playhead, Tick(42_000));
+        assert!(app.monitor_playing);
+        assert!(!app.monitor_play_reverse);
+        assert_eq!(app.monitor_play_speed, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod panel_layout_tests {
+    use super::put_fixed;
+
+    fn screen() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 1000.0))
+    }
+
+    fn frame(ctx: &egui::Context, events: Vec<egui::Event>) -> f32 {
+        let input = egui::RawInput {
+            screen_rect: Some(screen()),
+            events,
+            ..Default::default()
+        };
+        let mut height = 0.0;
+        let _ = ctx.run(input, |ctx| {
+            let response = egui::TopBottomPanel::bottom("resizable_timeline_test")
+                .resizable(true)
+                .default_height(220.0)
+                .min_height(120.0)
+                .show(ctx, |ui| {
+                    let full = ui.max_rect();
+                    ui.set_min_size(full.size());
+                    // This models the timeline's fixed-position controls.
+                    put_fixed(
+                        ui,
+                        egui::Rect::from_min_size(
+                            egui::pos2(full.left(), full.bottom() - 20.0),
+                            egui::vec2(100.0, 20.0),
+                        ),
+                        egui::Label::new("control"),
+                    );
+                });
+            height = response.response.rect.height();
+        });
+        height
+    }
+
+    #[test]
+    fn fixed_canvas_does_not_block_the_timeline_splitter() {
+        let ctx = egui::Context::default();
+        let initial = frame(&ctx, vec![]);
+        for _ in 0..5 {
+            assert!(
+                (frame(&ctx, vec![]) - initial).abs() < 0.1,
+                "fixed controls must not feed their layout height back into the dock"
+            );
+        }
+        let splitter_y = screen().bottom() - initial;
+        let modifiers = egui::Modifiers::default();
+        frame(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(600.0, splitter_y)),
+                egui::Event::PointerButton {
+                    pos: egui::pos2(600.0, splitter_y),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                },
+            ],
+        );
+        let grown = frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(600.0, splitter_y - 100.0))],
+        );
+        assert!(
+            grown > initial + 50.0,
+            "dragging the dock splitter should grow the timeline: initial={initial}, grown={grown}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod drag_preview_geometry_tests {
+    use super::{lane_rect_for_track, tracks, TimelineView};
+    use photonic_core::timeline::{TrackId, TrackKind};
+
+    #[test]
+    fn drag_preview_is_limited_to_the_destination_track_row() {
+        let first = TrackId::new();
+        let destination = TrackId::new();
+        let rows = [
+            tracks::TrackRow {
+                id: first,
+                kind: TrackKind::Video,
+                height: 40.0,
+                locked: false,
+                index_in_kind: 0,
+                count_in_kind: 2,
+            },
+            tracks::TrackRow {
+                id: destination,
+                kind: TrackKind::Video,
+                height: 60.0,
+                locked: false,
+                index_in_kind: 1,
+                count_in_kind: 2,
+            },
+        ];
+        let lanes = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 180.0));
+
+        let rect = lane_rect_for_track(&rows, lanes, &TimelineView::default(), destination)
+            .expect("destination row exists");
+
+        assert_eq!(rect.top(), 40.0);
+        assert_eq!(rect.bottom(), 100.0);
+        assert_eq!(rect.width(), lanes.width());
+    }
+}
+
+#[cfg(test)]
+mod track_drag_tests {
+    use super::nearest_drop_row;
+    use photonic_core::timeline::{TrackId, TrackKind};
+
+    // Three video rows as `track_rows` builds them: painted top→bottom in
+    // reverse Vec order, so the top row carries the *last* Vec index. Rows are
+    // 30px tall starting at y=0. `(id, kind, index_in_kind, top, bot)`. The id
+    // is irrelevant to the resolver, so a fresh one per row is fine.
+    fn video_geom() -> Vec<(TrackId, TrackKind, usize, f32, f32)> {
+        vec![
+            (TrackId::new(), TrackKind::Video, 2, 0.0, 30.0), // top row = Vec idx 2
+            (TrackId::new(), TrackKind::Video, 1, 30.0, 60.0), // middle = Vec idx 1
+            (TrackId::new(), TrackKind::Video, 0, 60.0, 90.0), // bottom = Vec idx 0
+        ]
+    }
+
+    #[test]
+    fn reversed_video_top_row_maps_to_last_vec_index() {
+        let geom = video_geom();
+        // Pointer over the top row → the raw Vec index handed to reorder_track
+        // must be the *last* index (2), not the first, despite the reversal.
+        let (idx, top) = nearest_drop_row(&geom, TrackKind::Video, 5.0).unwrap();
+        assert_eq!(idx, 2, "top visual row = highest Vec index (reversed lane)");
+        assert_eq!(top, 0.0, "indicator sits on the target row's top edge");
+    }
+
+    #[test]
+    fn reversed_video_bottom_row_maps_to_first_vec_index() {
+        let geom = video_geom();
+        let (idx, _) = nearest_drop_row(&geom, TrackKind::Video, 85.0).unwrap();
+        assert_eq!(idx, 0, "bottom visual row = Vec index 0 (reversed lane)");
+    }
+
+    #[test]
+    fn nearest_is_by_row_center_not_edge() {
+        let geom = video_geom();
+        // y=44 is just below the middle row's center (45) → still the middle row.
+        let (idx, _) = nearest_drop_row(&geom, TrackKind::Video, 44.0).unwrap();
+        assert_eq!(idx, 1);
+        // y=61 is nearest the bottom row's center (75)? center distances: mid
+        // center 45 (|61-45|=16) vs bottom center 75 (|61-75|=14) → bottom wins.
+        let (idx, _) = nearest_drop_row(&geom, TrackKind::Video, 61.0).unwrap();
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn filters_to_the_dragged_rows_own_kind() {
+        // A mixed lane: dragging an audio row must never resolve onto a video row
+        // even when a video row is vertically closer to the pointer.
+        let geom = vec![
+            (TrackId::new(), TrackKind::Video, 1, 0.0, 30.0),
+            (TrackId::new(), TrackKind::Video, 0, 30.0, 60.0),
+            (TrackId::new(), TrackKind::Audio, 0, 60.0, 90.0),
+        ];
+        // Pointer at y=40 is inside the video middle row, but for an audio drag
+        // the only candidate is the audio row (idx 0).
+        let (idx, _) = nearest_drop_row(&geom, TrackKind::Audio, 40.0).unwrap();
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn no_same_kind_rows_yields_none() {
+        let geom = vec![(TrackId::new(), TrackKind::Video, 0, 0.0, 30.0)];
+        assert!(nearest_drop_row(&geom, TrackKind::Audio, 10.0).is_none());
     }
 }

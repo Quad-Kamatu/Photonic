@@ -15,7 +15,7 @@
 //! 2. **Presentation.** [`EngineBridge::present_latest`] runs the normative
 //!    `EngineFrame`→screen present pass (03 §5,
 //!    `photonic_render::video::VideoPresenter`) into an intermediate
-//!    `Rgba8Unorm` texture registered with egui as a native texture; the
+//!    `Rgba8UnormSrgb` texture registered with egui as a native texture; the
 //!    monitor paints it with a UV rect cropped to the sequence-format logical
 //!    size (the engine's frame textures are pool-bucket padded — see the
 //!    facade notes in `photonic_video::session`).
@@ -47,7 +47,9 @@ use photonic_core::document::Document;
 use photonic_core::history::CommandHistory;
 use photonic_core::timeline::{SequenceId, Tick};
 use photonic_render::video::VideoPresenter;
-use photonic_video::{EngineCmd, EngineSession, EngineStatus, ProxyMode, VideoEngine};
+use photonic_video::{
+    EngineCmd, EngineSession, EngineStatus, PreviewQuality, PreviewTarget, ProxyMode, VideoEngine,
+};
 use std::sync::{Arc, Mutex as StdMutex};
 
 /// The registered egui texture for the current engine frame.
@@ -99,12 +101,18 @@ pub struct EngineBridge {
     sent_loop: Option<Option<(Tick, Tick)>>,
     sent_sequence: Option<SequenceId>,
     sent_proxy: Option<ProxyMode>,
+    sent_preview_quality: Option<PreviewQuality>,
+    sent_preview_target: Option<PreviewTarget>,
     /// Playhead value the GUI and engine last agreed on — a differing
     /// `self.playhead` means the *user* moved it (ruler scrub, Home/End,
     /// marker jump) and a `Seek` must be sent.
     pub(crate) agreed_playhead: Option<Tick>,
     /// GUI-side proxy-mode intent (media pool toggle).
     pub(crate) proxy_mode: ProxyMode,
+    /// Draft (default) / Full interactive quality (24 §4).
+    pub(crate) preview_quality: PreviewQuality,
+    /// Desired single-monitor target; play-wins enforced by engine (24 §3).
+    pub(crate) preview_target: PreviewTarget,
 }
 
 struct PresentTarget {
@@ -146,8 +154,12 @@ impl EngineBridge {
             sent_loop: None,
             sent_sequence: None,
             sent_proxy: None,
+            sent_preview_quality: None,
+            sent_preview_target: None,
             agreed_playhead: None,
             proxy_mode: ProxyMode::Auto,
+            preview_quality: PreviewQuality::Draft,
+            preview_target: PreviewTarget::default(),
         }
     }
 
@@ -263,9 +275,49 @@ impl EngineBridge {
         }
     }
 
+    pub(crate) fn apply_preview_quality(&mut self) {
+        if self.sent_preview_quality != Some(self.preview_quality) {
+            self.session
+                .send(EngineCmd::SetPreviewQuality(self.preview_quality));
+            self.sent_preview_quality = Some(self.preview_quality);
+        }
+    }
+
+    pub(crate) fn apply_preview_target(&mut self) {
+        if self.sent_preview_target.as_ref() != Some(&self.preview_target) {
+            self.session
+                .send(EngineCmd::SetPreviewTarget(self.preview_target.clone()));
+            self.sent_preview_target = Some(self.preview_target.clone());
+        }
+    }
+
+    /// Peek a media-pool asset on the single monitor (24 §3). No-op while
+    /// playing (engine enforces play-wins).
+    pub(crate) fn peek_asset(&mut self, asset: photonic_core::timeline::AssetId, time: Tick) {
+        self.preview_target = PreviewTarget::Asset {
+            asset,
+            source_time: time,
+        };
+        self.apply_preview_target();
+    }
+
+    /// Return the monitor to sequence program view.
+    pub(crate) fn peek_sequence(&mut self, sequence: SequenceId) {
+        self.preview_target = PreviewTarget::Sequence { sequence };
+        self.apply_preview_target();
+    }
+
     /// Seek and record agreement so the scrub detector stays quiet.
     pub(crate) fn seek(&mut self, to: Tick) {
         self.session.send(EngineCmd::Seek(to));
+        self.agreed_playhead = Some(to);
+    }
+
+    /// Live scrub target while the playhead is being dragged: decodes a cheap
+    /// keyframe preview. Records agreement like `seek`; the drag-release settle
+    /// sends a real `seek` to land the exact frame.
+    pub(crate) fn scrub_seek(&mut self, to: Tick) {
+        self.session.send(EngineCmd::ScrubSeek(to));
         self.agreed_playhead = Some(to);
     }
 
@@ -306,9 +358,9 @@ impl EngineBridge {
         }
         let size = (frame.texture.width(), frame.texture.height());
         self.ensure_target(device, egui_renderer, size);
-        let presenter = self
-            .presenter
-            .get_or_insert_with(|| VideoPresenter::new(device, wgpu::TextureFormat::Rgba8Unorm));
+        let presenter = self.presenter.get_or_insert_with(|| {
+            VideoPresenter::new(device, wgpu::TextureFormat::Rgba8UnormSrgb)
+        });
         let target = self.target.as_ref().expect("ensure_target sets target");
 
         let src_view = frame.texture.create_view(&Default::default());
@@ -348,10 +400,10 @@ impl EngineBridge {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // The present pass writes sRGB-encoded values (03 §5); egui
-            // samples them as-is and blends in gamma space against the
-            // non-sRGB swapchain — same convention as the vector canvas.
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            // The present pass writes linear values and hardware encodes them;
+            // egui then decodes the native texture before its gamma-space
+            // window pass, avoiding a double sRGB transform.
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });

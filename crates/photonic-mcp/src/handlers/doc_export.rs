@@ -61,7 +61,6 @@ pub async fn set_active_layer(state: &AppState, args: SetActiveLayerArgs) -> Too
         .with_data(serde_json::json!({ "layer_id": lid, "name": name }))
 }
 
-
 pub async fn delete_layer(state: &AppState, args: DeleteLayerArgs) -> ToolResult {
     tracing::debug!("tool: delete_layer");
     use photonic_core::history::Command;
@@ -141,7 +140,6 @@ pub async fn delete_layer(state: &AppState, args: DeleteLayerArgs) -> ToolResult
     .with_data(serde_json::json!({ "layer_id": lid, "nodes_affected": node_count }))
 }
 
-
 pub async fn reorder_layers(state: &AppState, args: ReorderLayersArgs) -> ToolResult {
     tracing::debug!("tool: reorder_layers");
     use photonic_core::history::Command;
@@ -182,7 +180,6 @@ pub async fn reorder_layers(state: &AppState, args: ReorderLayersArgs) -> ToolRe
     ToolResult::text(format!("Reordered {} layers", new_order.len()))
         .with_data(serde_json::json!({ "layer_order": new_order }))
 }
-
 
 pub async fn duplicate_layer(state: &AppState, args: DuplicateLayerArgs) -> ToolResult {
     tracing::debug!("tool: duplicate_layer");
@@ -249,7 +246,6 @@ pub async fn duplicate_layer(state: &AppState, args: DuplicateLayerArgs) -> Tool
     }))
 }
 
-
 pub async fn export_svg(state: &AppState, args: ExportSvgArgs) -> ToolResult {
     tracing::debug!("tool: export_svg");
     let doc = state.document.lock().await;
@@ -278,7 +274,6 @@ pub async fn export_svg(state: &AppState, args: ExportSvgArgs) -> ToolResult {
     ))
     .with_data(serde_json::json!({ "svg": output, "bytes": byte_count }))
 }
-
 
 pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
     tracing::debug!("tool: export_pdf");
@@ -888,7 +883,6 @@ pub async fn export_artboards(state: &AppState, args: ExportArtboardsArgs) -> To
 static PREVIEW_RENDERER: tokio::sync::OnceCell<std::sync::Arc<photonic_render::HeadlessRenderer>> =
     tokio::sync::OnceCell::const_new();
 
-
 async fn preview_renderer() -> std::sync::Arc<photonic_render::HeadlessRenderer> {
     PREVIEW_RENDERER
         .get_or_init(|| async {
@@ -1195,7 +1189,6 @@ pub async fn preview_selection(state: &AppState, args: PreviewSelectionArgs) -> 
     }))
 }
 
-
 fn resize_png(png_bytes: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     use image::{imageops::FilterType, ImageFormat};
     let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png).ok()?;
@@ -1206,7 +1199,6 @@ fn resize_png(png_bytes: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
         .ok()?;
     Some(out)
 }
-
 
 fn png_to_jpeg(png_bytes: &[u8], quality: u8) -> Option<Vec<u8>> {
     let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).ok()?;
@@ -1228,7 +1220,6 @@ fn png_to_jpeg(png_bytes: &[u8], quality: u8) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-
 fn png_to_gif(png_bytes: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).ok()?;
     let mut buf = Vec::new();
@@ -1236,7 +1227,6 @@ fn png_to_gif(png_bytes: &[u8]) -> Option<Vec<u8>> {
     img.write_with_encoder(encoder).ok()?;
     Some(buf)
 }
-
 
 fn png_to_tiff(png_bytes: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).ok()?;
@@ -1249,7 +1239,6 @@ fn png_to_tiff(png_bytes: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-
 fn png_to_webp(png_bytes: &[u8], _quality: u8) -> Option<Vec<u8>> {
     let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).ok()?;
     let mut buf = Vec::new();
@@ -1257,7 +1246,6 @@ fn png_to_webp(png_bytes: &[u8], _quality: u8) -> Option<Vec<u8>> {
     img.write_with_encoder(encoder).ok()?;
     Some(buf)
 }
-
 
 /// Export a selection of nodes as a clean, minimal SVG with a tight viewBox.
 pub async fn export_selection_as_svg(state: &AppState, args: ExportSelectionArgs) -> ToolResult {
@@ -1309,7 +1297,6 @@ pub async fn export_selection_as_svg(state: &AppState, args: ExportSelectionArgs
     }))
 }
 
-
 /// Build [`SvgSelectionOptions`] from MCP args (shared by selection + icon-set
 /// export). `default_square` picks the framing when `normalize` is unspecified.
 fn selection_svg_opts_ex(
@@ -1336,7 +1323,6 @@ fn selection_svg_opts_ex(
     }
 }
 
-
 fn selection_svg_opts(
     precision: Option<u8>,
     normalize: Option<&str>,
@@ -1344,7 +1330,6 @@ fn selection_svg_opts(
 ) -> photonic_core::export::SvgSelectionOptions {
     selection_svg_opts_ex(precision, normalize, pad, false)
 }
-
 
 /// #203: batch-export N tagged groups to normalized `.svg` files (or inline) in
 /// one call — the canonical icon-pipeline workflow, no external post-pass needed.
@@ -1469,7 +1454,6 @@ pub async fn export_icon_set(state: &AppState, args: ExportIconSetArgs) -> ToolR
     }))
 }
 
-
 /// Slugify a name into a safe file stem (alnum + dash), lower-cased.
 fn slugify_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -1490,7 +1474,6 @@ fn slugify_filename(name: &str) -> String {
 }
 
 // ─── Design Token Export ──────────────────────────────────────────────────────
-
 
 /// Extract the document's design vocabulary as structured design tokens.
 pub async fn export_design_tokens(state: &AppState, args: ExportDesignTokensArgs) -> ToolResult {
@@ -1549,7 +1532,6 @@ pub async fn export_design_tokens(state: &AppState, args: ExportDesignTokensArgs
     .with_data(serde_json::json!({ "format": format, "tokens": output }))
 }
 
-
 fn collect_fill_colors(fill: &Fill, set: &mut BTreeSet<String>) {
     if !fill.enabled {
         return;
@@ -1560,14 +1542,12 @@ fn collect_fill_colors(fill: &Fill, set: &mut BTreeSet<String>) {
     // Gradients are not exported as single-value tokens.
 }
 
-
 fn push_unique_f64(vec: &mut Vec<f64>, val: f64) {
     let already = vec.iter().any(|&v| (v - val).abs() < 0.01);
     if !already {
         vec.push(val);
     }
 }
-
 
 fn format_tokens_json(
     colors: &BTreeSet<String>,
@@ -1594,7 +1574,6 @@ fn format_tokens_json(
     .unwrap_or_default()
 }
 
-
 fn format_tokens_css(
     colors: &BTreeSet<String>,
     font_families: &BTreeSet<String>,
@@ -1619,7 +1598,6 @@ fn format_tokens_css(
     lines.push("}".to_string());
     lines.join("\n")
 }
-
 
 fn format_tokens_tailwind(
     colors: &BTreeSet<String>,
@@ -1673,7 +1651,6 @@ fn format_tokens_tailwind(
     }))
     .unwrap_or_default()
 }
-
 
 fn format_tokens_style_dictionary(
     colors: &BTreeSet<String>,
@@ -1753,7 +1730,6 @@ fn format_tokens_style_dictionary(
 
 // ─── Checkpoint Diff ─────────────────────────────────────────────────────────
 
-
 pub async fn add_export_profile(state: &AppState, args: AddExportProfileArgs) -> ToolResult {
     tracing::debug!("tool: add_export_profile");
 
@@ -1797,7 +1773,6 @@ pub async fn add_export_profile(state: &AppState, args: AddExportProfileArgs) ->
     .with_data(serde_json::json!({ "name": profile.name, "format": format }))
 }
 
-
 pub async fn list_export_profiles(state: &AppState) -> ToolResult {
     tracing::debug!("tool: list_export_profiles");
     let doc = state.document.lock().await;
@@ -1822,7 +1797,6 @@ pub async fn list_export_profiles(state: &AppState) -> ToolResult {
         .with_data(serde_json::json!({ "profiles": profiles }))
 }
 
-
 pub async fn remove_export_profile(state: &AppState, args: RemoveExportProfileArgs) -> ToolResult {
     tracing::debug!("tool: remove_export_profile");
     let mut doc = state.document.lock().await;
@@ -1834,7 +1808,6 @@ pub async fn remove_export_profile(state: &AppState, args: RemoveExportProfileAr
         ToolResult::error(format!("No profile named '{}' found.", args.name))
     }
 }
-
 
 pub async fn run_export_profile(state: &AppState, args: RunExportProfileArgs) -> ToolResult {
     tracing::debug!("tool: run_export_profile");
@@ -1876,7 +1849,6 @@ pub async fn run_export_profile(state: &AppState, args: RunExportProfileArgs) ->
 }
 
 // ─── Document Templates ───────────────────────────────────────────────────────
-
 
 /// #207: import named color swatches from a design-tokens payload (CSS custom
 /// properties / JSON / style-dictionary) — the counterpart to

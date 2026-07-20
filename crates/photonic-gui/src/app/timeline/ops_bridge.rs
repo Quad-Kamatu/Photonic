@@ -145,14 +145,12 @@ pub(crate) fn add_track(
     let n = p
         .sequences
         .get(&seq)
-        .map(|s| match kind {
-            TrackKind::Video => s.video_tracks.len(),
-            TrackKind::Audio => s.audio_tracks.len(),
-        })
+        .map(|s| s.tracks_for(kind).len())
         .unwrap_or(0);
     let prefix = match kind {
         TrackKind::Video => "V",
         TrackKind::Audio => "A",
+        TrackKind::Text => "T",
     };
     let track = Track::new(kind, format!("{prefix}{}", n + 1));
     if let Ok(cmd) = ops::add_track(p, seq, track, None) {
@@ -865,16 +863,25 @@ pub(crate) fn insert_asset_at_first_fit(
     let Some(seq) = p.sequences.get(&seq_id) else {
         return false;
     };
-    let tracks: Vec<TrackId> = match wanted {
-        TrackKind::Video => seq.video_tracks.iter().map(|t| t.id).collect(),
-        TrackKind::Audio => seq.audio_tracks.iter().map(|t| t.id).collect(),
-    };
+    let tracks: Vec<TrackId> = seq.tracks_for(wanted).iter().map(|t| t.id).collect();
     for track in tracks {
         if insert_asset_clip(doc, history, seq_id, track, asset_id, at) {
             return true;
         }
     }
-    false
+    // No existing track of the wanted kind had room at `at` (or none exists yet
+    // — a fresh sequence can be trackless). Add a track and insert there so the
+    // action always lands instead of silently doing nothing.
+    add_track(doc, history, seq_id, wanted);
+    let new_track = doc
+        .timeline
+        .as_ref()
+        .and_then(|p| p.sequences.get(&seq_id))
+        .and_then(|s| s.tracks_for(wanted).last().map(|t| t.id));
+    match new_track {
+        Some(track) => insert_asset_clip(doc, history, seq_id, track, asset_id, at),
+        None => false,
+    }
 }
 
 // ── Markers & work range ─────────────────────────────────────────────────────

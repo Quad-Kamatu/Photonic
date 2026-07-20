@@ -136,6 +136,47 @@ pub fn relink_asset(
     })
 }
 
+/// Set or clear an asset's proxy attachment while preserving a lossless undo
+/// snapshot. Used by background proxy generation when a job moves through
+/// Pending → Ready/Failed.
+pub fn set_asset_proxy(
+    p: &TimelineProject,
+    asset: AssetId,
+    new: Option<super::media::ProxyRef>,
+) -> Result<TimelineCmd, EditError> {
+    let old = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?
+        .proxy
+        .clone();
+    Ok(TimelineCmd::SetAssetProxy { asset, old, new })
+}
+
+/// Update probe + content hash after L0 pool registration (24-preview-media-load
+/// L1/L2). Row already exists via [`add_asset`]; this fills metadata without
+/// removing/re-adding the asset id.
+pub fn set_asset_meta(
+    p: &TimelineProject,
+    asset: AssetId,
+    new_probe: Option<super::media::MediaProbe>,
+    new_hash: Option<String>,
+) -> Result<TimelineCmd, EditError> {
+    let a = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?;
+    Ok(TimelineCmd::SetAssetMeta {
+        asset,
+        old_probe: a.probe.clone(),
+        new_probe,
+        old_hash: a.content_hash.clone(),
+        new_hash,
+    })
+}
+
 // ── Sequences / formats / tracks ────────────────────────────────────────────
 
 pub fn add_sequence(s: Sequence) -> TimelineCmd {
@@ -234,10 +275,7 @@ pub fn add_track(
 ) -> Result<TimelineCmd, EditError> {
     let s = seq(p, id)?;
     let kind = t.kind;
-    let len = match kind {
-        TrackKind::Video => s.video_tracks.len(),
-        TrackKind::Audio => s.audio_tracks.len(),
-    };
+    let len = s.tracks_for(kind).len();
     Ok(TimelineCmd::AddTrack {
         seq: id,
         kind,
@@ -1608,10 +1646,7 @@ pub fn create_nested_sequence(
         nc.start = c.start - min_start;
         inner_track.clips.push(nc);
     }
-    match t.kind {
-        TrackKind::Video => inner.video_tracks.push(inner_track),
-        TrackKind::Audio => inner.audio_tracks.push(inner_track),
-    }
+    inner.tracks_for_mut(t.kind).push(inner_track);
     let inner_id = inner.id;
 
     // Replace the selection with one NestedSequence clip over its bounding box.
@@ -3019,5 +3054,38 @@ mod tests {
             set_multicam_active_angle(p, seq_id, v_track, primary, 0).unwrap_err(),
             EditError::IndexOutOfRange
         );
+    }
+
+    #[test]
+    fn set_asset_meta_fills_probe_and_hash_undoably() {
+        use super::super::media::{AssetKind, MediaAsset, MediaProbe};
+        use super::super::time::Tick;
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut project = TimelineProject::new();
+        let asset = MediaAsset::from_file(AssetKind::Video, "/tmp/clip.mp4");
+        let id = asset.id;
+        project.media.insert(asset);
+        doc.timeline = Some(project);
+
+        let probe = MediaProbe {
+            duration: Tick(1_000_000),
+            video: None,
+            audio: None,
+            container: "mp4".into(),
+            codec: "h264".into(),
+        };
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = set_asset_meta(
+            p,
+            id,
+            Some(probe.clone()),
+            Some("hash-abc".into()),
+        )
+        .unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+        Command::Timeline(cmd).apply(&mut doc);
+        let a = doc.timeline.as_ref().unwrap().media.assets.get(&id).unwrap();
+        assert_eq!(a.probe.as_ref().map(|p| p.codec.as_str()), Some("h264"));
+        assert_eq!(a.content_hash.as_deref(), Some("hash-abc"));
     }
 }

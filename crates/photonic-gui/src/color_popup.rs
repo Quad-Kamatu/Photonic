@@ -13,9 +13,7 @@
 //! Photonic stores **gamma-encoded sRGB** `[f32; 4]`. All public entry points
 //! speak that; conversions live in [`crate::color_convert`].
 
-use egui::{
-    epaint::Vertex, Color32, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2,
-};
+use egui::{epaint::Vertex, Color32, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
 use photonic_core::style::{
     interpolate_stops_with, Fill, FillKind, FluidGradient, FluidGradientPoint, Gradient,
     GradientInterpolation, GradientKind, GradientStop, GradientUnits, MeshGradient,
@@ -431,8 +429,11 @@ fn sv_square(ui: &mut Ui, size: Vec2, st: &mut PickerState) -> bool {
     let center = Pos2::new(cx, cy);
     ui.painter()
         .circle_stroke(center, 5.0, Stroke::new(2.0, Color32::WHITE));
-    ui.painter()
-        .circle_stroke(center, 6.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
+    ui.painter().circle_stroke(
+        center,
+        6.0,
+        Stroke::new(1.0, Color32::from_black_alpha(160)),
+    );
     changed
 }
 
@@ -548,9 +549,7 @@ fn hex_field(ui: &mut Ui, id: egui::Id, rgb: &mut [f32; 3], a: &mut f32, alpha: 
 
 fn model_fields(ui: &mut Ui, id: egui::Id, rgb: &mut [f32; 3], a: &mut f32, alpha: bool) -> bool {
     let model_id = egui::Id::new("colorpopup_model");
-    let mut model: ColorModel = ui
-        .data(|d| d.get_temp(model_id))
-        .unwrap_or(ColorModel::Rgb);
+    let mut model: ColorModel = ui.data(|d| d.get_temp(model_id)).unwrap_or(ColorModel::Rgb);
 
     egui::ComboBox::from_id_salt(id.with("model"))
         .selected_text(model.label())
@@ -714,9 +713,18 @@ fn contrast_and_cvd(ui: &mut Ui, rgb: [f32; 3], reference: Option<[f32; 3]>) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("CVD").small().weak());
         for (kind, tip) in [
-            (cc::ColorVisionDeficiency::Protanopia, "Protanopia (red-blind)"),
-            (cc::ColorVisionDeficiency::Deuteranopia, "Deuteranopia (green-blind)"),
-            (cc::ColorVisionDeficiency::Tritanopia, "Tritanopia (blue-blind)"),
+            (
+                cc::ColorVisionDeficiency::Protanopia,
+                "Protanopia (red-blind)",
+            ),
+            (
+                cc::ColorVisionDeficiency::Deuteranopia,
+                "Deuteranopia (green-blind)",
+            ),
+            (
+                cc::ColorVisionDeficiency::Tritanopia,
+                "Tritanopia (blue-blind)",
+            ),
         ] {
             let sim = cc::simulate_cvd(rgb, kind);
             mini_swatch(ui, sim, 1.0, false).on_hover_text(tip);
@@ -811,11 +819,7 @@ fn paint_checker(painter: &egui::Painter, rect: Rect) {
 /// A horizontal marker line across a vertical bar.
 fn marker_line(painter: &egui::Painter, rect: Rect, y: f32) {
     let y = y.clamp(rect.top(), rect.bottom());
-    painter.hline(
-        rect.x_range(),
-        y,
-        Stroke::new(2.0, Color32::WHITE),
-    );
+    painter.hline(rect.x_range(), y, Stroke::new(2.0, Color32::WHITE));
     painter.hline(
         rect.x_range(),
         y + 1.5,
@@ -846,8 +850,12 @@ fn arrow_delta(ui: &Ui) -> (f32, f32) {
 }
 
 fn byte_drag(ui: &mut Ui, prefix: &str, v: &mut u8) -> bool {
-    ui.add(egui::DragValue::new(v).speed(0.5).prefix(format!("{prefix} ")))
-        .changed()
+    ui.add(
+        egui::DragValue::new(v)
+            .speed(0.5)
+            .prefix(format!("{prefix} ")),
+    )
+    .changed()
 }
 
 fn deg_drag(ui: &mut Ui, prefix: &str, v: &mut f32) -> bool {
@@ -1049,8 +1057,7 @@ fn fill_type_tabs(ui: &mut Ui, current: FillType) -> Option<FillType> {
             FillType::Mesh,
             FillType::Pattern,
         ] {
-            let selected = current == t
-                || (t == FillType::Solid && current == FillType::None);
+            let selected = current == t || (t == FillType::Solid && current == FillType::None);
             if ui
                 .add(egui::SelectableLabel::new(selected, t.label()))
                 .clicked()
@@ -1117,9 +1124,9 @@ fn build_default_fill(t: FillType, old: &Fill) -> Fill {
             )
             .with_units(GradientUnits::ObjectBoundingBox),
         ),
-        FillType::Pattern => {
-            Fill::pattern(photonic_core::style::PatternFill::new(crate::panels::default_checker_tile()))
-        }
+        FillType::Pattern => Fill::pattern(photonic_core::style::PatternFill::new(
+            crate::panels::default_checker_tile(),
+        )),
     };
     f.opacity = old.opacity;
     f.enabled = true;
@@ -1207,7 +1214,11 @@ fn fill_active_color(
         }
         None => {
             if matches!(fill.kind, FillKind::Pattern(_)) {
-                ui.label(egui::RichText::new("Pattern fill — see drawer").weak().small());
+                ui.label(
+                    egui::RichText::new("Pattern fill — see drawer")
+                        .weak()
+                        .small(),
+                );
             } else {
                 ui.label(egui::RichText::new("No fill").weak());
                 if ui.button("Add solid color").clicked() {
@@ -1274,7 +1285,10 @@ fn gradient_drawer(
         });
         ui.horizontal_wrapped(|ui| {
             for (name, gfill) in cfg.gradient_swatches {
-                if gradient_swatch_button(ui, gfill).on_hover_text(name).clicked() {
+                if gradient_swatch_button(ui, gfill)
+                    .on_hover_text(name)
+                    .clicked()
+                {
                     *fill = gfill.clone();
                     out.changed = true;
                 }
@@ -1336,7 +1350,12 @@ fn gradient_stop_drawer(ui: &mut Ui, g: &mut Gradient, id: egui::Id, out: &mut F
         if let Some(s) = g.stops.get_mut(active) {
             let mut off = s.offset;
             if ui
-                .add(egui::DragValue::new(&mut off).speed(0.005).range(0.0..=1.0).prefix("pos "))
+                .add(
+                    egui::DragValue::new(&mut off)
+                        .speed(0.005)
+                        .range(0.0..=1.0)
+                        .prefix("pos "),
+                )
                 .changed()
             {
                 s.offset = off;
@@ -1360,20 +1379,34 @@ fn gradient_stop_drawer(ui: &mut Ui, g: &mut Gradient, id: egui::Id, out: &mut F
         }
     });
     ui.horizontal(|ui| {
-        if ui.small_button(egui_phosphor::regular::PLUS).on_hover_text("Add stop").clicked() {
+        if ui
+            .small_button(egui_phosphor::regular::PLUS)
+            .on_hover_text("Add stop")
+            .clicked()
+        {
             let off = g.stops.get(active).map(|s| s.offset).unwrap_or(0.5);
             let c = interpolate_stops_with(&g.stops, off, g.interpolation);
-            g.stops.insert(active + 1, GradientStop::new((off + 0.1).min(1.0), arr_to_col(c)));
+            g.stops.insert(
+                active + 1,
+                GradientStop::new((off + 0.1).min(1.0), arr_to_col(c)),
+            );
             changed = true;
         }
-        if ui.small_button(egui_phosphor::regular::COPY).on_hover_text("Duplicate stop").clicked() {
+        if ui
+            .small_button(egui_phosphor::regular::COPY)
+            .on_hover_text("Duplicate stop")
+            .clicked()
+        {
             if let Some(s) = g.stops.get(active).cloned() {
                 g.stops.insert(active + 1, s);
                 changed = true;
             }
         }
         if g.stops.len() > 2
-            && ui.small_button(egui_phosphor::regular::TRASH).on_hover_text("Delete stop").clicked()
+            && ui
+                .small_button(egui_phosphor::regular::TRASH)
+                .on_hover_text("Delete stop")
+                .clicked()
         {
             g.stops.remove(active);
             changed = true;
@@ -1433,8 +1466,11 @@ fn gradient_bar(ui: &mut Ui, g: &mut Gradient, active: &mut usize) -> bool {
             (c[3] * 255.0) as u8,
         )
     });
-    ui.painter()
-        .rect_stroke(rect, egui::Rounding::same(3.0), Stroke::new(1.0, Color32::from_gray(90)));
+    ui.painter().rect_stroke(
+        rect,
+        egui::Rounding::same(3.0),
+        Stroke::new(1.0, Color32::from_gray(90)),
+    );
 
     let x_of = |off: f32| rect.left() + off.clamp(0.0, 1.0) * rect.width();
     let frac_of = |x: f32| ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -1447,7 +1483,8 @@ fn gradient_bar(ui: &mut Ui, g: &mut Gradient, active: &mut usize) -> bool {
             let off = frac_of(p.x);
             let c = interpolate_stops_with(&g.stops, off, interp);
             g.stops.push(GradientStop::new(off, arr_to_col(c)));
-            g.stops.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
+            g.stops
+                .sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
             *active = g
                 .stops
                 .iter()
@@ -1491,7 +1528,8 @@ fn gradient_bar(ui: &mut Ui, g: &mut Gradient, active: &mut usize) -> bool {
         } else {
             Stroke::new(1.0, Color32::from_black_alpha(180))
         };
-        ui.painter().line_segment([Pos2::new(x, top), Pos2::new(x, bot)], stroke);
+        ui.painter()
+            .line_segment([Pos2::new(x, top), Pos2::new(x, bot)], stroke);
         let b = cc::rgba_to_bytes(col_to_arr(s.color));
         ui.painter().circle(
             Pos2::new(x, bot + 4.0),
@@ -1532,7 +1570,12 @@ fn linear_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
     };
     ui.horizontal(|ui| {
         if ui
-            .add(egui::DragValue::new(&mut angle).speed(1.0).suffix("°").prefix("angle "))
+            .add(
+                egui::DragValue::new(&mut angle)
+                    .speed(1.0)
+                    .suffix("°")
+                    .prefix("angle "),
+            )
             .changed()
         {
             apply(g, angle, len);
@@ -1569,19 +1612,30 @@ fn radial_geometry(ui: &mut Ui, g: &mut Gradient) -> bool {
     ui.horizontal(|ui| {
         let mut cx = g.coords[0];
         let mut cy = g.coords[1];
-        if ui.add(egui::DragValue::new(&mut cx).speed(speed).prefix("cx ")).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut cx).speed(speed).prefix("cx "))
+            .changed()
+        {
             g.coords[0] = cx;
             g.coords[2] = cx;
             changed = true;
         }
-        if ui.add(egui::DragValue::new(&mut cy).speed(speed).prefix("cy ")).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut cy).speed(speed).prefix("cy "))
+            .changed()
+        {
             g.coords[1] = cy;
             g.coords[3] = cy;
             changed = true;
         }
         let mut r = g.coords[4];
         if ui
-            .add(egui::DragValue::new(&mut r).speed(speed).range(rmin..=rmax).prefix("r "))
+            .add(
+                egui::DragValue::new(&mut r)
+                    .speed(speed)
+                    .range(rmin..=rmax)
+                    .prefix("r "),
+            )
             .changed()
         {
             g.coords[4] = r;
@@ -1600,44 +1654,73 @@ fn fluid_drawer(ui: &mut Ui, fg: &mut FluidGradient, id: egui::Id) -> bool {
     let mut active = active_index(ui, id, fg.points.len());
     let mut remove = None;
     ui.label(egui::RichText::new("Points").small().weak());
-    egui::ScrollArea::vertical().max_height(150.0).id_salt("fluid_pts").show(ui, |ui| {
-        for i in 0..fg.points.len() {
-            ui.horizontal(|ui| {
-                let sel = i == active;
-                if mini_swatch(ui, [fg.points[i].color.r, fg.points[i].color.g, fg.points[i].color.b], fg.points[i].color.a, true).clicked() {
-                    active = i;
-                }
-                if sel {
-                    ui.label(egui::RichText::new("●").small().color(ACCENT));
-                }
-                let mut x = fg.points[i].x as f32;
-                let mut y = fg.points[i].y as f32;
-                if ui.add(egui::DragValue::new(&mut x).speed(xy_speed).prefix("x")).changed() {
-                    fg.points[i].x = x as f64;
-                    changed = true;
-                }
-                if ui.add(egui::DragValue::new(&mut y).speed(xy_speed).prefix("y")).changed() {
-                    fg.points[i].y = y as f64;
-                    changed = true;
-                }
-                if fg.points.len() > 1 && ui.small_button(egui_phosphor::regular::X).clicked() {
-                    remove = Some(i);
-                }
-            });
-        }
-    });
+    egui::ScrollArea::vertical()
+        .max_height(150.0)
+        .id_salt("fluid_pts")
+        .show(ui, |ui| {
+            for i in 0..fg.points.len() {
+                ui.horizontal(|ui| {
+                    let sel = i == active;
+                    if mini_swatch(
+                        ui,
+                        [
+                            fg.points[i].color.r,
+                            fg.points[i].color.g,
+                            fg.points[i].color.b,
+                        ],
+                        fg.points[i].color.a,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        active = i;
+                    }
+                    if sel {
+                        ui.label(egui::RichText::new("●").small().color(ACCENT));
+                    }
+                    let mut x = fg.points[i].x as f32;
+                    let mut y = fg.points[i].y as f32;
+                    if ui
+                        .add(egui::DragValue::new(&mut x).speed(xy_speed).prefix("x"))
+                        .changed()
+                    {
+                        fg.points[i].x = x as f64;
+                        changed = true;
+                    }
+                    if ui
+                        .add(egui::DragValue::new(&mut y).speed(xy_speed).prefix("y"))
+                        .changed()
+                    {
+                        fg.points[i].y = y as f64;
+                        changed = true;
+                    }
+                    if fg.points.len() > 1 && ui.small_button(egui_phosphor::regular::X).clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+        });
     if let Some(i) = remove {
         fg.points.remove(i);
         changed = true;
     }
     ui.horizontal(|ui| {
         if ui.small_button("+ Point").clicked() {
-            fg.points.push(FluidGradientPoint::new(add_pos, add_pos, Color::WHITE));
+            fg.points
+                .push(FluidGradientPoint::new(add_pos, add_pos, Color::WHITE));
             active = fg.points.len() - 1;
             changed = true;
         }
         let mut power = fg.power;
-        if ui.add(egui::DragValue::new(&mut power).speed(0.1).range(0.5..=8.0).prefix("power ")).changed() {
+        if ui
+            .add(
+                egui::DragValue::new(&mut power)
+                    .speed(0.1)
+                    .range(0.5..=8.0)
+                    .prefix("power "),
+            )
+            .changed()
+        {
             fg.power = power;
             changed = true;
         }
@@ -1670,29 +1753,32 @@ fn mesh_drawer(ui: &mut Ui, mg: &mut MeshGradient, id: egui::Id) -> bool {
             .small()
             .weak(),
     );
-    egui::ScrollArea::vertical().max_height(150.0).id_salt("mesh_grid").show(ui, |ui| {
-        for row in 0..mg.rows {
-            ui.horizontal(|ui| {
-                for col in 0..mg.cols {
-                    let idx = (row * mg.cols + col) as usize;
-                    if let Some(c) = mg.cell_colors.get(idx) {
-                        let sel = idx == active;
-                        let r = mini_swatch(ui, [c.r, c.g, c.b], c.a, false);
-                        if r.clicked() {
-                            active = idx;
-                        }
-                        if sel {
-                            ui.painter().rect_stroke(
-                                r.rect.expand(1.5),
-                                egui::Rounding::same(3.0),
-                                Stroke::new(2.0, ACCENT),
-                            );
+    egui::ScrollArea::vertical()
+        .max_height(150.0)
+        .id_salt("mesh_grid")
+        .show(ui, |ui| {
+            for row in 0..mg.rows {
+                ui.horizontal(|ui| {
+                    for col in 0..mg.cols {
+                        let idx = (row * mg.cols + col) as usize;
+                        if let Some(c) = mg.cell_colors.get(idx) {
+                            let sel = idx == active;
+                            let r = mini_swatch(ui, [c.r, c.g, c.b], c.a, false);
+                            if r.clicked() {
+                                active = idx;
+                            }
+                            if sel {
+                                ui.painter().rect_stroke(
+                                    r.rect.expand(1.5),
+                                    egui::Rounding::same(3.0),
+                                    Stroke::new(2.0, ACCENT),
+                                );
+                            }
                         }
                     }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
     ui.horizontal(|ui| {
         if mg.rows < 8 && ui.small_button("+ Row").clicked() {
             mesh_resize(mg, mg.rows + 1, mg.cols);
@@ -1726,7 +1812,9 @@ fn mesh_resize(mg: &mut MeshGradient, new_rows: u32, new_cols: u32) {
     for r in 0..new_rows {
         for c in 0..new_cols {
             colors.push(if r < or && c < oc {
-                old.get((r * oc + c) as usize).copied().unwrap_or(Color::WHITE)
+                old.get((r * oc + c) as usize)
+                    .copied()
+                    .unwrap_or(Color::WHITE)
             } else {
                 Color::WHITE
             });
@@ -1751,17 +1839,23 @@ fn gradient_swatch_button(ui: &mut Ui, fill: &Fill) -> Response {
         let interp = g.interpolation;
         paint_gradient(ui.painter(), rect, 24, 1, |fx, _| {
             let c = interpolate_stops_with(&stops, fx, interp);
-            Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
+            Color32::from_rgb(
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8,
+            )
         });
     } else {
-        ui.painter().rect_filled(rect, egui::Rounding::same(3.0), Color32::from_gray(80));
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(3.0), Color32::from_gray(80));
     }
     let stroke = if resp.hovered() {
         Stroke::new(2.0, ACCENT)
     } else {
         Stroke::new(1.0, Color32::from_gray(80))
     };
-    ui.painter().rect_stroke(rect, egui::Rounding::same(3.0), stroke);
+    ui.painter()
+        .rect_stroke(rect, egui::Rounding::same(3.0), stroke);
     resp
 }
 
@@ -1789,7 +1883,12 @@ fn pattern_drawer(ui: &mut Ui, p: &mut photonic_core::style::PatternFill) -> boo
     ui.horizontal(|ui| {
         let mut scale = p.scale;
         if ui
-            .add(egui::DragValue::new(&mut scale).speed(0.01).range(0.05..=20.0).prefix("scale "))
+            .add(
+                egui::DragValue::new(&mut scale)
+                    .speed(0.01)
+                    .range(0.05..=20.0)
+                    .prefix("scale "),
+            )
             .changed()
         {
             p.scale = scale;
@@ -1797,7 +1896,12 @@ fn pattern_drawer(ui: &mut Ui, p: &mut photonic_core::style::PatternFill) -> boo
         }
         let mut rot = p.rotation.to_degrees();
         if ui
-            .add(egui::DragValue::new(&mut rot).speed(1.0).suffix("°").prefix("rot "))
+            .add(
+                egui::DragValue::new(&mut rot)
+                    .speed(1.0)
+                    .suffix("°")
+                    .prefix("rot "),
+            )
             .changed()
         {
             p.rotation = rot.to_radians();
@@ -1807,7 +1911,12 @@ fn pattern_drawer(ui: &mut Ui, p: &mut photonic_core::style::PatternFill) -> boo
     ui.horizontal(|ui| {
         let mut spacing = p.spacing;
         if ui
-            .add(egui::DragValue::new(&mut spacing).speed(0.5).range(0.0..=200.0).prefix("gap "))
+            .add(
+                egui::DragValue::new(&mut spacing)
+                    .speed(0.5)
+                    .range(0.0..=200.0)
+                    .prefix("gap "),
+            )
             .changed()
         {
             p.spacing = spacing;
@@ -1846,17 +1955,16 @@ impl ColorPopup {
 
     /// A fill preview **swatch button** that opens the fill picker in a popup.
     /// Renders a wide swatch showing the current fill.
-    pub fn fill_swatch_popup(
-        ui: &mut Ui,
-        fill: &mut Fill,
-        cfg: &FillPickerConfig,
-    ) -> FillOutcome {
+    pub fn fill_swatch_popup(ui: &mut Ui, fill: &mut Fill, cfg: &FillPickerConfig) -> FillOutcome {
         let mut out = FillOutcome::default();
         let size = Vec2::new(48.0, ui.spacing().interact_size.y.max(18.0));
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         paint_fill_preview(ui.painter(), rect, fill);
-        ui.painter()
-            .rect_stroke(rect, egui::Rounding::same(3.0), Stroke::new(1.0, Color32::from_gray(90)));
+        ui.painter().rect_stroke(
+            rect,
+            egui::Rounding::same(3.0),
+            Stroke::new(1.0, Color32::from_gray(90)),
+        );
 
         let popup_id = resp.id.with("fill_popup");
         if resp.clicked() {
@@ -1917,14 +2025,30 @@ fn paint_fill_preview(painter: &egui::Painter, rect: Rect, fill: &Fill) {
             });
         }
         FillKind::FluidGradient(fg) => {
-            let c = fg.points.first().map(|p| col_to_arr(p.color)).unwrap_or([0.5; 4]);
+            let c = fg
+                .points
+                .first()
+                .map(|p| col_to_arr(p.color))
+                .unwrap_or([0.5; 4]);
             let b = cc::rgba_to_bytes(c);
-            painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_rgb(b[0], b[1], b[2]));
+            painter.rect_filled(
+                rect,
+                egui::Rounding::same(3.0),
+                Color32::from_rgb(b[0], b[1], b[2]),
+            );
         }
         FillKind::MeshGradient(mg) => {
-            let c = mg.cell_colors.first().map(|c| col_to_arr(*c)).unwrap_or([0.5; 4]);
+            let c = mg
+                .cell_colors
+                .first()
+                .map(|c| col_to_arr(*c))
+                .unwrap_or([0.5; 4]);
             let b = cc::rgba_to_bytes(c);
-            painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_rgb(b[0], b[1], b[2]));
+            painter.rect_filled(
+                rect,
+                egui::Rounding::same(3.0),
+                Color32::from_rgb(b[0], b[1], b[2]),
+            );
         }
         FillKind::Pattern(_) => {
             painter.rect_filled(rect, egui::Rounding::same(3.0), Color32::from_gray(120));

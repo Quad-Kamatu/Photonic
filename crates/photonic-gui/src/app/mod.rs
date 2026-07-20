@@ -870,6 +870,10 @@ pub struct PhotonicApp {
     pub(crate) monitor_loop_enabled: bool,
     /// Safe-area guide overlay toggle (04 §3.3).
     pub(crate) monitor_safe_area: bool,
+    /// Transform tool toggle: show the in-monitor reframe/transform handles for
+    /// the selected clip only when on (off by default — the handles are opt-in,
+    /// not always drawn over the picture).
+    pub(crate) monitor_transform_tool: bool,
     /// One-time keyboard-shortcut overlay (Space/JKL/I/O/S) visible — opened
     /// automatically on first video-mode entry and re-openable via `?` (04
     /// §1.2 First-run hint). Session state; the "has this been shown before"
@@ -1574,6 +1578,7 @@ impl Default for PhotonicApp {
             monitor_play_speed: 1.0,
             monitor_loop_enabled: false,
             monitor_safe_area: false,
+            monitor_transform_tool: false,
             show_video_shortcut_sheet: false,
             initial_mode_checked: false,
             engine: None,
@@ -2459,32 +2464,63 @@ impl PhotonicApp {
         }
         if !media_drops.is_empty() {
             let bin = self.media_pool_ui.current_bin;
-            self.media_pool_ui.spawn_import(media_drops, bin);
+            let project_path = self.current_file.clone();
+            // L0-first: stubs land on this frame; L1–L3 meta fills async (24 §2).
+            let stubs = self
+                .media_pool_ui
+                .spawn_import(media_drops, bin, project_path);
+            if !stubs.is_empty() {
+                use photonic_core::timeline::ops;
+                timeline::ops_bridge::ensure_project_and_sequence(
+                    doc,
+                    history,
+                    photonic_core::timeline::FrameRate::FPS_30,
+                );
+                for asset in stubs {
+                    history.execute_discrete(Command::Timeline(ops::add_asset(asset)), doc);
+                }
+                doc_modified = true;
+            }
         }
 
         // ── Video engine upkeep ───────────────────────────────────────────────
         // Mirror the timeline into the engine's snapshot pair whenever the
-        // history revision moved (see `app/engine.rs`), and commit any
-        // background media imports that finished probing (one undoable
-        // `AddAsset` each, 05 §2).
+        // history revision moved (see `app/engine.rs`), and apply L1–L3 meta
+        // fills for imports already registered at L0 (24 §2).
         if let Some(bridge) = self.engine.as_mut() {
             bridge.sync_document(doc, history);
         }
-        let finished_imports = self.media_pool_ui.drain_finished();
-        if !finished_imports.is_empty() {
+        let meta_updates = self.media_pool_ui.drain_meta();
+        if !meta_updates.is_empty() {
             use photonic_core::timeline::ops;
-            // Imports originate in video mode, but a tab switch may have
-            // landed us on a document with no project — create one rather
-            // than dropping the user's finished imports.
-            timeline::ops_bridge::ensure_project_and_sequence(
-                doc,
-                history,
-                photonic_core::timeline::FrameRate::FPS_30,
-            );
-            for asset in finished_imports {
-                history.execute_discrete(Command::Timeline(ops::add_asset(asset)), doc);
+            if let Some(project) = doc.timeline.as_ref() {
+                let commands: Vec<_> = meta_updates
+                    .into_iter()
+                    .filter_map(|m| {
+                        ops::set_asset_meta(project, m.asset, m.probe, m.content_hash).ok()
+                    })
+                    .collect();
+                for cmd in commands {
+                    history.execute_discrete(Command::Timeline(cmd), doc);
+                    doc_modified = true;
+                }
             }
-            doc_modified = true;
+        }
+        let finished_proxies = self.media_pool_ui.drain_finished_proxies();
+        if !finished_proxies.is_empty() {
+            use photonic_core::timeline::ops;
+            if let Some(project) = doc.timeline.as_ref() {
+                let commands: Vec<_> = finished_proxies
+                    .into_iter()
+                    .filter_map(|result| {
+                        ops::set_asset_proxy(project, result.asset, result.proxy).ok()
+                    })
+                    .collect();
+                for cmd in commands {
+                    history.execute_discrete(Command::Timeline(cmd), doc);
+                    doc_modified = true;
+                }
+            }
         }
 
         // ── Direct Select entry seed (#164) ───────────────────────────────────
@@ -3700,13 +3736,15 @@ impl PhotonicApp {
         // program-monitor) CentralPanel — panel registration order is
         // egui-stacking order, so this must land after the console panel's
         // `show_animated` and before `CentralPanel::show`.
-        egui::TopBottomPanel::bottom("timeline")
-            .resizable(true)
-            .default_height(220.0)
-            .min_height(120.0)
-            .show_animated(ctx, self.mode == AppMode::Video, |ui| {
-                self.draw_timeline_panel(ui, doc, history);
-            });
+        if self.mode == AppMode::Video {
+            egui::TopBottomPanel::bottom("timeline")
+                .resizable(true)
+                .default_height(220.0)
+                .min_height(120.0)
+                .show(ctx, |ui| {
+                    self.draw_timeline_panel(ui, doc, history);
+                });
+        }
 
         // ── Audit panel (floating window) ────────────────────────────────────
         if self.audit.panel_open {

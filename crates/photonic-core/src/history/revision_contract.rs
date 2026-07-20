@@ -166,7 +166,10 @@ fn changes_since_reports_touched_node_after_single_execute() {
     );
 
     let summary = history.changes_since(baseline);
-    assert!(!summary.overflowed, "a single-command gap must not overflow");
+    assert!(
+        !summary.overflowed,
+        "a single-command gap must not overflow"
+    );
     assert_eq!(summary.revision, history.revision());
     assert!(
         summary.touched.contains(&node_id),

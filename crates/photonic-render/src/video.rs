@@ -162,18 +162,12 @@ fn vs_quad(@builtin(vertex_index) vi: u32) -> VOut {
     return out;
 }
 
-fn srgb_oetf(c: f32) -> f32 {
-    if (c <= 0.0031308) { return 12.92 * c; }
-    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-}
-
 @fragment
 fn fs_present(in: VOut) -> @location(0) vec4<f32> {
     let p = textureSample(t_src, samp, in.uv);
     let a = max(p.a, 1e-6);
     let straight = p.rgb / a;
-    let enc = vec3<f32>(srgb_oetf(straight.r), srgb_oetf(straight.g), srgb_oetf(straight.b));
-    return vec4<f32>(enc, p.a);
+    return vec4<f32>(straight, p.a);
 }
 "#;
 
@@ -298,160 +292,186 @@ fn r8_plane(
     tex
 }
 
-/// Upload YUV planes and convert to a linear, premultiplied `Rgba16Float`
-/// working texture (03 §3.2/§3.3). `yuv420p` chroma is bilinearly upsampled;
-/// `yuva444p` alpha passes straight through. The returned texture is sized to
-/// the luma resolution with `TEXTURE_BINDING | COPY_SRC | RENDER_ATTACHMENT`.
-///
-/// A fresh bind-group-layout and pipeline are built per call; the P3 engine will
-/// hold a persistent `YuvConverter` — kept inline here for the P1 contract.
+/// Persistent YUV→working conversion resources for one wgpu device.
+pub struct YuvConverter {
+    bgl: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    nearest: wgpu::Sampler,
+    linear: wgpu::Sampler,
+}
+
+impl YuvConverter {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let bgl = plane_bgl(device);
+        let pipeline =
+            fullscreen_pipeline(device, &bgl, YUV_CONVERT_SHADER, "fs_yuv", WORKING_FORMAT);
+        let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("yuv_nearest"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("yuv_linear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            bgl,
+            pipeline,
+            nearest,
+            linear,
+        }
+    }
+
+    /// Upload YUV planes and convert them to a linear, premultiplied
+    /// `Rgba16Float` working texture.
+    pub fn convert(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        planes: &YuvPlanes,
+        colorimetry: Colorimetry,
+    ) -> wgpu::Texture {
+        let (w, h) = planes.dims();
+        let (w, h) = (w.max(1), h.max(1));
+
+        // Plane textures.
+        let (y_tex, cb_tex, cr_tex, a_tex, has_alpha) = match *planes {
+            YuvPlanes::Yuv420 { y, cb, cr, .. } => {
+                let cw = w.div_ceil(2);
+                let ch = h.div_ceil(2);
+                (
+                    r8_plane(device, queue, w, h, y),
+                    r8_plane(device, queue, cw, ch, cb),
+                    r8_plane(device, queue, cw, ch, cr),
+                    r8_plane(device, queue, 1, 1, &[255]), // dummy, unsampled
+                    0u32,
+                )
+            }
+            YuvPlanes::Yuva444 { y, cb, cr, a, .. } => (
+                r8_plane(device, queue, w, h, y),
+                r8_plane(device, queue, w, h, cb),
+                r8_plane(device, queue, w, h, cr),
+                r8_plane(device, queue, w, h, a),
+                1u32,
+            ),
+        };
+
+        let params = YuvParams {
+            matrix_id: match colorimetry.matrix {
+                Matrix::Bt709 => 0,
+                Matrix::Bt601 => 1,
+            },
+            range_id: match colorimetry.range {
+                Range::Limited => 0,
+                Range::Full => 1,
+            },
+            has_alpha,
+            _pad: 0,
+        };
+        let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("yuv_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let v = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("yuv_bg"),
+            layout: &self.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&v(&y_tex)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&v(&cb_tex)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&v(&cr_tex)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&v(&a_tex)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.nearest),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: pbuf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let out = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("yuv_working"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let out_view = out.create_view(&Default::default());
+        let mut enc = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("yuv_convert_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        queue.submit([enc.finish()]);
+        out
+    }
+}
+
+/// One-shot YUV conversion convenience wrapper for tests and one-off callers.
 pub fn convert_yuv_planes_to_working(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     planes: &YuvPlanes,
     colorimetry: Colorimetry,
 ) -> wgpu::Texture {
-    let (w, h) = planes.dims();
-    let (w, h) = (w.max(1), h.max(1));
-
-    // Plane textures.
-    let (y_tex, cb_tex, cr_tex, a_tex, has_alpha) = match *planes {
-        YuvPlanes::Yuv420 { y, cb, cr, .. } => {
-            let cw = w.div_ceil(2);
-            let ch = h.div_ceil(2);
-            (
-                r8_plane(device, queue, w, h, y),
-                r8_plane(device, queue, cw, ch, cb),
-                r8_plane(device, queue, cw, ch, cr),
-                r8_plane(device, queue, 1, 1, &[255]), // dummy, unsampled
-                0u32,
-            )
-        }
-        YuvPlanes::Yuva444 { y, cb, cr, a, .. } => (
-            r8_plane(device, queue, w, h, y),
-            r8_plane(device, queue, w, h, cb),
-            r8_plane(device, queue, w, h, cr),
-            r8_plane(device, queue, w, h, a),
-            1u32,
-        ),
-    };
-
-    let params = YuvParams {
-        matrix_id: match colorimetry.matrix {
-            Matrix::Bt709 => 0,
-            Matrix::Bt601 => 1,
-        },
-        range_id: match colorimetry.range {
-            Range::Limited => 0,
-            Range::Full => 1,
-        },
-        has_alpha,
-        _pad: 0,
-    };
-    let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("yuv_params"),
-        contents: bytemuck::bytes_of(&params),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
-
-    let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("yuv_nearest"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        ..Default::default()
-    });
-    let linear = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("yuv_linear"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-
-    let bgl = plane_bgl(device);
-    let pipeline = fullscreen_pipeline(device, &bgl, YUV_CONVERT_SHADER, "fs_yuv", WORKING_FORMAT);
-
-    let v = |t: &wgpu::Texture| t.create_view(&Default::default());
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("yuv_bg"),
-        layout: &bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&v(&y_tex)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&v(&cb_tex)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&v(&cr_tex)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(&v(&a_tex)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::Sampler(&nearest),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::Sampler(&linear),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: pbuf.as_entire_binding(),
-            },
-        ],
-    });
-
-    let out = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("yuv_working"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: WORKING_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let out_view = out.create_view(&Default::default());
-    let mut enc = device.create_command_encoder(&Default::default());
-    {
-        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("yuv_convert_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &out_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..6, 0..1);
-    }
-    queue.submit([enc.finish()]);
-    out
+    YuvConverter::new(device).convert(device, queue, planes, colorimetry)
 }
 
 /// Presents a working-format (`Rgba16Float`, linear, premultiplied) texture to a
-/// non-sRGB surface, per 03 §5 — the normative `EngineFrame`→screen handoff 04
-/// conforms to. Holds the pipeline + sampler for one target format; call
+/// sRGB target, per 03 §5 — the normative `EngineFrame`→screen handoff 04
+/// conforms to. The pipeline writes linear values; hardware encodes to the
+/// sRGB target and egui decodes it when sampling. Holds the pipeline + sampler
+/// for one target format; call
 /// [`Self::present_engine_frame`] per displayed frame.
 pub struct VideoPresenter {
     bgl: wgpu::BindGroupLayout,
@@ -461,7 +481,7 @@ pub struct VideoPresenter {
 
 impl VideoPresenter {
     /// Build the present pipeline for `target_format` (the negotiated
-    /// `Rgba8Unorm` / `Bgra8Unorm` surface format).
+    /// `Rgba8UnormSrgb` / `Bgra8UnormSrgb` target format).
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("present_bgl"),
@@ -502,7 +522,7 @@ impl VideoPresenter {
     }
 
     /// Record the present pass: sample `source` (working format) → unpremultiply
-    /// → sRGB OETF → write `target` (03 §5).
+    /// → write linear values to an sRGB `target` (03 §5).
     pub fn present_engine_frame(
         &self,
         device: &wgpu::Device,
@@ -607,18 +627,23 @@ mod tests {
                 "YUV shader missing constant token {c:?}"
             );
         }
-        // Present shader carries the full sRGB OETF constant set.
-        let srgb = [
+        // The present shader is a straight-alpha *linear* passthrough: it
+        // unpremultiplies and writes linear values, letting the sRGB present
+        // target (and egui's window pass) apply the OETF once in hardware —
+        // applying the sRGB OETF in the shader too would double-encode gamma.
+        // So the present shader deliberately carries NONE of the sRGB OETF
+        // constants (that transform lives at the format boundary, not here).
+        for c in [
             color::SRGB_OETF_THRESHOLD,
             color::SRGB_SLOPE,
             color::SRGB_ALPHA,
             color::SRGB_BETA,
             color::SRGB_GAMMA_INV,
-        ];
-        for c in srgb {
+        ] {
             assert!(
-                contains_token(PRESENT_SHADER, c),
-                "present shader missing constant token {c:?}"
+                !contains_token(PRESENT_SHADER, c),
+                "present shader must NOT apply the sRGB OETF (constant {c:?} found) — \
+                 gamma is encoded by the sRGB target, not the shader"
             );
         }
         // The matcher must reject substrings, not just accept whole tokens.
@@ -832,11 +857,11 @@ mod tests {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let presenter = VideoPresenter::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let presenter = VideoPresenter::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut enc = device.create_command_encoder(&Default::default());
         presenter.present_engine_frame(
             &device,

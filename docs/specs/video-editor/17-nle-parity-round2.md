@@ -1,5 +1,7 @@
 # 17 — NLE Parity Gap-List, Round 2 (post-Wave-2 residuals + newly-surfaced gaps)
 
+> **Status: Historical; superseded for live status.** Use [ROADMAP.md](ROADMAP.md) for inventory/priority and [19](19-editing-velocity-shot-management.md) / [20](20-pro-workflows.md) for contracts. This file preserves original research and ranking rationale.
+
 **Depends on:** 14-nle-parity.md (round-1 backlog), 16-insert-overwrite-editing.md (3/4-point ops), 15-thumbnails-waveforms.md, 04-ui-mode-timeline.md, 01-data-model.md, 09-audio-mixer.md.
 **Owns:** the *second-pass* prioritized parity backlog for the video editor's editing surfaces (timeline + program monitor + the edit grammar + the pending pro-editing spine). Supersedes 14's ranking; does **not** re-own captions/color/fusion parity except where a timeline affordance crosses into them.
 **Source:** re-audit (2026-07-10) of `crates/photonic-gui/src/app/timeline/{mod,layout,ruler,tracks,clips,interact,ops_bridge}.rs`, `app/monitor.rs`, `app/command_center.rs`, `panels/video/*`, and `photonic-core/src/timeline/clip.rs`, plus fresh Premiere 2024/2025 + CapCut depth research.
@@ -51,11 +53,13 @@ Each gap carries: **Ref** (which reference NLE ships it — **Pr** Premiere / **
 | **L-3** | **Source in/out vs work-range semantics** | ⚠️ PARTIAL | `video.set_in/out` still write `work_range`; true source marks live only in §16's session `PendingSource` — folds into **G-10** |
 | **L-5** | **Sequence tabs / multi-open** | ❌ OPEN | `draw_timeline_panel` renders single `active_sequence` — **G-17** |
 
-**Net:** 12 of 20 round-1 items shipped; 8 residuals carry forward (renumbered G-*), joined by newly-surfaced Premiere-depth gaps.
+**Net:** 13 of 20 round-1 items shipped after G-6; 7 residuals carry forward (renumbered G-*), joined by newly-surfaced Premiere-depth gaps.
 
 ---
 
-## Ranked top-12 (builder pick-order)
+## Historical ranked top-12 (original builder pick-order)
+
+Not live queue. See [ROADMAP.md §4](ROADMAP.md#4-corrected-priority-bands).
 
 | # | Gap | Territory | Class | Effort |
 |---|-----|-----------|-------|--------|

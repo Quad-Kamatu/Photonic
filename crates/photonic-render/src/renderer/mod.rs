@@ -10,6 +10,7 @@ use crate::{
     },
     tessellator::tessellate_fill,
 };
+use anyhow::{anyhow, Result};
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
     Style as GlyphonStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -51,6 +52,60 @@ pub(crate) const BG: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 const MSAA_SAMPLES: u32 = 4;
+
+fn adapter_rank(device_type: wgpu::DeviceType) -> u8 {
+    match device_type {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        wgpu::DeviceType::VirtualGpu => 2,
+        wgpu::DeviceType::Cpu => 3,
+        wgpu::DeviceType::Other => 4,
+    }
+}
+
+fn choose_surface_config(
+    caps: &wgpu::SurfaceCapabilities,
+    width: u32,
+    height: u32,
+) -> Result<wgpu::SurfaceConfiguration> {
+    let Some(surface_format) = caps
+        .formats
+        .iter()
+        .find(|format| {
+            matches!(
+                format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            )
+        })
+        .copied()
+        .or_else(|| caps.formats.first().copied())
+    else {
+        return Err(anyhow!("surface has no compatible texture formats"));
+    };
+    let Some(present_mode) = caps
+        .present_modes
+        .iter()
+        .copied()
+        .find(|mode| *mode == wgpu::PresentMode::Fifo)
+        .or_else(|| caps.present_modes.first().copied())
+    else {
+        return Err(anyhow!("surface has no compatible presentation modes"));
+    };
+    let Some(alpha_mode) = caps.alpha_modes.first().copied() else {
+        return Err(anyhow!("surface has no compatible alpha modes"));
+    };
+
+    Ok(wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width,
+        height,
+        present_mode,
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    })
+}
 
 // ─── Frame handle ─────────────────────────────────────────────────────────────
 
@@ -269,60 +324,65 @@ impl PhotonicRenderer {
         document: Arc<Mutex<Document>>,
         history: Arc<Mutex<CommandHistory>>,
         capture_rx: std::sync::mpsc::Receiver<oneshot::Sender<Vec<u8>>>,
-    ) -> Self {
+    ) -> Result<Self> {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
 
+        let backends = wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::all());
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
         let surface = instance
             .create_surface(window)
-            .expect("Failed to create wgpu surface");
+            .map_err(|error| anyhow!("failed to create wgpu surface: {error}"))?;
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("No suitable GPU adapter found");
-
-        let (device, queue) = Self::request_device(&adapter).await;
-        let (device, queue) = (Arc::new(device), Arc::new(queue));
-
-        let caps = surface.get_capabilities(&adapter);
-        // Prefer a non-sRGB linear format so egui doesn't double-gamma-correct.
-        // Bgra8Unorm / Rgba8Unorm are the formats egui explicitly recommends.
-        let surface_format = caps
-            .formats
-            .iter()
-            .find(|f| {
-                matches!(
-                    f,
-                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+        let mut adapters = instance.enumerate_adapters(backends);
+        adapters.sort_by_key(|adapter| adapter_rank(adapter.get_info().device_type));
+        let mut selected = None;
+        for adapter in adapters {
+            let info = adapter.get_info();
+            let caps = surface.get_capabilities(&adapter);
+            if caps.formats.is_empty()
+                || caps.present_modes.is_empty()
+                || caps.alpha_modes.is_empty()
+            {
+                tracing::warn!(adapter = %info.name, ?info.backend, "Skipping adapter with incompatible surface capabilities");
+                continue;
+            }
+            match adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("photonic_device"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::default(),
+                        memory_hints: Default::default(),
+                    },
+                    None,
                 )
-            })
-            .copied()
-            .unwrap_or(caps.formats[0]);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width,
-            height,
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+                .await
+            {
+                Ok((device, queue)) => {
+                    selected = Some((info, caps, device, queue));
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(adapter = %info.name, ?info.backend, %error, "Unable to create device; trying next adapter")
+                }
+            }
+        }
+        let Some((adapter_info, caps, device, queue)) = selected else {
+            return Err(anyhow!("no GPU adapter could create a device compatible with this window (backends: {backends:?})"));
         };
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
+        let surface_config = choose_surface_config(&caps, width, height)?;
+        let surface_format = surface_config.format;
+        tracing::info!(adapter = %adapter_info.name, ?adapter_info.backend, ?adapter_info.device_type, ?surface_format, ?surface_config.present_mode, "Selected GPU adapter and surface configuration");
         surface.configure(&device, &surface_config);
 
-        Self::assemble(
+        Ok(Self::assemble(
             device,
             queue,
             Some(surface),
@@ -333,7 +393,7 @@ impl PhotonicRenderer {
             document,
             Some(history),
             capture_rx,
-        )
+        ))
     }
 
     /// Construct a **windowless** renderer that draws only to offscreen textures
@@ -719,7 +779,7 @@ impl PhotonicRenderer {
     /// Convenience: full render loop without an egui overlay.
     pub fn render(&mut self) {
         let (verts, idxs) = self.update(); // already &mut self
-        if let Some(frame) = self.begin_frame(&verts, &idxs) {
+        if let Ok(Some(frame)) = self.begin_frame(&verts, &idxs) {
             self.finish_frame(frame);
         }
         self.service_captures(&verts, &idxs);
@@ -2037,6 +2097,53 @@ impl PhotonicRenderer {
     /// statement and tests (03 §2.2).
     pub fn last_frame_tess_stats(&self) -> (u32, u32) {
         (self.last_tess_nodes, self.last_tess_calls)
+    }
+}
+
+#[cfg(test)]
+mod surface_config_tests {
+    use super::*;
+
+    fn caps(present_modes: Vec<wgpu::PresentMode>) -> wgpu::SurfaceCapabilities {
+        wgpu::SurfaceCapabilities {
+            formats: vec![
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::TextureFormat::Bgra8Unorm,
+            ],
+            present_modes,
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        }
+    }
+
+    #[test]
+    fn surface_configuration_prefers_an_advertised_fifo_mode_and_linear_format() {
+        let config = choose_surface_config(
+            &caps(vec![wgpu::PresentMode::Immediate, wgpu::PresentMode::Fifo]),
+            640,
+            480,
+        )
+        .expect("compatible caps");
+
+        assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
+        assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
+    }
+
+    #[test]
+    fn surface_configuration_rejects_an_adapter_without_present_modes() {
+        let error = choose_surface_config(&caps(vec![]), 640, 480).expect_err("no present mode");
+        assert!(error.to_string().contains("presentation modes"));
+    }
+
+    #[test]
+    fn adapter_fallback_order_prefers_hardware() {
+        assert!(
+            adapter_rank(wgpu::DeviceType::DiscreteGpu)
+                < adapter_rank(wgpu::DeviceType::IntegratedGpu)
+        );
+        assert!(
+            adapter_rank(wgpu::DeviceType::IntegratedGpu) < adapter_rank(wgpu::DeviceType::Cpu)
+        );
     }
 }
 

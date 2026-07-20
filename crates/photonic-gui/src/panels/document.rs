@@ -934,4 +934,3 @@ pub(crate) fn draw_workspaces(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ctx.action = action;
     }
 }
-

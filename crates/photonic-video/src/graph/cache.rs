@@ -90,7 +90,11 @@ impl NodeCache {
     /// Returns `(texture, valid)`: when `valid` is `true` the texture already
     /// holds rendered content; when `false` the caller must render into it and
     /// then call [`mark_rendered`](Self::mark_rendered).
-    pub fn lookup_or_alloc(&mut self, hash: ContentHash, desc: TextureDesc) -> (Arc<wgpu::Texture>, bool) {
+    pub fn lookup_or_alloc(
+        &mut self,
+        hash: ContentHash,
+        desc: TextureDesc,
+    ) -> (Arc<wgpu::Texture>, bool) {
         let valid = self.rendered.get(&hash) == Some(&desc) && self.pool.contains_desc(hash, desc);
         let tex = self.pool.get_or_alloc(hash, desc).clone();
         if valid {
@@ -146,7 +150,10 @@ mod tests {
         ContentHash(n)
     }
     fn desc(w: u32, hh: u32) -> TextureDesc {
-        TextureDesc { width: w, height: hh }
+        TextureDesc {
+            width: w,
+            height: hh,
+        }
     }
 
     fn try_device() -> Option<Arc<wgpu::Device>> {

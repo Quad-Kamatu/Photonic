@@ -1,5 +1,7 @@
 # 15 — Clip Thumbnails & Audio Waveforms (parity: NLE gap 10)
 
+> **Status: Delivered.** This file records the shipped thumbnail/waveform contract. Live regression protection and remaining backlog are tracked in [ROADMAP.md](ROADMAP.md).
+
 **Why:** the single biggest visual-parity gap vs Premiere/CapCut/Resolve. Clips are flat colored rectangles; reference NLEs render frame thumbnails along video clips and a min/max waveform along audio clips, so a user reads their timeline at a glance. Seam already flagged at `crates/photonic-gui/src/app/timeline/clips.rs:132-133`.
 
 **Scope:** render thumbnails on video clips and waveforms on audio clips in the timeline, backed by background-generated, sidecar-cached data. No blocking on the render thread.

@@ -56,12 +56,14 @@ pub fn extract_audio_48k_mono(
     if let Some((start, end)) = range {
         cmd.arg("-ss").arg(format!("{:.6}", start.as_seconds_f64()));
         cmd.arg("-i").arg(input);
-        let duration_secs = (end.0 - start.0).max(0) as f64 / photonic_core::timeline::TICKS_PER_SECOND as f64;
+        let duration_secs =
+            (end.0 - start.0).max(0) as f64 / photonic_core::timeline::TICKS_PER_SECOND as f64;
         cmd.arg("-t").arg(format!("{:.6}", duration_secs));
     } else {
         cmd.arg("-i").arg(input);
     }
-    cmd.args(["-vn", "-ac", "1", "-ar", "48000", "-f", "wav"]).arg(output);
+    cmd.args(["-vn", "-ac", "1", "-ar", "48000", "-f", "wav"])
+        .arg(output);
 
     let result = cmd.output().map_err(ExtractError::Spawn)?;
     if !result.status.success() {

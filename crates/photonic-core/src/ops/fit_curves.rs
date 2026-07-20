@@ -71,22 +71,23 @@ pub fn fit_curves(path: &PathData, opts: &FitOptions) -> PathData {
 
     // Fit the accumulated straight-line run and append it to `out` (whose pen is
     // already at `run[0]`), then clear the run.
-    let flush_run = |out: &mut BezPath, run: &mut Vec<Point>, accuracy: f64, sopts: &SimplifyOptions| {
-        if run.len() >= 3 {
-            // A genuine polyline run — fit curves to it.
-            let mut poly = BezPath::new();
-            poly.move_to(run[0]);
-            for p in &run[1..] {
-                poly.line_to(*p);
+    let flush_run =
+        |out: &mut BezPath, run: &mut Vec<Point>, accuracy: f64, sopts: &SimplifyOptions| {
+            if run.len() >= 3 {
+                // A genuine polyline run — fit curves to it.
+                let mut poly = BezPath::new();
+                poly.move_to(run[0]);
+                for p in &run[1..] {
+                    poly.line_to(*p);
+                }
+                let fitted = simplify_bezpath(poly.elements().iter().copied(), accuracy, sopts);
+                append_after_moveto(out, &fitted);
+            } else if run.len() == 2 {
+                // A single straight segment — keep it as-is.
+                out.line_to(run[1]);
             }
-            let fitted = simplify_bezpath(poly.elements().iter().copied(), accuracy, sopts);
-            append_after_moveto(out, &fitted);
-        } else if run.len() == 2 {
-            // A single straight segment — keep it as-is.
-            out.line_to(run[1]);
-        }
-        run.clear();
-    };
+            run.clear();
+        };
 
     for el in bez.elements() {
         match *el {

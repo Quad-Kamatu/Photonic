@@ -15,7 +15,12 @@ use xxhash_rust::xxh3::Xxh3;
 /// keys are sorted before hashing — iteration order must never leak into the
 /// key, or identical requests could miss the cache depending on hash-map
 /// internals.
-pub fn tts_cache_key(provider_id: &str, voice_id: &str, params: &HashMap<String, f32>, text: &str) -> String {
+pub fn tts_cache_key(
+    provider_id: &str,
+    voice_id: &str,
+    params: &HashMap<String, f32>,
+    text: &str,
+) -> String {
     let mut hasher = Xxh3::new();
     hasher.update(provider_id.as_bytes());
     hasher.update(&[0]);

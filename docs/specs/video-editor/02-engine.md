@@ -98,6 +98,8 @@ Compile budget: < 0.5 ms typical (pure CPU, no I/O) — measured in 11.
 
 Topological execution on wgpu. Each `IrOp` = one pass writing an `Rgba16Float` texture from a pooled allocator (transient textures reused via LRU pool keyed by size). CPU reference path (`eval_cpu`) implements the same ops in f32 for golden tests + the raster/compositor-parity cases (03 §6).
 
+Interactive **preview targets**, Draft/Full quality tiers, import readiness stages, and time-to-paint rules are owned by [24-preview-media-load.md](24-preview-media-load.md). This section remains the decode/proxy mechanics those rules consume.
+
 ## 3. Decode: ffmpeg sidecar (D-03)
 
 - **Process model:** one persistent `ffmpeg` process per (asset, quality) actively decoding, spawned via `ffmpeg-sidecar`-style management (own `decode::sidecar` module; we control args): `ffmpeg -ss <keyframe_before(t)> -i <file> -f rawvideo -pix_fmt yuv420p|yuva444p ... pipe:1` + a parallel PCM pipe for audio assets (`-f f32le`). Reader threads parse framed output into `DecodedFrame { pts: Tick, planes }`.

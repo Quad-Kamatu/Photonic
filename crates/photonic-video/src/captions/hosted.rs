@@ -132,7 +132,12 @@ impl HostedTranscriptionProvider {
         const BOUNDARY: &str = "----photonicCaptionsBoundary7c3f9a";
         let mut body = Vec::new();
         push_multipart_file(&mut body, BOUNDARY, "file", "audio.wav", "audio/wav", audio);
-        push_multipart_field(&mut body, BOUNDARY, "model", req.model.as_deref().unwrap_or("whisper-1"));
+        push_multipart_field(
+            &mut body,
+            BOUNDARY,
+            "model",
+            req.model.as_deref().unwrap_or("whisper-1"),
+        );
         push_multipart_field(&mut body, BOUNDARY, "response_format", "verbose_json");
         push_multipart_field(&mut body, BOUNDARY, "timestamp_granularities[]", "word");
         if let Some(lang) = &req.language_hint {
@@ -144,14 +149,19 @@ impl HostedTranscriptionProvider {
         let request = apply_auth(
             self.agent
                 .post(&url)
-                .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
+                .set(
+                    "Content-Type",
+                    &format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
                 .timeout(budget),
             &self.config.auth_header,
         );
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
-        let response = request.send_bytes(&body).map_err(|e| map_ureq_error(e, cancel))?;
+        let response = request
+            .send_bytes(&body)
+            .map_err(|e| map_ureq_error(e, cancel))?;
         let parsed: OpenAiTranscription = response
             .into_json()
             .map_err(|e| ProviderError::Other(format!("invalid JSON response: {e}")))?;
@@ -172,11 +182,16 @@ impl HostedTranscriptionProvider {
             model: req.model.as_deref(),
         };
         let url = format!("{}{}", self.config.base_url, path);
-        let request = apply_auth(self.agent.post(&url).timeout(budget), &self.config.auth_header);
+        let request = apply_auth(
+            self.agent.post(&url).timeout(budget),
+            &self.config.auth_header,
+        );
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
-        let response = request.send_json(body).map_err(|e| map_ureq_error(e, cancel))?;
+        let response = request
+            .send_json(body)
+            .map_err(|e| map_ureq_error(e, cancel))?;
         let parsed: GenericTranscribeResponse = response
             .into_json()
             .map_err(|e| ProviderError::Other(format!("invalid JSON response: {e}")))?;
@@ -192,13 +207,25 @@ impl HostedTranscriptionProvider {
                     confidence: w.confidence,
                 })
                 .collect();
-            Ok(TranscriptionResult { words, language: parsed.language, degraded: parsed.degraded })
+            Ok(TranscriptionResult {
+                words,
+                language: parsed.language,
+                degraded: parsed.degraded,
+            })
         } else {
             let mut words = Vec::new();
             for seg in parsed.segments {
-                words.extend(distribute_words_proportionally(&seg.text, ms_to_tick(seg.start_ms), ms_to_tick(seg.end_ms)));
+                words.extend(distribute_words_proportionally(
+                    &seg.text,
+                    ms_to_tick(seg.start_ms),
+                    ms_to_tick(seg.end_ms),
+                ));
             }
-            Ok(TranscriptionResult { words, language: parsed.language, degraded: true })
+            Ok(TranscriptionResult {
+                words,
+                language: parsed.language,
+                degraded: true,
+            })
         }
     }
 }
@@ -219,12 +246,19 @@ impl TranscriptionProvider for HostedTranscriptionProvider {
             return Err(ProviderError::Cancelled);
         }
 
-        let audio_bytes = std::fs::read(&req.audio_path)
-            .map_err(|e| ProviderError::Other(format!("failed to read {:?}: {e}", req.audio_path)))?;
-        let duration_secs = wav::read_wav_info(&audio_bytes).map(|i| i.duration_secs()).unwrap_or(0.0);
-        let budget = default_timeout(Duration::from_secs_f64(duration_secs.max(0.0))) + self.config.extra_timeout;
+        let audio_bytes = std::fs::read(&req.audio_path).map_err(|e| {
+            ProviderError::Other(format!("failed to read {:?}: {e}", req.audio_path))
+        })?;
+        let duration_secs = wav::read_wav_info(&audio_bytes)
+            .map(|i| i.duration_secs())
+            .unwrap_or(0.0);
+        let budget = default_timeout(Duration::from_secs_f64(duration_secs.max(0.0)))
+            + self.config.extra_timeout;
 
-        let _ = progress.send(ProviderProgress::Uploading { sent: 0, total: Some(audio_bytes.len() as u64) });
+        let _ = progress.send(ProviderProgress::Uploading {
+            sent: 0,
+            total: Some(audio_bytes.len() as u64),
+        });
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
@@ -245,15 +279,25 @@ impl TranscriptionProvider for HostedTranscriptionProvider {
 
 fn push_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+    );
     body.extend_from_slice(value.as_bytes());
     body.extend_from_slice(b"\r\n");
 }
 
-fn push_multipart_file(body: &mut Vec<u8>, boundary: &str, name: &str, filename: &str, content_type: &str, bytes: &[u8]) {
+fn push_multipart_file(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    name: &str,
+    filename: &str,
+    content_type: &str,
+    bytes: &[u8],
+) {
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(
-        format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n").as_bytes(),
+        format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
     );
     body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
     body.extend_from_slice(bytes);
@@ -296,13 +340,25 @@ impl OpenAiTranscription {
                     confidence: None,
                 })
                 .collect();
-            TranscriptionResult { words, language: self.language, degraded: false }
+            TranscriptionResult {
+                words,
+                language: self.language,
+                degraded: false,
+            }
         } else {
             let mut words = Vec::new();
             for seg in self.segments {
-                words.extend(distribute_words_proportionally(&seg.text, seconds_to_tick(seg.start), seconds_to_tick(seg.end)));
+                words.extend(distribute_words_proportionally(
+                    &seg.text,
+                    seconds_to_tick(seg.start),
+                    seconds_to_tick(seg.end),
+                ));
             }
-            TranscriptionResult { words, language: self.language, degraded: true }
+            TranscriptionResult {
+                words,
+                language: self.language,
+                degraded: true,
+            }
         }
     }
 }
@@ -403,20 +459,36 @@ impl HostedTtsProvider {
             voice: &'a str,
             response_format: &'a str,
         }
-        let body = OpenAiTtsRequest { input: &req.text, voice: &req.voice, response_format: "wav" };
+        let body = OpenAiTtsRequest {
+            input: &req.text,
+            voice: &req.voice,
+            response_format: "wav",
+        };
         let url = format!("{}{}", self.config.base_url, path);
-        let request = apply_auth(self.agent.post(&url).timeout(budget), &self.config.auth_header);
+        let request = apply_auth(
+            self.agent.post(&url).timeout(budget),
+            &self.config.auth_header,
+        );
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
-        let response = request.send_json(body).map_err(|e| map_ureq_error(e, cancel))?;
+        let response = request
+            .send_json(body)
+            .map_err(|e| map_ureq_error(e, cancel))?;
         let mut audio = Vec::new();
         response
             .into_reader()
             .read_to_end(&mut audio)
             .map_err(|e| ProviderError::Other(format!("failed to read audio response: {e}")))?;
-        let (sample_rate, channels) = wav::read_wav_info(&audio).map(|i| (i.sample_rate, i.channels)).unwrap_or((24_000, 1));
-        Ok(TtsResult { audio, sample_rate, channels, word_timings: None })
+        let (sample_rate, channels) = wav::read_wav_info(&audio)
+            .map(|i| (i.sample_rate, i.channels))
+            .unwrap_or((24_000, 1));
+        Ok(TtsResult {
+            audio,
+            sample_rate,
+            channels,
+            word_timings: None,
+        })
     }
 
     fn synthesize_generic(
@@ -432,13 +504,22 @@ impl HostedTtsProvider {
             voice: &'a str,
             params: &'a HashMap<String, f32>,
         }
-        let body = GenericTtsRequest { text: &req.text, voice: &req.voice, params: &req.params };
+        let body = GenericTtsRequest {
+            text: &req.text,
+            voice: &req.voice,
+            params: &req.params,
+        };
         let url = format!("{}{}", self.config.base_url, path);
-        let request = apply_auth(self.agent.post(&url).timeout(budget), &self.config.auth_header);
+        let request = apply_auth(
+            self.agent.post(&url).timeout(budget),
+            &self.config.auth_header,
+        );
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
-        let response = request.send_json(body).map_err(|e| map_ureq_error(e, cancel))?;
+        let response = request
+            .send_json(body)
+            .map_err(|e| map_ureq_error(e, cancel))?;
         let parsed: GenericTtsResponse = response
             .into_json()
             .map_err(|e| ProviderError::Other(format!("invalid JSON response: {e}")))?;
@@ -455,7 +536,12 @@ impl HostedTtsProvider {
                 })
                 .collect()
         });
-        Ok(TtsResult { audio, sample_rate: parsed.sample_rate, channels: parsed.channels, word_timings })
+        Ok(TtsResult {
+            audio,
+            sample_rate: parsed.sample_rate,
+            channels: parsed.channels,
+            word_timings,
+        })
     }
 }
 
@@ -467,7 +553,9 @@ impl TtsProvider for HostedTtsProvider {
     fn voices(&self) -> Result<Vec<VoiceDescriptor>, ProviderError> {
         let url = format!("{}{}", self.config.base_url, self.config.voices_path);
         let request = apply_auth(
-            self.agent.get(&url).timeout(Duration::from_secs(30) + self.config.extra_timeout),
+            self.agent
+                .get(&url)
+                .timeout(Duration::from_secs(30) + self.config.extra_timeout),
             &self.config.auth_header,
         );
         let cancel = CancelToken::new();
@@ -478,7 +566,12 @@ impl TtsProvider for HostedTtsProvider {
         Ok(parsed.voices.into_iter().map(Into::into).collect())
     }
 
-    fn synthesize(&self, req: TtsRequest, progress: ProgressSink, cancel: CancelToken) -> Result<TtsResult, ProviderError> {
+    fn synthesize(
+        &self,
+        req: TtsRequest,
+        progress: ProgressSink,
+        cancel: CancelToken,
+    ) -> Result<TtsResult, ProviderError> {
         let _ = progress.send(ProviderProgress::Started);
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
@@ -488,8 +581,12 @@ impl TtsProvider for HostedTtsProvider {
         // plus the configurable extra budget instead.
         let budget = Duration::from_secs(120) + self.config.extra_timeout;
         let result = match &self.config.synthesize_shape {
-            TtsEndpointShape::OpenAiCompatible { path } => self.synthesize_openai(path, &req, budget, &cancel)?,
-            TtsEndpointShape::GenericJson { path } => self.synthesize_generic(path, &req, budget, &cancel)?,
+            TtsEndpointShape::OpenAiCompatible { path } => {
+                self.synthesize_openai(path, &req, budget, &cancel)?
+            }
+            TtsEndpointShape::GenericJson { path } => {
+                self.synthesize_generic(path, &req, budget, &cancel)?
+            }
         };
         let _ = progress.send(ProviderProgress::Done);
         Ok(result)
@@ -551,7 +648,13 @@ impl From<VoiceJson> for VoiceDescriptor {
             params: v
                 .params
                 .into_iter()
-                .map(|p| ParamSpec { key: p.key, label: p.label, kind: p.kind.into(), range: p.range, default: p.default })
+                .map(|p| ParamSpec {
+                    key: p.key,
+                    label: p.label,
+                    kind: p.kind.into(),
+                    range: p.range,
+                    default: p.default,
+                })
                 .collect(),
         }
     }
@@ -599,7 +702,12 @@ mod tests {
                 let headers: Vec<(String, String)> = request
                     .headers()
                     .iter()
-                    .map(|h| (h.field.as_str().as_str().to_string(), h.value.as_str().to_string()))
+                    .map(|h| {
+                        (
+                            h.field.as_str().as_str().to_string(),
+                            h.value.as_str().to_string(),
+                        )
+                    })
                     .collect();
                 let mut body = Vec::new();
                 let _ = request.as_reader().read_to_end(&mut body);
@@ -607,24 +715,42 @@ mod tests {
                 let response = tiny_http::Response::from_data(response_body)
                     .with_status_code(status)
                     .with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).unwrap(),
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            content_type.as_bytes(),
+                        )
+                        .unwrap(),
                     );
                 let _ = request.respond(response);
-                let _ = tx.send(CapturedRequest { method, url, headers, body });
+                let _ = tx.send(CapturedRequest {
+                    method,
+                    url,
+                    headers,
+                    body,
+                });
             }
         });
 
-        StubServer { base_url, captured: rx, _handle: handle }
+        StubServer {
+            base_url,
+            captured: rx,
+            _handle: handle,
+        }
     }
 
     impl StubServer {
         fn captured(&self) -> CapturedRequest {
-            self.captured.recv_timeout(Duration::from_secs(5)).expect("stub never received a request")
+            self.captured
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stub never received a request")
         }
     }
 
     fn header<'a>(req: &'a CapturedRequest, name: &str) -> Option<&'a str> {
-        req.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        req.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 
     #[test]
@@ -635,7 +761,9 @@ mod tests {
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: stub.base_url.clone(),
             auth_header: Some(("Authorization".to_string(), "Bearer test-token".to_string())),
-            shape: TranscriptionEndpointShape::OpenAiCompatible { path: "/v1/audio/transcriptions".to_string() },
+            shape: TranscriptionEndpointShape::OpenAiCompatible {
+                path: "/v1/audio/transcriptions".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
 
@@ -643,7 +771,11 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider
             .transcribe(
-                TranscriptionRequest { audio_path, language_hint: Some("en".to_string()), model: None },
+                TranscriptionRequest {
+                    audio_path,
+                    language_hint: Some("en".to_string()),
+                    model: None,
+                },
                 tx,
                 CancelToken::new(),
             )
@@ -657,7 +789,9 @@ mod tests {
         assert_eq!(req.method, "POST");
         assert_eq!(req.url, "/v1/audio/transcriptions");
         assert_eq!(header(&req, "Authorization"), Some("Bearer test-token"));
-        assert!(header(&req, "Content-Type").unwrap().starts_with("multipart/form-data"));
+        assert!(header(&req, "Content-Type")
+            .unwrap()
+            .starts_with("multipart/form-data"));
         let body_str = String::from_utf8_lossy(&req.body);
         assert!(body_str.contains("name=\"file\""));
         assert!(body_str.contains("response_format"));
@@ -673,13 +807,19 @@ mod tests {
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            shape: TranscriptionEndpointShape::OpenAiCompatible { path: "/v1/audio/transcriptions".to_string() },
+            shape: TranscriptionEndpointShape::OpenAiCompatible {
+                path: "/v1/audio/transcriptions".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider
             .transcribe(
-                TranscriptionRequest { audio_path: write_temp_wav("openai_degraded"), language_hint: None, model: None },
+                TranscriptionRequest {
+                    audio_path: write_temp_wav("openai_degraded"),
+                    language_hint: None,
+                    model: None,
+                },
                 tx,
                 CancelToken::new(),
             )
@@ -696,13 +836,19 @@ mod tests {
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: stub.base_url.clone(),
             auth_header: Some(("X-Api-Key".to_string(), "secret".to_string())),
-            shape: TranscriptionEndpointShape::GenericJson { path: "/transcribe".to_string() },
+            shape: TranscriptionEndpointShape::GenericJson {
+                path: "/transcribe".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider
             .transcribe(
-                TranscriptionRequest { audio_path: write_temp_wav("generic_shape"), language_hint: Some("en".to_string()), model: None },
+                TranscriptionRequest {
+                    audio_path: write_temp_wav("generic_shape"),
+                    language_hint: Some("en".to_string()),
+                    model: None,
+                },
                 tx,
                 CancelToken::new(),
             )
@@ -718,7 +864,10 @@ mod tests {
         assert_eq!(header(&req, "Content-Type"), Some("application/json"));
         let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
         assert!(parsed.get("audio_base64").is_some());
-        assert_eq!(parsed.get("language_hint").and_then(|v| v.as_str()), Some("en"));
+        assert_eq!(
+            parsed.get("language_hint").and_then(|v| v.as_str()),
+            Some("en")
+        );
     }
 
     #[test]
@@ -728,13 +877,19 @@ mod tests {
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            shape: TranscriptionEndpointShape::GenericJson { path: "/transcribe".to_string() },
+            shape: TranscriptionEndpointShape::GenericJson {
+                path: "/transcribe".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider
             .transcribe(
-                TranscriptionRequest { audio_path: write_temp_wav("generic_degraded"), language_hint: None, model: None },
+                TranscriptionRequest {
+                    audio_path: write_temp_wav("generic_degraded"),
+                    language_hint: None,
+                    model: None,
+                },
                 tx,
                 CancelToken::new(),
             )
@@ -746,16 +901,26 @@ mod tests {
 
     #[test]
     fn transcription_maps_401_to_unauthorized() {
-        let stub = start_stub(401, "application/json", br#"{"error":"bad token"}"#.to_vec());
+        let stub = start_stub(
+            401,
+            "application/json",
+            br#"{"error":"bad token"}"#.to_vec(),
+        );
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            shape: TranscriptionEndpointShape::GenericJson { path: "/transcribe".to_string() },
+            shape: TranscriptionEndpointShape::GenericJson {
+                path: "/transcribe".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider.transcribe(
-            TranscriptionRequest { audio_path: write_temp_wav("unauthorized"), language_hint: None, model: None },
+            TranscriptionRequest {
+                audio_path: write_temp_wav("unauthorized"),
+                language_hint: None,
+                model: None,
+            },
             tx,
             CancelToken::new(),
         );
@@ -765,16 +930,26 @@ mod tests {
 
     #[test]
     fn transcription_maps_429_to_rate_limited() {
-        let stub = start_stub(429, "application/json", br#"{"error":"slow down"}"#.to_vec());
+        let stub = start_stub(
+            429,
+            "application/json",
+            br#"{"error":"slow down"}"#.to_vec(),
+        );
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            shape: TranscriptionEndpointShape::GenericJson { path: "/transcribe".to_string() },
+            shape: TranscriptionEndpointShape::GenericJson {
+                path: "/transcribe".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider.transcribe(
-            TranscriptionRequest { audio_path: write_temp_wav("rate_limited"), language_hint: None, model: None },
+            TranscriptionRequest {
+                audio_path: write_temp_wav("rate_limited"),
+                language_hint: None,
+                model: None,
+            },
             tx,
             CancelToken::new(),
         );
@@ -787,14 +962,20 @@ mod tests {
         let provider = HostedTranscriptionProvider::new(HostedTranscriptionConfig {
             base_url: "http://127.0.0.1:1".to_string(), // unroutable — proves no attempt was made
             auth_header: None,
-            shape: TranscriptionEndpointShape::GenericJson { path: "/transcribe".to_string() },
+            shape: TranscriptionEndpointShape::GenericJson {
+                path: "/transcribe".to_string(),
+            },
             extra_timeout: Duration::ZERO,
         });
         let cancel = CancelToken::new();
         cancel.cancel();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider.transcribe(
-            TranscriptionRequest { audio_path: write_temp_wav("precancelled"), language_hint: None, model: None },
+            TranscriptionRequest {
+                audio_path: write_temp_wav("precancelled"),
+                language_hint: None,
+                model: None,
+            },
             tx,
             cancel,
         );
@@ -813,14 +994,20 @@ mod tests {
         let provider = HostedTtsProvider::new(HostedTtsConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            synthesize_shape: TtsEndpointShape::GenericJson { path: "/tts".to_string() },
+            synthesize_shape: TtsEndpointShape::GenericJson {
+                path: "/tts".to_string(),
+            },
             voices_path: "/voices".to_string(),
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider
             .synthesize(
-                TtsRequest { text: "hi".to_string(), voice: "v1".to_string(), params: HashMap::new() },
+                TtsRequest {
+                    text: "hi".to_string(),
+                    voice: "v1".to_string(),
+                    params: HashMap::new(),
+                },
                 tx,
                 CancelToken::new(),
             )
@@ -845,14 +1032,20 @@ mod tests {
         let provider = HostedTtsProvider::new(HostedTtsConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            synthesize_shape: TtsEndpointShape::OpenAiCompatible { path: "/v1/audio/speech".to_string() },
+            synthesize_shape: TtsEndpointShape::OpenAiCompatible {
+                path: "/v1/audio/speech".to_string(),
+            },
             voices_path: "/voices".to_string(),
             extra_timeout: Duration::ZERO,
         });
         let (tx, _rx) = crossbeam_channel::unbounded();
         let result = provider
             .synthesize(
-                TtsRequest { text: "hi".to_string(), voice: "alloy".to_string(), params: HashMap::new() },
+                TtsRequest {
+                    text: "hi".to_string(),
+                    voice: "alloy".to_string(),
+                    params: HashMap::new(),
+                },
                 tx,
                 CancelToken::new(),
             )
@@ -873,7 +1066,9 @@ mod tests {
         let provider = HostedTtsProvider::new(HostedTtsConfig {
             base_url: stub.base_url.clone(),
             auth_header: None,
-            synthesize_shape: TtsEndpointShape::GenericJson { path: "/tts".to_string() },
+            synthesize_shape: TtsEndpointShape::GenericJson {
+                path: "/tts".to_string(),
+            },
             voices_path: "/voices".to_string(),
             extra_timeout: Duration::ZERO,
         });
@@ -882,7 +1077,9 @@ mod tests {
         assert_eq!(voices[0].id, "v1");
         assert_eq!(voices[0].params.len(), 2);
         assert!(matches!(voices[0].params[0].kind, ParamKind::Float));
-        assert!(matches!(&voices[0].params[1].kind, ParamKind::Enum(v) if v == &vec!["neutral".to_string(), "cheerful".to_string()]));
+        assert!(
+            matches!(&voices[0].params[1].kind, ParamKind::Enum(v) if v == &vec!["neutral".to_string(), "cheerful".to_string()])
+        );
         let _ = stub.captured();
     }
 

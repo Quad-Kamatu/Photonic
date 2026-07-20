@@ -174,7 +174,10 @@ impl PhotonicApp {
             FillKind::Gradient(g) if g.kind == GradientKind::Linear && g.coords.len() >= 4 => {
                 let a = to_screen(frame.c2d(g.coords[0], g.coords[1]));
                 let b = to_screen(frame.c2d(g.coords[2], g.coords[3]));
-                painter.line_segment([a, b], egui::Stroke::new(3.0, Color32::from_black_alpha(120)));
+                painter.line_segment(
+                    [a, b],
+                    egui::Stroke::new(3.0, Color32::from_black_alpha(120)),
+                );
                 painter.line_segment([a, b], egui::Stroke::new(1.5, Color32::WHITE));
             }
             FillKind::Gradient(g) if g.kind == GradientKind::Radial && g.coords.len() >= 5 => {
@@ -194,14 +197,25 @@ impl PhotonicApp {
                 let y0 = mg.y_lines[0];
                 let y1 = *mg.y_lines.last().unwrap();
                 let line = |a, b, painter: &egui::Painter| {
-                    painter.line_segment([a, b], egui::Stroke::new(3.0, Color32::from_black_alpha(110)));
+                    painter.line_segment(
+                        [a, b],
+                        egui::Stroke::new(3.0, Color32::from_black_alpha(110)),
+                    );
                     painter.line_segment([a, b], egui::Stroke::new(1.25, Color32::WHITE));
                 };
                 for &x in &mg.x_lines {
-                    line(to_screen(frame.c2d(x, y0)), to_screen(frame.c2d(x, y1)), painter);
+                    line(
+                        to_screen(frame.c2d(x, y0)),
+                        to_screen(frame.c2d(x, y1)),
+                        painter,
+                    );
                 }
                 for &y in &mg.y_lines {
-                    line(to_screen(frame.c2d(x0, y)), to_screen(frame.c2d(x1, y)), painter);
+                    line(
+                        to_screen(frame.c2d(x0, y)),
+                        to_screen(frame.c2d(x1, y)),
+                        painter,
+                    );
                 }
             }
             _ => {}
@@ -260,7 +274,13 @@ impl PhotonicApp {
                 let (cx, cy) = view.screen_to_canvas(pp.x as f64, pp.y as f64);
                 let mut new_node = node.clone();
                 if let SceneNodeKind::Path(pnm) = &mut new_node.kind {
-                    apply_handle_drag(&mut pnm.fill.kind, self.gradient_drag.unwrap(), cx, cy, &frame);
+                    apply_handle_drag(
+                        &mut pnm.fill.kind,
+                        self.gradient_drag.unwrap(),
+                        cx,
+                        cy,
+                        &frame,
+                    );
                 }
                 history.execute(
                     Command::UpdateNode {
@@ -316,7 +336,10 @@ fn inverse(t: &Transform, x: f64, y: f64) -> (f64, f64) {
     }
     let dx = x - m[4];
     let dy = y - m[5];
-    ((m[3] * dx - m[2] * dy) / det, (-m[1] * dx + m[0] * dy) / det)
+    (
+        (m[3] * dx - m[2] * dy) / det,
+        (-m[1] * dx + m[0] * dy) / det,
+    )
 }
 
 /// Collect draggable handles as (handle, doc_x, doc_y, optional color).
@@ -428,5 +451,9 @@ fn apply_handle_drag(kind: &mut FillKind, handle: GradHandle, x: f64, y: f64, f:
 }
 
 fn color32(c: photonic_core::Color) -> Color32 {
-    Color32::from_rgb((c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8)
+    Color32::from_rgb(
+        (c.r * 255.0) as u8,
+        (c.g * 255.0) as u8,
+        (c.b * 255.0) as u8,
+    )
 }

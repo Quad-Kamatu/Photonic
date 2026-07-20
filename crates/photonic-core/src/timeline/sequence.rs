@@ -158,6 +158,23 @@ impl Sequence {
         self.video_tracks.iter().chain(self.audio_tracks.iter())
     }
 
+    /// The track vec a `kind` lives in. Video and Text share `video_tracks`
+    /// (both are part of the visual composite); Audio uses `audio_tracks`.
+    pub fn tracks_for(&self, kind: TrackKind) -> &Vec<Track> {
+        match kind {
+            TrackKind::Audio => &self.audio_tracks,
+            TrackKind::Video | TrackKind::Text => &self.video_tracks,
+        }
+    }
+
+    /// Mutable counterpart of [`tracks_for`](Self::tracks_for).
+    pub fn tracks_for_mut(&mut self, kind: TrackKind) -> &mut Vec<Track> {
+        match kind {
+            TrackKind::Audio => &mut self.audio_tracks,
+            TrackKind::Video | TrackKind::Text => &mut self.video_tracks,
+        }
+    }
+
     /// Find a track by id across video and audio lanes.
     pub fn track(&self, id: TrackId) -> Option<&Track> {
         self.tracks().find(|t| t.id == id)
@@ -358,6 +375,18 @@ impl Track {
 pub enum TrackKind {
     Video,
     Audio,
+    /// A title/graphics layer. Composited through the same stack as video
+    /// (stored in `video_tracks`), but only holds `ClipSource::Text` clips — a
+    /// dedicated home for titles above the footage.
+    Text,
+}
+
+impl TrackKind {
+    /// Whether this kind is part of the visual composite (video + text tracks,
+    /// both stored in `Sequence::video_tracks`).
+    pub fn is_visual(self) -> bool {
+        matches!(self, TrackKind::Video | TrackKind::Text)
+    }
 }
 
 /// A sequence marker.
@@ -408,6 +437,25 @@ mod tests {
     fn validate_accepts_sorted_non_overlapping() {
         let s = seq_with(vid_track_with(vec![(0, 100), (100, 50), (200, 10)]));
         assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn text_track_lives_in_video_lane_and_round_trips() {
+        let mut s = Sequence::new("seq", FrameRate::FPS_30, 1920, 1080);
+        s.video_tracks.push(Track::new(TrackKind::Video, "V1"));
+        let text = Track::new(TrackKind::Text, "T1");
+        let text_id = text.id;
+        // A Text track is routed into the video (visual composite) lane.
+        s.tracks_for_mut(TrackKind::Text).push(text);
+        assert_eq!(s.video_tracks.len(), 2);
+        assert!(s.tracks_for(TrackKind::Text)[1].kind == TrackKind::Text);
+        assert!(TrackKind::Text.is_visual());
+
+        // Serde round-trip preserves the kind (snake_case "text").
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"text\""));
+        let back: Sequence = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.track(text_id).map(|t| t.kind), Some(TrackKind::Text));
     }
 
     #[test]

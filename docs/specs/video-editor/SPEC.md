@@ -98,14 +98,14 @@ CAP-022 — Editor's project state survives an unexpected termination: on relaun
 
 - Collaborative / multi-user editing.
 - Third-party plugin API (OpenFX or similar) — internal effects only in v1.
-- HDR delivery (PQ/HLG output), 10-bit export pipelines.
-- Motion tracking, stabilization, and object tracking.
-- Multicam editing workflows.
+- Native HDR display presentation, Dolby Vision, bundled HEVC encoding, and HDR authoring beyond HLG/PQ. Ten-bit HLG/PQ decode, explicit Rec.2020 HDR working state, HDR scopes, deterministic SDR tone mapping, and preflighted AV1 Main10 or ProRes-compatible 10-bit delivery are in scope.
+- Optical-flow stabilization, motion tracking, object tracking, rolling-shutter correction, and ML horizon detection. Gyro-metadata stabilization with explicit synchronization and calibrated lens profiles is in scope for approved camera dialects.
+- Live capture, broadcast switching, remote sources, collaborative switching, and more than nine simultaneously keyboard-addressable multicam angles. Local-file multicam grouping, timecode/audio/marker/manual sync, multiview preview, and frame-accurate angle cuts are in scope.
 - Live capture / streaming input.
-- 360°/VR video.
+- VR authoring, headset preview, spatial audio, stereoscopic delivery, and 360-degree video timeline editing. Still-image panorama-set stitching, equirectangular/spherical projection, virtual-camera reframe, and little-planet output are in scope.
 - Mobile or web builds of the editor.
 - Audio recording (import + TTS only in v1).
-- Stock content library (royalty-free music/SFX/footage) — bring-your-own media in v1; a small starter set of vector title templates IS in scope (D-11), as titles are Photonic's native strength.
+- Online stock catalogs, stock footage, account-backed licensing services, automatic content recommendation, and media without release-grade rights evidence. A small offline `Photonic Starter Audio` pack of rights-cleared music beds and ambient SFX is in scope and works without a network.
 
 ---
 
@@ -127,9 +127,9 @@ D-05: Full audio mixer in v1 — automation, EQ/compression, ducking (locked 202
 D-06: Node flows at both levels — per-clip compositions and a project-level output graph (locked 2026-07-07)
 D-07: Acceptance = all three stories (locked 2026-07-07)
 D-08: Architecture Approach A — timeline-first with node-ready frame-graph IR (locked 2026-07-07)
-D-09: Video working color space: linear-light Rec.709, premultiplied alpha, f16 GPU textures (locked 2026-07-07)
+D-09: Video working color state is explicit per sequence. `LinearRec709Sdr` remains the default for new sequences and the compatibility default for every existing project. An explicitly selected `LinearRec2020Hdr` mode is permitted for approved HLG/PQ workflows; in that mode `1.0` represents 203 cd/m² HDR Reference White and the initial mastering-peak default is 1,000 cd/m². Every existing SDR golden remains pixel-stable. (Product/color review, locked 2026-07-12)
 D-10: Renderer prerequisite work (dirty tracking, persistent GPU buffers, wire COMPOSITE_SHADER) precedes playback phases (locked 2026-07-07)
-D-11: v1 ships a small starter set of vector-based title/lower-third templates; stock music/SFX library is explicitly out — bring-your-own media (PM review, locked 2026-07-07)
+D-11: v1 ships a small starter set of vector-based title/lower-third templates and may ship a small offline `Photonic Starter Audio` pack under the asset-rights gate in `23-legal-open-source-implementation-routes.md`. Online stock catalogs, stock footage, account-backed licensing services, automatic content recommendation, and media without release-grade rights evidence remain out of scope. (Product/legal review, locked 2026-07-12)
 D-12: Crash recovery extends Photonic's existing recovery machinery (recovery_path + relaunch prompt) to timeline projects — CAP-022; verified as a P3 exit criterion (PM review, locked 2026-07-07)
 
 ---

@@ -1,5 +1,7 @@
 # 14 — NLE Parity Gap-List (Timeline + Monitor vs Premiere / CapCut / Resolve)
 
+> **Status: Superseded historical gap analysis.** Live status and contracts moved to [ROADMAP.md](ROADMAP.md), [19](19-editing-velocity-shot-management.md), and [20](20-pro-workflows.md). Preserve this file for round-one rationale; do not schedule from it.
+
 **Depends on:** 04-ui-mode-timeline.md (timeline + monitor surfaces), 01-data-model.md (`Clip`, `Track`, `Sequence`), 09-audio-mixer.md (solo/meters), 13-ux-components.md.
 **Owns:** the prioritized parity backlog for the video editor's *editing* surfaces. This doc does **not** own captions/color/fusion parity — only timeline, program monitor, and the edit grammar around them.
 **Source:** synthesized from the timeline/monitor parity audit of `crates/photonic-gui/src/app/timeline/{mod,layout,ruler,tracks,clips,interact,ops_bridge}.rs` + `monitor.rs`, cross-checked against `command_center.rs`, `panels/video/*`, and `photonic-core/src/timeline/`.

@@ -58,7 +58,10 @@ const fn ticks_from_millis(ms: i64) -> Tick {
 }
 
 fn ends_sentence(text: &str) -> bool {
-    matches!(text.trim_end().chars().last(), Some('.') | Some('!') | Some('?'))
+    matches!(
+        text.trim_end().chars().last(),
+        Some('.') | Some('!') | Some('?')
+    )
 }
 
 /// Character length of `words` joined with single spaces (matches how
@@ -87,7 +90,10 @@ fn flush(words: Vec<TranscribedWord>) -> CaptionCue {
 
 /// Words → cues, build pass (06 §3.5 pass 1) followed by the repair pass
 /// (pass 2). The single entry point this module exposes.
-pub fn group_words_into_cues(words: &[TranscribedWord], params: &GroupingParams) -> Vec<CaptionCue> {
+pub fn group_words_into_cues(
+    words: &[TranscribedWord],
+    params: &GroupingParams,
+) -> Vec<CaptionCue> {
     let built = build_pass(words, params);
     let split = split_long_cues(built, params);
     merge_short_cues(split, params)
@@ -171,10 +177,14 @@ fn split_cue_at_best_point(cue: CaptionCue) -> (CaptionCue, CaptionCue) {
             })
             .unwrap()
     } else {
-        let sentence_candidates: Vec<usize> =
-            (0..n - 1).filter(|&i| ends_sentence(&words[i].text)).collect();
+        let sentence_candidates: Vec<usize> = (0..n - 1)
+            .filter(|&i| ends_sentence(&words[i].text))
+            .collect();
         if !sentence_candidates.is_empty() {
-            sentence_candidates.into_iter().min_by_key(|&i| dist(i)).unwrap()
+            sentence_candidates
+                .into_iter()
+                .min_by_key(|&i| dist(i))
+                .unwrap()
         } else {
             (0..n - 1).min_by_key(|&i| dist(i)).unwrap()
         }
@@ -184,7 +194,10 @@ fn split_cue_at_best_point(cue: CaptionCue) -> (CaptionCue, CaptionCue) {
     let b_words = words.split_off(chosen + 1);
     let a_words = words;
 
-    (cue_from_caption_words(a_words), cue_from_caption_words(b_words))
+    (
+        cue_from_caption_words(a_words),
+        cue_from_caption_words(b_words),
+    )
 }
 
 /// Like [`flush`] but for words already converted to `CaptionWord` (i.e.
@@ -258,7 +271,10 @@ fn merged_char_len(a: &CaptionCue, b: &CaptionCue) -> usize {
 fn merge_cues(a: CaptionCue, b: CaptionCue) -> CaptionCue {
     let mut words = a.words;
     words.extend(b.words);
-    let start = words.first().map(|w| w.start).unwrap_or(a.start.min(b.start));
+    let start = words
+        .first()
+        .map(|w| w.start)
+        .unwrap_or(a.start.min(b.start));
     let end = words.last().map(|w| w.end).unwrap_or(a.end.max(b.end));
     CaptionCue::new(start, end, words)
 }
@@ -352,7 +368,11 @@ mod tests {
         }
         let params = GroupingParams::default();
         let cues = group_words_into_cues(&words, &params);
-        assert!(cues.len() >= 2, "expected a split, got {} cue(s)", cues.len());
+        assert!(
+            cues.len() >= 2,
+            "expected a split, got {} cue(s)",
+            cues.len()
+        );
         for cue in &cues {
             // Every resulting cue must respect the max duration (each word is
             // only 300ms, so a valid split point always exists).
@@ -410,9 +430,9 @@ mod tests {
         let b = "b".repeat(30);
         let c = "c".repeat(10);
         let words = vec![
-            w(&a, 0, 300),        // short (300ms)
-            w(&b, 1000, 1300),    // short (300ms), gap 700ms => break
-            w(&c, 2000, 3000),    // long (1000ms), gap 700ms => break
+            w(&a, 0, 300),     // short (300ms)
+            w(&b, 1000, 1300), // short (300ms), gap 700ms => break
+            w(&c, 2000, 3000), // long (1000ms), gap 700ms => break
         ];
         let params = GroupingParams::default();
         let cues = group_words_into_cues(&words, &params);
@@ -429,10 +449,7 @@ mod tests {
         // "Hi." cue is left short rather than losing text. (At exactly 84 the
         // merge would be permitted — the budget is an inclusive ceiling.)
         let long_word = "x".repeat(82);
-        let words = vec![
-            w("Hi.", 0, 300),
-            w(&long_word, 3000, 3800),
-        ];
+        let words = vec![w("Hi.", 0, 300), w(&long_word, 3000, 3800)];
         let params = GroupingParams::default();
         let cues = group_words_into_cues(&words, &params);
         assert_eq!(cues.len(), 2);
@@ -445,7 +462,10 @@ mod tests {
             .map(|i| w(&format!("word{i}"), i * 200, i * 200 + 150))
             .collect();
         let cues = group_words_into_cues(&words, &GroupingParams::default());
-        let flat: Vec<String> = cues.iter().flat_map(|c| c.words.iter().map(|w| w.text.clone())).collect();
+        let flat: Vec<String> = cues
+            .iter()
+            .flat_map(|c| c.words.iter().map(|w| w.text.clone()))
+            .collect();
         let expected: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
         assert_eq!(flat, expected);
     }

@@ -16,8 +16,9 @@ use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Mutex};
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use winit::{
     application::ApplicationHandler,
@@ -182,25 +183,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ── GUI mode: MCP server on background thread, winit on main thread ───────
-    // The server runs on a detached thread; if it fails to bind (e.g. the port is
-    // held by another instance) the thread exits and `mcp_running` stays false.
-    // The GUI can then request a re-spawn via `mcp_restart_requested` (#170), which
-    // the winit host polls each frame — so keep clones of the spawn ingredients.
+    // ── GUI mode: winit on the main thread; MCP starts after GPU initialization ─
     let mcp_running = Arc::new(AtomicBool::new(false));
     let mcp_restart_requested = Arc::new(AtomicBool::new(false));
-    spawn_mcp_server(
-        Arc::clone(&document_arc),
-        Arc::clone(&history_arc),
-        capture_tx.clone(),
-        mcp_config.clone(),
-        Arc::clone(&mcp_running),
-        Arc::clone(&audit_log),
-        Arc::clone(&mcp_document_path),
-    );
-
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = PhotonicWinitApp {
         document: document_arc,
@@ -216,14 +203,14 @@ fn main() -> Result<()> {
         initial_file: args.file.clone(),
         audit_log,
         window_state: WindowState::load(),
+        startup_error: None,
     };
 
     event_loop.run_app(&mut app)?;
-
-    // Guarantee a full process exit once the window closes — the MCP server runs
-    // on a detached background thread, so terminate the whole process (and that
-    // thread) deterministically rather than relying on unwind order.
-    std::process::exit(0);
+    if let Some(error) = app.startup_error {
+        return Err(anyhow::anyhow!(error));
+    }
+    Ok(())
 }
 
 // ─── Claude streaming events ─────────────────────────────────────────────────
@@ -278,6 +265,8 @@ struct PhotonicWinitApp {
     audit_log: Arc<std::sync::Mutex<AuditLog>>,
     /// Last normal bounds and maximized state, persisted between launches.
     window_state: WindowState,
+    /// Renderer initialization failure reported after the event loop exits.
+    startup_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,6 +402,14 @@ impl PhotonicWinitApp {
 }
 
 impl ApplicationHandler for PhotonicWinitApp {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            if let Some(state) = &self.state {
+                state.window.request_redraw();
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
@@ -422,19 +419,28 @@ impl ApplicationHandler for PhotonicWinitApp {
         #[allow(unused_mut)]
         let mut attrs = WindowAttributes::default()
             .with_title("Photonic")
-            .with_inner_size(PhysicalSize::new(
-                self.window_state.width.clamp(320, 16_384),
-                self.window_state.height.clamp(240, 16_384),
-            ))
             .with_maximized(self.window_state.maximized)
             .with_window_icon(window_icon);
-        if self.window_state.position_is_visible(event_loop) {
-            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
-                self.window_state.x,
-                self.window_state.y,
+        // Only pin an explicit inner size / position when NOT opening maximized.
+        // Setting both `with_inner_size` and `with_maximized(true)` gives the
+        // compositor two conflicting targets (the saved normal size vs. the
+        // maximized size); on multi-monitor + fractional-scaling KWin that
+        // conflict can oscillate forever (endless resize/relayout). A maximized
+        // window derives its size from the output, so the saved bounds are only
+        // needed for the un-maximized (restore) case.
+        if !self.window_state.maximized {
+            attrs = attrs.with_inner_size(PhysicalSize::new(
+                self.window_state.width.clamp(320, 16_384),
+                self.window_state.height.clamp(240, 16_384),
             ));
-        } else if let Some(primary_monitor) = event_loop.primary_monitor() {
-            attrs = attrs.with_position(primary_monitor.position());
+            if self.window_state.position_is_visible(event_loop) {
+                attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                    self.window_state.x,
+                    self.window_state.y,
+                ));
+            } else if let Some(primary_monitor) = event_loop.primary_monitor() {
+                attrs = attrs.with_position(primary_monitor.position());
+            }
         }
         // On Linux the compositor (esp. Wayland/KWin) ignores the embedded .ico
         // for the titlebar/taskbar icon and instead maps the window to a desktop
@@ -455,12 +461,21 @@ impl ApplicationHandler for PhotonicWinitApp {
 
         let capture_rx = self.capture_rx.take().expect("capture_rx already consumed");
 
-        let renderer = pollster::block_on(PhotonicRenderer::new(
+        let renderer = match pollster::block_on(PhotonicRenderer::new(
             Arc::clone(&window),
             Arc::clone(&self.document),
             Arc::clone(&self.history),
             capture_rx,
-        ));
+        )) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                let message = format!("GPU renderer initialization failed: {error}");
+                error!("{message}");
+                self.startup_error = Some(message);
+                event_loop.exit();
+                return;
+            }
+        };
 
         // Share the windowed renderer's GPU device/queue with the MCP export path
         // so `export_artboards`/`export_raster` render on the SAME GPU context. A
@@ -510,6 +525,15 @@ impl ApplicationHandler for PhotonicWinitApp {
             ));
 
         write_mcp_config();
+        spawn_mcp_server(
+            Arc::clone(&self.document),
+            Arc::clone(&self.history),
+            self.mcp_capture_tx.clone(),
+            self.mcp_config.clone(),
+            Arc::clone(&self.mcp_running),
+            Arc::clone(&self.audit_log),
+            Arc::clone(&self.mcp_document_path),
+        );
         info!("GPU renderer + egui initialized — window open");
         window.request_redraw();
 
@@ -587,7 +611,14 @@ impl ApplicationHandler for PhotonicWinitApp {
                 self.window_state.update_normal_bounds(&state.window);
             }
             WindowEvent::RedrawRequested => {
-                self.render_frame();
+                let repaint_after = match self.render_frame() {
+                    Ok(repaint_after) => repaint_after,
+                    Err(error) => {
+                        error!(%error, "GPU surface failed; closing Photonic cleanly");
+                        event_loop.exit();
+                        return;
+                    }
+                };
                 // A deferred quit (unsaved-changes prompt) may have been confirmed
                 // by the GUI this frame — finalize window state + prefs and exit.
                 let exit_window = self.state.as_ref().and_then(|s| {
@@ -608,9 +639,19 @@ impl ApplicationHandler for PhotonicWinitApp {
                     event_loop.exit();
                     return;
                 }
-                if let Some(s) = &self.state {
-                    s.window.request_redraw();
-                }
+                // Do not wake at a fixed 60 Hz when the editor is idle. egui
+                // reports the earliest requested repaint for animations,
+                // playback, and delayed UI work. `ResumeTimeReached` above
+                // turns that deadline into the next native redraw, while input
+                // and window events still request an immediate repaint.
+                //
+                // This is especially important on Wayland: a permanent timer
+                // keeps the compositor and GPU busy even with a static window
+                // and magnifies any layout/cache feedback into needless work.
+                event_loop.set_control_flow(match repaint_after {
+                    Some(delay) => ControlFlow::WaitUntil(Instant::now() + delay),
+                    None => ControlFlow::Wait,
+                });
             }
             _ => {
                 if response.repaint {
@@ -622,12 +663,17 @@ impl ApplicationHandler for PhotonicWinitApp {
 }
 
 impl PhotonicWinitApp {
-    fn render_frame(&mut self) {
+    /// Render one frame and return egui's next requested repaint deadline.
+    /// `None` means there is no outstanding UI/playback work, so the native
+    /// event loop may sleep until real input or a window event arrives.
+    fn render_frame(&mut self) -> Result<Option<Duration>> {
         // Honor a pending MCP restart request from the GUI modal (#170) before we
         // take a mutable borrow of `self.state` for the frame.
         self.maybe_restart_mcp();
         let mcp_document_path = Arc::clone(&self.mcp_document_path);
-        let Some(state) = &mut self.state else { return };
+        let Some(state) = &mut self.state else {
+            return Ok(None);
+        };
 
         // Keep GUI File → Save and MCP save_document pointed at the same native
         // file. MCP writes are picked up before drawing; GUI path changes are
@@ -643,9 +689,9 @@ impl PhotonicWinitApp {
         let (verts, idxs) = state.renderer.update();
 
         // 2. Acquire surface frame
-        let mut frame = match state.renderer.begin_frame(&verts, &idxs) {
-            Some(f) => f,
-            None => return,
+        let mut frame = match state.renderer.begin_frame(&verts, &idxs)? {
+            Some(frame) => frame,
+            None => return Ok(None),
         };
 
         // 2b. Render text nodes over the document (before egui).
@@ -699,6 +745,11 @@ impl PhotonicWinitApp {
                 }
             }
         });
+        let repaint_after = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|output| output.repaint_delay)
+            .filter(|delay| *delay != Duration::MAX);
         // doc lock released here ↑
 
         if state.gui.current_file != gui_path_before {
@@ -878,6 +929,7 @@ impl PhotonicWinitApp {
                 tracing::info!("render loop alive — frame {}", n);
             }
         }
+        Ok(repaint_after)
     }
 }
 

@@ -11,16 +11,16 @@
 
 pub mod graph;
 
-/// Media probing, pool services, keyframe index (02 §1 module map).
-pub mod media;
-/// FFmpeg-sidecar decode: process mgmt, pipes, scheduling, rings (02 §3).
-pub mod decode;
 /// Audio engine host + mixer (02 §1, 09).
 pub mod audio;
-/// Export render loop + encoder sidecar + presets (02 §7, 05).
-pub mod export;
 /// Caption/TTS provider abstraction + subtitle interchange (06).
 pub mod captions;
+/// FFmpeg-sidecar decode: process mgmt, pipes, scheduling, rings (02 §3).
+pub mod decode;
+/// Export render loop + encoder sidecar + presets (02 §7, 05).
+pub mod export;
+/// Media probing, pool services, keyframe index (02 §1 module map).
+pub mod media;
 /// Playback controller, clock, prefetch (02 §4).
 pub mod playback;
 /// `VideoEngine` facade + per-document `EngineSession` (02 §1).
@@ -42,6 +42,6 @@ pub mod contract;
 pub use graph::eval::GpuContext;
 pub use media::thumbnails::{RgbaThumb, ThumbHandle, ThumbnailCache, WaveformCache};
 pub use session::{
-    coalesce_commands, colorimetry_for_probe, EngineCmd, EngineFrame, EngineSession,
-    EngineStatus, ExportJob, ProxyMode, VideoEngine,
+    coalesce_commands, colorimetry_for_probe, AssetReadiness, EngineCmd, EngineFrame,
+    EngineSession, EngineStatus, ExportJob, PreviewQuality, PreviewTarget, ProxyMode, VideoEngine,
 };

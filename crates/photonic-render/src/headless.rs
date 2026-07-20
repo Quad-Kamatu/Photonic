@@ -2317,6 +2317,8 @@ mod blend_tests {
                 let want = match mode {
                     BlendMode::Difference => (b - s).abs(),
                     BlendMode::Exclusion => b + s - 2.0 * b * s,
+                    // Unreachable: the enclosing loop only iterates over
+                    // `[Difference, Exclusion]`.
                     _ => unreachable!(),
                 };
                 assert!(

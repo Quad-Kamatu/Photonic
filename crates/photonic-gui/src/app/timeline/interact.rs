@@ -358,7 +358,7 @@ pub(crate) fn resolve_target_track(
     explicit: Option<TrackId>,
 ) -> Option<TrackId> {
     let lane = match kind {
-        TrackKind::Video => &seq.video_tracks,
+        TrackKind::Video | TrackKind::Text => &seq.video_tracks,
         TrackKind::Audio => &seq.audio_tracks,
     };
     if let Some(id) = explicit {

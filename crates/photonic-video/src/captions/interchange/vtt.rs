@@ -63,7 +63,10 @@ fn plain_text(segs: &[Seg]) -> String {
 fn words_from_cue_text(text: &str, start: Tick, end: Tick) -> (Vec<CaptionWord>, bool) {
     let segs = tokenize(text);
     if !segs.iter().any(|s| matches!(s, Seg::Time(_))) {
-        return (distribute_caption_words(&plain_text(&segs), start, end), true);
+        return (
+            distribute_caption_words(&plain_text(&segs), start, end),
+            true,
+        );
     }
 
     // Real per-word timing: each `<time>` tag marks the start of the text
@@ -94,8 +97,16 @@ fn words_from_cue_text(text: &str, start: Tick, end: Tick) -> (Vec<CaptionWord>,
     let mut words = Vec::new();
     for (i, (run_start, run_text)) in runs.iter().enumerate() {
         let run_end = runs.get(i + 1).map(|(t, _)| *t).unwrap_or(end);
-        let run_end = if run_end.0 < run_start.0 { *run_start } else { run_end };
-        words.extend(distribute_caption_words(run_text.trim(), *run_start, run_end));
+        let run_end = if run_end.0 < run_start.0 {
+            *run_start
+        } else {
+            run_end
+        };
+        words.extend(distribute_caption_words(
+            run_text.trim(),
+            *run_start,
+            run_end,
+        ));
     }
     (words, false)
 }
