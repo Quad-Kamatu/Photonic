@@ -2622,6 +2622,10 @@ mod tests {
             config: McpServerConfig::default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+            video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),
+            video_jobs: Arc::new(StdMutex::new(
+                crate::handlers::video_jobs::JobRegistry::new(),
+            )),
         }
     }
 

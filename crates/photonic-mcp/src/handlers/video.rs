@@ -6560,6 +6560,7 @@ mod tests {
             video_jobs: Arc::new(StdMutex::new(
                 crate::handlers::video_jobs::JobRegistry::new(),
             )),
+            document_path: Arc::new(StdMutex::new(None)),
         }
     }
 

@@ -23,6 +23,7 @@ fn test_state() -> AppState {
     AppState {
         document: Arc::new(Mutex::new(Document::new("t", 1920.0, 1080.0))),
         history: Arc::new(Mutex::new(CommandHistory::new(200))),
+        document_path: Arc::new(StdMutex::new(None)),
         capture_tx: Arc::new(StdMutex::new(tx)),
         config: McpServerConfig::default(),
         audit_log: Arc::new(StdMutex::new(AuditLog::new())),
