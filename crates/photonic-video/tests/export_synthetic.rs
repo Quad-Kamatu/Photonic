@@ -27,7 +27,9 @@ use std::sync::atomic::AtomicBool;
 use photonic_core::timeline::FrameRate;
 use photonic_render::color::Colorimetry;
 use photonic_video::export::convert::{working_frame_to_rgba8, working_frame_to_yuv_planes};
-use photonic_video::export::encoder::{plane_kind_for, AudioStreamSpec, PlaneKind};
+use photonic_video::export::encoder::{
+    plane_kind_for, AudioStreamSpec, EncoderCapabilities, PlaneKind,
+};
 use photonic_video::export::presets::built_in_presets;
 use photonic_video::export::render_loop::{export_frames, ExportEvent, Frame, ResolvedExport};
 use photonic_video::media::ffmpeg_locate::{locate_for_test, FfmpegTools};
@@ -350,6 +352,16 @@ fn export_h264_social_e2e_ffprobe_and_psnr() {
 #[test]
 fn export_master_av1_high_e2e_ffprobe_and_psnr() {
     let tools = tools_or_skip!();
+    // Ubuntu apt ffmpeg often ships without libsvtav1/librav1e; broken-pipe on
+    // encode is not a product bug. Skip cleanly when neither encoder exists.
+    let caps = EncoderCapabilities::probe(&tools).expect("ffmpeg -encoders");
+    if !caps.has("libsvtav1") && !caps.has("librav1e") {
+        eprintln!(
+            "ffmpeg has no AV1 encoder (libsvtav1/librav1e) — skipping AV1 export e2e \
+             (install a build with one of those, or use PHOTONIC_FFMPEG_DIR)"
+        );
+        return;
+    }
     let preset = preset_by_name("Master AV1 High");
     let out = tmp_path("master_av1.mkv");
 
