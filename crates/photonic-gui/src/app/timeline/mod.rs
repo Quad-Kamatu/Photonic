@@ -94,11 +94,9 @@ pub(crate) fn put_fixed(
     rect: egui::Rect,
     widget: impl egui::Widget,
 ) -> egui::Response {
-    let mut fixed_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
-    );
+    let mut fixed_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+    ));
     fixed_ui.add(widget)
 }
 
@@ -329,7 +327,10 @@ impl PhotonicApp {
         // a visible thumbnail or waveform is pending, ask egui for one modest
         // follow-up frame; this keeps the event loop idle otherwise and avoids
         // the old unconditional 60 Hz poll.
-        if media_caches.as_ref().is_some_and(TimelineMediaCaches::has_pending) {
+        if media_caches
+            .as_ref()
+            .is_some_and(TimelineMediaCaches::has_pending)
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -348,9 +349,7 @@ impl PhotonicApp {
                 let row_top = y;
                 let row_bot = y + row.height;
                 y = row_bot;
-                if row_bot < header_rows_rect.top()
-                    || row_top > header_rows_rect.bottom() - 28.0
-                {
+                if row_bot < header_rows_rect.top() || row_top > header_rows_rect.bottom() - 28.0 {
                     continue;
                 }
                 let hrect = egui::Rect::from_min_max(
@@ -445,7 +444,11 @@ impl PhotonicApp {
                             // natural order; video/text rows are displayed reversed
                             // but `index_in_kind` is the true Vec index, so the same
                             // remove-then-insert correction applies.)
-                            let target = if didx < drop_idx { drop_idx - 1 } else { drop_idx };
+                            let target = if didx < drop_idx {
+                                drop_idx - 1
+                            } else {
+                                drop_idx
+                            };
                             ops_bridge::move_track(doc, history, seq_id, drag_id, target);
                         }
                     }
@@ -560,17 +563,18 @@ impl PhotonicApp {
                     // always lands rather than silently doing nothing.
                     let mut landed = match target {
                         Some(track) => ops_bridge::insert_asset_clip(
-                            doc, history, seq_id, track, payload.asset, at,
+                            doc,
+                            history,
+                            seq_id,
+                            track,
+                            payload.asset,
+                            at,
                         ),
                         None => false,
                     };
                     if !landed {
-                        landed = ops_bridge::insert_asset_at_first_fit(
-                            doc,
-                            history,
-                            payload.asset,
-                            at,
-                        );
+                        landed =
+                            ops_bridge::insert_asset_at_first_fit(doc, history, payload.asset, at);
                     }
                     if landed {
                         // A media-pool drop is also a preview gesture: park the
@@ -2152,7 +2156,10 @@ mod panel_layout_tests {
         );
         let grown = frame(
             &ctx,
-            vec![egui::Event::PointerMoved(egui::pos2(600.0, splitter_y - 100.0))],
+            vec![egui::Event::PointerMoved(egui::pos2(
+                600.0,
+                splitter_y - 100.0,
+            ))],
         );
         assert!(
             grown > initial + 50.0,

@@ -53,9 +53,7 @@ impl PhotonicApp {
                         .pick_files();
                     if let Some(paths) = files {
                         let project_path = self.current_file.clone();
-                        let stubs =
-                            self.media_pool_ui
-                                .spawn_import(paths, bin, project_path);
+                        let stubs = self.media_pool_ui.spawn_import(paths, bin, project_path);
                         if !stubs.is_empty() {
                             use photonic_core::timeline::ops;
                             timeline::ops_bridge::ensure_project_and_sequence(

@@ -1181,9 +1181,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         AppState {
             document: Arc::new(Mutex::new(doc)),
-            history: Arc::new(Mutex::new(
-                photonic_core::history::CommandHistory::new(100),
-            )),
+            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
             document_path: Arc::new(StdMutex::new(None)),
             capture_tx: Arc::new(StdMutex::new(tx)),
             config: McpServerConfig::default(),

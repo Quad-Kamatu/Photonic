@@ -1,22 +1,9 @@
 use crate::protocol::{
-    AddConstructionLineArgs,
-    AddDimensionArgs,
-    ApplyDocumentTemplateArgs,
-    DiffCheckpointsArgs,
-    FitToMarginsArgs,
-    GetCanvasOverviewArgs,
-    GetDocumentStateArgs,
-    JumpToHistoryArgs,
-    ListHistoryArgs,
-    RemoveDimensionArgs,
-    ResizeCanvasArgs,
-    RestoreCheckpointArgs,
-    SetArtboardMarginsArgs,
-    SetDocumentBleedArgs,
-    SetDocumentColorModeArgs,
-    SetDocumentDpiArgs,
-    ToolResult,
-    UndoRedoArgs,
+    AddConstructionLineArgs, AddDimensionArgs, ApplyDocumentTemplateArgs, DiffCheckpointsArgs,
+    FitToMarginsArgs, GetCanvasOverviewArgs, GetDocumentStateArgs, JumpToHistoryArgs,
+    ListHistoryArgs, RemoveDimensionArgs, ResizeCanvasArgs, RestoreCheckpointArgs,
+    SetArtboardMarginsArgs, SetDocumentBleedArgs, SetDocumentColorModeArgs, SetDocumentDpiArgs,
+    ToolResult, UndoRedoArgs,
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
@@ -830,9 +817,11 @@ pub async fn get_document_bleed(state: &AppState) -> ToolResult {
     .with_data(json!({ "bleed_mm": doc.bleed_mm, "slug_mm": doc.slug_mm }))
 }
 
-
 /// Set the document color mode (rgb or cmyk).
-pub async fn set_document_color_mode(state: &AppState, args: SetDocumentColorModeArgs) -> ToolResult {
+pub async fn set_document_color_mode(
+    state: &AppState,
+    args: SetDocumentColorModeArgs,
+) -> ToolResult {
     tracing::debug!("tool: set_document_color_mode");
     let mode_str = match args.mode.as_deref() {
         Some(m) => m,
@@ -853,7 +842,6 @@ pub async fn set_document_color_mode(state: &AppState, args: SetDocumentColorMod
         .with_data(json!({ "color_mode": mode_label }))
 }
 
-
 /// Return the current document color mode.
 pub async fn get_document_color_mode(state: &AppState) -> ToolResult {
     tracing::debug!("tool: get_document_color_mode");
@@ -865,7 +853,6 @@ pub async fn get_document_color_mode(state: &AppState) -> ToolResult {
     ToolResult::text(format!("Document color mode: '{mode_label}'."))
         .with_data(json!({ "color_mode": mode_label }))
 }
-
 
 /// Set the document resolution (DPI). Controls the physical size the document's
 /// pixel dimensions map to on export: physical size = px / dpi × 72 pt. Presets
@@ -920,7 +907,6 @@ pub async fn get_document_dpi(state: &AppState) -> ToolResult {
         "page_in": { "width": w_pt / 72.0, "height": h_pt / 72.0 },
     }))
 }
-
 
 /// Set the artboard safe-area margins (top/right/bottom/left in document units).
 pub async fn set_artboard_margins(state: &AppState, args: SetArtboardMarginsArgs) -> ToolResult {

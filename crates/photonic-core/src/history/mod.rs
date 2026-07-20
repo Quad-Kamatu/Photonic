@@ -98,7 +98,11 @@ mod tests {
         );
         let group_id = group.id;
         doc.nodes.insert(group_id, group);
-        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(group_id);
+        doc.layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .node_ids
+            .push(group_id);
 
         let before = doc.nodes_in_draw_order().len(); // two leaves
 
@@ -2014,12 +2018,20 @@ mod tests {
         for step in (EDITS - 3..EDITS).rev() {
             assert!(h.undo(&mut doc));
             let (i, _) = samples[step];
-            assert_eq!(pix(&doc, i), 0, "undo did not restore pre-edit pixels at step {step}");
+            assert_eq!(
+                pix(&doc, i),
+                0,
+                "undo did not restore pre-edit pixels at step {step}"
+            );
         }
         for step in EDITS - 3..EDITS {
             assert!(h.redo(&mut doc));
             let (i, v) = samples[step];
-            assert_eq!(pix(&doc, i), v, "redo did not reproduce edit pixels at step {step}");
+            assert_eq!(
+                pix(&doc, i),
+                v,
+                "redo did not reproduce edit pixels at step {step}"
+            );
         }
     }
 
@@ -2061,7 +2073,10 @@ mod tests {
         h.execute(Command::UpdateNode { old, new }, &mut doc);
 
         assert!(
-            matches!(h.current_command(), Some(Command::UpdateRasterRegion { .. })),
+            matches!(
+                h.current_command(),
+                Some(Command::UpdateRasterRegion { .. })
+            ),
             "masked raster edit not stored as a region delta: {:?}",
             h.current_command()
         );
@@ -2513,8 +2528,16 @@ impl Command {
                 BASE + old.mem_estimate() + new.mem_estimate()
             }
             Command::ReplaceDocument { old, new, .. } => {
-                BASE + old.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
-                    + new.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
+                BASE + old
+                    .nodes
+                    .values()
+                    .map(|node| node.mem_estimate())
+                    .sum::<u64>()
+                    + new
+                        .nodes
+                        .values()
+                        .map(|node| node.mem_estimate())
+                        .sum::<u64>()
             }
             Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
             Command::Timeline(t) => BASE + t.mem_estimate(),
@@ -2611,10 +2634,18 @@ impl Command {
             Command::AddNode { node, .. } => format!("Add {}", node.name),
             Command::RemoveNode { .. } => "Remove node".to_string(),
             Command::AddSubtree { roots, .. } => {
-                format!("Paste {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
+                format!(
+                    "Paste {} object{}",
+                    roots.len(),
+                    if roots.len() == 1 { "" } else { "s" }
+                )
             }
             Command::RemoveSubtree { roots, .. } => {
-                format!("Remove {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
+                format!(
+                    "Remove {} object{}",
+                    roots.len(),
+                    if roots.len() == 1 { "" } else { "s" }
+                )
             }
             Command::UpdateNode { old, new } => describe_node_update(old, new),
             Command::UpdateRasterMeta { old, new } => describe_node_update(old, new),
@@ -3272,7 +3303,11 @@ impl Command {
                 new: old.clone(),
             }),
 
-            Command::ReplaceDocument { old, new, description } => Some(Command::ReplaceDocument {
+            Command::ReplaceDocument {
+                old,
+                new,
+                description,
+            } => Some(Command::ReplaceDocument {
                 old: new.clone(),
                 new: old.clone(),
                 description: description.clone(),
@@ -3572,10 +3607,7 @@ fn raster_update_delta(old: SceneNode, new: SceneNode) -> Command {
     let (SceneNodeKind::Raster(ro), SceneNodeKind::Raster(rn)) = (&old.kind, &new.kind) else {
         return Command::UpdateNode { old, new };
     };
-    if old.id != new.id
-        || ro.image.width != rn.image.width
-        || ro.image.height != rn.image.height
-    {
+    if old.id != new.id || ro.image.width != rn.image.width || ro.image.height != rn.image.height {
         return Command::UpdateNode { old, new };
     }
 

@@ -380,7 +380,9 @@ impl PhotonicApp {
         else {
             return false;
         };
-        let Some((cmd, new_ids)) = self.gui_clipboard.paste_command(target_layer, offset, offset)
+        let Some((cmd, new_ids)) = self
+            .gui_clipboard
+            .paste_command(target_layer, offset, offset)
         else {
             return false;
         };
@@ -859,7 +861,9 @@ mod ungroup_all_tests {
 
         // No group nodes remain anywhere.
         assert!(
-            !doc.nodes.values().any(|n| matches!(n.kind, SceneNodeKind::Group(_))),
+            !doc.nodes
+                .values()
+                .any(|n| matches!(n.kind, SceneNodeKind::Group(_))),
             "all groups dissolved"
         );
         // All three leaves + z are now top-level in the layer, no dangling ids.
@@ -874,7 +878,10 @@ mod ungroup_all_tests {
         assert!(history.undo(&mut doc));
         let top = &doc.layers.get(&layer).unwrap().node_ids;
         assert_eq!(top, &vec![outer, z], "undo restored original top level");
-        assert!(matches!(doc.nodes.get(&outer).map(|n| &n.kind), Some(SceneNodeKind::Group(_))));
+        assert!(matches!(
+            doc.nodes.get(&outer).map(|n| &n.kind),
+            Some(SceneNodeKind::Group(_))
+        ));
     }
 
     #[test]
