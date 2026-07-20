@@ -81,6 +81,12 @@ impl Default for ExportOptions {
 pub struct HeadlessRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Whether the adapter supports reinterpreting `Rgba8UnormSrgb` as
+    /// `Rgba8Unorm` via `view_formats` (needed for Tier B GPU→working). Soft
+    /// adapters (llvmpipe on GitHub Linux runners) often lack
+    /// [`wgpu::DownlevelFlags::VIEW_FORMATS`]; we empty `view_formats` and
+    /// fall back to the Tier A readback path when this is false.
+    supports_view_formats: bool,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     fill_pipeline: wgpu::RenderPipeline,
@@ -130,6 +136,11 @@ impl HeadlessRenderer {
             })
             .await
             .expect("No suitable GPU adapter for headless rendering");
+
+        let supports_view_formats = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
 
         let (device, queue) = adapter
             .request_device(
@@ -211,6 +222,7 @@ impl HeadlessRenderer {
         Self {
             device,
             queue,
+            supports_view_formats,
             camera_buffer,
             camera_bind_group,
             fill_pipeline,
@@ -603,7 +615,13 @@ impl HeadlessRenderer {
     ) -> wgpu::Texture {
         // `view_formats` includes the non-sRGB counterpart so the Tier B
         // conversion pass can sample the stored bytes raw (03 §2.5); it does not
-        // affect readback (Tier A) or the sRGB render itself.
+        // affect readback (Tier A) or the sRGB render itself. Soft adapters
+        // (llvmpipe) often lack VIEW_FORMATS — leave the list empty then.
+        let view_formats: &[wgpu::TextureFormat] = if self.supports_view_formats {
+            &[wgpu::TextureFormat::Rgba8Unorm]
+        } else {
+            &[]
+        };
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("headless_scene_tex"),
             size: wgpu::Extent3d {
@@ -618,7 +636,7 @@ impl HeadlessRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+            view_formats,
         });
         let tex_view = tex.create_view(&Default::default());
 
@@ -815,14 +833,52 @@ impl HeadlessRenderer {
             w,
             h,
         );
-        // Sample the sRGB scene texture through a non-sRGB view so the bytes are
-        // read raw and the conversion applies the sRGB EOTF explicitly — the
-        // exact same math Tier A runs on the CPU-readback bytes.
-        let raw_view = scene.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(wgpu::TextureFormat::Rgba8Unorm),
-            ..Default::default()
-        });
-        self.convert_srgb_texture_to_working(&raw_view, w, h)
+        if self.supports_view_formats {
+            // Sample the sRGB scene texture through a non-sRGB view so the bytes
+            // are read raw and the conversion applies the sRGB EOTF explicitly —
+            // the exact same math Tier A runs on the CPU-readback bytes.
+            let raw_view = scene.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::Rgba8Unorm),
+                ..Default::default()
+            });
+            self.convert_srgb_texture_to_working(&raw_view, w, h)
+        } else {
+            // Soft adapters (no VIEW_FORMATS): fall back to the Tier A path —
+            // readback sRGB bytes, re-upload as raw Unorm, then convert.
+            let rgba = self
+                .readback_rgba8(&scene, w, h)
+                .expect("scene texture readback for Tier A working conversion");
+            let src = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tier_a_srgb_upload"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                src.as_image_copy(),
+                &rgba,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let src_view = src.create_view(&Default::default());
+            self.convert_srgb_texture_to_working(&src_view, w, h)
+        }
     }
 
     /// Rasterize `document`'s flat text nodes onto `target` via glyphon

@@ -18,6 +18,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Deep wgpu/Metal and video-engine eval stacks overflow the default 2 MiB
+  # on macOS CI for render_frame_at determinism; 16 MiB matches local dev.
+  RUST_MIN_STACK: "16777216"
 
 jobs:
   build-test:

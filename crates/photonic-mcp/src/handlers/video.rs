@@ -8096,8 +8096,27 @@ mod tests {
     /// 10 §9 hook 5: two `render_frame_at` calls with the same args and
     /// `output_format: raw_rgba16f` are byte-identical (the evaluator's pure-
     /// function property) — plus a pixel probe and the png/scale smoke.
-    #[tokio::test]
-    async fn render_frame_at_is_deterministic() {
+    ///
+    /// Spawned on a large-stack thread: macOS CI Metal + full-quality eval
+    /// overflowed the default tokio worker stack (`stack overflow, aborting`).
+    #[test]
+    fn render_frame_at_is_deterministic() {
+        std::thread::Builder::new()
+            .name("render_frame_at_is_deterministic".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                rt.block_on(render_frame_at_is_deterministic_inner());
+            })
+            .expect("spawn large-stack test thread")
+            .join()
+            .expect("render_frame_at_is_deterministic panicked");
+    }
+
+    async fn render_frame_at_is_deterministic_inner() {
         let state = test_state();
         // Small format keeps the raw payload cheap (320*180*8 ≈ 460 KB).
         let r = call(
