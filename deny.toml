@@ -64,10 +64,12 @@ yanked = "deny"
 # Acknowledged unmaintained *transitive* dependencies (no vulnerability, no
 # maintained drop-in). Revisit when upstreams migrate off them.
 ignore = [
-    "RUSTSEC-2025-0057", # fxhash — unmaintained (pulled in transitively)
     "RUSTSEC-2024-0436", # paste — unmaintained (pulled in transitively)
     "RUSTSEC-2025-0119", # number_prefix — unmaintained (transitive via indicatif/hf-hub)
     "RUSTSEC-2026-0192", # ttf-parser — unmaintained (text shaping via glyphon/text-on-path)
+    # rustybuzz unmaintained: no safe upgrade; pulled via cosmic-text → glyphon.
+    # Alternative is harfrust once cosmic-text/glyphon migrate. Revisit then.
+    "RUSTSEC-2026-0206", # rustybuzz — unmaintained (text shaping via glyphon)
     # quick-xml DoS advisories: fix needs quick-xml >=0.41, but our only users are
     # transitive and pin older majors — wayland-scanner (winit, a build-time
     # proc-macro, no runtime XML) and self_update (parses our own GitHub release

@@ -98,10 +98,16 @@ fn recovery_round_trip_preserves_timeline() {
     // `write_photon_file`/`load_document` operate on a plain path either way,
     // so this exercises the same code the real `recovery_dir()`-rooted path
     // would run.
+    // Instant Debug includes ':' / braces that are invalid on Windows paths
+    // (ERROR_DIRECTORY 267). Use a path-safe nanos suffix instead.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "photonic-recovery-test-{}-{:?}",
+        "photonic-recovery-test-{}-{}",
         std::process::id(),
-        std::time::Instant::now()
+        stamp
     ));
     std::fs::create_dir_all(&dir).expect("create hermetic recovery-test dir");
     let path = dir.join("untitled-1.photon");

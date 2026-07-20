@@ -334,8 +334,12 @@ fn ui_attach_proxy_then_resolve_decode() {
     );
 
     // Draft Auto path selects proxy file when Ready.
+    // validate_attach stores a canonicalized path (macOS: /var → /private/var).
     let decoded = photonic_video::media::resolve_decode_input(&path, Some(&report.proxy), true);
-    assert_eq!(decoded, proxy_out);
+    let expect_proxy = proxy_out
+        .canonicalize()
+        .unwrap_or_else(|_| proxy_out.clone());
+    assert_eq!(decoded, expect_proxy);
     // Export / ForceOriginal never uses proxy.
     assert_eq!(
         photonic_video::media::resolve_decode_input(&path, Some(&report.proxy), false),
