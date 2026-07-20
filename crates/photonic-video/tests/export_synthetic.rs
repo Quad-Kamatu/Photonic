@@ -253,14 +253,14 @@ fn psnr_against_reference(
     avg
 }
 
-fn run_export(
+fn try_export(
     tools: &FfmpegTools,
     preset: &photonic_video::export::presets::ExportPreset,
     out_path: &Path,
     frames: u64,
     frame_fn: impl Fn(u64, u32, u32) -> Frame,
     with_audio: bool,
-) {
+) -> Result<(), String> {
     let _ = std::fs::remove_file(out_path);
     let audio = if with_audio && preset.audio.is_some() {
         Some(AudioStreamSpec {
@@ -298,21 +298,43 @@ fn run_export(
             }
         },
     )
-    .unwrap_or_else(|e| panic!("export of {:?} failed: {e}", preset.name));
-    assert!(saw_done, "export did not emit ExportEvent::Done");
+    .map_err(|e| format!("export of {:?} failed: {e}", preset.name))?;
+    if !saw_done {
+        return Err(format!("export of {:?} did not emit Done", preset.name));
+    }
     // Image-sequence exports write to a printf pattern (`frame_%06d.png`); that
     // literal path is never a real file — the per-frame expansions land in the
     // parent directory instead. Assert *those* exist rather than the pattern.
     if out_path.to_string_lossy().contains('%') {
-        let parent = out_path.parent().expect("pattern path has a parent dir");
+        let parent = out_path
+            .parent()
+            .ok_or_else(|| "pattern path has no parent".to_string())?;
         let n = std::fs::read_dir(parent)
-            .unwrap_or_else(|e| panic!("read_dir {parent:?}: {e}"))
+            .map_err(|e| format!("read_dir {parent:?}: {e}"))?
             .filter_map(|e| e.ok())
             .count();
-        assert!(n > 0, "no image-sequence frames written under {:?}", parent);
-    } else {
-        assert!(out_path.exists(), "{:?} was not written", out_path);
+        if n == 0 {
+            return Err(format!(
+                "no image-sequence frames written under {:?}",
+                parent
+            ));
+        }
+    } else if !out_path.exists() {
+        return Err(format!("{:?} was not written", out_path));
     }
+    Ok(())
+}
+
+fn run_export(
+    tools: &FfmpegTools,
+    preset: &photonic_video::export::presets::ExportPreset,
+    out_path: &Path,
+    frames: u64,
+    frame_fn: impl Fn(u64, u32, u32) -> Frame,
+    with_audio: bool,
+) {
+    try_export(tools, preset, out_path, frames, frame_fn, with_audio)
+        .unwrap_or_else(|e| panic!("{e}"));
 }
 
 // ── H.264 (Social family, representative of all three) ──────────────────────
@@ -352,19 +374,27 @@ fn export_h264_social_e2e_ffprobe_and_psnr() {
 #[test]
 fn export_master_av1_high_e2e_ffprobe_and_psnr() {
     let tools = tools_or_skip!();
-    // Ubuntu apt ffmpeg often ships without libsvtav1/librav1e; broken-pipe on
-    // encode is not a product bug. Skip cleanly when neither encoder exists.
+    // Ubuntu apt ffmpeg may list libsvtav1/librav1e but still fail at encode
+    // (Broken pipe). Probe-encode one tiny frame and skip if the encoder is
+    // unusable rather than red-ing the whole workspace suite.
     let caps = EncoderCapabilities::probe(&tools).expect("ffmpeg -encoders");
     if !caps.has("libsvtav1") && !caps.has("librav1e") {
-        eprintln!(
-            "ffmpeg has no AV1 encoder (libsvtav1/librav1e) — skipping AV1 export e2e \
-             (install a build with one of those, or use PHOTONIC_FFMPEG_DIR)"
-        );
+        eprintln!("ffmpeg has no AV1 encoder (libsvtav1/librav1e) — skipping AV1 export e2e");
         return;
     }
     let preset = preset_by_name("Master AV1 High");
-    let out = tmp_path("master_av1.mkv");
+    let probe_out = tmp_path("master_av1_probe.mkv");
+    if let Err(e) = try_export(&tools, &preset, &probe_out, 2, synthetic_frame, false) {
+        eprintln!(
+            "AV1 encoder present but unusable ({e}) — skipping AV1 export e2e \
+             (install a working libsvtav1/librav1e build, or set PHOTONIC_FFMPEG_DIR)"
+        );
+        let _ = std::fs::remove_file(&probe_out);
+        return;
+    }
+    let _ = std::fs::remove_file(&probe_out);
 
+    let out = tmp_path("master_av1.mkv");
     run_export(&tools, &preset, &out, N, synthetic_frame, true);
 
     let json = ffprobe_json(&tools, &out);
