@@ -320,12 +320,7 @@ fn build_overlay_gradient(
             let theta = (angle_deg as f64).to_radians();
             let (dx, dy) = (theta.cos(), theta.sin());
             let half = 0.5 * scale * ((bw * dx).abs() + (bh * dy).abs());
-            g.coords = vec![
-                cx - dx * half,
-                cy - dy * half,
-                cx + dx * half,
-                cy + dy * half,
-            ];
+            g.coords = vec![cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half];
         }
         GradientKind::Radial => {
             let r = 0.5 * scale * bw.hypot(bh);

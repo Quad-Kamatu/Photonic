@@ -128,7 +128,8 @@ impl EngineBridge {
     /// (02 §1 "GUI mode shares the winit GpuContext"). This is the one-line
     /// construction hosts call right after the renderer exists.
     pub fn from_renderer(renderer: &photonic_render::PhotonicRenderer) -> Self {
-        let gpu = photonic_video::GpuContext::new(renderer.device_arc(), renderer.queue_arc());
+        let gpu =
+            photonic_video::GpuContext::new(renderer.device_arc(), renderer.queue_arc());
         EngineBridge::new(VideoEngine::new(gpu))
     }
 

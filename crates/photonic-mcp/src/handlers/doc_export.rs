@@ -1,8 +1,20 @@
 use crate::protocol::{
-    AddExportProfileArgs, DeleteLayerArgs, DuplicateLayerArgs, ExportArtboardsArgs,
-    ExportDesignTokensArgs, ExportIconSetArgs, ExportPdfArgs, ExportRasterArgs,
-    ExportSelectionArgs, ExportSvgArgs, ImportDesignTokensArgs, PreviewSelectionArgs,
-    RemoveExportProfileArgs, ReorderLayersArgs, RunExportProfileArgs, SetActiveLayerArgs,
+    AddExportProfileArgs,
+    DeleteLayerArgs,
+    DuplicateLayerArgs,
+    ExportArtboardsArgs,
+    ExportDesignTokensArgs,
+    ExportIconSetArgs,
+    ExportPdfArgs,
+    ExportRasterArgs,
+    ExportSelectionArgs,
+    ExportSvgArgs,
+    ImportDesignTokensArgs,
+    PreviewSelectionArgs,
+    RemoveExportProfileArgs,
+    ReorderLayersArgs,
+    RunExportProfileArgs,
+    SetActiveLayerArgs,
     ToolResult,
 };
 use crate::server::AppState;
@@ -284,9 +296,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
     let color_mode = match args.color_mode.as_deref() {
         Some("cmyk") => photonic_core::document::ColorMode::Cmyk,
         Some("rgb") => photonic_core::document::ColorMode::Rgb,
-        Some(other) => {
-            return ToolResult::error(format!("color_mode must be 'rgb' or 'cmyk', got '{other}'"))
-        }
+        Some(other) => return ToolResult::error(format!("color_mode must be 'rgb' or 'cmyk', got '{other}'")),
         None => doc.color_mode,
     };
 
@@ -296,10 +306,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
     let export_doc: std::borrow::Cow<photonic_core::document::Document> =
         if args.outline_text.unwrap_or(false) {
             let mut font_system = glyphon::FontSystem::new();
-            std::borrow::Cow::Owned(photonic_render::outline_document_text(
-                &doc,
-                &mut font_system,
-            ))
+            std::borrow::Cow::Owned(photonic_render::outline_document_text(&doc, &mut font_system))
         } else {
             std::borrow::Cow::Borrowed(&*doc)
         };
@@ -318,8 +325,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
     // Triggered when any artboard selector is set. Each artboard becomes a page
     // clipped to its rectangle + bleed (single multi-page PDF by default, or one
     // file per artboard when `separate_files` is set).
-    let artboard_mode =
-        args.all.unwrap_or(false) || args.range.is_some() || args.artboards.is_some();
+    let artboard_mode = args.all.unwrap_or(false) || args.range.is_some() || args.artboards.is_some();
     if artboard_mode {
         const MAX_BOARDS: usize = 64;
         let selected = match select_artboards_for_export(
@@ -351,8 +357,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
             let mut items = Vec::new();
             let mut total = 0usize;
             for (i, (ab, region)) in selected.iter().zip(regions.iter()).enumerate() {
-                let bytes =
-                    photonic_core::export::export_pdf_regions(&export_doc, &opts, &[*region]);
+                let bytes = photonic_core::export::export_pdf_regions(&export_doc, &opts, &[*region]);
                 let out_path = expand_path_template(template, &ab.name, i + 1);
                 if let Err(e) = std::fs::write(&out_path, &bytes) {
                     return ToolResult::error(format!("Failed to write PDF to '{out_path}': {e}"));
@@ -434,13 +439,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
 fn expand_path_template(template: &str, name: &str, index: usize) -> String {
     let safe_name: String = name
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
     if template.contains("{name}") || template.contains("{index}") || template.contains("{n}") {
         return template
@@ -478,6 +477,7 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
     Some((w, h))
 }
+
 
 pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResult {
     tracing::debug!("tool: export_raster");
@@ -624,9 +624,7 @@ fn select_artboards_for_export(
         all[start - 1..end].to_vec()
     } else if let Some(list) = list {
         if list.is_empty() {
-            return Err(
-                "`artboards` was empty — omit it to export the active artboard".to_string(),
-            );
+            return Err("`artboards` was empty — omit it to export the active artboard".to_string());
         }
         let mut out = Vec::new();
         for sel in list {
@@ -922,10 +920,7 @@ static EXPORT_GPU: std::sync::OnceLock<(
 /// Register the live GUI renderer's GPU device/queue for reuse by artboard/PNG
 /// export. Called once from the app after the windowed renderer is created. A
 /// second call is ignored (the first registration wins).
-pub fn register_export_gpu(
-    device: std::sync::Arc<wgpu::Device>,
-    queue: std::sync::Arc<wgpu::Queue>,
-) {
+pub fn register_export_gpu(device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>) {
     let _ = EXPORT_GPU.set((device, queue));
 }
 
@@ -973,6 +968,7 @@ async fn export_renderer() -> ExportRenderer {
         .await
         .clone()
 }
+
 
 /// #204: render the selection at target display sizes over light AND dark
 /// backgrounds as a single contact-sheet PNG — judge small-size legibility and
@@ -1936,20 +1932,14 @@ mod export_artboards_tests {
     fn all_flag_returns_every_board_in_order() {
         let b = boards();
         let out = select_artboards_for_export(&b, None, true, None, None, 24).unwrap();
-        assert_eq!(
-            out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["Cover", "Body", "Back"]
-        );
+        assert_eq!(out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Cover", "Body", "Back"]);
     }
 
     #[test]
     fn range_is_one_based_inclusive() {
         let b = boards();
         let out = select_artboards_for_export(&b, None, false, Some([2, 3]), None, 24).unwrap();
-        assert_eq!(
-            out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["Body", "Back"]
-        );
+        assert_eq!(out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Body", "Back"]);
     }
 
     #[test]
@@ -1966,10 +1956,7 @@ mod export_artboards_tests {
         let id2 = b[1].id.to_string();
         let sel = vec!["Back".to_string(), "1".to_string(), id2];
         let out = select_artboards_for_export(&b, None, false, None, Some(&sel), 24).unwrap();
-        assert_eq!(
-            out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["Back", "Cover", "Body"]
-        );
+        assert_eq!(out.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Back", "Cover", "Body"]);
     }
 
     #[test]
@@ -1996,8 +1983,7 @@ mod export_artboards_tests {
         let b = boards();
         let sel = vec!["Cover".to_string()];
         // all wins even when range + list provided
-        let out =
-            select_artboards_for_export(&b, None, true, Some([1, 1]), Some(&sel), 24).unwrap();
+        let out = select_artboards_for_export(&b, None, true, Some([1, 1]), Some(&sel), 24).unwrap();
         assert_eq!(out.len(), 3);
     }
 
@@ -2052,10 +2038,7 @@ mod export_pdf_real_path_tests {
             opacity: 1.0,
             enabled: true,
         };
-        doc.add_node(
-            SceneNode::new("card", layer, SceneNodeKind::Path(card)),
-            None,
-        );
+        doc.add_node(SceneNode::new("card", layer, SceneNodeKind::Path(card)), None);
 
         // Oversampled avatar (1200²) placed small (scale 0.3 → 1000 DPI effective
         // → downsampled to 300). Transparent border, opaque interior.
@@ -2101,10 +2084,6 @@ mod export_pdf_real_path_tests {
             config: McpServerConfig::default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
-            video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),
-            video_jobs: Arc::new(StdMutex::new(
-                crate::handlers::video_jobs::JobRegistry::new(),
-            )),
         }
     }
 
@@ -2149,11 +2128,7 @@ mod export_pdf_real_path_tests {
 
         let state = state_with(doc);
         let res = export_pdf(&state, args).await;
-        assert_ne!(
-            res.is_error,
-            Some(true),
-            "export_pdf handler returned an error: {res:?}"
-        );
+        assert_ne!(res.is_error, Some(true), "export_pdf handler returned an error: {res:?}");
 
         let bytes = std::fs::read(&tmp).expect("handler must write the PDF");
         let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -2176,31 +2151,16 @@ mod export_pdf_real_path_tests {
         );
 
         // Issue C / X-1a — no live transparency (no SMask); CMYK output.
-        assert!(
-            !text.contains("/SMask"),
-            "CMYK/X-1a must not carry a soft mask"
-        );
-        assert!(
-            text.contains("/DeviceCMYK"),
-            "CMYK export must be DeviceCMYK"
-        );
+        assert!(!text.contains("/SMask"), "CMYK/X-1a must not carry a soft mask");
+        assert!(text.contains("/DeviceCMYK"), "CMYK export must be DeviceCMYK");
         // X-1a is PDF 1.3.
-        assert!(
-            bytes.starts_with(b"%PDF-1.3"),
-            "X-1a export must be PDF 1.3"
-        );
+        assert!(bytes.starts_with(b"%PDF-1.3"), "X-1a export must be PDF 1.3");
 
         // Outlined text ⇒ no embedded/referenced fonts.
-        assert!(
-            !text.contains("/Type /Font"),
-            "outline_text must leave zero fonts"
-        );
+        assert!(!text.contains("/Type /Font"), "outline_text must leave zero fonts");
 
         // If the preflight tooling is present, the real artifact must PASS X-1a.
-        let script = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/preflight-pdfx.sh"
-        );
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/preflight-pdfx.sh");
         if std::path::Path::new(script).exists() {
             if let Ok(out) = std::process::Command::new("bash")
                 .arg(script)
@@ -2213,8 +2173,7 @@ mod export_pdf_real_path_tests {
                 let code = out.status.code().unwrap_or(2);
                 if code != 2 {
                     assert_eq!(
-                        code,
-                        0,
+                        code, 0,
                         "preflight-pdfx.sh must PASS on the CMYK card back:\n{}\n{}",
                         String::from_utf8_lossy(&out.stdout),
                         String::from_utf8_lossy(&out.stderr),
@@ -2247,10 +2206,6 @@ mod export_blocking_tests {
             config: McpServerConfig::default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
-            video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),
-            video_jobs: Arc::new(StdMutex::new(
-                crate::handlers::video_jobs::JobRegistry::new(),
-            )),
         }
     }
 

@@ -161,9 +161,7 @@ impl SharedRing {
     /// Consumer: the frame covering `t` if resident, without blocking.
     pub fn frame_covering(&self, t: Tick) -> Option<Arc<DecodedFrame>> {
         let (lock, _) = &*self.inner;
-        lock.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .frame_covering(t)
+        lock.lock().unwrap_or_else(|e| e.into_inner()).frame_covering(t)
     }
 
     /// Exact-pts lookup without blocking.
@@ -216,9 +214,7 @@ impl SharedRing {
 
     pub fn set_playhead(&self, t: Tick) {
         let (lock, _) = &*self.inner;
-        lock.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_playhead(t);
+        lock.lock().unwrap_or_else(|e| e.into_inner()).set_playhead(t);
     }
 
     pub fn clear(&self) {

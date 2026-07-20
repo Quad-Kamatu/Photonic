@@ -298,7 +298,8 @@ impl PhotonicApp {
                     ui.add_space(4.0);
                     ui.separator();
                     ui.add_space(4.0);
-                    let is_svg_or_ico = matches!(dlg.format, ExportFormat::Svg | ExportFormat::Ico);
+                    let is_svg_or_ico =
+                        matches!(dlg.format, ExportFormat::Svg | ExportFormat::Ico);
                     if is_svg_or_ico {
                         ui.colored_label(
                             egui::Color32::from_rgb(210, 150, 60),

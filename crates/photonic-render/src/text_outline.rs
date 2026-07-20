@@ -122,10 +122,7 @@ fn warn_if_substituted(node: &TextNode, resolved: &ResolvedFace) {
     if is_generic_family(&node.font_family) {
         return;
     }
-    if !resolved
-        .family
-        .eq_ignore_ascii_case(node.font_family.trim())
-    {
+    if !resolved.family.eq_ignore_ascii_case(node.font_family.trim()) {
         tracing::warn!(
             requested_family = %node.font_family,
             requested_weight = node.font_weight,
@@ -157,10 +154,7 @@ fn warn_if_substituted(node: &TextNode, resolved: &ResolvedFace) {
 /// same `Attrs` (family + weight + style) over a `FontSystem::new()` DB — which
 /// on Linux includes `~/.local/share/fonts` — so a face that resolves here is
 /// exactly the one the live renderer draws.
-pub fn resolve_document_font(
-    font_system: &mut FontSystem,
-    node: &TextNode,
-) -> Option<ResolvedFace> {
+pub fn resolve_document_font(font_system: &mut FontSystem, node: &TextNode) -> Option<ResolvedFace> {
     let probe: &str = if node.content.trim().is_empty() {
         "A"
     } else {
@@ -292,7 +286,8 @@ pub fn layout_text_flat(font_system: &mut FontSystem, node: &TextNode) -> PathDa
             let scale = g.font_size as f64 / units;
             // font units (Y-up, origin at glyph origin) → doc space (Y-down):
             //   translate to (gx, gy) · scale(scale, -scale) · outline
-            let affine = Affine::translate((gx, gy)) * Affine::scale_non_uniform(scale, -scale);
+            let affine =
+                Affine::translate((gx, gy)) * Affine::scale_non_uniform(scale, -scale);
 
             let mut glyph_path = builder.path;
             glyph_path.apply_affine(affine);
@@ -353,12 +348,15 @@ pub fn outline_document_text(doc: &Document, font_system: &mut FontSystem) -> Do
 
         let path_data = if let Some(spine_id) = text.path_spine_id {
             // Text-on-path: use the existing on-path layout
-            let spine = clone.nodes.get(&spine_id).and_then(|n| match &n.kind {
-                SceneNodeKind::Path(p) => Some(p.path_data.clone()),
-                _ => None,
-            });
+            let spine = clone
+                .nodes
+                .get(&spine_id)
+                .and_then(|n| match &n.kind {
+                    SceneNodeKind::Path(p) => Some(p.path_data.clone()),
+                    _ => None,
+                });
             if let Some(spine_path) = spine {
-                use crate::text_path::{layout_text_on_path, TextOnPathParams};
+                use crate::text_path::{TextOnPathParams, layout_text_on_path};
                 let params = TextOnPathParams {
                     content: &text.content,
                     font_family: &text.font_family,
@@ -470,16 +468,8 @@ mod tests {
         // so `min_y` should be positive but less than `line_y`.  Descenders sit
         // below the baseline so `max_y > line_y`.  Both are within a 80-unit window
         // for a 32 px font. The overall bounding box stays within [-10, 80].
-        assert!(
-            bb.min_y() > -10.0,
-            "min_y unexpectedly far above buffer top: {}",
-            bb.min_y()
-        );
-        assert!(
-            bb.max_y() < 80.0,
-            "max_y unexpectedly far below buffer top: {}",
-            bb.max_y()
-        );
+        assert!(bb.min_y() > -10.0, "min_y unexpectedly far above buffer top: {}", bb.min_y());
+        assert!(bb.max_y() < 80.0, "max_y unexpectedly far below buffer top: {}", bb.max_y());
     }
 
     /// BUG 2 / ACCEPT: alignment must not move a run's exported x-position. The
@@ -652,10 +642,7 @@ mod tests {
 
         // Original doc is untouched.
         assert!(
-            matches!(
-                doc.nodes.get(&node_id).unwrap().kind,
-                SceneNodeKind::Text(_)
-            ),
+            matches!(doc.nodes.get(&node_id).unwrap().kind, SceneNodeKind::Text(_)),
             "original doc should still have Text node"
         );
 
@@ -680,10 +667,7 @@ mod tests {
                 eprintln!("no font — skipping geometry check");
                 return;
             }
-            assert!(
-                p.path_data.bounding_box().is_some(),
-                "outlined path must have a bbox"
-            );
+            assert!(p.path_data.bounding_box().is_some(), "outlined path must have a bbox");
         } else {
             panic!("expected PathNode");
         }
@@ -700,7 +684,7 @@ mod tests {
     /// the test passes with a warning so CI without poppler does not break the suite.
     #[test]
     fn pdf_has_zero_fonts_after_outlining() {
-        use photonic_core::export::{export_pdf, PdfExportOptions};
+        use photonic_core::export::{PdfExportOptions, export_pdf};
 
         let mut fs = FontSystem::new();
         let (doc, _node_id) = make_doc_with_text("Hello");
@@ -746,7 +730,10 @@ mod tests {
 
         // The header is always 2 lines; a non-empty font table adds more.
         // If there are only 2 lines (name + separator), the font table is empty.
-        let data_lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+        let data_lines: Vec<&str> = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
 
         assert!(
             data_lines.len() <= 2,

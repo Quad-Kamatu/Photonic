@@ -1181,16 +1181,14 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         AppState {
             document: Arc::new(Mutex::new(doc)),
-            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            history: Arc::new(Mutex::new(
+                photonic_core::history::CommandHistory::new(100),
+            )),
             document_path: Arc::new(StdMutex::new(None)),
             capture_tx: Arc::new(StdMutex::new(tx)),
             config: McpServerConfig::default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
-            video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),
-            video_jobs: Arc::new(StdMutex::new(
-                crate::handlers::video_jobs::JobRegistry::new(),
-            )),
         }
     }
 

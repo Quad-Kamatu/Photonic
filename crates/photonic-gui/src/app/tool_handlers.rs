@@ -252,8 +252,7 @@ impl PhotonicApp {
                 .or_else(|| doc.layer_order.first().copied())
             {
                 if let Some((cmd, new_ids)) =
-                    self.gui_clipboard
-                        .paste_command(target_layer, offset, offset)
+                    self.gui_clipboard.paste_command(target_layer, offset, offset)
                 {
                     history.execute(cmd, doc);
                     doc.selection = Selection::from_ids(new_ids.iter().copied());
@@ -433,7 +432,7 @@ impl PhotonicApp {
                             None => chain[0],
                             Some(iso) => match chain.iter().position(|g| *g == iso) {
                                 Some(i) if i + 1 < chain.len() => chain[i + 1],
-                                Some(_) => iso,   // already deepest for this leaf
+                                Some(_) => iso, // already deepest for this leaf
                                 None => chain[0], // isolated elsewhere → reset
                             },
                         };

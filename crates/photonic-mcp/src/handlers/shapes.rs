@@ -1670,14 +1670,7 @@ pub async fn create_qr_code(state: &AppState, args: CreateQrCodeArgs) -> ToolRes
         None => Some(Fill::solid(Color::WHITE)),
     };
 
-    let tf = Transform::new(
-        1.0,
-        0.0,
-        0.0,
-        1.0,
-        args.x.unwrap_or(0.0),
-        args.y.unwrap_or(0.0),
-    );
+    let tf = Transform::new(1.0, 0.0, 0.0, 1.0, args.x.unwrap_or(0.0), args.y.unwrap_or(0.0));
 
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
@@ -1697,10 +1690,7 @@ pub async fn create_qr_code(state: &AppState, args: CreateQrCodeArgs) -> ToolRes
         let mut node = SceneNode::new("QR Background", layer_id, SceneNodeKind::Path(pn));
         node.transform = tf;
         child_ids.push(node.id);
-        commands.push(Command::AddNode {
-            node,
-            layer_id: Some(layer_id),
-        });
+        commands.push(Command::AddNode { node, layer_id: Some(layer_id) });
     }
 
     // The compound path of every dark module (top of the group).
@@ -1709,10 +1699,7 @@ pub async fn create_qr_code(state: &AppState, args: CreateQrCodeArgs) -> ToolRes
     let mut mod_node = SceneNode::new("QR Modules", layer_id, SceneNodeKind::Path(mod_pn));
     mod_node.transform = tf;
     child_ids.push(mod_node.id);
-    commands.push(Command::AddNode {
-        node: mod_node,
-        layer_id: Some(layer_id),
-    });
+    commands.push(Command::AddNode { node: mod_node, layer_id: Some(layer_id) });
 
     // Wrap in a group so the code is one movable/recolourable unit. The group
     // node must ALREADY list its children — `GroupNodes` only detaches them from

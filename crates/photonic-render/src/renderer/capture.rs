@@ -565,11 +565,7 @@ mod offscreen_tests {
 
         // The export renderer renders the doc through the shared device.
         let (px, ew, eh) = export.render_export_rgba(&doc, W, H, &opts);
-        assert_eq!(
-            (ew, eh),
-            (W, H),
-            "shared export must honor the requested size"
-        );
+        assert_eq!((ew, eh), (W, H), "shared export must honor the requested size");
         let img = image::RgbaImage::from_raw(ew, eh, px).expect("shared export rgba");
         let center = img.get_pixel(W / 2, H / 2).0;
         assert!(

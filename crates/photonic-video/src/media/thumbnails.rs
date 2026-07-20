@@ -182,7 +182,12 @@ impl ThumbnailCache {
             Some(Arc::new(thumb))
         });
         ThumbnailCache {
-            store: AsyncStore::new(cfg.capacity, cfg.retry_cooldown, cfg.max_inflight, producer),
+            store: AsyncStore::new(
+                cfg.capacity,
+                cfg.retry_cooldown,
+                cfg.max_inflight,
+                producer,
+            ),
             bucket_ticks,
         }
     }
@@ -264,7 +269,12 @@ impl WaveformCache {
             Some(Arc::new(pyramid))
         });
         WaveformCache {
-            store: AsyncStore::new(WAVEFORM_CAPACITY, Duration::from_secs(2), 4, producer),
+            store: AsyncStore::new(
+                WAVEFORM_CAPACITY,
+                Duration::from_secs(2),
+                4,
+                producer,
+            ),
         }
     }
 

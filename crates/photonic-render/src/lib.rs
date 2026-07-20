@@ -28,9 +28,7 @@ pub use headless::{
 };
 pub use lut::{parse_cube, CubeError, Lut3d};
 pub use renderer::PhotonicRenderer;
+pub use text_outline::{layout_text_flat, outline_document_text, resolve_document_font, ResolvedFace};
 pub use scopes::{
     scopes_from_pixels_cpu, scopes_from_texture_gpu, Histogram, Scopes, Vectorscope, Waveform,
-};
-pub use text_outline::{
-    layout_text_flat, outline_document_text, resolve_document_font, ResolvedFace,
 };

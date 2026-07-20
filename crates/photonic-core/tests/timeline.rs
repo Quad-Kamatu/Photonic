@@ -159,11 +159,7 @@ fn asset_proxy_update_is_undoable() {
 
     Command::Timeline(cmd).apply(&mut f.doc);
     assert_eq!(
-        f.project()
-            .media
-            .assets
-            .get(&id)
-            .and_then(|asset| asset.proxy.clone()),
+        f.project().media.assets.get(&id).and_then(|asset| asset.proxy.clone()),
         Some(proxy)
     );
 }

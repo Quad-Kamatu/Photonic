@@ -2765,12 +2765,11 @@ mod tests {
         project.media.insert(asset);
         let seq = Sequence::new("S", FrameRate::FPS_30, 1920, 1080);
         project.sequences.insert(seq.id, seq);
-        let compiled = compile_asset_peek(&project, id, Tick::ZERO, Quality::PREVIEW, 640, 360);
-        assert!(compiled
-            .graph
-            .nodes
-            .iter()
-            .any(|n| matches!(n.op, IrOp::DecodeVideo { asset: a, .. } if a == id)));
+        let compiled =
+            compile_asset_peek(&project, id, Tick::ZERO, Quality::PREVIEW, 640, 360);
+        assert!(compiled.graph.nodes.iter().any(
+            |n| matches!(n.op, IrOp::DecodeVideo { asset: a, .. } if a == id)
+        ));
         assert!(compiled
             .graph
             .nodes

@@ -14,14 +14,8 @@ use photonic_core::style::Fill;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let out = a
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "/tmp/qr_doc.pdf".into());
-    let data = a
-        .get(2)
-        .cloned()
-        .unwrap_or_else(|| "https://kamatu.studio".into());
+    let out = a.get(1).cloned().unwrap_or_else(|| "/tmp/qr_doc.pdf".into());
+    let data = a.get(2).cloned().unwrap_or_else(|| "https://kamatu.studio".into());
     let shape = QrModuleShape::parse(a.get(3).map(|s| s.as_str()).unwrap_or("connected")).unwrap();
 
     let size = 300.0;
@@ -61,30 +55,16 @@ fn main() {
     );
     history.execute_discrete(
         Command::Batch(vec![
-            Command::AddNode {
-                node: bg,
-                layer_id: Some(layer),
-            },
-            Command::AddNode {
-                node: modules,
-                layer_id: Some(layer),
-            },
-            Command::GroupNodes {
-                group,
-                layer_id: layer,
-                insert_index: usize::MAX,
-                children: child_ids,
-            },
+            Command::AddNode { node: bg, layer_id: Some(layer) },
+            Command::AddNode { node: modules, layer_id: Some(layer) },
+            Command::GroupNodes { group, layer_id: layer, insert_index: usize::MAX, children: child_ids },
         ]),
         &mut doc,
     );
 
     let bytes = export_pdf(
         &doc,
-        &PdfExportOptions {
-            color_mode: ColorMode::Cmyk,
-            ..Default::default()
-        },
+        &PdfExportOptions { color_mode: ColorMode::Cmyk, ..Default::default() },
     );
     std::fs::write(&out, &bytes).unwrap();
     println!("wrote {out} ({} bytes, {shape:?})", bytes.len());

@@ -2,6 +2,9 @@ pub use crate::handlers::charts::{
     create_bar_chart, create_line_chart, create_pie_chart, create_radar_chart, create_scatter_plot,
     create_stacked_bar_chart,
 };
+pub use crate::handlers::shapes::{
+    create_shape, create_path, create_curvature_path, create_flare, create_spiral, create_grid, create_polar_grid, create_heart, create_gear, create_qr_code, create_wave_pattern, create_freehand_path, build_shape_from_points, create_speech_bubble, create_cross, create_arrow_shape, create_donut, create_sunburst, create_parametric_shape, create_truchet_tiling, add_anchor_points, delete_anchor_point, average_anchor_points, convert_anchor_points, zig_zag_path, pucker_bloat, roughen_path, twirl_path, proportional_move_anchor, round_corners, scallop_path, crystallize_path, simplify_path, smooth_path, reverse_path_direction, offset_path, join_paths, scissors_cut, outline_stroke, point_on_path, measure_path, noise_deform, warp_envelope,
+};
 pub use crate::handlers::clipping::{
     make_clipping_mask, make_compound_path, release_clipping_mask, release_compound_path,
 };
@@ -16,17 +19,6 @@ pub use crate::handlers::selection::{
     deselect_all, find_nodes, find_replace_style, find_replace_text, get_selection, lasso_select,
     magic_wand_select, select_all, select_by_kind, select_inside_group, select_same,
     select_similar, set_selection,
-};
-pub use crate::handlers::shapes::{
-    add_anchor_points, average_anchor_points, build_shape_from_points, convert_anchor_points,
-    create_arrow_shape, create_cross, create_curvature_path, create_donut, create_flare,
-    create_freehand_path, create_gear, create_grid, create_heart, create_parametric_shape,
-    create_path, create_polar_grid, create_qr_code, create_shape, create_speech_bubble,
-    create_spiral, create_sunburst, create_truchet_tiling, create_wave_pattern, crystallize_path,
-    delete_anchor_point, join_paths, measure_path, noise_deform, offset_path, outline_stroke,
-    point_on_path, proportional_move_anchor, pucker_bloat, reverse_path_direction, roughen_path,
-    round_corners, scallop_path, scissors_cut, simplify_path, smooth_path, twirl_path,
-    warp_envelope, zig_zag_path,
 };
 pub use crate::handlers::transform::{
     align_nodes, apply_flex_layout, apply_grid_layout, apply_stack_layout, apply_transform,

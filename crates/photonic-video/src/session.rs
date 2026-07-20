@@ -100,7 +100,10 @@ pub enum PreviewTarget {
     /// Sequence under the shared playhead (default).
     Sequence { sequence: SequenceId },
     /// Media-pool / Match Frame source peek on the same surface.
-    Asset { asset: AssetId, source_time: Tick },
+    Asset {
+        asset: AssetId,
+        source_time: Tick,
+    },
 }
 
 impl Default for PreviewTarget {
@@ -158,10 +161,7 @@ pub enum EngineCmd {
     /// Draft (default) vs Full interactive quality (24 §4).
     SetPreviewQuality(PreviewQuality),
     /// Source-space seek while `PreviewTarget::Asset` (ignored for Sequence).
-    SeekSource {
-        asset: AssetId,
-        time: Tick,
-    },
+    SeekSource { asset: AssetId, time: Tick },
     /// Asset relink / proxy swap (02 §5). P3 over-invalidates (whole node
     /// cache + decode sources) — the hash→asset index for targeted eviction
     /// is the proxy/relink story's seam.
@@ -561,7 +561,9 @@ impl EngineThread {
             }
             EngineCmd::SetPreviewTarget(target) => {
                 // While playing, ignore asset peeks (play-wins, 24 §3.2).
-                if self.controller.is_playing() && matches!(target, PreviewTarget::Asset { .. }) {
+                if self.controller.is_playing()
+                    && matches!(target, PreviewTarget::Asset { .. })
+                {
                     // no-op
                 } else {
                     self.preview_target = target;
@@ -721,9 +723,10 @@ impl EngineThread {
                 }
 
                 let (compiled, canvas, frame_time, preview_asset) = match &self.preview_target {
-                    PreviewTarget::Asset { asset, source_time }
-                        if !self.controller.is_playing() =>
-                    {
+                    PreviewTarget::Asset {
+                        asset,
+                        source_time,
+                    } if !self.controller.is_playing() => {
                         let (fw, fh) = seq
                             .formats
                             .get(format_index)
@@ -741,7 +744,8 @@ impl EngineThread {
                         (compiled, canvas, *source_time, Some(*asset))
                     }
                     _ => {
-                        let compiled = compile(&project, seq_id, format_index, t, quality, None);
+                        let compiled =
+                            compile(&project, seq_id, format_index, t, quality, None);
                         let (fw, fh) = seq
                             .formats
                             .get(format_index)
@@ -763,8 +767,7 @@ impl EngineThread {
                     .any(|n| matches!(n.op, IrOp::RasterVector { .. }))
                 {
                     if let Ok(doc) = self.doc.try_lock() {
-                        self.media
-                            .set_document(&doc, self.last_revision.unwrap_or(0));
+                        self.media.set_document(&doc, self.last_revision.unwrap_or(0));
                     }
                 }
                 if let Some(texture) =
@@ -1154,8 +1157,7 @@ impl MediaSources {
         }
         self.sources.retain(|(asset, _), _| !assets.contains(asset));
         self.pending.retain(|(asset, _), _| !assets.contains(asset));
-        self.uploads
-            .retain(|(asset, _, _), _| !assets.contains(asset));
+        self.uploads.retain(|(asset, _, _), _| !assets.contains(asset));
         self.stills.retain(|asset, _| !assets.contains(asset));
     }
 
@@ -1838,10 +1840,7 @@ mod tests {
         assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-4);
         // Monotone and inside the unit interval mid-scale.
         let mid = srgb_to_linear(0.5);
-        assert!(
-            mid > 0.0 && mid < 0.5,
-            "sRGB 0.5 decodes to ~0.214, got {mid}"
-        );
+        assert!(mid > 0.0 && mid < 0.5, "sRGB 0.5 decodes to ~0.214, got {mid}");
     }
 
     #[test]

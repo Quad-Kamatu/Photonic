@@ -3075,17 +3075,16 @@ mod tests {
             codec: "h264".into(),
         };
         let p = doc.timeline.as_ref().unwrap();
-        let cmd = set_asset_meta(p, id, Some(probe.clone()), Some("hash-abc".into())).unwrap();
+        let cmd = set_asset_meta(
+            p,
+            id,
+            Some(probe.clone()),
+            Some("hash-abc".into()),
+        )
+        .unwrap();
         assert_undo_roundtrip(&doc, &cmd);
         Command::Timeline(cmd).apply(&mut doc);
-        let a = doc
-            .timeline
-            .as_ref()
-            .unwrap()
-            .media
-            .assets
-            .get(&id)
-            .unwrap();
+        let a = doc.timeline.as_ref().unwrap().media.assets.get(&id).unwrap();
         assert_eq!(a.probe.as_ref().map(|p| p.codec.as_str()), Some("h264"));
         assert_eq!(a.content_hash.as_deref(), Some("hash-abc"));
     }

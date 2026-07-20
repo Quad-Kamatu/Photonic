@@ -143,14 +143,11 @@ pub async fn delete_nodes(state: &AppState, args: DeleteNodeArgs) -> ToolResult 
         };
         let layer_id = node.layer_id;
         if matches!(node.kind, SceneNodeKind::Group(_)) {
-            let nodes: Vec<SceneNode> = crate::handlers::clipboard::collect_subtree(&doc, node_id)
-                .into_values()
-                .collect();
-            commands.push(Command::RemoveSubtree {
-                layer_id,
-                roots: vec![node_id],
-                nodes,
-            });
+            let nodes: Vec<SceneNode> =
+                crate::handlers::clipboard::collect_subtree(&doc, node_id)
+                    .into_values()
+                    .collect();
+            commands.push(Command::RemoveSubtree { layer_id, roots: vec![node_id], nodes });
         } else {
             commands.push(Command::RemoveNode { node_id });
         }

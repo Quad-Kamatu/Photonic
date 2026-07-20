@@ -128,9 +128,8 @@ pub fn build_qr(opts: &QrOptions) -> Result<QrArtwork, String> {
     if !(opts.size > 0.0) {
         return Err("QR size must be > 0".into());
     }
-    let qr = QrCode::encode_text(&opts.data, opts.ecc.to_qrcodegen()).map_err(|e| {
-        format!("QR encode failed (data too long for this error-correction level?): {e}")
-    })?;
+    let qr = QrCode::encode_text(&opts.data, opts.ecc.to_qrcodegen())
+        .map_err(|e| format!("QR encode failed (data too long for this error-correction level?): {e}"))?;
     let n = qr.size().max(1) as usize; // modules per side
     let quiet = opts.quiet_zone as usize;
     let total = n + 2 * quiet;
@@ -204,14 +203,8 @@ fn append_square(bez: &mut BezPath, px: f64, py: f64, m: f64) {
 
 /// A quarter-circle cubic from `from` to `to`, bulging toward `corner`.
 fn corner_arc(bez: &mut BezPath, from: Point, corner: Point, to: Point) {
-    let c1 = Point::new(
-        from.x + (corner.x - from.x) * KAPPA,
-        from.y + (corner.y - from.y) * KAPPA,
-    );
-    let c2 = Point::new(
-        to.x + (corner.x - to.x) * KAPPA,
-        to.y + (corner.y - to.y) * KAPPA,
-    );
+    let c1 = Point::new(from.x + (corner.x - from.x) * KAPPA, from.y + (corner.y - from.y) * KAPPA);
+    let c2 = Point::new(to.x + (corner.x - to.x) * KAPPA, to.y + (corner.y - to.y) * KAPPA);
     bez.curve_to(c1, c2, to);
 }
 
@@ -234,12 +227,7 @@ fn append_connected(
         append_square(bez, px, py, m);
         return;
     }
-    let (up, down, left, right) = (
-        dark(x, y - 1),
-        dark(x, y + 1),
-        dark(x - 1, y),
-        dark(x + 1, y),
-    );
+    let (up, down, left, right) = (dark(x, y - 1), dark(x, y + 1), dark(x - 1, y), dark(x + 1, y));
     // Round a corner only when both edges meeting there are exposed.
     let tl = !up && !left;
     let tr = !up && !right;
@@ -252,42 +240,22 @@ fn append_connected(
     // → top edge to top-right
     bez.line_to((x1 - if tr { r } else { 0.0 }, y0));
     if tr {
-        corner_arc(
-            bez,
-            Point::new(x1 - r, y0),
-            Point::new(x1, y0),
-            Point::new(x1, y0 + r),
-        );
+        corner_arc(bez, Point::new(x1 - r, y0), Point::new(x1, y0), Point::new(x1, y0 + r));
     }
     // ↓ right edge to bottom-right
     bez.line_to((x1, y1 - if br { r } else { 0.0 }));
     if br {
-        corner_arc(
-            bez,
-            Point::new(x1, y1 - r),
-            Point::new(x1, y1),
-            Point::new(x1 - r, y1),
-        );
+        corner_arc(bez, Point::new(x1, y1 - r), Point::new(x1, y1), Point::new(x1 - r, y1));
     }
     // ← bottom edge to bottom-left
     bez.line_to((x0 + if bl { r } else { 0.0 }, y1));
     if bl {
-        corner_arc(
-            bez,
-            Point::new(x0 + r, y1),
-            Point::new(x0, y1),
-            Point::new(x0, y1 - r),
-        );
+        corner_arc(bez, Point::new(x0 + r, y1), Point::new(x0, y1), Point::new(x0, y1 - r));
     }
     // ↑ left edge to top-left
     bez.line_to((x0, y0 + if tl { r } else { 0.0 }));
     if tl {
-        corner_arc(
-            bez,
-            Point::new(x0, y0 + r),
-            Point::new(x0, y0),
-            Point::new(x0 + r, y0),
-        );
+        corner_arc(bez, Point::new(x0, y0 + r), Point::new(x0, y0), Point::new(x0 + r, y0));
     }
     bez.close_path();
 }
@@ -298,10 +266,7 @@ mod tests {
 
     #[test]
     fn empty_data_errors() {
-        let opts = QrOptions {
-            data: "  ".into(),
-            ..Default::default()
-        };
+        let opts = QrOptions { data: "  ".into(), ..Default::default() };
         assert!(build_qr(&opts).is_err());
     }
 
@@ -323,23 +288,11 @@ mod tests {
             let art = build_qr(&opts).expect("build");
             assert!(art.matrix_size >= 21, "smallest QR is 21×21");
             let bez = art.modules.to_bez_path();
-            let n_moves = bez
-                .elements()
-                .iter()
-                .filter(|e| matches!(e, kurbo::PathEl::MoveTo(_)))
-                .count();
-            assert!(
-                n_moves > 50,
-                "{shape:?}: expected many module sub-paths, got {n_moves}"
-            );
+            let n_moves = bez.elements().iter().filter(|e| matches!(e, kurbo::PathEl::MoveTo(_))).count();
+            assert!(n_moves > 50, "{shape:?}: expected many module sub-paths, got {n_moves}");
             // Geometry must sit inside the artwork square.
             let bb = art.modules.bounding_box().expect("bbox");
-            assert!(
-                bb.x0 >= -0.01
-                    && bb.y0 >= -0.01
-                    && bb.x1 <= art.size + 0.01
-                    && bb.y1 <= art.size + 0.01
-            );
+            assert!(bb.x0 >= -0.01 && bb.y0 >= -0.01 && bb.x1 <= art.size + 0.01 && bb.y1 <= art.size + 0.01);
         }
     }
 
@@ -369,11 +322,8 @@ mod tests {
             layer,
             SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, art.size, art.size))),
         );
-        let modules = SceneNode::new(
-            "QR Modules",
-            layer,
-            SceneNodeKind::Path(PathNode::new(art.modules)),
-        );
+        let modules =
+            SceneNode::new("QR Modules", layer, SceneNodeKind::Path(PathNode::new(art.modules)));
         let (bg_id, mod_id) = (bg.id, modules.id);
         let child_ids = vec![bg_id, mod_id];
         let group = SceneNode::new(
@@ -390,14 +340,8 @@ mod tests {
         let group_id = group.id;
         history.execute_discrete(
             Command::Batch(vec![
-                Command::AddNode {
-                    node: bg,
-                    layer_id: Some(layer),
-                },
-                Command::AddNode {
-                    node: modules,
-                    layer_id: Some(layer),
-                },
+                Command::AddNode { node: bg, layer_id: Some(layer) },
+                Command::AddNode { node: modules, layer_id: Some(layer) },
                 Command::GroupNodes {
                     group,
                     layer_id: layer,
@@ -411,20 +355,12 @@ mod tests {
         // (1,2) Group is populated and the modules are NOT loose siblings.
         match &doc.nodes.get(&group_id).expect("group exists").kind {
             SceneNodeKind::Group(g) => {
-                assert_eq!(
-                    g.children,
-                    vec![bg_id, mod_id],
-                    "group must list its children"
-                )
+                assert_eq!(g.children, vec![bg_id, mod_id], "group must list its children")
             }
             _ => panic!("not a group"),
         }
         let lids = &doc.layers[&layer].node_ids;
-        assert_eq!(
-            lids.last(),
-            Some(&group_id),
-            "group must be at the TOP of z-order"
-        );
+        assert_eq!(lids.last(), Some(&group_id), "group must be at the TOP of z-order");
         assert!(
             !lids.contains(&bg_id) && !lids.contains(&mod_id),
             "children must be in the group, not loose siblings"
@@ -438,38 +374,20 @@ mod tests {
             .filter_map(|id| doc.nodes.get(id).cloned())
             .collect();
         history.execute_discrete(
-            Command::RemoveSubtree {
-                layer_id: layer,
-                roots: vec![group_id],
-                nodes: subtree,
-            },
+            Command::RemoveSubtree { layer_id: layer, roots: vec![group_id], nodes: subtree },
             &mut doc,
         );
         assert!(!doc.nodes.contains_key(&group_id), "group removed");
-        assert!(
-            !doc.nodes.contains_key(&mod_id),
-            "QR Modules orphaned after group delete"
-        );
-        assert!(
-            !doc.nodes.contains_key(&bg_id),
-            "QR Background orphaned after group delete"
-        );
+        assert!(!doc.nodes.contains_key(&mod_id), "QR Modules orphaned after group delete");
+        assert!(!doc.nodes.contains_key(&bg_id), "QR Background orphaned after group delete");
     }
 
     #[test]
     fn quiet_zone_insets_the_matrix() {
-        let opts = QrOptions {
-            data: "x".into(),
-            size: 200.0,
-            quiet_zone: 4,
-            ..Default::default()
-        };
+        let opts = QrOptions { data: "x".into(), size: 200.0, quiet_zone: 4, ..Default::default() };
         let art = build_qr(&opts).unwrap();
         let bb = art.modules.bounding_box().unwrap();
         // With a 4-module quiet zone, no dark module touches the outer edge.
-        assert!(
-            bb.x0 >= art.module_size * 3.5,
-            "left quiet zone missing: {bb:?}"
-        );
+        assert!(bb.x0 >= art.module_size * 3.5, "left quiet zone missing: {bb:?}");
     }
 }

@@ -21,8 +21,8 @@ use super::{PanelAction, PropPanelCtx};
 use egui::Ui;
 use egui_phosphor::regular as ph;
 use photonic_core::timeline::{
-    AssetId, AssetKind, AssetSource, BinId, MediaAsset, MediaBin, MediaPool, ProxyRef, ProxyStatus,
-    Tick, TICKS_PER_SECOND,
+    AssetId, AssetKind, AssetSource, BinId, MediaAsset, MediaBin, MediaPool, ProxyRef,
+    ProxyStatus, Tick, TICKS_PER_SECOND,
 };
 use photonic_video::ProxyMode;
 use std::path::{Path, PathBuf};
@@ -143,11 +143,15 @@ impl MediaPoolUi {
                     (Some(tools), Some(h))
                         if matches!(asset.kind, AssetKind::Video | AssetKind::Image) =>
                     {
-                        let out = photonic_video::media::poster::poster_cache_path(&cache_dir, h);
-                        match photonic_video::media::poster::ensure_poster(tools, &path, &out) {
+                        let out =
+                            photonic_video::media::poster::poster_cache_path(&cache_dir, h);
+                        match photonic_video::media::poster::ensure_poster(tools, &path, &out)
+                        {
                             Ok(p) => Some(p),
                             Err(e) => {
-                                tracing::debug!("media import: poster failed for {path:?}: {e}");
+                                tracing::debug!(
+                                    "media import: poster failed for {path:?}: {e}"
+                                );
                                 None
                             }
                         }
@@ -207,7 +211,11 @@ impl MediaPoolUi {
     }
 
     /// Ensure a poster texture is loaded for `hash` (if a path is known).
-    fn poster_texture(&mut self, ctx: &egui::Context, hash: &str) -> Option<egui::TextureHandle> {
+    fn poster_texture(
+        &mut self,
+        ctx: &egui::Context,
+        hash: &str,
+    ) -> Option<egui::TextureHandle> {
         if let Some(tex) = self.poster_textures.get(hash) {
             return Some(tex.clone());
         }
@@ -220,8 +228,7 @@ impl MediaPoolUi {
         );
         let name = format!("media_poster_{hash}");
         let handle = ctx.load_texture(name, color, egui::TextureOptions::LINEAR);
-        self.poster_textures
-            .insert(hash.to_string(), handle.clone());
+        self.poster_textures.insert(hash.to_string(), handle.clone());
         Some(handle)
     }
 
@@ -237,7 +244,8 @@ impl MediaPoolUi {
         let assets: Vec<MediaAsset> = assets
             .into_iter()
             .filter(|asset| {
-                asset.kind == AssetKind::Video && matches!(asset.source, AssetSource::File { .. })
+                asset.kind == AssetKind::Video
+                    && matches!(asset.source, AssetSource::File { .. })
             })
             .collect();
         if assets.is_empty() {
@@ -252,14 +260,12 @@ impl MediaPoolUi {
                 let AssetSource::File { path, .. } = &asset.source else {
                     continue;
                 };
-                let hash = asset
-                    .content_hash
-                    .clone()
-                    .or_else(|| photonic_video::media::probe::content_hash(path).ok());
+                let hash = asset.content_hash.clone().or_else(|| {
+                    photonic_video::media::probe::content_hash(path).ok()
+                });
                 let proxy = match (tools.as_ref(), hash) {
                     (Some(tools), Some(hash)) => {
-                        let output =
-                            photonic_video::media::proxy::proxy_cache_path(&cache_dir, &hash);
+                        let output = photonic_video::media::proxy::proxy_cache_path(&cache_dir, &hash);
                         let status = if output.is_file()
                             || photonic_video::media::proxy::generate_proxy(
                                 tools,
@@ -273,22 +279,13 @@ impl MediaPoolUi {
                         } else {
                             ProxyStatus::Failed
                         };
-                        Some(ProxyRef {
-                            path: output,
-                            status,
-                        })
+                        Some(ProxyRef { path: output, status })
                     }
                     // A missing toolchain/hash must not detach a previously
                     // ready proxy; preserve the asset's existing attachment.
                     _ => asset.proxy.clone(),
                 };
-                if tx
-                    .send(ProxyJobResult {
-                        asset: asset.id,
-                        proxy,
-                    })
-                    .is_err()
-                {
+                if tx.send(ProxyJobResult { asset: asset.id, proxy }).is_err() {
                     return;
                 }
             }
@@ -462,10 +459,7 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             ctx.action = Some(PanelAction::MediaSetProxyMode { mode });
         }
         if ui
-            .add_enabled(
-                ctx.media_ui.proxying == 0,
-                egui::Button::new("Build proxies"),
-            )
+            .add_enabled(ctx.media_ui.proxying == 0, egui::Button::new("Build proxies"))
             .on_hover_text("Create reusable low-resolution editing proxies in the background")
             .clicked()
         {
