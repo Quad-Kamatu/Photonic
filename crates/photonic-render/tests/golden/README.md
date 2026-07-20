@@ -73,7 +73,8 @@ in CI.
 | `gradient_radial` | 3-stop radial gradient fill |
 | `blend_separable` | Fixed-function blend modes (`Multiply`/`Screen`/`Darken`/`Lighten`) — byte-exact |
 | `blend_nonseparable` | `COMPOSITE_SHADER`-path modes (`Hue`/`Saturation`/`Color`/`Luminosity`) — PSNR-tolerant |
-| `text_basic` | A glyphon-rendered text node |
+| `text_basic` | A glyphon-rendered text node — PSNR 15 dB (system fonts differ across CI OS) |
+| `text_styled` | Styled glyphon text — PSNR 15 dB (same font caveat) |
 | `raster_placement` | A placed + scaled raster node |
 | `effect_stack_color_overlay_stroke` | Layer-Styles effect stack (`ColorOverlay` + `StrokeEffect`), no own fill/stroke |
 | `boolean_groups` | Live (non-destructive) boolean union (#25) rendered as its single resolved path |
