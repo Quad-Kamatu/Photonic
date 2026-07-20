@@ -9,7 +9,8 @@
 //! startup) and stashed in the egui renderer's `callback_resources`; see
 //! [`LightfallResources::new`], installed from the app's setup. Each frame the
 //! [`Lightfall`] callback updates a small uniform buffer (time, resolution,
-//! palette, tuning) and draws a fullscreen triangle.
+//! palette, tuning) and draws a fullscreen triangle. The official Photonic mark
+//! is uploaded once and composited at the leading head of each light beam.
 
 use egui_wgpu::CallbackResources;
 
@@ -71,12 +72,14 @@ pub struct LightfallResources {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
+    // Keep the underlying texture alive for the lifetime of its bind-group view.
+    _logo_texture: wgpu::Texture,
 }
 
 impl LightfallResources {
     /// Build the pipeline for the given surface format. Call once at startup and
     /// insert into `egui_renderer.callback_resources`.
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lightfall_uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
@@ -85,24 +88,90 @@ impl LightfallResources {
         });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lightfall_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let logo = photonic_core::raster::image::RasterImage::from_encoded(include_bytes!(
+            "../assets/logo_mark.png"
+        ))
+        .expect("embedded Photonic logo mark must decode");
+        let logo_size = wgpu::Extent3d {
+            width: logo.width,
+            height: logo.height,
+            depth_or_array_layers: 1,
+        };
+        let logo_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lightfall_logo_mark"),
+            size: logo_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            logo_texture.as_image_copy(),
+            &logo.pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * logo.width),
+                rows_per_image: Some(logo.height),
+            },
+            logo_size,
+        );
+        let logo_view = logo_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let logo_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lightfall_logo_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lightfall_bg"),
             layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&logo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&logo_sampler),
+                },
+            ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lightfall_shader"),
@@ -145,6 +214,7 @@ impl LightfallResources {
             pipeline,
             bind_group,
             uniform_buf,
+            _logo_texture: logo_texture,
         }
     }
 }
@@ -218,6 +288,8 @@ struct Uniforms {
     p2         : vec4<f32>, // streak_width, streak_length, streak_count, color_count
 };
 @group(0) @binding(0) var<uniform> U : Uniforms;
+@group(0) @binding(1) var logo_mark : texture_2d<f32>;
+@group(0) @binding(2) var logo_sampler : sampler;
 
 struct VsOut {
     @builtin(position) pos : vec4<f32>,
@@ -317,6 +389,13 @@ fn fs_main(in : VsOut) -> @location(0) vec4<f32> {
         let inner = vec2<f32>(length(max(Pp, vec2<f32>(-1.0, 0.0))), length(Pp) - zr) - vec2<f32>(zr);
         let sm = vec2<f32>(1.0) - smoothstep(-rr, rr, inner);
         O = vec4<f32>(O.xyz + dot(sm, vec2<f32>(exp(tail * Pp.y), 3.0)) * col * weight, O.w);
+        // Use the official logo in local streak coordinates, so each icon is
+        // attached to and moves with its lightbeam rather than the viewport.
+        let logo_uv = Pp / (zr * 26.0) + vec2<f32>(0.5);
+        if (all(logo_uv >= vec2<f32>(0.0)) && all(logo_uv <= vec2<f32>(1.0))) {
+            let logo = textureSample(logo_mark, logo_sampler, logo_uv);
+            O = vec4<f32>(O.xyz + logo.rgb * logo.a * weight * 1.35, O.w);
+        }
         C.x = C.x + Y.x / 8.0;
     }
 

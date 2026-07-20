@@ -497,6 +497,7 @@ impl ApplicationHandler for PhotonicWinitApp {
             .callback_resources
             .insert(photonic_gui::lightfall::LightfallResources::new(
                 renderer.device(),
+                renderer.queue(),
                 renderer.surface_format(),
             ));
 
