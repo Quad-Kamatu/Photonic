@@ -85,9 +85,13 @@ Rationale for keeping both tiers rather than jumping straight to Tier B: correct
 
 ### 2.6 Golden-output safety net
 
-No golden-image harness exists today. A design proposal exists only on an unmerged fork branch (`fork/proposal/54-visual-regression-harness-golden-image-t...`, commit `bd3c04a`, doc-only, no implementation) — treat as prior art, not a dependency. What exists today (`headless.rs:1547-1582`, e.g. `separable_blend_modes_match_reference`) is single-pixel hand-computed-expected-value assertion (`TOL: f32 = 0.03`), not image-diff regression testing, and skips entirely with no GPU adapter (`headless.rs:1565`).
+**Status: delivered on this branch.** `crates/photonic-render/tests/golden_vector_equivalence.rs` implements the harness described below, against a 31-case corpus under `crates/photonic-render/tests/golden/`. Cases compare byte-for-byte by default; a case may opt into a PSNR floor by adding `tolerance_db.txt` beside its reference (used by `blend_nonseparable`, and by `text_basic` / `text_styled`, whose glyph rasterisation varies with the system fonts available per CI OS). It keeps the skip-with-message convention when no GPU adapter is present.
 
-**Spec position:** build the harness this phase gates on:
+The pre-existing checks it supplements (`headless.rs`, e.g. `separable_blend_modes_match_reference`) are single-pixel hand-computed-expected-value assertions (`TOL: f32 = 0.03`), not image-diff regression testing.
+
+A related design proposal — prior art, not a dependency, doc-only with no implementation — lives on branch `proposal/54-visual-regression-harness-golden-image-t` (commit `bd3c04a`) in this repository. It was previously reachable only via a personal fork remote; that fork has been deleted and every branch it held was preserved into `unn-corp/Photonic`, so the branch is now a plain `origin/` ref.
+
+**Spec position** (the design this section gates on, now implemented):
 - Fixture corpus: a checked-in set of `.photon` documents spanning node kinds, blend modes, effect stacks, raster+vector mixes — target 30-50 documents, stored under `crates/photonic-render/tests/golden/` (new dir).
 - Reference images generated once from the **pre-refactor** renderer (current `main`), stored as PNG alongside each fixture.
 - CI gate: render each fixture through `render_rgba_with_opts` post-refactor, compare byte-for-byte where the pipeline is meant to be exact (P1's persistent-buffer/dirty-tracking changes must not alter output at all — pure perf refactor) and via PSNR threshold (recommend ≥ 45 dB) for anything touching `COMPOSITE_SHADER` wiring (§2.4), since isolation-pass compositing may shift sub-LSB rounding vs the fixed-function path it replaces for previously-approximated modes.
