@@ -591,8 +591,11 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                             }
                                             if ui
                                                 .add(
-                                                    egui::Slider::new(&mut go.angle, -180.0..=180.0)
-                                                        .text("angle"),
+                                                    egui::Slider::new(
+                                                        &mut go.angle,
+                                                        -180.0..=180.0,
+                                                    )
+                                                    .text("angle"),
                                                 )
                                                 .changed()
                                             {

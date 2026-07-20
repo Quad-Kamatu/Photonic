@@ -55,10 +55,7 @@ fn import_ladder_l0_through_l4_headless() {
     let l0_ms = t0.elapsed().as_millis();
     assert!(stub.probe.is_none());
     assert!(stub.content_hash.is_none());
-    assert!(
-        l0_ms < 100,
-        "L0 register must be cheap (got {l0_ms} ms)"
-    );
+    assert!(l0_ms < 100, "L0 register must be cheap (got {l0_ms} ms)");
 
     // L1 hash
     let t1 = Instant::now();
@@ -74,10 +71,8 @@ fn import_ladder_l0_through_l4_headless() {
     assert!(probe.video.is_some());
 
     // L3 poster
-    let cache = std::env::temp_dir().join(format!(
-        "photonic-preview-load-test-{}",
-        std::process::id()
-    ));
+    let cache =
+        std::env::temp_dir().join(format!("photonic-preview-load-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache);
     std::fs::create_dir_all(&cache).unwrap();
     let poster_out = poster_cache_path(&cache, &hash);
@@ -130,14 +125,7 @@ fn draft_fit_and_asset_peek_compile() {
     project.active_sequence = Some(seq_id);
 
     let (dw, dh) = fit_long_edge(1920, 1080, DRAFT_MAX_LONG_EDGE);
-    let peek = compile_asset_peek(
-        &project,
-        asset_id,
-        Tick::ZERO,
-        Quality::PREVIEW,
-        dw,
-        dh,
-    );
+    let peek = compile_asset_peek(&project, asset_id, Tick::ZERO, Quality::PREVIEW, dw, dh);
     assert!(peek.diagnostics.is_empty());
     assert!(peek.graph.nodes.iter().any(|n| {
         matches!(
@@ -167,9 +155,11 @@ fn draft_fit_and_asset_peek_compile() {
         .video_tracks
         .push(track);
     let program = compile(&project, seq_id, 0, Tick::ZERO, Quality::PREVIEW, None);
-    assert!(program.graph.nodes.iter().any(|n| {
-        matches!(n.op, photonic_video::graph::ir::IrOp::DecodeVideo { .. })
-    }));
+    assert!(program
+        .graph
+        .nodes
+        .iter()
+        .any(|n| { matches!(n.op, photonic_video::graph::ir::IrOp::DecodeVideo { .. }) }));
 }
 
 // ── Engine command surface ──────────────────────────────────────────────────
@@ -246,6 +236,7 @@ fn audio_tempfile_staging_writes_f32le() {
 
 #[test]
 fn build_ffmpeg_args_accepts_windows_style_temp_audio_path() {
+    use photonic_core::timeline::FrameRate;
     use photonic_video::export::encoder::{
         build_ffmpeg_args, stage_audio_tempfile, AudioStreamSpec, EncodeSpec, EncoderCapabilities,
     };
@@ -253,7 +244,6 @@ fn build_ffmpeg_args_accepts_windows_style_temp_audio_path() {
         AudioCodec, AudioEncodeSpec, Container, ExportPreset, FrameRatePolicy, QualityMode,
         ResolutionSpec, VideoCodec, VideoEncodeSpec,
     };
-    use photonic_core::timeline::FrameRate;
 
     let Some(tools) = tools_or_skip() else {
         eprintln!("skip build_ffmpeg_args: no ffmpeg");
@@ -295,6 +285,8 @@ fn build_ffmpeg_args_accepts_windows_style_temp_audio_path() {
     assert!(args.iter().any(|a| a == "pipe:0"));
     assert!(args.windows(2).any(|w| w == ["-map", "0:v"]));
     assert!(args.windows(2).any(|w| w == ["-map", "1:a"]));
-    assert!(args.iter().any(|a| a == audio_path.to_string_lossy().as_ref()));
+    assert!(args
+        .iter()
+        .any(|a| a == audio_path.to_string_lossy().as_ref()));
     let _ = std::fs::remove_file(&audio_path);
 }

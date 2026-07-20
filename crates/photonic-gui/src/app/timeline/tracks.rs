@@ -155,11 +155,11 @@ pub(crate) fn draw_header(
     let lock_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
     if put_fixed(
         ui,
-            lock_rect,
-            egui::Button::new(if locked { "L" } else { "·" }).small(),
-        )
-        .on_hover_text("Lock / unlock track")
-        .clicked()
+        lock_rect,
+        egui::Button::new(if locked { "L" } else { "·" }).small(),
+    )
+    .on_hover_text("Lock / unlock track")
+    .clicked()
     {
         ops_bridge::toggle_locked(doc, history, seq_id, row.id);
     }
@@ -174,16 +174,16 @@ pub(crate) fn draw_header(
     );
     if put_fixed(
         ui,
-            sync_rect,
-            egui::Button::new(if sync_lock {
-                ph::ARROWS_CLOCKWISE
-            } else {
-                "·"
-            })
-            .small(),
-        )
-        .on_hover_text("Sync lock — ripple/insert edits shift sync-locked tracks together")
-        .clicked()
+        sync_rect,
+        egui::Button::new(if sync_lock {
+            ph::ARROWS_CLOCKWISE
+        } else {
+            "·"
+        })
+        .small(),
+    )
+    .on_hover_text("Sync lock — ripple/insert edits shift sync-locked tracks together")
+    .clicked()
     {
         toggle_sync_lock(doc, history, seq_id, row.id);
     }
@@ -198,11 +198,11 @@ pub(crate) fn draw_header(
     );
     if put_fixed(
         ui,
-            patch_rect,
-            egui::SelectableLabel::new(is_target, ph::TARGET),
-        )
-        .on_hover_text("Patch source here — Insert/Overwrite/Paste target for this lane")
-        .clicked()
+        patch_rect,
+        egui::SelectableLabel::new(is_target, ph::TARGET),
+    )
+    .on_hover_text("Patch source here — Insert/Overwrite/Paste target for this lane")
+    .clicked()
     {
         *target = if is_target { None } else { Some(row.id) };
     }
@@ -384,7 +384,10 @@ pub(crate) fn draw_add_controls(
     let inner = rect.shrink(4.0);
     ui.allocate_ui_at_rect(inner, |ui| {
         ui.menu_button(format!("{} Track", ph::PLUS), |ui| {
-            if ui.button(format!("{} Video track", ph::FILM_STRIP)).clicked() {
+            if ui
+                .button(format!("{} Video track", ph::FILM_STRIP))
+                .clicked()
+            {
                 ops_bridge::add_track(doc, history, seq_id, TrackKind::Video);
                 ui.close_menu();
             }

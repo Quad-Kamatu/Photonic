@@ -11,8 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Embedded CoatedFOGRA39 ICC profile, bundled at compile-time so export works
 /// without any external files on the target machine.
-pub const DEFAULT_CMYK_ICC: &[u8] =
-    include_bytes!("../../../assets/icc/CoatedFOGRA39.icc");
+pub const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("../../../assets/icc/CoatedFOGRA39.icc");
 
 // ── transform cache ─────────────────────────────────────────────────────────
 
@@ -210,10 +209,7 @@ pub fn cached_transform(icc_profile: Option<&Path>) -> Arc<CmykTransform> {
 
     let mut guard = cache().lock().unwrap_or_else(|p| p.into_inner());
     // Another thread may have inserted in the meantime; prefer their entry.
-    guard
-        .entry(key)
-        .or_insert(transform)
-        .clone()
+    guard.entry(key).or_insert(transform).clone()
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -267,6 +263,9 @@ mod tests {
     fn test_cached_transform_default() {
         let t = cached_transform(None);
         let [c, m, y, k] = t.rgb_to_cmyk([1.0, 0.0, 0.0]);
-        assert!(c < 0.15 && m > 0.5 && y > 0.5, "cached red: c={c} m={m} y={y} k={k}");
+        assert!(
+            c < 0.15 && m > 0.5 && y > 0.5,
+            "cached red: c={c} m={m} y={y} k={k}"
+        );
     }
 }

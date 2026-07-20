@@ -56,15 +56,7 @@ pub fn ensure_poster(
     // truncated poster that subsequent calls would treat as warm.
     let tmp = output.with_extension("poster.tmp.png");
     let status = Command::new(&tools.ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-ss",
-            "0",
-            "-i",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", "0", "-i"])
         .arg(input)
         .args([
             "-frames:v",

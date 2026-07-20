@@ -5,8 +5,8 @@ use crate::{
         blend_mode_index, coalesce_segments, create_blur_bgl, create_blur_pipeline,
         create_blur_pipeline_with_blend, create_camera_bind_group_layout, create_composite_bgl,
         create_composite_pipeline, create_fill_pipeline, create_fill_pipeline_with_blend,
-        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, CompositeParams,
-        DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
+        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform,
+        CompositeParams, DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::tessellate_fill,
 };
@@ -599,8 +599,7 @@ impl PhotonicRenderer {
 
         // Per-layer compositing (#226): shader + a filtering sampler.
         let composite_bgl = create_composite_bgl(&device);
-        let composite_pipeline =
-            create_composite_pipeline(&device, surface_format, &composite_bgl);
+        let composite_pipeline = create_composite_pipeline(&device, surface_format, &composite_bgl);
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -808,11 +807,7 @@ impl PhotonicRenderer {
         // contended lock leaves `revision = None`, forcing a full rebuild — the
         // content-addressed tessellation memo keeps that correct and cheap
         // (unchanged geometry still hits), only the frame-skip is unavailable.
-        let (revision, overflowed) = match self
-            .history
-            .as_ref()
-            .and_then(|h| h.try_lock().ok())
-        {
+        let (revision, overflowed) = match self.history.as_ref().and_then(|h| h.try_lock().ok()) {
             Some(h) => {
                 let rev = h.revision();
                 let overflowed = match self.last_revision {
@@ -1719,7 +1714,10 @@ impl PhotonicRenderer {
             if end <= start {
                 return;
             }
-            let (opacity, blend) = layer_meta.get(ord as usize).copied().unwrap_or((1.0, BlendMode::Normal));
+            let (opacity, blend) = layer_meta
+                .get(ord as usize)
+                .copied()
+                .unwrap_or((1.0, BlendMode::Normal));
             runs.push(LayerRun {
                 opacity,
                 blend,

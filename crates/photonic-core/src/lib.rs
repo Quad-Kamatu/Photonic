@@ -1,7 +1,7 @@
 pub mod annotation;
-pub mod color_cmyk;
 pub mod audit;
 pub mod color;
+pub mod color_cmyk;
 pub mod diagnostics;
 pub mod document;
 pub mod effects;

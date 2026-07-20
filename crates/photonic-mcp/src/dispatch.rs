@@ -2965,9 +2965,13 @@ mod tests {
     #[tokio::test]
     async fn save_document_writes_native_file_round_trips_and_remembers_path() {
         let state = test_state();
-        assert!(crate::schema_gen::tool_list().as_array().unwrap().iter().any(|tool| {
-            tool.get("name").and_then(|name| name.as_str()) == Some("save_document")
-        }));
+        assert!(crate::schema_gen::tool_list()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| {
+                tool.get("name").and_then(|name| name.as_str()) == Some("save_document")
+            }));
         let expected_counts = {
             let mut doc = state.document.lock().await;
             let layer_id = doc.active_layer_id.expect("default layer");
@@ -2984,16 +2988,33 @@ mod tests {
         let base = std::env::temp_dir().join(format!("photonic-save-{}", uuid::Uuid::new_v4()));
         let path = base.join("nested").join("tiny.photon");
 
-        let result = dispatch_tool(&state, "save_document", json!({ "path": path })).await.unwrap();
+        let result = dispatch_tool(&state, "save_document", json!({ "path": path }))
+            .await
+            .unwrap();
         assert_ne!(result.is_error, Some(true));
-        assert!(path.exists(), "save_document must create its parent directories");
+        assert!(
+            path.exists(),
+            "save_document must create its parent directories"
+        );
         let contents = std::fs::read_to_string(&path).unwrap();
         let (loaded, _) = photonic_core::load_photon(&contents).unwrap();
-        assert_eq!((loaded.artboards.len(), loaded.nodes.len()), expected_counts);
-        assert_eq!(state.document_path.lock().unwrap().as_deref(), Some(path.as_path()));
+        assert_eq!(
+            (loaded.artboards.len(), loaded.nodes.len()),
+            expected_counts
+        );
+        assert_eq!(
+            state.document_path.lock().unwrap().as_deref(),
+            Some(path.as_path())
+        );
 
-        let repeat = dispatch_tool(&state, "save_document", json!({})).await.unwrap();
-        assert_ne!(repeat.is_error, Some(true), "pathless save should use the remembered path");
+        let repeat = dispatch_tool(&state, "save_document", json!({}))
+            .await
+            .unwrap();
+        assert_ne!(
+            repeat.is_error,
+            Some(true),
+            "pathless save should use the remembered path"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 }
