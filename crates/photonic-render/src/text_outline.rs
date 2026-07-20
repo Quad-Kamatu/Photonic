@@ -346,6 +346,7 @@ pub fn outline_document_text(doc: &Document, font_system: &mut FontSystem) -> Do
         };
         let text = text.clone(); // clone to release the borrow on node
 
+        let mut on_path = false;
         let path_data = if let Some(spine_id) = text.path_spine_id {
             // Text-on-path: use the existing on-path layout
             let spine = clone
@@ -369,6 +370,7 @@ pub fn outline_document_text(doc: &Document, font_system: &mut FontSystem) -> Do
                     path_offset: text.path_offset,
                 };
                 let glyph_paths = layout_text_on_path(font_system, &params, &spine_path);
+                on_path = true;
                 if glyph_paths.is_empty() {
                     PathData::new()
                 } else {
@@ -401,6 +403,14 @@ pub fn outline_document_text(doc: &Document, font_system: &mut FontSystem) -> Do
         // Swap the node's kind in place (all other fields stay identical).
         if let Some(node) = clone.nodes.get_mut(&id) {
             node.kind = SceneNodeKind::Path(path_node);
+            // Text-on-path glyphs come out of `layout_text_on_path` already in
+            // absolute document space (they follow the spine, which carries its
+            // own transform). Keeping the text node's transform would apply it a
+            // second time — the windowed renderer pushes these glyphs without it,
+            // so exports must too or on-canvas and PNG/PDF disagree.
+            if on_path {
+                node.transform = Default::default();
+            }
         }
     }
 
