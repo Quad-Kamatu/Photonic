@@ -33,7 +33,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use photonic_core::timeline::{
     AssetKind, AssetSource, Clip, ClipAudio, ClipId, ClipSource, FrameRate, Sequence, SequenceId,
-    Tick, TimelineProject, TrackKind, TICKS_PER_SECOND,
+    Tick, TimelineProject, TICKS_PER_SECOND,
 };
 use photonic_core::{CommandHistory, Document};
 use photonic_render::color::{Colorimetry, Matrix, Range};
@@ -59,13 +59,16 @@ use crate::graph::ir::IrOp;
 use crate::media::ffmpeg_locate::{locate, FfmpegTools};
 use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
 use crate::media::probe::{probe_details, ProbeDetails};
+use crate::playback::prefetch::{
+    cut_ahead_targets, lru_eviction_victims, CUT_AHEAD_LEAD_FRAMES, MAX_LIVE_SOURCES,
+};
 use crate::playback::{FfmpegPcmSource, PlaybackController, PresentDecision};
 
-/// The engine must wake frequently while the audio/soft clock is advancing,
-/// but there is no reason to poll at 500 Hz when paused. Commands arrive on
-/// the channel immediately, so this only bounds passive document-snapshot
-/// discovery for non-transport edits.
-const PLAYING_POLL_INTERVAL: Duration = Duration::from_millis(2);
+/// While playing, wake often enough for 60–120 Hz present opportunities without
+/// spinning at 500 Hz (2 ms). 4 ms ≈ 250 Hz upper bound; PresentDecision still
+/// gates actual evaluate work to the sequence frame rate.
+const PLAYING_POLL_INTERVAL: Duration = Duration::from_millis(4);
+/// Paused: rare doc-snapshot poll; commands still wake immediately via channel.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 // ── Public command / state types (02 §1) ────────────────────────────────────
@@ -420,6 +423,11 @@ struct EngineThread {
     frames_published: u64,
     last_evaluate_micros: u64,
     evaluation_misses: u64,
+    /// Reused command drain buffer (avoids per-tick `Vec` alloc on the engine
+    /// thread — Linux + Windows hot path).
+    cmd_batch: Vec<EngineCmd>,
+    /// Skip redundant status Arc allocations when nothing visible changed.
+    last_status_sig: u64,
 }
 
 impl EngineThread {
@@ -457,6 +465,8 @@ impl EngineThread {
             frames_published: 0,
             last_evaluate_micros: 0,
             evaluation_misses: 0,
+            cmd_batch: Vec::with_capacity(32),
+            last_status_sig: 0,
         }
     }
 
@@ -464,7 +474,7 @@ impl EngineThread {
         loop {
             // 1. Wait briefly for commands, then drain the burst (a scrub
             //    produces many Seeks per engine tick — coalesced latest-wins).
-            let mut batch = Vec::new();
+            self.cmd_batch.clear();
             let poll_interval = if self.controller.is_playing() {
                 PLAYING_POLL_INTERVAL
             } else {
@@ -472,20 +482,24 @@ impl EngineThread {
             };
             match self.rx.recv_timeout(poll_interval) {
                 Ok(cmd) => {
-                    batch.push(cmd);
+                    self.cmd_batch.push(cmd);
                     while let Ok(cmd) = self.rx.try_recv() {
-                        batch.push(cmd);
+                        self.cmd_batch.push(cmd);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             let mut shutdown = false;
+            // Drain into a local so we don't hold &mut self.cmd_batch across handle.
+            let batch = std::mem::take(&mut self.cmd_batch);
             for cmd in coalesce_commands(batch) {
                 if !self.handle(cmd) {
                     shutdown = true;
                 }
             }
+            // Reclaim capacity for the next tick.
+            self.cmd_batch = Vec::with_capacity(32);
             if shutdown {
                 break;
             }
@@ -669,10 +683,11 @@ impl EngineThread {
         // `VectorStateKey` entries here. Clip/timeline edits already
         // invalidate hash-naturally via recompiled content hashes (02 §5).
         self.last_revision = Some(summary.revision);
-        self.snapshot = snap.clone();
-        if let Some(p) = snap {
-            self.media.set_project(p);
+        // Single Arc handoff to media + snapshot (was clone + move = 2 bumps).
+        if let Some(ref p) = snap {
+            self.media.set_project(Arc::clone(p));
         }
+        self.snapshot = snap;
         self.controller.request_present();
     }
 
@@ -685,10 +700,11 @@ impl EngineThread {
     }
 
     fn present(&mut self) {
-        let Some(project) = self.snapshot.clone() else {
+        // Borrow the snapshot Arc — no atomic bump every tick (was `.clone()`).
+        let Some(project) = self.snapshot.as_ref() else {
             return;
         };
-        let Some(seq_id) = self.effective_sequence(&project) else {
+        let Some(seq_id) = self.effective_sequence(project) else {
             return;
         };
         let Some(seq) = project.sequences.get(&seq_id) else {
@@ -731,7 +747,7 @@ impl EngineThread {
                             .unwrap_or((1920, 1080));
                         let canvas = self.preview_canvas(fw, fh);
                         let compiled = compile_asset_peek(
-                            &project,
+                            project.as_ref(),
                             *asset,
                             *source_time,
                             quality,
@@ -741,7 +757,8 @@ impl EngineThread {
                         (compiled, canvas, *source_time, Some(*asset))
                     }
                     _ => {
-                        let compiled = compile(&project, seq_id, format_index, t, quality, None);
+                        let compiled =
+                            compile(project.as_ref(), seq_id, format_index, t, quality, None);
                         let (fw, fh) = seq
                             .formats
                             .get(format_index)
@@ -794,7 +811,7 @@ impl EngineThread {
                 // ring instead of cold-starting (transparent flicker). Only while
                 // playing — a paused/scrubbing playhead has no imminent cut.
                 if self.controller.is_playing() {
-                    let lead = Tick(seq.frame_rate.ticks_per_frame().0 * PREFETCH_LEAD_FRAMES);
+                    let lead = Tick(seq.frame_rate.ticks_per_frame().0 * CUT_AHEAD_LEAD_FRAMES);
                     self.media.prefetch_upcoming(seq, t, lead, quality);
                 }
             }
@@ -863,25 +880,62 @@ impl EngineThread {
         self.audio.stop();
     }
 
-    fn publish_status(&self) {
+    fn publish_status(&mut self) {
+        let playhead = self.controller.playhead();
+        let playing = self.controller.is_playing();
+        let dropped = self.controller.dropped();
+        let audio_xruns = self
+            .xruns
+            .as_ref()
+            .map(|x| x.underrun_frames())
+            .unwrap_or(0);
+        let doc_revision = self.last_revision.unwrap_or(0);
+        let active_sequence = self
+            .snapshot
+            .as_ref()
+            .and_then(|p| self.effective_sequence(p));
+        // Cheap signature: skip Arc allocation when the GUI-visible fields are
+        // unchanged (idle paused loops were allocating status every 100 ms).
+        let sig = {
+            let mut h = playhead.0 as u64;
+            h = h.wrapping_mul(0x9E37_79B9).wrapping_add(playing as u64);
+            h = h.wrapping_mul(0x9E37_79B9).wrapping_add(dropped);
+            h = h.wrapping_mul(0x9E37_79B9).wrapping_add(audio_xruns);
+            h = h
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(self.frames_published);
+            h = h
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(self.evaluation_misses);
+            h = h.wrapping_mul(0x9E37_79B9).wrapping_add(doc_revision);
+            h = h
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(self.buffering as u64);
+            h = h
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(match self.preview_quality {
+                    PreviewQuality::Draft => 0,
+                    PreviewQuality::Full => 1,
+                });
+            h
+        };
+        if sig == self.last_status_sig && self.last_error.is_none() {
+            // Still refresh playhead while playing (sig includes playhead).
+            // When identical, skip the Arc::new + store.
+            return;
+        }
+        self.last_status_sig = sig;
         self.status_out.store(Arc::new(EngineStatus {
-            playhead: self.controller.playhead(),
-            playing: self.controller.is_playing(),
-            dropped: self.controller.dropped(),
+            playhead,
+            playing,
+            dropped,
             cache: self.evaluator.cache_stats(),
-            audio_xruns: self
-                .xruns
-                .as_ref()
-                .map(|x| x.underrun_frames())
-                .unwrap_or(0),
+            audio_xruns,
             frames_published: self.frames_published,
             last_evaluate_micros: self.last_evaluate_micros,
             evaluation_misses: self.evaluation_misses,
-            doc_revision: self.last_revision.unwrap_or(0),
-            active_sequence: self
-                .snapshot
-                .as_ref()
-                .and_then(|p| self.effective_sequence(p)),
+            doc_revision,
+            active_sequence,
             last_error: self.last_error.clone(),
             preview_target: self.preview_target.clone(),
             preview_quality: self.preview_quality,
@@ -989,12 +1043,12 @@ const VECTOR_CACHE_CAP: usize = 16;
 
 /// How far ahead (in frames) to warm the next clip's decoder before a cut.
 /// ~0.8s at 30fps — enough lead for a keyframe-seek bootstrap to finish.
-const PREFETCH_LEAD_FRAMES: i64 = 24;
+// Cut-ahead lead lives in `playback::prefetch::CUT_AHEAD_LEAD_FRAMES`.
 
 /// Cap on live decode sources (each = a worker thread + ffmpeg sidecar). With
 /// cut-ahead, a long timeline would otherwise accumulate them; evict the
 /// least-recently-used beyond this, never one on screen this frame.
-const MAX_LIVE_SOURCES: usize = 8;
+// MAX_LIVE_SOURCES re-exported from playback::prefetch.
 
 impl MediaSources {
     fn new(tools: Option<FfmpegTools>) -> Self {
@@ -1055,39 +1109,17 @@ impl MediaSources {
             })
     }
 
-    /// Cut-ahead: for each enabled video track, warm the next clip's decode
-    /// worker if it starts within `lead` of `t`, so the boundary crossing hits a
-    /// primed ring instead of cold-starting. Bounded to **one `build_source` per
-    /// call** (probe + keyframe-index build are synchronous on this thread), and
-    /// never re-steers a source already primed at its target (no thrash).
+    /// Cut-ahead: warm the next clip's decode worker if it starts within `lead`
+    /// of `t` ([`cut_ahead_targets`]). Bounded to **one `build_source` per call**
+    /// so we never open dual always-on decoders for every upcoming cut.
     fn prefetch_upcoming(&mut self, seq: &Sequence, t: Tick, lead: Tick, quality: Quality) {
         self.drain_pending();
         let proxy = quality.proxy;
-        let horizon = Tick(t.0.saturating_add(lead.0));
         let mut built_this_call = false;
-        // Collect targets first to avoid borrowing `seq` across the &mut self
-        // source mutations below.
-        let mut targets: Vec<(AssetId, Tick)> = Vec::new();
-        for track in &seq.video_tracks {
-            if track.kind != TrackKind::Video || !track.enabled {
-                continue;
-            }
-            let Some(clip) = track
-                .clips
-                .iter()
-                .find(|c| c.start > t && c.start <= horizon)
-            else {
-                continue;
-            };
-            if !clip.enabled {
-                continue;
-            }
-            if let ClipSource::Asset { asset } = clip.source {
-                // dt = 0 at the clip's own start (compile.rs src_time formula).
-                targets.push((asset, clip.source_in));
-            }
-        }
-        for (asset, src_time) in targets {
+        let targets = cut_ahead_targets(seq, t, lead);
+        for target in targets {
+            let asset = target.asset;
+            let src_time = target.source_time;
             if !self.is_video_asset(asset) {
                 continue;
             }
@@ -1118,18 +1150,29 @@ impl MediaSources {
     /// evicts a source touched this present (highest `last_used`), so an
     /// on-screen worker is never killed. Dropping stops+joins its worker.
     fn evict_stale(&mut self) {
-        while self.sources.values().filter(|v| v.is_some()).count() > MAX_LIVE_SOURCES {
-            let victim = self
+        let entries: Vec<_> = self
+            .sources
+            .iter()
+            .filter_map(|(k, v)| v.as_ref().map(|e| (*k, e.last_used)))
+            .collect();
+        if entries.len() <= MAX_LIVE_SOURCES {
+            return;
+        }
+        // Protect anything touched on the latest use stamp (this present).
+        let protected_min = entries.iter().map(|(_, u)| *u).max().unwrap_or(0);
+        let victims = lru_eviction_victims(&entries, MAX_LIVE_SOURCES, protected_min);
+        for k in victims {
+            self.sources.remove(&k);
+        }
+        // If still over (all entries protected), fall back to pure LRU without protect.
+        if self.sources.values().filter(|v| v.is_some()).count() > MAX_LIVE_SOURCES {
+            let entries: Vec<_> = self
                 .sources
                 .iter()
                 .filter_map(|(k, v)| v.as_ref().map(|e| (*k, e.last_used)))
-                .min_by_key(|(_, used)| *used)
-                .map(|(k, _)| k);
-            match victim {
-                Some(k) => {
-                    self.sources.remove(&k);
-                }
-                None => break,
+                .collect();
+            for k in lru_eviction_victims(&entries, MAX_LIVE_SOURCES, u64::MAX) {
+                self.sources.remove(&k);
             }
         }
     }

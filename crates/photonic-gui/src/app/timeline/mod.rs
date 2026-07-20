@@ -332,7 +332,9 @@ impl PhotonicApp {
             .is_some_and(TimelineMediaCaches::has_pending)
         {
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(50));
+                // Thumb/waveform cache fill: 50ms was fine; 33ms ≈ 30 Hz keeps
+                // strips snappy on Linux/Windows without full-speed repaint spam.
+                .request_repaint_after(std::time::Duration::from_millis(33));
         }
 
         // ── Track headers (drawn after lanes so widgets sit on top) ─────────

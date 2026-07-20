@@ -1,6 +1,6 @@
 //! Per-source decoded-frame ring, keyed by presentation tick (02 §3).
 //!
-//! Holds ±N frames around the playhead (default 16 forward / 4 back at preview
+//! Holds ±N frames around the playhead (default 24 forward / 6 back at preview
 //! quality). A reader worker [`push`](FrameRing::push)es decoded frames; the
 //! engine thread [`frame_covering`](FrameRing::frame_covering)s the playhead.
 //! [`SharedRing`] wraps the ring in a `Mutex` + `Condvar` so the two threads
@@ -15,9 +15,10 @@ use photonic_core::timeline::Tick;
 use super::DecodedFrame;
 
 /// Default forward window at preview quality (02 §3).
-pub const DEFAULT_FWD: usize = 16;
+/// 24 frames ≈ 0.8 s @ 30 fps — smoother scrub-ahead on Linux/Windows.
+pub const DEFAULT_FWD: usize = 24;
 /// Default backward window at preview quality (02 §3).
-pub const DEFAULT_BACK: usize = 4;
+pub const DEFAULT_BACK: usize = 6;
 
 /// A pts-keyed decoded-frame ring for one decode source. Not itself
 /// thread-safe; share via [`SharedRing`].

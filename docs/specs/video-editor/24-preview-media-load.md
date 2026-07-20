@@ -313,14 +313,14 @@ Owned with 04 monitor transport; specified here so speed UX is not lost:
 
 ## 11. Implementation checklist (for agents)
 
-1. `PreviewTarget` + retarget rules on monitor session; play-wins.  
-2. Import L0→L3 priority: poster job scheduled ahead of full thumb strips.  
-3. Draft default size + proxy Auto path wired to compile/eval.  
-4. Seek coalesce + ring + cut-ahead verified against §6 budgets.  
-5. Sidecar LRU cap; no dual always-on decoders.  
-6. Source marks session fields + Insert/Overwrite consumption (G-10 residual) on single surface.  
-7. Windows: no unix-FIFO assumption for any load/preview path (export dual-input is separate; preview is single rawvideo pipe).  
-8. Tests in 11 for budgets and “import N files → N rows before probe.”  
+1. `PreviewTarget` + retarget rules on monitor session; play-wins. **Done** (2026-07-19).  
+2. Import L0→L3 priority: poster job scheduled ahead of full thumb strips. **Done** (L0–L5; L5 after L1–L4 meta send so waveforms never gate metadata). L6 strip samples remain lazy via timeline `ThumbnailCache` (spec 15; visible-range only).  
+3. Draft default size + proxy Auto path wired to compile/eval. **Done** (Draft default + `ProxyMode`; L7 auto-queue when `ProjectVideoSettings.generate_proxies`).  
+4. Seek coalesce + ring + cut-ahead verified against §6 budgets. **Done** — hard: `scrub_seek_coalesce_latest_wins`, `seek_coalesce_under_drag_simulation`, `warm_keyframe_index_lookup_budget`, `cut_ahead_scan_next_clip_within_lead`, `prefetch_ahead_horizon_is_contractual`, `playback::prefetch::cut_ahead_*` units; session wires `cut_ahead_targets` + at-most-one open per present. Soft: `soft_draft_seek_budget_with_warm_index` (full decode-to-frame p95 remains environment-dependent).  
+5. Sidecar LRU cap; no dual always-on decoders. **Done** — `lru_evicts_coldest_unprotected_only` + session `evict_stale` via `lru_eviction_victims`; `MAX_LIVE_SOURCES=8`; cut-ahead amortizes one build/present.  
+6. Source marks session fields + Insert/Overwrite consumption (G-10 residual) on single surface. **Done** — `SourceMarksSession`; focus-aware I/O; Match Frame full range; `marks_to_insert_payload_preserves_source_range`, `match_frame_style_marks_keep_remainder_out` (dual-pane still non-goal).  
+7. Windows: no unix-FIFO assumption for any load/preview path (export dual-input is separate; preview is single rawvideo pipe). **Done** (export temp-file A/V path).  
+8. Tests in 11 for budgets and “import N files → N rows before probe.” **Done** — `l0_register_n_stubs_before_any_probe` (N stubs, no probe/hash, &lt;100 ms); ladder L0–L5+L7 in `preview_media_load`; §6 harness in `seek_budgets`.  
 
 ---
 

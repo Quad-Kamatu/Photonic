@@ -177,6 +177,14 @@ pub fn set_asset_meta(
     })
 }
 
+/// Set project policy for auto proxy generation on import (G-15C / 24 L7).
+pub fn set_generate_proxies_on_import(p: &TimelineProject, new: bool) -> TimelineCmd {
+    TimelineCmd::SetGenerateProxiesOnImport {
+        old: p.settings.generate_proxies,
+        new,
+    }
+}
+
 // ── Sequences / formats / tracks ────────────────────────────────────────────
 
 pub fn add_sequence(s: Sequence) -> TimelineCmd {
@@ -3088,5 +3096,23 @@ mod tests {
             .unwrap();
         assert_eq!(a.probe.as_ref().map(|p| p.codec.as_str()), Some("h264"));
         assert_eq!(a.content_hash.as_deref(), Some("hash-abc"));
+    }
+
+    #[test]
+    fn set_generate_proxies_on_import_undoably() {
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(TimelineProject::new());
+        assert!(!doc.timeline.as_ref().unwrap().settings.generate_proxies);
+
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = set_generate_proxies_on_import(p, true);
+        assert_undo_roundtrip(&doc, &cmd);
+        Command::Timeline(cmd).apply(&mut doc);
+        assert!(doc.timeline.as_ref().unwrap().settings.generate_proxies);
+
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = set_generate_proxies_on_import(p, false);
+        Command::Timeline(cmd).apply(&mut doc);
+        assert!(!doc.timeline.as_ref().unwrap().settings.generate_proxies);
     }
 }

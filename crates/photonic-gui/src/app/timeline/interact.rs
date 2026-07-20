@@ -287,7 +287,7 @@ pub(crate) fn apply_marquee(
 /// trim in/out and originating track kind. Duration = `src_out − src_in`. Held
 /// in GUI session state only.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PendingSource {
+pub struct PendingSource {
     /// The source op to lay down (carries the asset id for asset/vector sources).
     pub source: ClipSource,
     /// Trim in-point into the source media.
@@ -486,7 +486,7 @@ fn commit_edit(history: &mut CommandHistory, doc: &mut Document, mut cmds: Vec<T
 /// `source` in, rippling downstream clips right. One undo step; `true` if
 /// applied (a rejected edit — bad track, non-positive duration, nested cycle —
 /// is a silent no-op like other invalid gestures).
-pub(crate) fn do_insert_edit(
+pub fn do_insert_edit(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,

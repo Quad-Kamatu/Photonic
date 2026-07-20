@@ -9,6 +9,9 @@ mod demos;
 use demos::*;
 mod hit_test;
 use hit_test::*;
+/// G-10 source marks (session-only). `pub` so UI-path integration tests can
+/// drive the same types the transport and command palette use.
+pub mod source_marks;
 // `pub` (not `pub(crate)`): CAP-022's crash-recovery integration test
 // (crates/photonic-gui/tests/timeline_recovery.rs) drives the real write/load
 // path via test-only hooks in `autosave.rs`, and external integration test
@@ -30,7 +33,9 @@ mod recovery;
 pub(crate) mod reframe;
 mod rulers;
 mod tabs;
-pub(crate) mod timeline;
+/// Timeline panel + edit interact helpers. `pub` so UI-path integration tests
+/// can construct `PendingSource` the same way Insert/Overwrite does.
+pub mod timeline;
 mod tool_handlers;
 mod width_tool;
 use egui::{Color32, RichText};
@@ -840,9 +845,11 @@ pub struct PhotonicApp {
     // not serde) and deliberately NOT in the document — the armed source and the
     // patch targets are editor state, not sequence content.
     /// The armed 3-point source (source op + trim in/out) for Insert/Overwrite.
-    /// `None` = nothing armed; set from the selected timeline clip at edit time
-    /// (spec 16 §4 minimal arming — a source monitor is the separable §6 story).
+    /// `None` = nothing armed; set from source marks (G-10) or selected clip
+    /// (spec 16 §4 minimal arming) at edit time.
     pub(crate) pending_source: Option<timeline::interact::PendingSource>,
+    /// G-10 source marks + armed asset (session-only, non-undoable; 24 §3.3).
+    pub(crate) source_marks: source_marks::SourceMarksSession,
     /// Source-patch target (spec 16 §1 M-3): which track receives the edit.
     /// `None` = default to the first enabled track of the source's kind
     /// (`interact::resolve_target_track`).
@@ -1570,6 +1577,7 @@ impl Default for PhotonicApp {
             timeline_selection: Vec::new(),
             timeline_snap_enabled: true,
             pending_source: None,
+            source_marks: source_marks::SourceMarksSession::default(),
             target_video_track: None,
             target_audio_track: None,
             timeline_razor_active: false,
@@ -2493,9 +2501,16 @@ impl PhotonicApp {
         let meta_updates = self.media_pool_ui.drain_meta();
         if !meta_updates.is_empty() {
             use photonic_core::timeline::ops;
+            let auto_proxy = doc
+                .timeline
+                .as_ref()
+                .map(|p| p.settings.generate_proxies)
+                .unwrap_or(false);
+            let meta_asset_ids: Vec<_> = meta_updates.iter().map(|m| m.asset).collect();
             if let Some(project) = doc.timeline.as_ref() {
                 let commands: Vec<_> = meta_updates
                     .into_iter()
+                    .filter(|m| !m.waveform_only)
                     .filter_map(|m| {
                         ops::set_asset_meta(project, m.asset, m.probe, m.content_hash).ok()
                     })
@@ -2505,18 +2520,57 @@ impl PhotonicApp {
                     doc_modified = true;
                 }
             }
+            // L7: after L1–L4 fill, auto-queue proxies when project policy says so
+            // (24 §2 L7, G-15C). No Pending document mutation — in-flight is
+            // session-only (`proxy_in_flight`); one Ready/Failed history entry
+            // on completion. Manual "Build proxies" shares the same queue guard.
+            if auto_proxy {
+                let candidates: Vec<_> = doc
+                    .timeline
+                    .as_ref()
+                    .map(|project| {
+                        meta_asset_ids
+                            .iter()
+                            .filter_map(|id| project.media.assets.get(id).cloned())
+                            .filter(|a| {
+                                a.content_hash.is_some()
+                                    && !self.media_pool_ui.proxy_job_in_flight(a.id)
+                                    && photonic_video::media::should_auto_generate_proxy(
+                                        a.kind,
+                                        &a.source,
+                                        a.proxy.as_ref(),
+                                        true,
+                                    )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if !candidates.is_empty() {
+                    self.media_pool_ui
+                        .spawn_proxy_generation(candidates, self.current_file.clone());
+                }
+            }
         }
         let finished_proxies = self.media_pool_ui.drain_finished_proxies();
         if !finished_proxies.is_empty() {
             use photonic_core::timeline::ops;
-            if let Some(project) = doc.timeline.as_ref() {
-                let commands: Vec<_> = finished_proxies
-                    .into_iter()
-                    .filter_map(|result| {
-                        ops::set_asset_proxy(project, result.asset, result.proxy).ok()
-                    })
-                    .collect();
-                for cmd in commands {
+            use photonic_core::timeline::ProxyOrigin;
+            // Skip applying a Generated completion if the user attached a proxy
+            // while the job was in flight (G-15A: never clobber Attached).
+            for result in finished_proxies {
+                let skip = doc
+                    .timeline
+                    .as_ref()
+                    .and_then(|p| p.media.assets.get(&result.asset))
+                    .and_then(|a| a.proxy.as_ref())
+                    .is_some_and(|p| p.origin == ProxyOrigin::Attached);
+                if skip {
+                    continue;
+                }
+                let cmd = doc.timeline.as_ref().and_then(|project| {
+                    ops::set_asset_proxy(project, result.asset, result.proxy).ok()
+                });
+                if let Some(cmd) = cmd {
                     history.execute_discrete(Command::Timeline(cmd), doc);
                     doc_modified = true;
                 }

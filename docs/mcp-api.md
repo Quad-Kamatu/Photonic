@@ -3,11 +3,11 @@
 <!-- GENERATED FILE — do not edit by hand. -->
 <!-- Regenerate with: cargo run -p photonic-mcp --bin dump_tools | python3 tools/gen-mcp-docs.py > docs/mcp-api.md -->
 
-This document lists all **435** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
+This document lists all **423** MCP tools exposed by `photonic-mcp`, generated directly from `server::tool_list()` so it cannot drift from the implementation.
 
 ## Tools
 
-[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_artboard`](#add-artboard), [`add_caption_track`](#add-caption-track), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_edit_all_tracks`](#add-edit-all-tracks), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_graph_edge`](#add-graph-edge), [`add_graph_node`](#add-graph-node), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_lut`](#apply-lut), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`audio_fx`](#audio-fx), [`auto_caption`](#auto-caption), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`cancel_job`](#cancel-job), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`close_gap`](#close-gap), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_grade`](#copy-grade), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_clip_composition`](#create-clip-composition), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_qr_code`](#create-qr-code), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_export_preset`](#delete-export-preset), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_artboard`](#duplicate-artboard), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_artboards`](#export-artboards), [`export_audit_log`](#export-audit-log), [`export_captions`](#export-captions), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_sequence`](#export-sequence), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`extract_edit`](#extract-edit), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`generate_proxies`](#generate-proxies), [`generate_voiceover`](#generate-voiceover), [`get_artboard_margins`](#get-artboard-margins), [`get_audio_meters`](#get-audio-meters), [`get_canvas_overview`](#get-canvas-overview), [`get_caption_track`](#get-caption-track), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_color_mode`](#get-document-color-mode), [`get_document_dpi`](#get-document-dpi), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_engine_status`](#get-engine-status), [`get_graph`](#get-graph), [`get_job_status`](#get-job-status), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_scopes`](#get-scopes), [`get_selection`](#get-selection), [`get_waveform`](#get-waveform), [`grade_preset`](#grade-preset), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_captions`](#import-captions), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_adjustment_clip`](#insert-adjustment-clip), [`insert_clip`](#insert-clip), [`insert_edit`](#insert-edit), [`insert_text_clip`](#insert-text-clip), [`insert_title_template`](#insert-title-template), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`lift_edit`](#lift-edit), [`link_clips`](#link-clips), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_artboards`](#list-artboards), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_presets`](#list-export-presets), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_title_templates`](#list-title-templates), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`match_frame`](#match-frame), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_caption_cues`](#merge-caption-cues), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_artboard`](#move-artboard), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`overwrite_edit`](#overwrite-edit), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pause`](#pause), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play`](#play), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`probe_media`](#probe-media), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_artboard`](#remove-artboard), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_caption_track`](#remove-caption-track), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_graph_edge`](#remove-graph-edge), [`remove_graph_node`](#remove-graph-node), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_proxy`](#remove-proxy), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`render_frame_at`](#render-frame-at), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`replace_clip_source`](#replace-clip-source), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_document`](#save-document), [`save_export_preset`](#save-export-preset), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`seek`](#seek), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_artboard`](#set-active-artboard), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_caption_cue`](#set-caption-cue), [`set_caption_style`](#set-caption-style), [`set_caption_word`](#set-caption-word), [`set_character_metrics`](#set-character-metrics), [`set_clip_audio`](#set-clip-audio), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_document_color_mode`](#set-document-color-mode), [`set_document_dpi`](#set-document-dpi), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_grade`](#set-grade), [`set_graph_node_param`](#set-graph-node-param), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_loop_range`](#set-loop-range), [`set_master_bus`](#set-master-bus), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_project_graph`](#set-project-graph), [`set_proxy_mode`](#set-proxy-mode), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_audio`](#set-track-audio), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_caption_cue`](#split-caption-cue), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`step`](#step), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transcode_media`](#transcode-media), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_clips`](#unlink-clips), [`unlink_text_frames`](#unlink-text-frames), [`update_artboard`](#update-artboard), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
+[`add_anchor_points`](#add-anchor-points), [`add_annotation`](#add-annotation), [`add_caption_track`](#add-caption-track), [`add_color_swatch`](#add-color-swatch), [`add_construction_line`](#add-construction-line), [`add_dimension`](#add-dimension), [`add_dimension_line`](#add-dimension-line), [`add_drop_shadow`](#add-drop-shadow), [`add_edit_all_tracks`](#add-edit-all-tracks), [`add_effect`](#add-effect), [`add_export_profile`](#add-export-profile), [`add_graph_edge`](#add-graph-edge), [`add_graph_node`](#add-graph-node), [`add_guide`](#add-guide), [`add_marker`](#add-marker), [`add_track`](#add-track), [`adjust_colors`](#adjust-colors), [`align_nodes`](#align-nodes), [`analyze_composition`](#analyze-composition), [`apply_adjustment`](#apply-adjustment), [`apply_character_style`](#apply-character-style), [`apply_color_swatch`](#apply-color-swatch), [`apply_document_template`](#apply-document-template), [`apply_filter`](#apply-filter), [`apply_flex_layout`](#apply-flex-layout), [`apply_gradient_swatch`](#apply-gradient-swatch), [`apply_graphic_style`](#apply-graphic-style), [`apply_grid_layout`](#apply-grid-layout), [`apply_lut`](#apply-lut), [`apply_paragraph_style`](#apply-paragraph-style), [`apply_pattern_fill`](#apply-pattern-fill), [`apply_spot_color`](#apply-spot-color), [`apply_stack_layout`](#apply-stack-layout), [`apply_transform`](#apply-transform), [`apply_variables`](#apply-variables), [`apply_width_profile`](#apply-width-profile), [`attach_proxy`](#attach-proxy), [`audio_fx`](#audio-fx), [`auto_caption`](#auto-caption), [`auto_name_nodes`](#auto-name-nodes), [`average_anchor_points`](#average-anchor-points), [`batch_set_keyframes`](#batch-set-keyframes), [`bind_text_variable`](#bind-text-variable), [`blend_colors`](#blend-colors), [`blend_objects`](#blend-objects), [`boolean_operation`](#boolean-operation), [`branch_create`](#branch-create), [`branch_delete`](#branch-delete), [`branch_list`](#branch-list), [`branch_switch`](#branch-switch), [`break_link_to_symbol`](#break-link-to-symbol), [`brush_stroke`](#brush-stroke), [`bucket_fill`](#bucket-fill), [`build_shape_from_points`](#build-shape-from-points), [`cancel_job`](#cancel-job), [`center_on_canvas`](#center-on-canvas), [`check_grammar`](#check-grammar), [`check_style_continuity`](#check-style-continuity), [`clean_up`](#clean-up), [`clear_blend_spine`](#clear-blend-spine), [`clear_guides`](#clear-guides), [`clear_layer_mask`](#clear-layer-mask), [`clear_symbol_overrides`](#clear-symbol-overrides), [`clear_tab_stops`](#clear-tab-stops), [`clear_text_area`](#clear-text-area), [`clear_text_path`](#clear-text-path), [`close_gap`](#close-gap), [`collect_in_new_layer`](#collect-in-new-layer), [`color_guide`](#color-guide), [`convert_anchor_points`](#convert-anchor-points), [`convert_to_grayscale`](#convert-to-grayscale), [`copy_appearance`](#copy-appearance), [`copy_grade`](#copy-grade), [`copy_nodes_to_clipboard`](#copy-nodes-to-clipboard), [`create_adjustment_layer`](#create-adjustment-layer), [`create_array`](#create-array), [`create_arrow_shape`](#create-arrow-shape), [`create_bar_chart`](#create-bar-chart), [`create_bin`](#create-bin), [`create_character_style`](#create-character-style), [`create_clip_composition`](#create-clip-composition), [`create_cross`](#create-cross), [`create_curvature_path`](#create-curvature-path), [`create_donut`](#create-donut), [`create_flare`](#create-flare), [`create_freehand_path`](#create-freehand-path), [`create_gear`](#create-gear), [`create_grid`](#create-grid), [`create_heart`](#create-heart), [`create_layer`](#create-layer), [`create_line_chart`](#create-line-chart), [`create_paragraph_style`](#create-paragraph-style), [`create_parametric_shape`](#create-parametric-shape), [`create_path`](#create-path), [`create_pie_chart`](#create-pie-chart), [`create_polar_grid`](#create-polar-grid), [`create_radar_chart`](#create-radar-chart), [`create_raster_layer`](#create-raster-layer), [`create_scatter_plot`](#create-scatter-plot), [`create_sequence`](#create-sequence), [`create_shape`](#create-shape), [`create_speech_bubble`](#create-speech-bubble), [`create_spiral`](#create-spiral), [`create_stacked_bar_chart`](#create-stacked-bar-chart), [`create_sunburst`](#create-sunburst), [`create_text`](#create-text), [`create_truchet_tiling`](#create-truchet-tiling), [`create_wave_pattern`](#create-wave-pattern), [`crystallize_path`](#crystallize-path), [`define_action`](#define-action), [`define_grammar_rule`](#define-grammar-rule), [`define_graphic_style`](#define-graphic-style), [`define_pattern`](#define-pattern), [`define_spot_color`](#define-spot-color), [`define_symbol`](#define-symbol), [`define_variable`](#define-variable), [`define_width_profile`](#define-width-profile), [`delete_action`](#delete-action), [`delete_anchor_point`](#delete-anchor-point), [`delete_character_style`](#delete-character-style), [`delete_color_swatch`](#delete-color-swatch), [`delete_export_preset`](#delete-export-preset), [`delete_gradient_swatch`](#delete-gradient-swatch), [`delete_grammar_rule`](#delete-grammar-rule), [`delete_graphic_style`](#delete-graphic-style), [`delete_layer`](#delete-layer), [`delete_nodes`](#delete-nodes), [`delete_paragraph_style`](#delete-paragraph-style), [`delete_pattern`](#delete-pattern), [`delete_sequence`](#delete-sequence), [`delete_spot_color`](#delete-spot-color), [`delete_symbol`](#delete-symbol), [`delete_variable`](#delete-variable), [`delete_width_profile`](#delete-width-profile), [`delete_workspace`](#delete-workspace), [`deselect_all`](#deselect-all), [`detach_proxy`](#detach-proxy), [`detect_rhythms`](#detect-rhythms), [`diff_checkpoints`](#diff-checkpoints), [`distribute_no_overlap`](#distribute-no-overlap), [`distribute_on_path`](#distribute-on-path), [`divide_objects_below`](#divide-objects-below), [`duplicate_layer`](#duplicate-layer), [`duplicate_nodes`](#duplicate-nodes), [`enter_isolation_mode`](#enter-isolation-mode), [`exit_isolation_mode`](#exit-isolation-mode), [`expand_blend`](#expand-blend), [`export_audit_log`](#export-audit-log), [`export_captions`](#export-captions), [`export_design_tokens`](#export-design-tokens), [`export_icon_set`](#export-icon-set), [`export_pdf`](#export-pdf), [`export_raster`](#export-raster), [`export_selection_as_svg`](#export-selection-as-svg), [`export_sequence`](#export-sequence), [`export_svg`](#export-svg), [`export_tagged_assets`](#export-tagged-assets), [`extract_edit`](#extract-edit), [`find_nodes`](#find-nodes), [`find_replace_style`](#find-replace-style), [`find_replace_text`](#find-replace-text), [`fit_to_canvas`](#fit-to-canvas), [`fit_to_margins`](#fit-to-margins), [`flatten_artwork`](#flatten-artwork), [`flatten_group`](#flatten-group), [`flatten_transparency`](#flatten-transparency), [`flip_nodes`](#flip-nodes), [`generate_proxies`](#generate-proxies), [`generate_voiceover`](#generate-voiceover), [`get_artboard_margins`](#get-artboard-margins), [`get_audio_meters`](#get-audio-meters), [`get_canvas_overview`](#get-canvas-overview), [`get_caption_track`](#get-caption-track), [`get_clip`](#get-clip), [`get_clipboard_history`](#get-clipboard-history), [`get_css_preview`](#get-css-preview), [`get_document_bleed`](#get-document-bleed), [`get_document_info`](#get-document-info), [`get_document_state`](#get-document-state), [`get_document_template`](#get-document-template), [`get_engine_status`](#get-engine-status), [`get_graph`](#get-graph), [`get_job_status`](#get-job-status), [`get_keyframes`](#get-keyframes), [`get_node`](#get-node), [`get_node_prompts`](#get-node-prompts), [`get_opentype_features`](#get-opentype-features), [`get_raster_info`](#get-raster-info), [`get_recent_colors`](#get-recent-colors), [`get_scopes`](#get-scopes), [`get_selection`](#get-selection), [`get_waveform`](#get-waveform), [`grade_preset`](#grade-preset), [`gradient_fill`](#gradient-fill), [`group_nodes`](#group-nodes), [`hatch_fill`](#hatch-fill), [`import_captions`](#import-captions), [`import_design_tokens`](#import-design-tokens), [`import_media`](#import-media), [`insert_adjustment_clip`](#insert-adjustment-clip), [`insert_clip`](#insert-clip), [`insert_edit`](#insert-edit), [`insert_text_clip`](#insert-text-clip), [`insert_title_template`](#insert-title-template), [`inspect_node`](#inspect-node), [`invert_colors`](#invert-colors), [`join_paths`](#join-paths), [`jump_to_history`](#jump-to-history), [`lasso_select`](#lasso-select), [`layout_nodes`](#layout-nodes), [`lift_edit`](#lift-edit), [`link_clips`](#link-clips), [`link_text_frames`](#link-text-frames), [`liquify`](#liquify), [`list_actions`](#list-actions), [`list_annotations`](#list-annotations), [`list_audit_log`](#list-audit-log), [`list_bins`](#list-bins), [`list_character_styles`](#list-character-styles), [`list_clips`](#list-clips), [`list_color_swatches`](#list-color-swatches), [`list_constraints`](#list-constraints), [`list_dimensions`](#list-dimensions), [`list_effect_kinds`](#list-effect-kinds), [`list_event_triggers`](#list-event-triggers), [`list_export_presets`](#list-export-presets), [`list_export_profiles`](#list-export-profiles), [`list_gradient_swatches`](#list-gradient-swatches), [`list_grammar_rules`](#list-grammar-rules), [`list_graphic_styles`](#list-graphic-styles), [`list_guides`](#list-guides), [`list_history`](#list-history), [`list_markers`](#list-markers), [`list_media`](#list-media), [`list_paragraph_styles`](#list-paragraph-styles), [`list_patterns`](#list-patterns), [`list_sequences`](#list-sequences), [`list_spot_colors`](#list-spot-colors), [`list_symbols`](#list-symbols), [`list_title_templates`](#list-title-templates), [`list_variables`](#list-variables), [`list_width_profiles`](#list-width-profiles), [`list_workspaces`](#list-workspaces), [`load_swatch_library`](#load-swatch-library), [`load_symbol_library`](#load-symbol-library), [`load_workspace`](#load-workspace), [`magic_wand_select`](#magic-wand-select), [`make_clipping_mask`](#make-clipping-mask), [`make_compound_path`](#make-compound-path), [`make_compound_path`](#make-compound-path), [`make_live_boolean`](#make-live-boolean), [`match_frame`](#match-frame), [`measure_distance`](#measure-distance), [`measure_distances`](#measure-distances), [`measure_nodes`](#measure-nodes), [`measure_path`](#measure-path), [`merge_caption_cues`](#merge-caption-cues), [`merge_layers`](#merge-layers), [`mirror_copy`](#mirror-copy), [`move_clip`](#move-clip), [`move_to_layer`](#move-to-layer), [`noise_deform`](#noise-deform), [`offset_path`](#offset-path), [`outline_stroke`](#outline-stroke), [`overwrite_edit`](#overwrite-edit), [`paste_from_history`](#paste-from-history), [`pathfinder_crop`](#pathfinder-crop), [`pathfinder_divide`](#pathfinder-divide), [`pathfinder_merge`](#pathfinder-merge), [`pathfinder_minus_back`](#pathfinder-minus-back), [`pathfinder_minus_front`](#pathfinder-minus-front), [`pathfinder_outline`](#pathfinder-outline), [`pathfinder_trim`](#pathfinder-trim), [`pause`](#pause), [`pin_object_guides`](#pin-object-guides), [`place_image`](#place-image), [`place_symbol`](#place-symbol), [`play`](#play), [`play_action`](#play-action), [`point_on_path`](#point-on-path), [`preview_selection`](#preview-selection), [`probe_media`](#probe-media), [`proportional_move_anchor`](#proportional-move-anchor), [`pucker_bloat`](#pucker-bloat), [`randomize_colors`](#randomize-colors), [`recolor_artwork`](#recolor-artwork), [`redo`](#redo), [`register_event_trigger`](#register-event-trigger), [`release_clipping_mask`](#release-clipping-mask), [`release_compound_path`](#release-compound-path), [`release_compound_path`](#release-compound-path), [`release_to_layers`](#release-to-layers), [`relink_media`](#relink-media), [`remove_asset`](#remove-asset), [`remove_background`](#remove-background), [`remove_bin`](#remove-bin), [`remove_caption_track`](#remove-caption-track), [`remove_clip`](#remove-clip), [`remove_constraint`](#remove-constraint), [`remove_dimension`](#remove-dimension), [`remove_effect`](#remove-effect), [`remove_event_trigger`](#remove-event-trigger), [`remove_export_profile`](#remove-export-profile), [`remove_fill`](#remove-fill), [`remove_graph_edge`](#remove-graph-edge), [`remove_graph_node`](#remove-graph-node), [`remove_guide`](#remove-guide), [`remove_keyframe`](#remove-keyframe), [`remove_marker`](#remove-marker), [`remove_proxy`](#remove-proxy), [`remove_stroke`](#remove-stroke), [`remove_track`](#remove-track), [`render_frame_at`](#render-frame-at), [`reorder_effects`](#reorder-effects), [`reorder_layers`](#reorder-layers), [`reorder_node`](#reorder-node), [`reorder_track`](#reorder-track), [`replace_clip_source`](#replace-clip-source), [`resize_canvas`](#resize-canvas), [`resolve_annotation`](#resolve-annotation), [`retouch`](#retouch), [`reverse_blend_spine`](#reverse-blend-spine), [`reverse_node_order`](#reverse-node-order), [`reverse_path_direction`](#reverse-path-direction), [`ripple_edit`](#ripple-edit), [`roll_edit`](#roll-edit), [`rotate_copies`](#rotate-copies), [`roughen_path`](#roughen-path), [`round_corners`](#round-corners), [`run_export_profile`](#run-export-profile), [`sample_color_at`](#sample-color-at), [`save_export_preset`](#save-export-preset), [`save_gradient_swatch`](#save-gradient-swatch), [`save_workspace`](#save-workspace), [`scallop_path`](#scallop-path), [`scatter_copies`](#scatter-copies), [`scissors_cut`](#scissors-cut), [`screenshot`](#screenshot), [`seek`](#seek), [`select_all`](#select-all), [`select_by_kind`](#select-by-kind), [`select_inside_group`](#select-inside-group), [`select_same`](#select-same), [`select_similar`](#select-similar), [`set_active_format`](#set-active-format), [`set_active_layer`](#set-active-layer), [`set_active_sequence`](#set-active-sequence), [`set_artboard_margins`](#set-artboard-margins), [`set_asset_bin`](#set-asset-bin), [`set_blend_mode`](#set-blend-mode), [`set_blend_spine`](#set-blend-spine), [`set_caption_cue`](#set-caption-cue), [`set_caption_style`](#set-caption-style), [`set_caption_word`](#set-caption-word), [`set_character_metrics`](#set-character-metrics), [`set_clip_audio`](#set-clip-audio), [`set_clip_prop`](#set-clip-prop), [`set_clip_speed`](#set-clip-speed), [`set_constraint`](#set-constraint), [`set_document_bleed`](#set-document-bleed), [`set_effect_param`](#set-effect-param), [`set_font_style`](#set-font-style), [`set_font_weight`](#set-font-weight), [`set_grade`](#set-grade), [`set_graph_node_param`](#set-graph-node-param), [`set_keyframe`](#set-keyframe), [`set_layer_mask`](#set-layer-mask), [`set_locked`](#set-locked), [`set_loop_range`](#set-loop-range), [`set_master_bus`](#set-master-bus), [`set_node_prompt`](#set-node-prompt), [`set_node_size`](#set-node-size), [`set_opacity`](#set-opacity), [`set_opentype_features`](#set-opentype-features), [`set_paint`](#set-paint), [`set_paragraph_options`](#set-paragraph-options), [`set_project_graph`](#set-project-graph), [`set_proxy_mode`](#set-proxy-mode), [`set_selection`](#set-selection), [`set_sequence_format`](#set-sequence-format), [`set_symbol_override`](#set-symbol-override), [`set_tab_stops`](#set-tab-stops), [`set_text_area`](#set-text-area), [`set_text_decoration`](#set-text-decoration), [`set_text_direction`](#set-text-direction), [`set_text_path`](#set-text-path), [`set_track_audio`](#set-track-audio), [`set_track_prop`](#set-track-prop), [`set_transition`](#set-transition), [`set_variable_value`](#set-variable-value), [`set_visibility`](#set-visibility), [`set_work_range`](#set-work-range), [`simplify_path`](#simplify-path), [`slide_clip`](#slide-clip), [`slip_clip`](#slip-clip), [`smooth_path`](#smooth-path), [`snap_to_pixel`](#snap-to-pixel), [`split_caption_cue`](#split-caption-cue), [`split_clip`](#split-clip), [`split_into_grid`](#split-into-grid), [`spray_symbol_instances`](#spray-symbol-instances), [`step`](#step), [`stipple_fill`](#stipple-fill), [`style_transfer`](#style-transfer), [`swap_fill_stroke`](#swap-fill-stroke), [`tag_node_for_export`](#tag-node-for-export), [`tag_nodes`](#tag-nodes), [`transcode_media`](#transcode-media), [`transform_copies`](#transform-copies), [`transform_image`](#transform-image), [`trim_clip`](#trim-clip), [`twirl_path`](#twirl-path), [`unbind_text_variable`](#unbind-text-variable), [`undo`](#undo), [`undo_node`](#undo-node), [`ungroup_nodes`](#ungroup-nodes), [`unlink_clips`](#unlink-clips), [`unlink_text_frames`](#unlink-text-frames), [`update_color_swatch`](#update-color-swatch), [`update_layer`](#update-layer), [`update_node`](#update-node), [`warp_envelope`](#warp-envelope), [`zig_zag_path`](#zig-zag-path)
 
 ---
 
@@ -38,18 +38,6 @@ Returns the new `annotation_id` UUID.
 | `text` | string | yes | The comment or design note (required, non-empty). |
 | `author` | string | no | Optional author identity, e.g. "claude" or "design-reviewer". |
 | `node_id` | string | no | UUID of the node to annotate. Omit to create a document-level annotation. |
-
-## `add_artboard`
-
-Create a new artboard (a named crop/export rectangle) at the given top-left (x, y) with width×height in document units, and make it the active artboard. Returns the new artboard_id. Use for multi-artboard layouts (e.g. responsive frames, icon sizes, print pages side by side).
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `height` | number | yes | Height in document units (> 0). |
-| `width` | number | yes | Width in document units (> 0). |
-| `x` | number | yes | Top-left X in document units. |
-| `y` | number | yes | Top-left Y in document units. |
-| `name` | string | no | Optional name. Default: 'Artboard N'. |
 
 ## `add_caption_track`
 
@@ -419,6 +407,16 @@ Apply a named width profile to path nodes — sets stroke.width to the profile a
 | --- | --- | --- | --- |
 | `name` | string | yes | Name of the width profile to apply. |
 | `node_ids` | array<string> | yes | Node UUIDs or names to apply the profile to. |
+
+## `attach_proxy`
+
+Attach an existing user-owned proxy file to a file-backed video asset without re-encoding (G-15A). Validates path, video stream, duration (within one source frame) and nominal frame rate. Set allow_mismatch=true to accept mismatches as warnings. Never copies the file. Export still uses originals (CAP-014).
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes |  |
+| `path` | string | yes | Absolute path to the proxy media file. |
+| `allow_mismatch` | boolean | no | If true, duration/frame-rate mismatches become warnings instead of errors. |
 
 ## `audio_fx`
 
@@ -1141,26 +1139,6 @@ Create a polar (radial) grid centered at a point. Draws concentric circles and r
 | `sectors` | integer | no | Number of radial sectors/spokes (default: 8) |
 | `stroke` | object | no |  |
 
-## `create_qr_code`
-
-Generate a native, resolution-independent QR code as a group of vectors (a compound path of all dark modules, plus an optional background). Encodes a URL/text and lets you style the modules while staying scannable — the three finder 'eyes' are always rendered recognizably so stylized codes still scan.
-
-Styles: square (classic), rounded (rounded squares), dot (circles), connected ('blob' — neighbouring modules merge with smooth joins). Dark modules take any fill (solid or gradient). Keep good dark-on-light contrast and use a higher error-correction level (q/h) when heavily stylized.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `data` | string | yes | Content to encode (URL or text) |
-| `background` | string | no | Background behind the code: a #rrggbb hex (default white) or 'none' for transparent |
-| `ecc` | enum (`l`, `m`, `q`, `h`) | no | Error-correction level (default: m). Higher = more robust but denser. |
-| `fill` | object | no | Fill for the dark modules — solid or gradient (default solid black) |
-| `layer_id` | string | no |  |
-| `module_shape` | enum (`square`, `rounded`, `dot`, `connected`) | no | Module style (default: square) |
-| `quiet_zone` | integer | no | Quiet-zone margin in modules (default 4; keep >= 2 to stay scannable) |
-| `radius` | number | no | Corner radius as a fraction of one module, 0..0.5 (default 0.4). Used by rounded/connected. |
-| `size` | number | no | Total artwork size in document units incl. quiet zone (default 200) |
-| `x` | number | no | Top-left X (default 0) |
-| `y` | number | no | Top-left Y (default 0) |
-
 ## `create_radar_chart`
 
 Create a radar (spider) chart from multi-dimensional data. Each axis represents one dimension; each series is drawn as a polygon scaled to its values per axis. Supports filled semi-transparent overlays, configurable grid rings, and multiple overlapping series. Default Tableau-10 color palette.
@@ -1628,6 +1606,14 @@ Clear the selection (deselect all nodes).
 
 _No parameters._
 
+## `detach_proxy`
+
+Clear an asset's proxy reference without deleting the file on disk (G-15A). Safe for Attached user-owned proxies; for Generated cache files prefer remove_proxy if cache cleanup is desired.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes |  |
+
 ## `detect_rhythms`
 
 Detect visual rhythm patterns in the document: evenly-spaced objects (horizontal/vertical), uniform widths, geometric size progressions, and rotational symmetry. Returns structured findings with descriptions and extension suggestions. Read-only.
@@ -1683,17 +1669,6 @@ Use a selected path as a cutting edge to divide all path nodes beneath it in z-o
 | --- | --- | --- | --- |
 | `node_id` | string | yes | UUID of the cutting path node (must be a path; will be removed after cutting) |
 
-## `duplicate_artboard`
-
-Duplicate an artboard together with all content/nodes inside it, as one undoable step. The copy becomes active. By default it is placed to the right of the original with a 40-unit gutter (offset_x = original width + 40, offset_y = 0). Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to duplicate (from list_artboards). |
-| `new_name` | string | no | Optional name for the copy. Default: '{original name} copy'. |
-| `offset_x` | number | no | Horizontal offset for the copy in document units. Default: original width + 40. |
-| `offset_y` | number | no | Vertical offset for the copy in document units. Default: 0. |
-
 ## `duplicate_layer`
 
 Duplicate a layer with all its nodes. Creates a copy of the layer and deep-clones every node with new IDs. Single undoable batch.
@@ -1738,22 +1713,6 @@ Expand a blend group into individual discrete objects. Dissolves the group wrapp
 | --- | --- | --- | --- |
 | `group_id` | string | yes | UUID or name of the blend group to expand. |
 
-## `export_artboards`
-
-Export one or more artboards to raster images — one image per artboard. Returns base64 by default, OR — when `path` is given — writes each image to disk and returns only a small result (path + dimensions per artboard), keeping full-resolution PNGs off the socket. Unlike export_raster (which snapshots the live editor viewport), each artboard's rectangle is rendered off-screen at its own aspect ratio, so results are exact regardless of the current zoom/scroll. Select artboards by (precedence): all=true → every artboard; range=[start,end] → 1-based inclusive index range; artboards=[...] → a list of UUIDs, exact names, or 1-based index strings; otherwise the active artboard. Get ids/names/indices from list_artboards. Set bleed=true to include the document print bleed around each artboard (for print upload). Max 24 artboards per call; each side capped at 8192 px.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `all` | boolean | no | Export every artboard in document order. Overrides range/artboards. |
-| `artboards` | array<string> | no | Specific artboards to export, each a UUID, an exact name, or a 1-based index string ("1", "2", …). Exported in the given order. |
-| `bleed` | boolean | no | Expand each artboard's rectangle by the document print bleed (bleed_mm, at the export scale/DPI) on all four sides, so the output includes the bleed area for print upload. Output dimensions become artboard px + 2×bleed px. Default false (trim only). |
-| `format` | enum (`png`, `jpeg`, `webp`, `gif`, `tiff`) | no | Output format (default: png). |
-| `path` | string | no | Write each artboard's image to disk (parent dirs created) and return a small result (path + dimensions) instead of base64. With multiple artboards, include a {name} or {index} placeholder (or an extension, before which -{index} is inserted); a single artboard is written to `path` verbatim. Omit to return base64 inline. |
-| `quality` | integer | no | JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG. |
-| `range` | array<integer> | no | Inclusive 1-based index range [start, end] (e.g. [2, 5] exports artboards 2–5). |
-| `scale` | number | no | Output pixels per document unit (default 1.0). A 400×300 artboard at scale 2 exports 800×600 px. Clamped to 0.05–8.0. |
-| `transparent` | boolean | no | Transparent background instead of the artboard fill (default false). Ignored by JPEG (always opaque). |
-
 ## `export_audit_log`
 
 Export the complete in-memory MCP audit log as a JSON array (oldest first). Includes every tool call recorded since the server started, up to 1000 entries.
@@ -1794,28 +1753,17 @@ Batch-export a set of icons to normalized .svg files in a single call — the ca
 
 ## `export_pdf`
 
-Export the document as a vector PDF, at its physical size for the document DPI. Returns the PDF bytes as base64 in `data_base64`; also writes to `path` when given.
+Export the entire document as a single-page vector PDF (1 document unit = 1 PDF point). Returns the PDF bytes as base64 in `data_base64`.
 
-Vector paths with solid colours, transforms and nesting (gradients approximate to their first stop). With `color_mode: "cmyk"` the output is a print-ready PDF/X-1a:2001 file: DeviceCMYK via an ICC profile, embedded GTS_PDFX OutputIntent, PDF 1.3, and MediaBox/TrimBox/BleedBox from the document bleed. `outline_text` converts every glyph to a vector path (zero font dependencies); `marks` renders trim + registration marks.
-
-PER-ARTBOARD / MULTI-PAGE: set `all`, `range`, or `artboards` to emit one page per artboard, each clipped to its rectangle + bleed with its own page boxes and marks — a single multi-page PDF by default, or one file per artboard with `separate_files: true` (needs a `path` template). This is the native card-batch path; without any selector the whole canvas is one page. Note: documents that use layer opacity/blend still emit transparency (not yet flattened for strict X-1a).
+MVP scope: filled/stroked vector paths with solid colours, node/group transforms and nesting. Gradient fills are approximated by their first stop colour; text, clipping, per-node opacity, blend modes and multi-page artboards are not yet emitted.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `all` | boolean | no | Export every artboard, one page each (overrides range/artboards). |
-| `artboards` | array<string> | no | Per-artboard export: specific artboards, each a UUID, an exact name, or a 1-based index string ("1", "2"). One clipped page per artboard, in this order. Get ids/names from list_artboards. |
 | `background` | string | no | Optional page background colour, e.g. "#ffffff". Omit for an unpainted (white-in-viewers) page. |
-| `color_mode` | enum (`rgb`, `cmyk`) | no | Export colour model. "rgb" (default) preserves on-screen colours. "cmyk" separates to DeviceCMYK via the ICC profile and emits a PDF/X-1a file. When omitted, the document's own color_mode is used. |
-| `marks` | boolean | no | Render trim and registration marks in the bleed/slug area. Default false. |
-| `outline_text` | boolean | no | Convert text nodes to vector outlines (zero font dependencies). Default false. |
-| `path` | string | no | Also write the exported PDF to this filesystem path. The base64 payload is still returned. |
-| `profile` | string | no | Path to a CMYK ICC profile for colour conversion and the OutputIntent (defaults to the bundled Coated FOGRA39 when color_mode is cmyk). |
-| `range` | array<integer> | no | Export a 1-based inclusive artboard index range [start, end], one page each. |
-| `separate_files` | boolean | no | With a multi-artboard selection, write one file PER artboard instead of a single multi-page PDF. Requires `path` with a {name} or {index} placeholder (or a filename, before whose extension -{index} is inserted). |
 
 ## `export_raster`
 
-Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF). Returns the image data as a base64-encoded string, OR — when `path` is given — writes the image to disk and returns only a small result (path + dimensions), keeping full-resolution PNGs off the socket.
+Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF) and return the image data as a base64-encoded string.
 
 PNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.
 
@@ -1825,7 +1773,6 @@ Optionally specify width/height to resize the output. If omitted, the capture us
 | --- | --- | --- | --- |
 | `format` | enum (`png`, `jpeg`, `webp`, `gif`, `tiff`) | no | Output format (default: png) |
 | `height` | integer | no | Output height in pixels. Omit to use current canvas height. |
-| `path` | string | no | Write the encoded image to this filesystem path (parent dirs created) and return a small result (path + width/height) instead of base64. Omit to return base64 inline. Use this for full-resolution PNGs, whose base64 is too large for the MCP socket. |
 | `quality` | integer | no | JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG. |
 | `width` | integer | no | Output width in pixels. Omit to use current canvas width. |
 
@@ -2082,18 +2029,6 @@ Return the CSS equivalent of a node's visual properties for developer handoff. S
 ## `get_document_bleed`
 
 Return the current document bleed and slug values in millimetres. Read-only.
-
-_No parameters._
-
-## `get_document_color_mode`
-
-Return the current document color mode ('rgb' or 'cmyk'). Read-only.
-
-_No parameters._
-
-## `get_document_dpi`
-
-Return the current document DPI and the physical page size (pt and inches) it implies for export. Read-only.
 
 _No parameters._
 
@@ -2512,12 +2447,6 @@ By default only unresolved annotations are returned. Pass `include_resolved: tru
 | `include_resolved` | boolean | no | When true, include annotations that have already been resolved. Default: false. |
 | `node_id` | string | no | Filter to annotations attached to this specific node UUID. Omit to list all annotations. |
 
-## `list_artboards`
-
-List every artboard (named crop/export rectangle) in the document, with id, name, position (x, y = top-left), size (width, height), and which one is active. Artboards live in the shared document coordinate space; a fresh document has one 'Artboard 1' at the origin. Read-only. Use before update_artboard / remove_artboard / set_active_artboard to get ids. Distinct from the document canvas size (get_document_info) and from artboard safe-area margins (get_artboard_margins).
-
-_No parameters._
-
 ## `list_audit_log`
 
 Return the most recent MCP tool calls recorded since the server started.
@@ -2843,16 +2772,6 @@ Duplicate each selected node and flip the copy across its bounding-box center, p
 | --- | --- | --- | --- |
 | `axis` | enum (`horizontal`, `vertical`) | no | "horizontal" flips left-right (default); "vertical" flips top-bottom. |
 | `node_ids` | array<string> | no | UUIDs or names of nodes to mirror. Uses current selection if empty. |
-
-## `move_artboard`
-
-Move an artboard together with all content/nodes inside it by (dx, dy), as one undoable step. Unlike update_artboard, which repositions only the frame, this tool also moves the artboard's contents. Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to move (from list_artboards). |
-| `dx` | number | yes | Horizontal movement in document units. |
-| `dy` | number | yes | Vertical movement in document units. |
 
 ## `move_clip`
 
@@ -3197,14 +3116,6 @@ Repoint an offline (or any) asset to a new file path. Supports undo.
 | `asset_id` | string | yes |  |
 | `new_path` | string | yes |  |
 
-## `remove_artboard`
-
-Delete an artboard by id. Refuses to remove the last remaining artboard (a document must keep at least one). If the removed artboard was active, the first remaining one becomes active. Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to remove (from list_artboards). |
-
 ## `remove_asset`
 
 Remove an asset from the media pool. Not in the original 10-mcp-tools.md §3.1 catalog table — added to the P2 scope explicitly (ops::remove_asset already existed). Supports undo.
@@ -3346,7 +3257,7 @@ Remove a sequence marker by id. Supports undo.
 
 ## `remove_proxy`
 
-Detach the proxy from each asset and delete its cached proxy file, reverting assets to original-only (05 §2.3). Assets then decode originals regardless of ProxyMode until regenerated (see generate_proxies).
+Detach the proxy from each asset. Generated (cache-owned) proxy files are deleted; Attached user-owned proxy files are never deleted (G-15A). Assets then decode originals regardless of ProxyMode until regenerated (see generate_proxies) or re-attached.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -3556,14 +3467,6 @@ Sample the fill and stroke color of the topmost visible node at a canvas coordin
 | `x` | number | yes | Canvas X coordinate |
 | `y` | number | yes | Canvas Y coordinate |
 
-## `save_document`
-
-Save the current in-memory document in Photonic's native .photon format, including its undo/history tree. Pass path to save-as and make it the current MCP document path; omit path to save to that current path. Parent directories are created automatically. Returns the absolute path and bytes written.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `path` | string | no | Optional destination path for save-as. Required when the document has no current path. |
-
 ## `save_export_preset`
 
 Create or overwrite a custom export preset (app-level config, 05 §3.6 — no document mutation, no undo step). Built-in preset names are refused (NotSupportedV1). The preset object is validated (alpha allow-list etc.) before persisting.
@@ -3695,14 +3598,6 @@ Select all nodes in the document whose visual attributes match those of the refe
 | `match_by` | string | no | Comma-separated match criteria: fill_color, stroke_color, stroke_width, kind, opacity, tags. Default: fill_color. |
 | `node_ids` | array<string> | no | Reference node UUIDs or names. Uses current selection if empty. |
 | `tolerance` | integer | no | Color match tolerance 0–255 per channel. Default: 5. |
-
-## `set_active_artboard`
-
-Make an artboard the active one. The active artboard is the default target for artboard-relative operations and export. Soft view state — not an undo step. Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to activate (from list_artboards). |
 
 ## `set_active_format`
 
@@ -3877,22 +3772,6 @@ Set the print bleed and/or slug margins for the document. Bleed is the extra art
 | --- | --- | --- | --- |
 | `bleed_mm` | number | no | Bleed in millimetres (all four sides). Typical values: 3.0 (EU) or 3.175 (US 0.125 in). Default: unchanged. |
 | `slug_mm` | number | no | Slug area in millimetres outside the bleed. Default: unchanged. |
-
-## `set_document_color_mode`
-
-Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photonic file and is used as the default color space when exporting PDF without an explicit color_mode override.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `mode` | enum (`rgb`, `cmyk`) | yes | Color mode. 'rgb' for screen/web; 'cmyk' for print production. |
-
-## `set_document_dpi`
-
-Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photonic file.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `dpi` | number | yes | Dots per inch. Common print value: 300. |
 
 ## `set_effect_param`
 
@@ -4503,19 +4382,6 @@ Remove a text node from its thread chain, severing both the previous and next fr
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `node_id` | string | yes | ID or name of the text node to remove from its thread chain. |
-
-## `update_artboard`
-
-Edit an existing artboard's name, position (x, y = top-left) and/or size (width, height). Only the fields you pass change; others are left as-is. Repositioning with this tool moves only the artboard frame, not its contents. One undoable step. Get the artboard_id from list_artboards.
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `artboard_id` | string | yes | UUID of the artboard to edit (from list_artboards). |
-| `height` | number | no | New height in document units (> 0). Default: unchanged. |
-| `name` | string | no | New name. Default: unchanged. |
-| `width` | number | no | New width in document units (> 0). Default: unchanged. |
-| `x` | number | no | New top-left X in document units. Default: unchanged. |
-| `y` | number | no | New top-left Y in document units. Default: unchanged. |
 
 ## `update_color_swatch`
 

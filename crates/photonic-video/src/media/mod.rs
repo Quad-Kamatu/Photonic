@@ -21,7 +21,8 @@ pub use keyframe_index::{
 pub use poster::{ensure_poster, poster_cache_dir, poster_cache_path, poster_ready, PosterError};
 pub use probe::{content_hash, probe_asset, probe_details, ProbeDetails, ProbeError};
 pub use proxy::{
-    generate_proxy, proxy_cache_dir, proxy_cache_path, resolve_decode_input, ProxyError,
+    generate_proxy, proxy_cache_dir, proxy_cache_path, resolve_decode_input,
+    should_auto_generate_proxy, validate_attach, AttachError, AttachValidation, ProxyError,
 };
 pub use thumbnails::{
     DecodeThumbnailSource, RgbaThumb, ThumbHandle, ThumbnailCache, ThumbnailConfig,

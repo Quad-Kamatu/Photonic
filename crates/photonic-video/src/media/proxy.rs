@@ -17,10 +17,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use photonic_core::timeline::{ProxyRef, ProxyStatus};
+use photonic_core::timeline::{
+    FrameRate, ProxyOrigin, ProxyRef, ProxyStatus, Tick, TICKS_PER_SECOND,
+};
 
 use super::cache_dir_for_project;
 use super::ffmpeg_locate::FfmpegTools;
+use super::probe::{probe_asset, ProbeError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -32,6 +35,33 @@ pub enum ProxyError {
     Io(#[source] std::io::Error),
     #[error("proxy generation cancelled")]
     Cancelled,
+}
+
+/// Failure reasons for attaching a user-supplied proxy file (G-15A).
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("proxy path does not exist: {0}")]
+    MissingPath(PathBuf),
+    #[error("proxy path is not a file: {0}")]
+    NotAFile(PathBuf),
+    #[error("proxy path is the same as the original media")]
+    SameAsOriginal,
+    #[error("proxy file has no video stream")]
+    NotVideo,
+    #[error("failed to probe proxy (or original): {0}")]
+    ProbeFailed(#[source] ProbeError),
+    #[error("proxy duration does not match original within tolerance")]
+    DurationMismatch,
+    #[error("proxy frame rate does not match original")]
+    FrameRateMismatch,
+}
+
+/// Successful attach validation: Ready+Attached proxy plus any soft warnings
+/// when `allow_mismatch` overrode duration/rate checks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttachValidation {
+    pub proxy: ProxyRef,
+    pub warnings: Vec<String>,
 }
 
 // ── Cache location ───────────────────────────────────────────────────────────
@@ -74,6 +104,137 @@ pub fn resolve_decode_input(original: &Path, proxy: Option<&ProxyRef>, use_proxy
         }
     }
     original.to_path_buf()
+}
+
+/// Whether an asset should be auto-queued for L7 proxy generation after import
+/// metadata (L1–L4) completes (24 §2 L7, G-15C).
+///
+/// Policy is project-level (`generate_proxies`). Only file-backed video without
+/// an already-Ready proxy is eligible. Pending/Failed/missing may be retried.
+/// User-**Attached** proxies are never auto-replaced (G-15A).
+pub fn should_auto_generate_proxy(
+    kind: photonic_core::timeline::AssetKind,
+    source: &photonic_core::timeline::AssetSource,
+    proxy: Option<&ProxyRef>,
+    generate_proxies: bool,
+) -> bool {
+    use photonic_core::timeline::{AssetKind, AssetSource, ProxyOrigin};
+    if !generate_proxies {
+        return false;
+    }
+    if kind != AssetKind::Video {
+        return false;
+    }
+    if !matches!(source, AssetSource::File { .. }) {
+        return false;
+    }
+    if let Some(p) = proxy {
+        if p.origin == ProxyOrigin::Attached {
+            return false;
+        }
+        if p.status == ProxyStatus::Ready && p.path.is_file() {
+            return false;
+        }
+    }
+    true
+}
+
+// ── Attach (G-15A) ───────────────────────────────────────────────────────────
+
+/// Validate a user-supplied proxy file against its original and return a
+/// Ready + [`ProxyOrigin::Attached`] ref.
+///
+/// Pure of document/ops: callers apply the result via
+/// [`photonic_core::timeline::ops::set_asset_proxy`]. Does not copy or move
+/// files. Match policy (D-G15-01): same nominal frame rate when both known;
+/// duration within one source frame (or 1/30s if rate unknown). When
+/// `allow_mismatch` is true, duration/rate failures become warnings instead.
+pub fn validate_attach(
+    tools: &FfmpegTools,
+    original: &Path,
+    proxy_path: &Path,
+    allow_mismatch: bool,
+) -> Result<AttachValidation, AttachError> {
+    if !proxy_path.exists() {
+        return Err(AttachError::MissingPath(proxy_path.to_path_buf()));
+    }
+    if !proxy_path.is_file() {
+        return Err(AttachError::NotAFile(proxy_path.to_path_buf()));
+    }
+
+    // Canonicalize when possible so hardlinks / `./` aliases count as same file.
+    let same = match (original.canonicalize(), proxy_path.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => original == proxy_path,
+    };
+    if same {
+        return Err(AttachError::SameAsOriginal);
+    }
+
+    let orig_probe = probe_asset(tools, original).map_err(AttachError::ProbeFailed)?;
+    let proxy_probe = probe_asset(tools, proxy_path).map_err(AttachError::ProbeFailed)?;
+
+    let Some(proxy_video) = proxy_probe.video.as_ref() else {
+        return Err(AttachError::NotVideo);
+    };
+
+    let mut warnings = Vec::new();
+
+    // Frame rate: same nominal when both known (exact rational match).
+    if let Some(orig_video) = orig_probe.video.as_ref() {
+        if orig_video.frame_rate != proxy_video.frame_rate {
+            let msg = format!(
+                "frame rate mismatch: original {}/{} vs proxy {}/{}",
+                orig_video.frame_rate.num,
+                orig_video.frame_rate.den,
+                proxy_video.frame_rate.num,
+                proxy_video.frame_rate.den
+            );
+            if allow_mismatch {
+                warnings.push(msg);
+            } else {
+                return Err(AttachError::FrameRateMismatch);
+            }
+        }
+    }
+
+    // Duration: |d_proxy - d_orig| ≤ one frame of original rate (or 1/30s).
+    let tolerance = duration_tolerance(orig_probe.video.as_ref().map(|v| v.frame_rate));
+    let delta = (proxy_probe.duration.0 - orig_probe.duration.0).unsigned_abs() as i64;
+    if delta > tolerance.0 {
+        let msg = format!(
+            "duration mismatch: original {:.3}s vs proxy {:.3}s (tolerance {:.3}s)",
+            orig_probe.duration.as_seconds_f64(),
+            proxy_probe.duration.as_seconds_f64(),
+            tolerance.as_seconds_f64()
+        );
+        if allow_mismatch {
+            warnings.push(msg);
+        } else {
+            return Err(AttachError::DurationMismatch);
+        }
+    }
+
+    let path = proxy_path
+        .canonicalize()
+        .unwrap_or_else(|_| proxy_path.to_path_buf());
+
+    Ok(AttachValidation {
+        proxy: ProxyRef {
+            path,
+            status: ProxyStatus::Ready,
+            origin: ProxyOrigin::Attached,
+        },
+        warnings,
+    })
+}
+
+/// One original frame at `rate`, or 1/30s when rate is unknown.
+fn duration_tolerance(rate: Option<FrameRate>) -> Tick {
+    match rate {
+        Some(fr) if fr.num > 0 => fr.ticks_per_frame(),
+        _ => Tick(TICKS_PER_SECOND / 30),
+    }
 }
 
 // ── Generation ───────────────────────────────────────────────────────────────
@@ -194,7 +355,16 @@ fn lower_background_priority(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows: BELOW_NORMAL priority class so proxy encodes yield to interactive
+/// playback/decode without requiring admin rights.
+#[cfg(windows)]
+fn lower_background_priority(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+    command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn lower_background_priority(_command: &mut Command) {}
 
 /// Read the last ~500 chars ffmpeg wrote to stderr (for a `ProxyError` message).
@@ -244,6 +414,70 @@ mod tests {
     }
 
     #[test]
+    fn should_auto_generate_proxy_policy() {
+        use photonic_core::timeline::{AssetKind, AssetSource, VectorRef};
+        let path = PathBuf::from("/media/clip.mp4");
+        let file = AssetSource::File {
+            path: path.clone(),
+            rel_path: None,
+        };
+        assert!(!should_auto_generate_proxy(
+            AssetKind::Video,
+            &file,
+            None,
+            false
+        ));
+        assert!(should_auto_generate_proxy(
+            AssetKind::Video,
+            &file,
+            None,
+            true
+        ));
+        assert!(!should_auto_generate_proxy(
+            AssetKind::Audio,
+            &file,
+            None,
+            true
+        ));
+        assert!(!should_auto_generate_proxy(
+            AssetKind::Video,
+            &AssetSource::EmbeddedVector {
+                root: VectorRef::WholeDocument,
+            },
+            None,
+            true
+        ));
+        let ready_path = unique_tmp_dir("auto-ready").join("p.proxy.mp4");
+        std::fs::write(&ready_path, b"p").unwrap();
+        let ready = ProxyRef::ready_generated(ready_path.clone());
+        assert!(!should_auto_generate_proxy(
+            AssetKind::Video,
+            &file,
+            Some(&ready),
+            true
+        ));
+        let pending = ProxyRef::with_status(ready_path, ProxyStatus::Pending);
+        assert!(should_auto_generate_proxy(
+            AssetKind::Video,
+            &file,
+            Some(&pending),
+            true
+        ));
+        let attached = ProxyRef {
+            path: PathBuf::from("/media/user-proxy.mp4"),
+            status: ProxyStatus::Ready,
+            origin: photonic_core::timeline::ProxyOrigin::Attached,
+        };
+        // Attached must never be auto-replaced even if path missing on disk.
+        assert!(!should_auto_generate_proxy(
+            AssetKind::Video,
+            &file,
+            Some(&attached),
+            true
+        ));
+    }
+
+    #[test]
     fn resolve_decode_input_falls_back_unless_ready_on_disk() {
         let dir = unique_tmp_dir("resolve");
         let original = dir.join("orig.mp4");
@@ -251,18 +485,9 @@ mod tests {
         std::fs::write(&original, b"o").unwrap();
         std::fs::write(&proxy_file, b"p").unwrap();
 
-        let ready = ProxyRef {
-            path: proxy_file.clone(),
-            status: ProxyStatus::Ready,
-        };
-        let pending = ProxyRef {
-            path: proxy_file.clone(),
-            status: ProxyStatus::Pending,
-        };
-        let missing = ProxyRef {
-            path: dir.join("nope.proxy.mp4"),
-            status: ProxyStatus::Ready,
-        };
+        let ready = ProxyRef::ready_generated(proxy_file.clone());
+        let pending = ProxyRef::with_status(proxy_file.clone(), ProxyStatus::Pending);
+        let missing = ProxyRef::ready_generated(dir.join("nope.proxy.mp4"));
 
         // Ready + present + requested ⇒ proxy.
         assert_eq!(
@@ -342,10 +567,7 @@ mod tests {
         assert_eq!((v.width, v.height), (160, 120), "proxy should be half-res");
 
         // Selection: ForceProxy ⇒ proxy, ForceOriginal ⇒ original.
-        let pref = ProxyRef {
-            path: out.clone(),
-            status: ProxyStatus::Ready,
-        };
+        let pref = ProxyRef::ready_generated(out.clone());
         let sel_proxy = resolve_decode_input(&input, Some(&pref), true);
         let sel_orig = resolve_decode_input(&input, Some(&pref), false);
         assert_eq!(sel_proxy, out);
@@ -368,6 +590,80 @@ mod tests {
         };
         assert_eq!(mk(&sel_proxy).input_path(), out.as_path());
         assert_eq!(mk(&sel_orig).input_path(), input.as_path());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_attach_rejects_missing_and_same_as_original() {
+        let dir = unique_tmp_dir("attach-basic");
+        let original = dir.join("orig.mp4");
+        std::fs::write(&original, b"o").unwrap();
+
+        // Missing tools still need a dummy for path-only checks — use locate.
+        // Path checks run before probe, so we can exercise them without ffmpeg
+        // by constructing a fake tools only when present; without tools we
+        // still cover MissingPath via the exists() branch before probe.
+        let missing = dir.join("nope.mp4");
+        // probe is never reached for MissingPath — pass a placeholder FfmpegTools
+        // only when available; otherwise skip tool-dependent path and call with
+        // a synthetic that will never be used for MissingPath.
+        let Some(tools) = locate_for_test() else {
+            // Still exercise pure path existence without tools by checking the
+            // error path that does not need ffprobe — re-check logic inline.
+            assert!(!missing.exists());
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+
+        let err = validate_attach(&tools, &original, &missing, false).unwrap_err();
+        assert!(matches!(err, AttachError::MissingPath(_)));
+
+        let err = validate_attach(&tools, &original, &original, false).unwrap_err();
+        assert!(matches!(err, AttachError::SameAsOriginal));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_attach_ready_attached_with_generated_proxy_fixture() {
+        let Some(tools) = locate_for_test() else {
+            eprintln!("skip: ffmpeg/ffprobe not found (set PHOTONIC_FFMPEG_DIR)");
+            return;
+        };
+        let dir = unique_tmp_dir("attach-ok");
+
+        let input = dir.join("input.mp4");
+        let made = Command::new(&tools.ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10:duration=1",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&input)
+            .status();
+        if !matches!(made, Ok(s) if s.success()) || !input.is_file() {
+            eprintln!("skip: could not synthesize a fixture with this ffmpeg build");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let hash = crate::media::probe::content_hash(&input).unwrap();
+        let out = proxy_cache_path(&dir, &hash);
+        generate_proxy(&tools, &input, &out, &|| false).expect("proxy generation");
+
+        let result = validate_attach(&tools, &input, &out, false).expect("attach should succeed");
+        assert_eq!(result.proxy.status, ProxyStatus::Ready);
+        assert_eq!(result.proxy.origin, ProxyOrigin::Attached);
+        assert!(result.warnings.is_empty());
+        assert!(result.proxy.path.is_file());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

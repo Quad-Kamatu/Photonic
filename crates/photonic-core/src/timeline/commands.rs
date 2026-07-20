@@ -399,6 +399,12 @@ pub enum TimelineCmd {
         old_hash: Option<String>,
         new_hash: Option<String>,
     },
+    /// Toggle project-wide "generate proxies on import" (G-15C / 24 L7).
+    /// Document policy only — does not start or cancel running jobs.
+    SetGenerateProxiesOnImport {
+        old: bool,
+        new: bool,
+    },
     AddSequence {
         sequence: Box<Sequence>,
     },
@@ -1562,6 +1568,13 @@ impl TimelineCmd {
             TimelineCmd::RelinkAsset { .. } => "Relink media".into(),
             TimelineCmd::SetAssetProxy { .. } => "Update media proxy".into(),
             TimelineCmd::SetAssetMeta { .. } => "Update media metadata".into(),
+            TimelineCmd::SetGenerateProxiesOnImport { new, .. } => {
+                if *new {
+                    "Enable generate proxies on import".into()
+                } else {
+                    "Disable generate proxies on import".into()
+                }
+            }
             TimelineCmd::AddSequence { sequence } => format!("Add sequence \"{}\"", sequence.name),
             TimelineCmd::RemoveSequence { .. } => "Remove sequence".into(),
             TimelineCmd::RenameSequence { new, .. } => format!("Rename sequence \"{new}\""),
@@ -1668,6 +1681,9 @@ impl TimelineCmd {
                     a.probe = new_probe.clone();
                     a.content_hash = new_hash.clone();
                 }
+            }
+            TimelineCmd::SetGenerateProxiesOnImport { new, .. } => {
+                p.settings.generate_proxies = *new;
             }
             TimelineCmd::AddSequence { sequence } => {
                 let id = sequence.id;
@@ -2038,6 +2054,12 @@ impl TimelineCmd {
                 old_hash: new_hash.clone(),
                 new_hash: old_hash.clone(),
             },
+            TimelineCmd::SetGenerateProxiesOnImport { old, new } => {
+                TimelineCmd::SetGenerateProxiesOnImport {
+                    old: *new,
+                    new: *old,
+                }
+            }
             TimelineCmd::AddSequence { sequence } => TimelineCmd::RemoveSequence {
                 sequence: sequence.clone(),
                 order_index: 0,

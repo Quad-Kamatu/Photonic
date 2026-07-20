@@ -152,19 +152,30 @@ Checked: no egui-specific test-automation infra exists (the one GUI test today, 
 
 ### 4.1 Preview & media load budgets (24-preview-media-load §6)
 
-Owned by [24-preview-media-load.md](24-preview-media-load.md). Headless harness: `crates/photonic-video/tests/preview_media_load.rs` (skips when ffmpeg/GPU absent).
+Owned by [24-preview-media-load.md](24-preview-media-load.md). Headless harnesses:
 
-| Metric | Budget | Measurement |
-|---|---|---|
-| L0 row register | ≤ 100 ms | Stub `MediaAsset::from_file` wall time (no I/O beyond path) |
-| L2 probe (typical short MP4) | ≤ 500 ms p95 product; test soft ≤ 5 s | `probe_asset` on `counter.mp4` |
-| L3 poster available | ≤ 1.0 s p95 product; test soft ≤ 10 s | `ensure_poster` + decode PNG |
-| L4 keyframe index | warm after import; test soft ≤ 15 s | `KeyframeIndex::load_or_build` |
-| Draft long-edge fit | 1920×1080 → 960×540 | pure unit (`fit_long_edge`) |
-| Dual-input audio (Windows path) | temp f32le file stages without FIFO | `stage_audio_tempfile` + `build_ffmpeg_args` second `-i` |
-| Preview cmd coalesce | latest Seek wins; quality/target pass through | `coalesce_commands` |
+- `crates/photonic-video/tests/preview_media_load.rs` — import ladder L0–L5 + L7 proxy, Draft fit, dual-input audio (skips when ffmpeg/GPU absent).
+- `crates/photonic-video/tests/seek_budgets.rs` — formal §6 **seek** + cut-ahead scan + soft warm-index budget (no full GPU play).
+- `photonic_video::playback::prefetch` units — `cut_ahead_targets`, `lru_eviction_victims`.
+- `photonic_gui::panels::media_pool::l0_register_n_stubs_before_any_probe` — multi-file L0.
+- `photonic_gui::app::source_marks` — G-10 marks→insert + Match Frame range.
+- `crates/photonic-gui/tests/video_ui_paths.rs` — real UI code paths: media pool import ladder drain, source marks→Insert, engine peek/play-wins/proxy, attach proxy, cut-ahead scan.
 
-Product p95 numbers remain the normative contract in 24 §6; the integration test asserts **functional readiness** and soft upper bounds suitable for shared CI.
+| Metric | Budget | Hardness | Measurement |
+|---|---|---|---|
+| L0 row register | ≤ 100 ms | **Hard** (tiny fixture) | Stub `MediaAsset::from_file` wall time (no I/O beyond path) |
+| L2 probe (typical short MP4) | ≤ 500 ms p95 product; test soft ≤ 5 s | Soft | `probe_asset` on `counter.mp4` |
+| L3 poster available | ≤ 1.0 s p95 product; test soft ≤ 10 s | Soft | `ensure_poster` + decode PNG |
+| L4 keyframe index build | warm after import; test soft ≤ 15 s | Soft | `KeyframeIndex::load_or_build` |
+| Warm keyframe lookup (CPU) | ≤ 1 ms p95 (100× random ticks) | **Hard** | `seek_budgets::warm_keyframe_index_lookup_budget` |
+| Exact Draft frame after seek | ≤ 150 ms p95 product (warm index + proxy) | Soft / integration-only | Not hard-gated in CI; full decode path remains soak |
+| Draft long-edge fit | 1920×1080 → 960×540 | **Hard** | pure unit (`fit_long_edge`) |
+| Draft quality → proxy flag | `Quality::PREVIEW.proxy == true`, FULL false | **Hard** | `seek_budgets::draft_quality_selects_proxy_flag_in_compile` |
+| Dual-input audio (Windows path) | temp f32le file stages without FIFO | **Hard** | `stage_audio_tempfile` + `build_ffmpeg_args` second `-i` |
+| Scrub seek coalesce | Drop intermediate seeks; latest-wins | **Hard** | `seek_budgets::scrub_seek_coalesce_latest_wins` (+ drag sim) |
+| Play start / ring hit | ring API + coalesce+Play surface | Smoke | `seek_budgets::ring_api_existence_for_play_start_path` (no GPU play) |
+
+**Hard vs soft:** hard asserts are pure-CPU or tiny-fixture bounds that must not flake on shared CI. Soft rows log/eprintln or use generous ceilings (5–15 s). Product p95 numbers remain the normative contract in 24 §6; full decode-to-frame Draft seek p95 and GPU play-start are still integration/soak, not default-PR hard gates.
 
 **Playback soak test** (SS-1 procedure): reference timeline = 1080p30, 3 concurrent video-track clips (using `color_bars.mp4` tiled/scaled — a real decode load, not a solid-color no-op), one grade node, one caption track with dense cues. Play the full fixture duration in a headless engine session, record `EngineStatus.dropped` (02 §1). **Pass threshold: zero dropped frames** on the reference dev machine (matches SS-1's literal wording — "plays at full frame rate without dropped frames"). Run as a `#[ignore]`-by-default long-running test (soak tests don't belong in the default fast `cargo test --workspace` path) invoked explicitly in a dedicated CI step or pre-release checklist — flag which; **recommendation: dedicated CI job, not blocking on PR, scheduled nightly on `main`** (mirrors the "advisory, not blocking" stance below).
 

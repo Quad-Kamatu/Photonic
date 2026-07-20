@@ -2578,6 +2578,20 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::remove_proxy(state, a).await,
             ))
         }
+        "attach_proxy" => {
+            let a: AttachProxyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            // Document mutation happens inside the handler (set_asset_proxy +
+            // MCP checkpoint); treat as readonly dispatch like generate/remove.
+            Ok(ToolOutput::readonly(
+                handlers::video::attach_proxy(state, a).await,
+            ))
+        }
+        "detach_proxy" => {
+            let a: DetachProxyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::detach_proxy(state, a).await,
+            ))
+        }
         "transcode_media" => {
             let a: TranscodeMediaArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::readonly(

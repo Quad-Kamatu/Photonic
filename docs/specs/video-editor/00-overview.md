@@ -82,6 +82,7 @@ D-01…D-10 in [SPEC.md](SPEC.md#decisions). Every doc cites decisions it depend
 | 22-dji-advanced-workflows.md | D-10–D-15 advanced/gated DJI workflows | 11, 21, ROADMAP |
 | 23-legal-open-source-implementation-routes.md | Accepted S1–S5 amendments, permissive/native routes, provenance gates, and evidence-based stop/go policy for G-20/D-3/D-8/D-12/D-13/D-14 | SPEC, ROADMAP, 20–22 |
 | 24-preview-media-load.md | Single context-driven monitor; import readiness ladder; Draft/Full preview tiers; time-to-paint and scrub budgets; thread ownership for load/preview | 01, 02, 04, 05, CAP-001/004/014 |
+| 25-performance.md | Linux/Windows interactive performance: ring depths, engine poll, release profiles, proxy priority, GUI repaint cadence | 02, 24 |
 
 ## 6. Phases
 

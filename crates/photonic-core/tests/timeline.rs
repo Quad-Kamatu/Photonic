@@ -150,10 +150,7 @@ fn asset_proxy_update_is_undoable() {
         .media
         .assets
         .insert(id, asset);
-    let proxy = ProxyRef {
-        path: "/tmp/proxy-source.proxy.mp4".into(),
-        status: ProxyStatus::Ready,
-    };
+    let proxy = ProxyRef::ready_attached("/tmp/proxy-source.proxy.mp4");
     let cmd = ops::set_asset_proxy(f.project(), id, Some(proxy.clone())).unwrap();
     assert_undo_roundtrip(&f.doc, &cmd);
 
@@ -165,6 +162,15 @@ fn asset_proxy_update_is_undoable() {
             .get(&id)
             .and_then(|asset| asset.proxy.clone()),
         Some(proxy)
+    );
+    assert_eq!(
+        f.project()
+            .media
+            .assets
+            .get(&id)
+            .and_then(|a| a.proxy.as_ref())
+            .map(|p| p.origin),
+        Some(photonic_core::timeline::ProxyOrigin::Attached)
     );
 }
 
@@ -1274,6 +1280,7 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::RelinkAsset { .. } => {}
         TimelineCmd::SetAssetProxy { .. } => {}
         TimelineCmd::SetAssetMeta { .. } => {}
+        TimelineCmd::SetGenerateProxiesOnImport { .. } => {}
         // Sequences / formats / tracks.
         TimelineCmd::AddSequence { .. } => {}
         TimelineCmd::RemoveSequence { .. } => {}

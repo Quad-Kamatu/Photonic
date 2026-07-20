@@ -300,6 +300,21 @@ impl EngineBridge {
         self.apply_preview_target();
     }
 
+    /// Seek within a source peek (source clock; G-10 / 24 §3.3).
+    pub(crate) fn seek_source(&mut self, asset: photonic_core::timeline::AssetId, time: Tick) {
+        self.preview_target = PreviewTarget::Asset {
+            asset,
+            source_time: time,
+        };
+        self.session.send(EngineCmd::SeekSource { asset, time });
+        self.apply_preview_target();
+    }
+
+    /// True when the single monitor is showing a source peek.
+    pub(crate) fn preview_is_asset(&self) -> bool {
+        matches!(self.preview_target, PreviewTarget::Asset { .. })
+    }
+
     /// Return the monitor to sequence program view.
     pub(crate) fn peek_sequence(&mut self, sequence: SequenceId) {
         self.preview_target = PreviewTarget::Sequence { sequence };

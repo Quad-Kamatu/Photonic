@@ -5794,13 +5794,37 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "remove_proxy",
-            "description": "Detach the proxy from each asset and delete its cached proxy file, reverting assets to original-only (05 §2.3). Assets then decode originals regardless of ProxyMode until regenerated (see generate_proxies).",
+            "description": "Detach the proxy from each asset. Generated (cache-owned) proxy files are deleted; Attached user-owned proxy files are never deleted (G-15A). Assets then decode originals regardless of ProxyMode until regenerated (see generate_proxies) or re-attached.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "asset_ids": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["asset_ids"]
+            }
+        },
+        {
+            "name": "attach_proxy",
+            "description": "Attach an existing user-owned proxy file to a file-backed video asset without re-encoding (G-15A). Validates path, video stream, duration (within one source frame) and nominal frame rate. Set allow_mismatch=true to accept mismatches as warnings. Never copies the file. Export still uses originals (CAP-014).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_id": { "type": "string" },
+                    "path": { "type": "string", "description": "Absolute path to the proxy media file." },
+                    "allow_mismatch": { "type": "boolean", "description": "If true, duration/frame-rate mismatches become warnings instead of errors." }
+                },
+                "required": ["asset_id", "path"]
+            }
+        },
+        {
+            "name": "detach_proxy",
+            "description": "Clear an asset's proxy reference without deleting the file on disk (G-15A). Safe for Attached user-owned proxies; for Generated cache files prefer remove_proxy if cache cleanup is desired.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_id": { "type": "string" }
+                },
+                "required": ["asset_id"]
             }
         },
         {

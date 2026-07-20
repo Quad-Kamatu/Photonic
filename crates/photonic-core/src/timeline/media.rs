@@ -180,11 +180,56 @@ pub struct ProbedColor {
     pub full_range: Option<bool>,
 }
 
+/// How a proxy file entered the pool (G-15A).
+///
+/// `Generated` is the serde default so projects written before origin existed
+/// load as engine-managed cache files. `Attached` marks user-owned files that
+/// must never be deleted on detach.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyOrigin {
+    #[default]
+    Generated,
+    Attached,
+}
+
 /// Engine-managed proxy media reference.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProxyRef {
     pub path: PathBuf,
     pub status: ProxyStatus,
+    /// Provenance; defaults to [`ProxyOrigin::Generated`] for old project JSON.
+    #[serde(default)]
+    pub origin: ProxyOrigin,
+}
+
+impl ProxyRef {
+    /// Ready proxy produced by the engine (cache-owned path).
+    pub fn ready_generated(path: impl Into<PathBuf>) -> Self {
+        ProxyRef {
+            path: path.into(),
+            status: ProxyStatus::Ready,
+            origin: ProxyOrigin::Generated,
+        }
+    }
+
+    /// Ready proxy linked from a user-supplied file (G-15A attach).
+    pub fn ready_attached(path: impl Into<PathBuf>) -> Self {
+        ProxyRef {
+            path: path.into(),
+            status: ProxyStatus::Ready,
+            origin: ProxyOrigin::Attached,
+        }
+    }
+
+    /// Pending/Failed intermediate for engine generation jobs.
+    pub fn with_status(path: impl Into<PathBuf>, status: ProxyStatus) -> Self {
+        ProxyRef {
+            path: path.into(),
+            status,
+            origin: ProxyOrigin::Generated,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -244,5 +289,24 @@ mod tests {
         assert!(j.contains("\"source\":\"file\""));
         let back: AssetSource = serde_json::from_str(&j).unwrap();
         assert_eq!(f, back);
+    }
+
+    /// G-15A: projects written before `origin` existed deserialize as Generated.
+    #[test]
+    fn proxy_ref_serde_defaults_origin_to_generated() {
+        let old = r#"{"path":"/cache/abc.proxy.mp4","status":"ready"}"#;
+        let pref: ProxyRef = serde_json::from_str(old).unwrap();
+        assert_eq!(pref.status, ProxyStatus::Ready);
+        assert_eq!(pref.origin, ProxyOrigin::Generated);
+        assert_eq!(pref.path, PathBuf::from("/cache/abc.proxy.mp4"));
+    }
+
+    #[test]
+    fn proxy_ref_attached_roundtrips() {
+        let pref = ProxyRef::ready_attached("/user/cam_proxy.mp4");
+        let j = serde_json::to_string(&pref).unwrap();
+        let back: ProxyRef = serde_json::from_str(&j).unwrap();
+        assert_eq!(pref, back);
+        assert_eq!(back.origin, ProxyOrigin::Attached);
     }
 }

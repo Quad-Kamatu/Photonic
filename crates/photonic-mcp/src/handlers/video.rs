@@ -3315,6 +3315,17 @@ pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> To
                 Some(a) if a.kind != AssetKind::Video => {
                     skipped.push(json!({ "asset_id": id, "reason": "not a video asset" }))
                 }
+                // G-15A: never replace a user-attached proxy via generate_proxies.
+                Some(a)
+                    if a.proxy.as_ref().is_some_and(|p| {
+                        p.origin == photonic_core::timeline::ProxyOrigin::Attached
+                    }) =>
+                {
+                    skipped.push(json!({
+                        "asset_id": id,
+                        "reason": "attached proxy present (detach first)"
+                    }))
+                }
                 Some(a) => match &a.source {
                     photonic_core::timeline::AssetSource::File { path, .. } => {
                         work.push((*id, path.clone(), a.content_hash.clone()))
@@ -3387,10 +3398,7 @@ pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> To
                     &document,
                     &history,
                     asset_id,
-                    Some(ProxyRef {
-                        path: out.clone(),
-                        status: ProxyStatus::Ready,
-                    }),
+                    Some(ProxyRef::ready_generated(out.clone())),
                     "generate_proxies",
                 );
                 results.push(json!({
@@ -3405,10 +3413,7 @@ pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> To
                 &document,
                 &history,
                 asset_id,
-                Some(ProxyRef {
-                    path: out.clone(),
-                    status: ProxyStatus::Pending,
-                }),
+                Some(ProxyRef::with_status(out.clone(), ProxyStatus::Pending)),
                 "generate_proxies",
             );
             match video_proxy::generate_proxy(&tools, &input, &out, &cancel_fn) {
@@ -3417,10 +3422,7 @@ pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> To
                         &document,
                         &history,
                         asset_id,
-                        Some(ProxyRef {
-                            path: out.clone(),
-                            status: ProxyStatus::Ready,
-                        }),
+                        Some(ProxyRef::ready_generated(out.clone())),
                         "generate_proxies",
                     );
                     results.push(json!({
@@ -3432,10 +3434,7 @@ pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> To
                         &document,
                         &history,
                         asset_id,
-                        Some(ProxyRef {
-                            path: out.clone(),
-                            status: ProxyStatus::Failed,
-                        }),
+                        Some(ProxyRef::with_status(out.clone(), ProxyStatus::Failed)),
                         "generate_proxies",
                     );
                     set_job_status(&jobs, job_id, JobStatus::Cancelled);
@@ -3446,10 +3445,7 @@ pub async fn generate_proxies(state: &AppState, args: GenerateProxiesArgs) -> To
                         &document,
                         &history,
                         asset_id,
-                        Some(ProxyRef {
-                            path: out.clone(),
-                            status: ProxyStatus::Failed,
-                        }),
+                        Some(ProxyRef::with_status(out.clone(), ProxyStatus::Failed)),
                         "generate_proxies",
                     );
                     results.push(json!({
@@ -3478,8 +3474,9 @@ pub async fn remove_proxy(state: &AppState, args: RemoveProxyArgs) -> ToolResult
     if args.asset_ids.is_empty() {
         return ToolResult::error("no asset_ids given");
     }
-    // Detach the ProxyRef from each asset under the doc lock, collecting the
-    // file paths to delete afterward.
+    // Detach the ProxyRef from each asset under the doc lock. Only Generated
+    // (cache-owned) paths are collected for delete — Attached user files are
+    // never deleted on detach (G-15A).
     let mut assets: Vec<serde_json::Value> = Vec::new();
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut mutated = false;
@@ -3493,8 +3490,19 @@ pub async fn remove_proxy(state: &AppState, args: RemoveProxyArgs) -> ToolResult
                 Some(a) => match a.proxy.take() {
                     Some(p) => {
                         mutated = true;
-                        files.push(p.path.clone());
-                        assets.push(json!({ "asset_id": id, "removed": true, "path": p.path }));
+                        let origin = match p.origin {
+                            photonic_core::timeline::ProxyOrigin::Generated => "generated",
+                            photonic_core::timeline::ProxyOrigin::Attached => "attached",
+                        };
+                        if p.origin == photonic_core::timeline::ProxyOrigin::Generated {
+                            files.push(p.path.clone());
+                        }
+                        assets.push(json!({
+                            "asset_id": id,
+                            "removed": true,
+                            "path": p.path,
+                            "origin": origin,
+                        }));
                     }
                     None => assets
                         .push(json!({ "asset_id": id, "removed": false, "reason": "no proxy" })),
@@ -3505,8 +3513,7 @@ pub async fn remove_proxy(state: &AppState, args: RemoveProxyArgs) -> ToolResult
             }
         }
     }
-    // Best-effort delete the cache files (a missing file is fine — proxies are
-    // rebuildable and may be shared by content hash).
+    // Best-effort delete only cache-owned Generated files.
     let mut files_deleted = 0usize;
     for f in &files {
         if std::fs::remove_file(f).is_ok() {
@@ -3517,12 +3524,130 @@ pub async fn remove_proxy(state: &AppState, args: RemoveProxyArgs) -> ToolResult
         let mut hist = state.history.lock().await;
         hist.schedule_mcp_checkpoint("remove_proxy");
     }
+    let detached = assets
+        .iter()
+        .filter(|a| a.get("removed") == Some(&json!(true)))
+        .count();
     ToolResult::text(format!(
-        "detached {} proxy ref(s), deleted {} file(s)",
-        files.len(),
-        files_deleted
+        "detached {detached} proxy ref(s), deleted {files_deleted} file(s)"
     ))
     .with_data(json!({ "assets": assets, "files_deleted": files_deleted }))
+}
+
+/// Attach a user-supplied proxy file to a video asset (G-15A). Never copies
+/// the file; validation via ffprobe. Detach never deletes attached files.
+pub async fn attach_proxy(state: &AppState, args: AttachProxyArgs) -> ToolResult {
+    tracing::debug!("tool: attach_proxy asset={}", args.asset_id);
+    let tools = match ffmpeg_locate::locate() {
+        Ok(t) => t,
+        Err(e) => {
+            return err_code(
+                "FfmpegUnavailable",
+                format!("ffmpeg not found ({e}) — set PHOTONIC_FFMPEG_DIR or install ffmpeg"),
+            )
+        }
+    };
+    let allow_mismatch = args.allow_mismatch.unwrap_or(false);
+    let proxy_path = std::path::PathBuf::from(&args.path);
+
+    let original = {
+        let doc = state.document.lock().await;
+        let Some(project) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        let Some(asset) = project.media.assets.get(&args.asset_id) else {
+            return err_code("NotFound", format!("asset {} not found", args.asset_id));
+        };
+        if asset.kind != AssetKind::Video {
+            return err_code("NotVideo", "attach_proxy requires a video asset");
+        }
+        match &asset.source {
+            photonic_core::timeline::AssetSource::File { path, .. } => path.clone(),
+            _ => return err_code("NotFileBacked", "attach_proxy requires a file-backed asset"),
+        }
+    };
+
+    let validation =
+        match video_proxy::validate_attach(&tools, &original, &proxy_path, allow_mismatch) {
+            Ok(v) => v,
+            Err(e) => {
+                return err_code(
+                    match &e {
+                        video_proxy::AttachError::MissingPath(_) => "MissingPath",
+                        video_proxy::AttachError::NotAFile(_) => "NotAFile",
+                        video_proxy::AttachError::SameAsOriginal => "SameAsOriginal",
+                        video_proxy::AttachError::NotVideo => "NotVideo",
+                        video_proxy::AttachError::ProbeFailed(_) => "ProbeFailed",
+                        video_proxy::AttachError::DurationMismatch => "DurationMismatch",
+                        video_proxy::AttachError::FrameRateMismatch => "FrameRateMismatch",
+                    },
+                    e.to_string(),
+                )
+            }
+        };
+
+    {
+        let mut doc = state.document.lock().await;
+        let Some(asset) = doc
+            .timeline
+            .as_mut()
+            .and_then(|p| p.media.assets.get_mut(&args.asset_id))
+        else {
+            return err_code("NotFound", format!("asset {} not found", args.asset_id));
+        };
+        asset.proxy = Some(validation.proxy.clone());
+    }
+    {
+        let mut hist = state.history.lock().await;
+        hist.schedule_mcp_checkpoint("attach_proxy".to_string());
+    }
+    ToolResult::text("proxy attached").with_data(json!({
+        "asset_id": args.asset_id,
+        "path": validation.proxy.path,
+        "origin": "attached",
+        "warnings": validation.warnings,
+    }))
+}
+
+/// Detach proxy without deleting user-owned Attached files (G-15A).
+pub async fn detach_proxy(state: &AppState, args: DetachProxyArgs) -> ToolResult {
+    tracing::debug!("tool: detach_proxy asset={}", args.asset_id);
+    let (had, origin, path) = {
+        let mut doc = state.document.lock().await;
+        let Some(project) = doc.timeline.as_mut() else {
+            return ToolResult::error("no timeline project");
+        };
+        match project.media.assets.get_mut(&args.asset_id) {
+            Some(a) => match a.proxy.take() {
+                Some(p) => (
+                    true,
+                    match p.origin {
+                        photonic_core::timeline::ProxyOrigin::Generated => "generated",
+                        photonic_core::timeline::ProxyOrigin::Attached => "attached",
+                    },
+                    Some(p.path),
+                ),
+                None => (false, "none", None),
+            },
+            None => return err_code("NotFound", format!("asset {} not found", args.asset_id)),
+        }
+    };
+    if had {
+        let mut hist = state.history.lock().await;
+        hist.schedule_mcp_checkpoint("detach_proxy");
+    }
+    ToolResult::text(if had {
+        "proxy detached (file not deleted)"
+    } else {
+        "no proxy to detach"
+    })
+    .with_data(json!({
+        "asset_id": args.asset_id,
+        "detached": had,
+        "origin": origin,
+        "path": path,
+        "file_deleted": false,
+    }))
 }
 
 impl TranscodePresetArg {
@@ -8204,10 +8329,9 @@ mod tests {
                 .values_mut()
                 .next()
                 .unwrap();
-            a.proxy = Some(photonic_core::timeline::ProxyRef {
-                path: proxy_file.clone(),
-                status: photonic_core::timeline::ProxyStatus::Ready,
-            });
+            a.proxy = Some(photonic_core::timeline::ProxyRef::ready_generated(
+                proxy_file.clone(),
+            ));
         }
 
         // proxy_status reflects reality: ready.

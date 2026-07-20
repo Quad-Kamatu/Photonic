@@ -89,10 +89,7 @@ fn play_and_measure(
     let mut project = TimelineProject::new();
     let mut asset = MediaAsset::from_file(AssetKind::Video, clip.to_path_buf());
     if let Some(p) = proxy {
-        asset.proxy = Some(ProxyRef {
-            path: p.to_path_buf(),
-            status: ProxyStatus::Ready,
-        });
+        asset.proxy = Some(ProxyRef::ready_generated(p.to_path_buf()));
     }
     let asset_id = project.media.insert(asset);
 

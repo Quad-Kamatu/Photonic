@@ -42,7 +42,7 @@ Status reflects read-only inspection on 2026-07-10. Status vocabulary is `done`,
 | G-9 | partial | `panels-video` | `clip_inspector.rs` hosts `keyframe_editor::draw_embedded`; floating `draw_window` retained | Shared-state regression tests; layout/a11y polish |
 | G-13 | open | `timeline-panel` | `TimelineTool` enum and session field in `app/mod.rs` only | Toolbar, drag bias, cursor hints, per-tab state |
 | G-14 | partial | `timeline-panel` | Per-track height wrench menu in `timeline/tracks.rs` | Select-forward/all-tracks; thumbnail/waveform/name display options |
-| G-15 | partial | `photonic-video-engine` | `ProjectVideoSettings.generate_proxies`; proxy generation; `ProxyMode`; playback-resolution proxy mapping | Attach proxies, dedicated toggle, ingest UI/automation, attached-file ownership |
+| G-15 | partial | `photonic-video-engine` | Attach (G-15A); `ProxyMode` toggle; on-import L7 + `generate_proxies` checkbox | Full ingest-settings modal, size thresholds, batch attach-by-name |
 | G-21 | partial | `photonic-mcp` | MCP tools for G-1 add-edit/close-gap, G-3 match-frame, G-5 replace, G-7 adjustment, G-11 speed, G-12 text | Missing GUI-verb parity; duplicated GUI/MCP edit planning; acceptance-story coverage |
 
 G-6 target routing is a dependency for G-1/G-2/G-5. Preserve explicit video/audio targets, enabled/locked validation, and deterministic fallback behavior.
@@ -341,7 +341,7 @@ All G-15 work reuses `02-engine.md` §8 cached/cold seek budgets and SPEC SS-1/S
 
 | Concern | Contract |
 |---|---|
-| Status/scope | `open`. Link user-supplied proxy without transcoding. |
+| Status/scope | `partial` (lean MVP landed). Link user-supplied proxy without transcoding; batch attach-by-name / full comparison UI still open. |
 | User outcome | Reuse camera/editor proxies by file match. |
 | Dependencies/ownership | Media Pool, ffprobe, proxy resolver, timeline media model. |
 | State/model | Extend `ProxyRef` with `origin: Generated | Attached`, `fingerprint`, and probed duration/frame-rate/resolution. Serde defaults preserve old refs as `Generated`. |
@@ -375,7 +375,7 @@ All G-15 work reuses `02-engine.md` §8 cached/cold seek budgets and SPEC SS-1/S
 
 | Concern | Contract |
 |---|---|
-| Status/scope | `partial`. `ProjectVideoSettings.generate_proxies` exists but is unwired. Build UI and import-job orchestration. |
+| Status/scope | `partial`. `ProjectVideoSettings.generate_proxies` is undoable + Media Pool “On import” checkbox; L1–L4 completion auto-queues L7 for eligible video. Full ingest-settings modal, size threshold, and MCP still open. |
 | User outcome | Generate proxies automatically on import under explicit project policy. |
 | State/model | Replace/extend boolean with additive `ProxyIngestSettings { enabled, profile, size_threshold, codec_policy }`; old `true` migrates to enabled default profile. |
 | Operation | Import commits asset stub first, probes asynchronously, then queues proxy only when policy matches. Proxy completion commits one asset update. Import remains usable while job runs. |

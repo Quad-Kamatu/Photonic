@@ -39,12 +39,12 @@ Status semantics:
 | G-7 | partial | GUI create command/menu; paint clarity; goldens | [19 §9](19-editing-velocity-shot-management.md#9-g-7--adjustment-layer-clips) |
 | G-8 | partial | Accessibility/extreme-range/per-tab acceptance | [19 §10](19-editing-velocity-shot-management.md#10-g-8--timeline-navigator) |
 | G-9 | partial | Shared-state/a11y regression closure | [19 §11](19-editing-velocity-shot-management.md#11-g-9--effect-controls-unification) |
-| G-10 | open | Source marks + single-surface source peek (no dual-pane); see [24](24-preview-media-load.md) D-PM-1–3 | [20 §4](20-pro-workflows.md#4-g-10--source-monitor-and-true-source-marks), [24](24-preview-media-load.md) |
+| G-10 | partial | Single-surface marks/peek/Match Frame/Insert from marks shipped + unit tests; dual-pane + source-audio clock still deferred | [20 §4](20-pro-workflows.md#4-g-10--source-monitor-and-true-source-marks), [24](24-preview-media-load.md) |
 | G-11 | partial | Rubber-band UI; audio mapping; goldens | [20 §5](20-pro-workflows.md#5-g-11--speed-and-time-remap-ramps) |
 | G-12 | partial | Pin-To, protected time, vector templates | [20 §6](20-pro-workflows.md#6-g-12--title-text-and-responsive-graphics-clips) |
 | G-13 | open | Modal tool palette and cursors | [19 §12](19-editing-velocity-shot-management.md#12-g-13--modal-timeline-tool-palette-and-cursor-hints) |
 | G-14 | partial | Select-forward and display options | [19 §13](19-editing-velocity-shot-management.md#13-g-14--track-select-forward-and-display-menu) |
-| G-15 | partial | Attach proxies, toggle, ingest automation | [19 §14](19-editing-velocity-shot-management.md#14-g-15--proxy-workflow-polish) |
+| G-15 | partial | G-15A attach + detach (GUI/MCP); G-15B toggle; G-15C on-import L7 + policy checkbox; full ingest modal/thresholds still open | [19 §14](19-editing-velocity-shot-management.md#14-g-15--proxy-workflow-polish), [24](24-preview-media-load.md) |
 | G-16 | partial | Nest/open/breadcrumb GUI; MCP | [20 §7](20-pro-workflows.md#7-g-16--nested-sequence-ui) |
 | G-17 | open | Multiple-open sequence tabs | [20 §8](20-pro-workflows.md#8-g-17--sequence-tabs-and-multiple-open-sequences) |
 | G-18 | open | Transcript projection and ripple edits | [20 §9](20-pro-workflows.md#9-g-18--text-based-transcript-editing) |

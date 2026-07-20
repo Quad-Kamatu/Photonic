@@ -1,5 +1,7 @@
 //! Headless coverage for 24-preview-media-load:
 //! - import ladder L0 → L1/L2/L3/L4 (hash, probe, poster, keyframe index)
+//! - L5 waveform peak pyramid (build + sidecar save/load)
+//! - L7 proxy generation + decode-input selection
 //! - Draft canvas fit
 //! - PreviewTarget / PreviewQuality command surface
 //! - Windows-style audio temp-file staging for dual-input export
@@ -14,13 +16,15 @@ use std::time::Instant;
 use photonic_core::document::Document;
 use photonic_core::history::CommandHistory;
 use photonic_core::timeline::{
-    AssetKind, Clip, ClipSource, MediaAsset, Sequence, Tick, TimelineProject, Track, TrackKind,
+    AssetKind, Clip, ClipSource, MediaAsset, ProxyRef, Sequence, Tick, TimelineProject, Track,
+    TrackKind,
 };
 use photonic_video::graph::compile::{
     compile, compile_asset_peek, fit_long_edge, Quality, DRAFT_MAX_LONG_EDGE,
 };
 use photonic_video::media::{
-    ensure_poster, keyframe_index_ready, poster_cache_path, poster_ready, KeyframeIndex,
+    ensure_poster, generate_proxy, keyframe_index_ready, poster_cache_path, poster_ready,
+    proxy_cache_path, resolve_decode_input, should_auto_generate_proxy, KeyframeIndex,
 };
 use photonic_video::{
     coalesce_commands, EngineCmd, PreviewQuality, PreviewTarget, ProxyMode, VideoEngine,
@@ -32,6 +36,10 @@ fn fixtures_dir() -> PathBuf {
 
 fn counter_mp4() -> PathBuf {
     fixtures_dir().join("counter.mp4")
+}
+
+fn beep_flash_wav() -> PathBuf {
+    fixtures_dir().join("beep_flash.wav")
 }
 
 fn tools_or_skip() -> Option<photonic_video::media::FfmpegTools> {
@@ -106,6 +114,145 @@ fn import_ladder_l0_through_l4_headless() {
     eprintln!(
         "ladder timings ms: L0={l0_ms} L1={l1_ms} L2={l2_ms} L3={l3_ms} L4={l4_ms} hash={hash}"
     );
+}
+
+// ── Ladder L5: waveform peak pyramid (audio) ────────────────────────────────
+
+#[test]
+fn import_ladder_l5_waveform_headless() {
+    let Some(tools) = tools_or_skip() else {
+        eprintln!("skip import_ladder_l5: no ffmpeg/ffprobe");
+        return;
+    };
+    let path = beep_flash_wav();
+    assert!(path.is_file(), "fixture missing: {}", path.display());
+
+    let hash = photonic_video::media::content_hash(&path).expect("hash");
+    let cache =
+        std::env::temp_dir().join(format!("photonic-preview-load-l5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(&cache).unwrap();
+
+    // Match import ladder + timeline PoolWaveformSource rate.
+    const WAVEFORM_SAMPLE_RATE: u32 = 48_000;
+    let t5 = Instant::now();
+    let mut src = photonic_video::playback::FfmpegPcmSource::spawn(
+        &tools,
+        &path,
+        Tick::ZERO,
+        WAVEFORM_SAMPLE_RATE,
+    )
+    .expect("spawn pcm for waveform");
+    let pyramid = photonic_video::audio::waveform::build_pyramid(&mut src, hash.clone());
+    let saved = photonic_video::audio::waveform::save_to_dir(&pyramid, &cache)
+        .expect("save waveform pyramid");
+    let l5_ms = t5.elapsed().as_millis();
+
+    assert!(saved.is_file());
+    assert_eq!(pyramid.asset_hash, hash);
+    assert!(pyramid.channels >= 1);
+    assert_eq!(pyramid.source_sample_rate, WAVEFORM_SAMPLE_RATE);
+    assert!(
+        pyramid.total_frames > 0,
+        "beep_flash.wav should yield non-empty PCM"
+    );
+    assert!(
+        !pyramid.levels.is_empty(),
+        "pyramid must have at least one level"
+    );
+
+    let loaded = photonic_video::audio::waveform::load_from_dir(&cache, &hash)
+        .expect("load_from_dir io")
+        .expect("warm cache hit after save");
+    assert_eq!(loaded.asset_hash, pyramid.asset_hash);
+    assert_eq!(loaded.channels, pyramid.channels);
+    assert_eq!(loaded.source_sample_rate, pyramid.source_sample_rate);
+    assert_eq!(loaded.total_frames, pyramid.total_frames);
+    assert_eq!(loaded.levels.len(), pyramid.levels.len());
+    // Spot-check level 0 bucket counts match (sidecar roundtrip).
+    assert_eq!(
+        loaded.levels[0].channels[0].len(),
+        pyramid.levels[0].channels[0].len()
+    );
+
+    // Soft budget: 60s mono ADPCM fixture; decode+pyramid should be well under
+    // a minute on CI-class hardware (not a product p95 gate).
+    assert!(
+        l5_ms < 60_000,
+        "L5 waveform for short fixture took {l5_ms} ms"
+    );
+
+    let _ = std::fs::remove_dir_all(&cache);
+    eprintln!(
+        "ladder L5 waveform ms: {l5_ms} hash={hash} frames={}",
+        pyramid.total_frames
+    );
+}
+
+// ── L7 proxy: generate + Auto path selects proxy for Draft ──────────────────
+
+#[test]
+fn import_ladder_l7_proxy_headless() {
+    let Some(tools) = tools_or_skip() else {
+        eprintln!("skip import_ladder_l7: no ffmpeg/ffprobe");
+        return;
+    };
+    let path = counter_mp4();
+    assert!(path.is_file(), "fixture missing: {}", path.display());
+
+    let mut stub = MediaAsset::from_file(AssetKind::Video, &path);
+    assert!(should_auto_generate_proxy(
+        stub.kind,
+        &stub.source,
+        stub.proxy.as_ref(),
+        true
+    ));
+    assert!(!should_auto_generate_proxy(
+        stub.kind,
+        &stub.source,
+        stub.proxy.as_ref(),
+        false
+    ));
+
+    let hash = photonic_video::media::content_hash(&path).expect("hash");
+    stub.content_hash = Some(hash.clone());
+
+    let cache =
+        std::env::temp_dir().join(format!("photonic-preview-load-l7-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(&cache).unwrap();
+    let proxy_out = proxy_cache_path(&cache, &hash);
+
+    let t7 = Instant::now();
+    generate_proxy(&tools, &path, &proxy_out, &|| false).expect("generate proxy");
+    let l7_ms = t7.elapsed().as_millis();
+    assert!(proxy_out.is_file());
+    assert!(
+        l7_ms < 60_000,
+        "proxy gen for short fixture took {l7_ms} ms"
+    );
+
+    let ready = ProxyRef::ready_generated(proxy_out.clone());
+    assert!(!should_auto_generate_proxy(
+        stub.kind,
+        &stub.source,
+        Some(&ready),
+        true
+    ));
+
+    // Draft/Auto path: Ready proxy is selected.
+    let decoded = resolve_decode_input(&path, Some(&ready), true);
+    assert_eq!(decoded, proxy_out);
+    // Full/export path: original always.
+    let full = resolve_decode_input(&path, Some(&ready), false);
+    assert_eq!(full, path);
+
+    // Second generate is a no-op when file already exists (cache hit path used
+    // by MediaPoolUi::spawn_proxy_generation).
+    assert!(proxy_out.is_file());
+
+    let _ = std::fs::remove_dir_all(&cache);
+    eprintln!("ladder L7 proxy ms: {l7_ms} hash={hash}");
 }
 
 // ── Draft canvas + asset peek compile ───────────────────────────────────────

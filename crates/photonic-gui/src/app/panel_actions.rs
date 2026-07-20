@@ -141,6 +141,115 @@ impl PhotonicApp {
                     self.media_pool_ui
                         .spawn_proxy_generation(assets, self.current_file.clone());
                 }
+                PanelAction::MediaSetGenerateProxiesOnImport { enabled } => {
+                    use photonic_core::timeline::ops;
+                    if let Some(project) = doc.timeline.as_ref() {
+                        let cmd = ops::set_generate_proxies_on_import(project, enabled);
+                        history.execute_discrete(Command::Timeline(cmd), doc);
+                        doc_modified = true;
+                    }
+                }
+                PanelAction::MediaAttachProxy { asset } => {
+                    // G-15A: file picker → validate (ffprobe) → optional mismatch
+                    // override → undoable set_asset_proxy with Attached origin.
+                    use photonic_core::timeline::{ops, AssetSource};
+                    let Some(project) = doc.timeline.as_ref() else {
+                        continue;
+                    };
+                    let Some(media) = project.media.assets.get(&asset) else {
+                        continue;
+                    };
+                    let AssetSource::File { path: original, .. } = &media.source else {
+                        continue;
+                    };
+                    let original = original.clone();
+                    let picked = rfd::FileDialog::new()
+                        .set_title("Attach Proxy")
+                        .add_filter("Video", &["mp4", "mov", "mxf", "mkv", "m4v", "avi", "webm"])
+                        .pick_file();
+                    let Some(proxy_path) = picked else {
+                        continue;
+                    };
+                    let tools = match photonic_video::media::ffmpeg_locate::locate() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!("attach proxy: ffmpeg unavailable: {e}");
+                            continue;
+                        }
+                    };
+                    let validation = match photonic_video::media::proxy::validate_attach(
+                        &tools,
+                        &original,
+                        &proxy_path,
+                        false,
+                    ) {
+                        Ok(v) => v,
+                        Err(
+                            photonic_video::media::proxy::AttachError::DurationMismatch
+                            | photonic_video::media::proxy::AttachError::FrameRateMismatch,
+                        ) => {
+                            // Soft override: re-validate with allow_mismatch when
+                            // the user confirms. rfd has no custom modal; use a
+                            // second pick-style MessageDialog if available, else
+                            // proceed after logging a clear warning.
+                            let proceed = rfd::MessageDialog::new()
+                                .set_title("Proxy mismatch")
+                                .set_description(
+                                    "Proxy duration or frame rate does not match the original. Attach anyway?",
+                                )
+                                .set_buttons(rfd::MessageButtons::YesNo)
+                                .show()
+                                == rfd::MessageDialogResult::Yes;
+                            if !proceed {
+                                continue;
+                            }
+                            match photonic_video::media::proxy::validate_attach(
+                                &tools,
+                                &original,
+                                &proxy_path,
+                                true,
+                            ) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!("attach proxy failed after override: {e}");
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("attach proxy failed: {e}");
+                            let _ = rfd::MessageDialog::new()
+                                .set_title("Attach Proxy failed")
+                                .set_description(e.to_string())
+                                .set_buttons(rfd::MessageButtons::Ok)
+                                .show();
+                            continue;
+                        }
+                    };
+                    if !validation.warnings.is_empty() {
+                        tracing::info!("attach proxy warnings: {}", validation.warnings.join("; "));
+                    }
+                    if let Some(project) = doc.timeline.as_ref() {
+                        if let Ok(cmd) =
+                            ops::set_asset_proxy(project, asset, Some(validation.proxy))
+                        {
+                            history.execute_discrete(Command::Timeline(cmd), doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
+                PanelAction::MediaDetachProxy { asset } => {
+                    // Clears the ProxyRef only — never deletes disk files
+                    // (Attached user files stay; Generated cleanup is out of
+                    // scope for G-15A).
+                    use photonic_core::timeline::ops;
+                    if let Some(project) = doc.timeline.as_ref() {
+                        if let Ok(cmd) = ops::set_asset_proxy(project, asset, None) {
+                            history.execute_discrete(Command::Timeline(cmd), doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
                 PanelAction::MediaInsertAtPlayhead { asset } => {
                     let at = self.playhead;
                     if timeline::ops_bridge::insert_asset_at_first_fit(doc, history, asset, at) {

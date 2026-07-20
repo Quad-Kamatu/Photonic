@@ -7,7 +7,9 @@
 use super::*;
 use crate::app::timeline::{interact, ops_bridge};
 use crate::commands::{self, CommandId};
-use photonic_core::timeline::{ops, Clip, ClipTiming, Sequence, SequenceId, TrackKind};
+use photonic_core::timeline::{
+    ops, Clip, ClipSource, ClipTiming, Sequence, SequenceId, Tick, TrackKind,
+};
 
 /// One clip captured on the timeline clipboard (Ctrl+C / Ctrl+X, NLE parity
 /// QW-3). Holds a full clone of the source clip — grade, effects, trim, speed
@@ -1081,11 +1083,64 @@ impl PhotonicApp {
 
     // ── 3/4-point source editing (spec 16) ───────────────────────────────────
 
-    /// Arm `pending_source` from the first selected timeline clip (spec 16 §4
-    /// minimal arming — no source monitor yet: selecting a clip makes it the
-    /// source). Returns the source now in effect — the freshly-armed selection
-    /// when one exists, else whatever was previously armed.
+    /// Arm `pending_source` for Insert/Overwrite:
+    /// 1. Existing pending if it already matches armed asset (e.g. Match Frame)
+    /// 2. G-10 source marks on the armed media-pool asset
+    /// 3. First selected timeline clip (spec 16 §4 minimal arming)
+    /// Returns the source now in effect.
     fn arm_pending_source(&mut self, doc: &Document) -> Option<interact::PendingSource> {
+        // Keep Match Frame / prior arm when it still points at the armed asset.
+        if let Some(id) = self.source_marks.armed_asset {
+            if let Some(ps) = self.pending_source.as_ref() {
+                if matches!(
+                    &ps.source,
+                    ClipSource::Asset { asset } if *asset == id
+                ) && ps.src_out > ps.src_in
+                {
+                    return self.pending_source.clone();
+                }
+            }
+            if let Some(asset) = doc
+                .timeline
+                .as_ref()
+                .and_then(|p| p.media.assets.get(&id))
+                .cloned()
+            {
+                let default_dur = asset
+                    .probe
+                    .as_ref()
+                    .map(|p| p.duration)
+                    .filter(|d| d.0 > 0)
+                    .unwrap_or(Tick(5_000_000));
+                if let Some(ps) = self.source_marks.pending_source(&asset, default_dur) {
+                    self.pending_source = Some(ps);
+                    return self.pending_source.clone();
+                }
+                // Armed asset, no marks: whole asset duration as range.
+                let end = default_dur;
+                if end.0 > 0 {
+                    let kind = match asset.kind {
+                        photonic_core::timeline::AssetKind::Audio => TrackKind::Audio,
+                        _ => TrackKind::Video,
+                    };
+                    let name = match &asset.source {
+                        photonic_core::timeline::AssetSource::File { path, .. } => path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string()),
+                        _ => "Media".into(),
+                    };
+                    self.pending_source = Some(interact::PendingSource {
+                        source: ClipSource::Asset { asset: asset.id },
+                        src_in: Tick::ZERO,
+                        src_out: end,
+                        name,
+                        kind,
+                    });
+                    return self.pending_source.clone();
+                }
+            }
+        }
         if let Some(seq) = doc
             .timeline
             .as_ref()
@@ -1443,14 +1498,14 @@ impl PhotonicApp {
     }
 
     /// **Match Frame** (G3, Premiere F): from the clip under the playhead, arm
-    /// its source at the matching source tick (feeds Insert/Overwrite/Replace).
-    /// Reports the armed source tick via tracing (no source monitor yet — G10).
+    /// its source at the matching source tick, peek on the single monitor
+    /// (G-10 / 24), and seed pending Insert/Overwrite.
     pub(crate) fn timeline_match_frame(&mut self, doc: &Document) {
         let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
             return;
         };
         let at = self.playhead;
-        let Some(ps) = doc
+        let Some((ps, asset_id, matched)) = doc
             .timeline
             .as_ref()
             .and_then(|p| p.sequences.get(&seq_id))
@@ -1465,13 +1520,21 @@ impl PhotonicApp {
                 } else {
                     matched + c.duration
                 };
-                Some(interact::PendingSource {
-                    source: c.source.clone(),
-                    src_in: matched,
-                    src_out,
-                    name: c.name.clone(),
-                    kind: t.kind,
-                })
+                let asset_id = match &c.source {
+                    ClipSource::Asset { asset } => Some(*asset),
+                    _ => None,
+                };
+                Some((
+                    interact::PendingSource {
+                        source: c.source.clone(),
+                        src_in: matched,
+                        src_out,
+                        name: c.name.clone(),
+                        kind: t.kind,
+                    },
+                    asset_id,
+                    matched,
+                ))
             })
         else {
             return;
@@ -1481,7 +1544,24 @@ impl PhotonicApp {
             ps.name,
             ps.src_in.0
         );
+        // Capture range before move — arm_pending_source must not re-derive a
+        // full-asset default that clobbers Match Frame's clip-remainder out.
+        let src_in = ps.src_in;
+        let src_out = ps.src_out;
         self.pending_source = Some(ps);
+        if let Some(asset) = asset_id {
+            self.source_marks.arm(asset, matched);
+            // Full matched range as source marks (in → clip end / remainder).
+            self.source_marks.mark_in = Some(src_in);
+            self.source_marks.mark_out = Some(src_out);
+            self.source_marks.source_time = matched;
+            // Park the single monitor on the matched source frame (24 §3.2).
+            if let Some(bridge) = self.engine.as_mut() {
+                if !self.monitor_playing {
+                    bridge.peek_asset(asset, matched);
+                }
+            }
+        }
     }
 
     /// **Reveal in Media Pool** (G3): select the source asset of the clip under

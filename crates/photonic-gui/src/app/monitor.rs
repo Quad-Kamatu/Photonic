@@ -648,6 +648,16 @@ impl PhotonicApp {
     pub(crate) fn video_step_back(&mut self, doc: &Document) {
         self.monitor_playing = false;
         let tpf = active_frame_rate(doc).ticks_per_frame().0.max(1);
+        if self.io_targets_source_marks() {
+            let next = Tick((self.source_marks.source_time.0 - tpf).max(0));
+            self.source_marks.source_time = next;
+            if let (Some(asset), Some(bridge)) =
+                (self.source_marks.armed_asset, self.engine.as_mut())
+            {
+                bridge.seek_source(asset, next);
+            }
+            return;
+        }
         self.playhead = Tick((self.playhead.0 - tpf).max(0));
         if let Some(bridge) = self.engine.as_mut() {
             // Exact-frame step on the engine (02 §4: Step always pauses); the
@@ -660,6 +670,22 @@ impl PhotonicApp {
     pub(crate) fn video_step_forward(&mut self, doc: &Document) {
         self.monitor_playing = false;
         let tpf = active_frame_rate(doc).ticks_per_frame().0.max(1);
+        if self.io_targets_source_marks() {
+            let mut next = self.source_marks.source_time.0 + tpf;
+            if let Some(end) = self.armed_asset_duration(doc) {
+                if end.0 > 0 {
+                    next = next.min(end.0);
+                }
+            }
+            let next = Tick(next);
+            self.source_marks.source_time = next;
+            if let (Some(asset), Some(bridge)) =
+                (self.source_marks.armed_asset, self.engine.as_mut())
+            {
+                bridge.seek_source(asset, next);
+            }
+            return;
+        }
         let mut next = self.playhead.0 + tpf;
         let end = sequence_end_tick(doc).0;
         if end > 0 {
@@ -672,28 +698,121 @@ impl PhotonicApp {
         }
     }
 
+    fn armed_asset_duration(&self, doc: &Document) -> Option<Tick> {
+        let id = self.source_marks.armed_asset?;
+        doc.timeline
+            .as_ref()?
+            .media
+            .assets
+            .get(&id)?
+            .probe
+            .as_ref()
+            .map(|p| p.duration)
+    }
+
     pub(crate) fn video_playhead_home(&mut self) {
         // Intent only — the reconciler's scrub detector turns the moved
         // playhead into an `EngineCmd::Seek`.
         self.monitor_playing = false;
+        if self.io_targets_source_marks() {
+            self.source_marks.source_time = Tick::ZERO;
+            if let (Some(asset), Some(bridge)) =
+                (self.source_marks.armed_asset, self.engine.as_mut())
+            {
+                bridge.seek_source(asset, Tick::ZERO);
+            }
+            return;
+        }
         self.playhead = Tick::ZERO;
     }
 
     pub(crate) fn video_playhead_end(&mut self, doc: &Document) {
         self.monitor_playing = false;
+        if self.io_targets_source_marks() {
+            let end = self.armed_asset_duration(doc).unwrap_or(Tick::ZERO);
+            self.source_marks.source_time = end;
+            if let (Some(asset), Some(bridge)) =
+                (self.source_marks.armed_asset, self.engine.as_mut())
+            {
+                bridge.seek_source(asset, end);
+            }
+            return;
+        }
         self.playhead = sequence_end_tick(doc);
     }
 
-    /// I: set in-point at playhead (`Sequence::work_range`, 01 §4 document
-    /// state). O: set out-point. Undoable via `ops::set_work_range` →
-    /// `TimelineCmd::SetWorkRange`, routed through `ops_bridge` like every
-    /// other timeline edit (04 §2.3).
+    /// I: set In point. When the single monitor is peaking a source (or an
+    /// asset is armed for 3-point edit), sets **source** marks (G-10 / 24 §3.3,
+    /// session-only). Otherwise sets sequence **work range** (document, undoable).
     pub(crate) fn video_set_in(&mut self, doc: &mut Document, history: &mut CommandHistory) {
+        if self.io_targets_source_marks() {
+            let t = self.source_marks.source_time;
+            self.source_marks.set_in(t);
+            self.sync_pending_from_source_marks(doc);
+            return;
+        }
         self.set_work_range_bound(doc, history, true);
     }
 
     pub(crate) fn video_set_out(&mut self, doc: &mut Document, history: &mut CommandHistory) {
+        if self.io_targets_source_marks() {
+            let t = self.source_marks.source_time;
+            self.source_marks.set_out(t);
+            self.sync_pending_from_source_marks(doc);
+            return;
+        }
         self.set_work_range_bound(doc, history, false);
+    }
+
+    /// Clear source In/Out marks (G-10). No-op for work range.
+    pub(crate) fn video_clear_source_marks(&mut self) {
+        self.source_marks.clear_marks();
+        // Keep pending_source only if it came from timeline selection, not marks.
+        if self.pending_source.as_ref().and_then(|p| match &p.source {
+            photonic_core::timeline::ClipSource::Asset { asset } => Some(*asset),
+            _ => None,
+        }) == self.source_marks.armed_asset
+        {
+            // Marks cleared — drop mark-derived pending; re-arm on next edit.
+            self.pending_source = None;
+        }
+    }
+
+    fn io_targets_source_marks(&self) -> bool {
+        let preview_is_asset = self
+            .engine
+            .as_ref()
+            .map(|b| b.preview_is_asset())
+            .unwrap_or(false);
+        crate::app::source_marks::io_targets_source_marks(
+            preview_is_asset,
+            self.monitor_playing,
+            self.source_marks.armed_asset,
+        )
+    }
+
+    /// Derive `pending_source` from G-10 marks when possible.
+    fn sync_pending_from_source_marks(&mut self, doc: &Document) {
+        let Some(id) = self.source_marks.armed_asset else {
+            return;
+        };
+        let Some(asset) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.media.assets.get(&id))
+            .cloned()
+        else {
+            return;
+        };
+        let default_dur = asset
+            .probe
+            .as_ref()
+            .map(|p| p.duration)
+            .filter(|d| d.0 > 0)
+            .unwrap_or(Tick(5_000_000)); // 5s fallback for unprobed media
+        if let Some(ps) = self.source_marks.pending_source(&asset, default_dur) {
+            self.pending_source = Some(ps);
+        }
     }
 
     fn set_work_range_bound(
@@ -761,9 +880,15 @@ impl PhotonicApp {
         bridge.apply_preview_quality();
         bridge.set_loop(loop_range);
 
-        // Media-pool click → source peek on the single monitor (24 §3).
+        // Media-pool click → source peek on the single monitor (24 §3) + arm G-10.
         if let Some(asset) = want_peek {
-            bridge.peek_asset(asset, Tick::ZERO);
+            let at = if self.source_marks.armed_asset == Some(asset) {
+                self.source_marks.source_time
+            } else {
+                Tick::ZERO
+            };
+            self.source_marks.arm(asset, at);
+            bridge.peek_asset(asset, at);
         }
 
         // User scrub (ruler drag, scrubber, Home/End, marker jump): the playhead
@@ -814,7 +939,10 @@ impl PhotonicApp {
         } else {
             bridge.set_playing(self.monitor_playing);
             if self.monitor_playing {
-                ctx.request_repaint();
+                // Cap GUI repaint to ~120 Hz while playing — matches engine
+                // poll (4 ms) without oversubscribing the main thread on Windows
+                // (composition) or Linux (X11/Wayland present).
+                ctx.request_repaint_after(std::time::Duration::from_millis(8));
                 let status = bridge.status();
                 if status.playing {
                     // The engine's clock is authoritative at 1× (02 §4).
@@ -1281,12 +1409,21 @@ impl PhotonicApp {
                 );
 
                 ui.separator();
-                // Prominent current / total timecode readout (pro-NLE feel):
-                // large accent-colored playhead time, muted total after it.
+                // Prominent current / total timecode readout (pro-NLE feel).
+                // When SOURCE peaking: source clock (G-10); else sequence playhead.
                 let fr = active_frame_rate(doc);
-                let end = sequence_end_tick(doc);
+                let source_io = self.io_targets_source_marks();
+                let (now, end) = if source_io {
+                    (
+                        self.source_marks.source_time,
+                        self.armed_asset_duration(doc)
+                            .unwrap_or(self.source_marks.source_time),
+                    )
+                } else {
+                    (self.playhead, sequence_end_tick(doc))
+                };
                 ui.label(
-                    egui::RichText::new(format_timecode(fr, self.playhead))
+                    egui::RichText::new(format_timecode(fr, now))
                         .monospace()
                         .size(16.0)
                         .strong()
@@ -1299,11 +1436,50 @@ impl PhotonicApp {
                 );
 
                 ui.separator();
-                if ui.button("I").on_hover_text("Set In Point (I)").clicked() {
+                let i_tip = if source_io {
+                    "Set Source In (I) — marks for 3-point Insert/Overwrite"
+                } else {
+                    "Set Work In (I) — sequence work range"
+                };
+                let o_tip = if source_io {
+                    "Set Source Out (O) — marks for 3-point Insert/Overwrite"
+                } else {
+                    "Set Work Out (O) — sequence work range"
+                };
+                if ui.button("I").on_hover_text(i_tip).clicked() {
                     self.video_set_in(doc, history);
                 }
-                if ui.button("O").on_hover_text("Set Out Point (O)").clicked() {
+                if ui.button("O").on_hover_text(o_tip).clicked() {
                     self.video_set_out(doc, history);
+                }
+                if source_io {
+                    if ui
+                        .button(ph::X)
+                        .on_hover_text("Clear source marks")
+                        .clicked()
+                    {
+                        self.video_clear_source_marks();
+                    }
+                    // Show active source range on the transport.
+                    if self.source_marks.mark_in.is_some() || self.source_marks.mark_out.is_some() {
+                        let fr = active_frame_rate(doc);
+                        let a = self
+                            .source_marks
+                            .mark_in
+                            .map(|t| format_timecode(fr, t))
+                            .unwrap_or_else(|| "—".into());
+                        let b = self
+                            .source_marks
+                            .mark_out
+                            .map(|t| format_timecode(fr, t))
+                            .unwrap_or_else(|| "—".into());
+                        ui.label(
+                            egui::RichText::new(format!("Src {a}–{b}"))
+                                .monospace()
+                                .small()
+                                .weak(),
+                        );
+                    }
                 }
 
                 ui.separator();

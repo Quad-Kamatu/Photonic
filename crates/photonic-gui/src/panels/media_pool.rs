@@ -41,19 +41,25 @@ pub struct MediaPoolUi {
     /// Bin filter; `None` = pool root (shows unfiled assets).
     pub current_bin: Option<BinId>,
     pub new_bin_name: String,
-    /// L1–L3 jobs still in flight (24-preview-media-load ladder).
+    /// L1–L5 jobs still in flight (24-preview-media-load ladder).
     pub importing: usize,
     meta_tx: mpsc::Sender<ImportMetaResult>,
     meta_rx: mpsc::Receiver<ImportMetaResult>,
     /// Proxy transcodes currently running. Separate from importing: ffmpeg
     /// work must never block the editor thread or compete with asset probes.
     pub proxying: usize,
+    /// Asset ids with a worker already generating a proxy (session-only).
+    /// Prevents auto-L7 and manual "Build proxies" from double-queuing the
+    /// same asset into concurrent ffmpeg writes of the same `.part` path.
+    proxy_in_flight: std::collections::HashSet<AssetId>,
     proxy_tx: mpsc::Sender<ProxyJobResult>,
     proxy_rx: mpsc::Receiver<ProxyJobResult>,
     /// content_hash → poster PNG for grid/monitor paint (session).
     pub posters: std::collections::HashMap<String, PathBuf>,
     /// content_hash → L4 keyframe index ready.
     pub keyframe_ready: std::collections::HashSet<String>,
+    /// content_hash → L5 waveform peak pyramid ready.
+    pub waveform_ready: std::collections::HashSet<String>,
     /// Loaded egui textures for poster paths (path string → TextureHandle).
     poster_textures: std::collections::HashMap<String, egui::TextureHandle>,
 }
@@ -65,7 +71,11 @@ pub struct ProxyJobResult {
     pub proxy: Option<ProxyRef>,
 }
 
-/// L1–L4 fill for an already-registered L0 asset (24 §2).
+/// L1–L5 fill for an already-registered L0 asset (24 §2).
+///
+/// L1–L4 meta is sent **before** L5 runs so later stages never gate earlier
+/// pool metadata (24 §2). A follow-up message may set only
+/// [`ImportMetaResult::waveform_only`] after L5 completes.
 pub struct ImportMetaResult {
     pub asset: AssetId,
     pub probe: Option<photonic_core::timeline::MediaProbe>,
@@ -73,6 +83,11 @@ pub struct ImportMetaResult {
     pub poster_path: Option<PathBuf>,
     /// L4 keyframe index written (video only).
     pub keyframe_index: bool,
+    /// L5 waveform pyramid written (audio / video-with-audio).
+    pub waveform_ready: bool,
+    /// When true, only session `waveform_ready` is updated — do not apply
+    /// `set_asset_meta` (probe/hash already applied by the L1–L4 message).
+    pub waveform_only: bool,
 }
 
 impl Default for MediaPoolUi {
@@ -89,10 +104,12 @@ impl Default for MediaPoolUi {
             meta_tx,
             meta_rx,
             proxying: 0,
+            proxy_in_flight: std::collections::HashSet::new(),
             proxy_tx,
             proxy_rx,
             posters: std::collections::HashMap::new(),
             keyframe_ready: std::collections::HashSet::new(),
+            waveform_ready: std::collections::HashSet::new(),
             poster_textures: std::collections::HashMap::new(),
         }
     }
@@ -100,27 +117,33 @@ impl Default for MediaPoolUi {
 
 impl MediaPoolUi {
     /// L0-first import (24 §2): returns stubs for immediate `AddAsset`, then
-    /// runs hash → probe → poster → keyframe index on a worker.
+    /// runs hash → probe → poster → keyframe index → waveform on a worker.
     pub fn spawn_import(
         &mut self,
         paths: Vec<PathBuf>,
         bin: Option<BinId>,
         project_path: Option<PathBuf>,
     ) -> Vec<MediaAsset> {
-        let jobs: Vec<(MediaAsset, PathBuf)> = paths
-            .into_iter()
-            .filter_map(|path| {
-                let kind = guess_asset_kind(&path)?;
-                let mut asset = MediaAsset::from_file(kind, &path);
-                asset.bin = bin;
-                Some((asset, path))
-            })
-            .collect();
-        if jobs.is_empty() {
+        // L0 first: stubs are placeable immediately (24 §2). Worker does L1–L5.
+        let stubs = l0_register_stubs(&paths, bin);
+        if stubs.is_empty() {
             return Vec::new();
         }
-        self.importing += jobs.len();
-        let stubs: Vec<MediaAsset> = jobs.iter().map(|(a, _)| a.clone()).collect();
+        let jobs: Vec<(MediaAsset, PathBuf)> = {
+            let mut out = Vec::with_capacity(stubs.len());
+            let mut si = 0;
+            for path in paths {
+                if guess_asset_kind(&path).is_none() {
+                    continue;
+                }
+                if si < stubs.len() {
+                    out.push((stubs[si].clone(), path));
+                    si += 1;
+                }
+            }
+            out
+        };
+        self.importing += stubs.len();
         let meta_tx = self.meta_tx.clone();
         std::thread::spawn(move || {
             let tools = photonic_video::media::ffmpeg_locate::locate().ok();
@@ -171,34 +194,118 @@ impl MediaPoolUi {
                     }
                     _ => false,
                 };
+                // Send L1–L4 meta *before* L5 so long waveforms never gate
+                // pool columns / L7 auto-queue (24 §2).
                 if meta_tx
                     .send(ImportMetaResult {
                         asset: asset_id,
-                        probe,
-                        content_hash: hash,
+                        probe: probe.clone(),
+                        content_hash: hash.clone(),
                         poster_path,
                         keyframe_index,
+                        waveform_ready: false,
+                        waveform_only: false,
                     })
                     .is_err()
                 {
                     return;
+                }
+                // L5: waveform peak pyramid (audio + video-with-audio). Same
+                // sidecar dir as timeline WaveformCache so reopen/paint hits.
+                // Failures never fail import (24 §2 / D-PM-6).
+                let waveform_ready = match (tools.as_ref(), hash.as_ref()) {
+                    (Some(tools), Some(h))
+                        if matches!(asset.kind, AssetKind::Audio | AssetKind::Video) =>
+                    {
+                        let try_wave = match asset.kind {
+                            AssetKind::Audio => true,
+                            AssetKind::Video => match &probe {
+                                Some(p) => p.audio.is_some(),
+                                None => true,
+                            },
+                            _ => false,
+                        };
+                        if !try_wave {
+                            false
+                        } else if matches!(
+                            photonic_video::audio::waveform::load_from_dir(&cache_dir, h),
+                            Ok(Some(_))
+                        ) {
+                            true
+                        } else {
+                            const WAVEFORM_SAMPLE_RATE: u32 = 48_000;
+                            match photonic_video::playback::FfmpegPcmSource::spawn(
+                                tools,
+                                &path,
+                                Tick::ZERO,
+                                WAVEFORM_SAMPLE_RATE,
+                            ) {
+                                Ok(mut src) => {
+                                    let pyramid = photonic_video::audio::waveform::build_pyramid(
+                                        &mut src,
+                                        h.clone(),
+                                    );
+                                    match photonic_video::audio::waveform::save_to_dir(
+                                        &pyramid, &cache_dir,
+                                    ) {
+                                        Ok(_) => true,
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "media import: waveform save failed for {path:?}: {e}"
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "media import: waveform decode failed for {path:?}: {e}"
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                if waveform_ready {
+                    if meta_tx
+                        .send(ImportMetaResult {
+                            asset: asset_id,
+                            probe: None,
+                            content_hash: hash,
+                            poster_path: None,
+                            keyframe_index: false,
+                            waveform_ready: true,
+                            waveform_only: true,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
         });
         stubs
     }
 
-    /// Drain L1–L4 completions. Caller applies `set_asset_meta`.
+    /// Drain L1–L5 completions. L1–L4 messages need `set_asset_meta`; waveform-only
+    /// follow-ups only update session readiness.
     pub fn drain_meta(&mut self) -> Vec<ImportMetaResult> {
         let mut out = Vec::new();
         while let Ok(meta) = self.meta_rx.try_recv() {
-            self.importing = self.importing.saturating_sub(1);
+            if !meta.waveform_only {
+                self.importing = self.importing.saturating_sub(1);
+            }
             if let Some(hash) = &meta.content_hash {
                 if let Some(path) = &meta.poster_path {
                     self.posters.insert(hash.clone(), path.clone());
                 }
                 if meta.keyframe_index {
                     self.keyframe_ready.insert(hash.clone());
+                }
+                if meta.waveform_ready {
+                    self.waveform_ready.insert(hash.clone());
                 }
             }
             out.push(meta);
@@ -225,10 +332,18 @@ impl MediaPoolUi {
         Some(handle)
     }
 
+    /// True while a background proxy job is already covering this asset.
+    pub fn proxy_job_in_flight(&self, asset: AssetId) -> bool {
+        self.proxy_in_flight.contains(&asset)
+    }
+
     /// Build all supplied file-backed video proxies sequentially on one worker.
     /// The worker yields CPU priority inside `generate_proxy`; completion is
     /// handed back to the UI so document/history mutation stays on the main
     /// thread. Existing ready cache files are reused without re-encoding.
+    ///
+    /// Skips assets already in flight (session) so auto-L7 and manual Build
+    /// cannot double-write the same `.part` proxy path.
     pub fn spawn_proxy_generation(
         &mut self,
         assets: Vec<MediaAsset>,
@@ -237,11 +352,22 @@ impl MediaPoolUi {
         let assets: Vec<MediaAsset> = assets
             .into_iter()
             .filter(|asset| {
-                asset.kind == AssetKind::Video && matches!(asset.source, AssetSource::File { .. })
+                asset.kind == AssetKind::Video
+                    && matches!(asset.source, AssetSource::File { .. })
+                    && !self.proxy_in_flight.contains(&asset.id)
+                    // Never overwrite a user-attached proxy with a generated one
+                    // (G-15A; in-flight generate completion must not clobber Attach).
+                    && !matches!(
+                        asset.proxy.as_ref(),
+                        Some(p) if p.origin == photonic_core::timeline::ProxyOrigin::Attached
+                    )
             })
             .collect();
         if assets.is_empty() {
             return;
+        }
+        for a in &assets {
+            self.proxy_in_flight.insert(a.id);
         }
         self.proxying += assets.len();
         let tx = self.proxy_tx.clone();
@@ -250,6 +376,10 @@ impl MediaPoolUi {
             let cache_dir = photonic_video::media::proxy::proxy_cache_dir(project_path.as_deref());
             for asset in assets {
                 let AssetSource::File { path, .. } = &asset.source else {
+                    let _ = tx.send(ProxyJobResult {
+                        asset: asset.id,
+                        proxy: asset.proxy.clone(),
+                    });
                     continue;
                 };
                 let hash = asset
@@ -276,6 +406,7 @@ impl MediaPoolUi {
                         Some(ProxyRef {
                             path: output,
                             status,
+                            origin: photonic_core::timeline::ProxyOrigin::Generated,
                         })
                     }
                     // A missing toolchain/hash must not detach a previously
@@ -297,10 +428,13 @@ impl MediaPoolUi {
 
     /// Drain proxy completions. The caller applies them through timeline
     /// commands so undo/redo and the engine mirror stay coherent.
+    /// Each completion is a single document update (Ready/Failed) — no
+    /// intermediate Pending history entries (G-15C).
     pub fn drain_finished_proxies(&mut self) -> Vec<ProxyJobResult> {
         let mut out = Vec::new();
         while let Ok(result) = self.proxy_rx.try_recv() {
             self.proxying = self.proxying.saturating_sub(1);
+            self.proxy_in_flight.remove(&result.asset);
             out.push(result);
         }
         out
@@ -315,6 +449,24 @@ pub struct AssetDrag {
 }
 
 // ── Pure helpers (unit-tested below) ─────────────────────────────────────────
+
+/// L0 register only: build placeable stubs with **no** probe/hash (24 §2).
+/// Pure and synchronous — the same path `spawn_import` uses before the worker.
+/// Multi-select import must return N stubs before any L1–L2 completes.
+pub fn l0_register_stubs(paths: &[PathBuf], bin: Option<BinId>) -> Vec<MediaAsset> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let kind = guess_asset_kind(path)?;
+            let mut asset = MediaAsset::from_file(kind, path);
+            asset.bin = bin;
+            // Contract: L0 has no probe/hash yet.
+            debug_assert!(asset.probe.is_none());
+            debug_assert!(asset.content_hash.is_none());
+            Some(asset)
+        })
+        .collect()
+}
 
 /// Extension → asset kind (mirrors 05 §1's accepted-format table).
 pub fn guess_asset_kind(path: &Path) -> Option<AssetKind> {
@@ -443,7 +595,7 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         }
     });
 
-    // ── Proxy playback mode (engine-wide toggle, 05 §4) ─────────────────────
+    // ── Proxy playback mode (engine-wide toggle, 05 §4) + L7 ingest (G-15C) ─
     ui.horizontal(|ui| {
         ui.label("Proxies:");
         let mut mode = ctx.proxy_mode;
@@ -460,6 +612,23 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             });
         if mode != ctx.proxy_mode {
             ctx.action = Some(PanelAction::MediaSetProxyMode { mode });
+        }
+        let generate_on_import = ctx
+            .doc
+            .timeline
+            .as_ref()
+            .map(|p| p.settings.generate_proxies)
+            .unwrap_or(false);
+        let mut gen = generate_on_import;
+        if ui
+            .checkbox(&mut gen, "On import")
+            .on_hover_text(
+                "Automatically build half-res editing proxies after import (L7). \
+                 Playback uses them when Proxy mode is Auto or Force proxy.",
+            )
+            .changed()
+        {
+            ctx.action = Some(PanelAction::MediaSetGenerateProxiesOnImport { enabled: gen });
         }
         if ui
             .add_enabled(
@@ -695,6 +864,19 @@ fn draw_asset_cell(
                 ctx.action = Some(PanelAction::MediaRelink { asset: asset.id });
                 ui.close_menu();
             }
+            // G-15A: attach a user-owned proxy without re-encoding; detach never
+            // deletes Attached files (handler / set_asset_proxy only clears ref).
+            if asset.kind == AssetKind::Video
+                && matches!(asset.source, AssetSource::File { .. })
+                && ui.button("Attach Proxy…").clicked()
+            {
+                ctx.action = Some(PanelAction::MediaAttachProxy { asset: asset.id });
+                ui.close_menu();
+            }
+            if asset.proxy.is_some() && ui.button("Detach Proxy").clicked() {
+                ctx.action = Some(PanelAction::MediaDetachProxy { asset: asset.id });
+                ui.close_menu();
+            }
             ui.menu_button("Move to bin", |ui| {
                 if ui.button("(root)").clicked() {
                     ctx.action = Some(PanelAction::MediaAssignBin {
@@ -862,5 +1044,32 @@ mod tests {
     fn probe_summary_handles_missing_probe() {
         let a = MediaAsset::from_file(AssetKind::Video, "/x/clip.mp4");
         assert_eq!(probe_summary(&a), "—");
+    }
+
+    /// 24 §2 / checklist §11.8: multi-select import yields **N L0 stubs** with
+    /// no probe/hash before any L1–L2 work runs.
+    #[test]
+    fn l0_register_n_stubs_before_any_probe() {
+        let t0 = std::time::Instant::now();
+        let paths = vec![
+            PathBuf::from("/media/a.mp4"),
+            PathBuf::from("/media/b.mov"),
+            PathBuf::from("/media/skip.txt"), // not a media kind
+            PathBuf::from("/media/c.wav"),
+        ];
+        let stubs = l0_register_stubs(&paths, None);
+        let l0_ms = t0.elapsed().as_millis();
+        assert_eq!(stubs.len(), 3, "three media paths → three L0 rows");
+        assert!(stubs.iter().all(|a| a.probe.is_none()));
+        assert!(stubs.iter().all(|a| a.content_hash.is_none()));
+        assert!(
+            l0_ms < 100,
+            "L0 multi-register must be UI-cheap (got {l0_ms} ms)"
+        );
+        // Distinct ids so concurrent AddAsset is safe.
+        let mut ids: Vec<_> = stubs.iter().map(|a| a.id).collect();
+        ids.sort_by_key(|i| i.0);
+        ids.dedup();
+        assert_eq!(ids.len(), 3);
     }
 }

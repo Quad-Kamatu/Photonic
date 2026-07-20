@@ -941,6 +941,23 @@ pub struct RemoveProxyArgs {
     pub asset_ids: Vec<AssetId>,
 }
 
+/// Attach a user-owned proxy file to a video asset (G-15A).
+#[derive(Debug, Deserialize)]
+pub struct AttachProxyArgs {
+    pub asset_id: AssetId,
+    /// Absolute path to the proxy media file.
+    pub path: String,
+    /// When true, duration/frame-rate mismatches become warnings.
+    #[serde(default)]
+    pub allow_mismatch: Option<bool>,
+}
+
+/// Clear an asset's proxy ref without deleting user-owned attached files.
+#[derive(Debug, Deserialize)]
+pub struct DetachProxyArgs {
+    pub asset_id: AssetId,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TranscodeMediaArgs {
     pub asset_id: AssetId,

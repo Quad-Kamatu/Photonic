@@ -21,7 +21,8 @@ mod editors;
 mod history;
 mod inspector;
 mod layers_panel;
-pub(crate) mod media_pool;
+/// Media pool panel + import ladder. `pub` for UI-path integration tests.
+pub mod media_pool;
 mod modify;
 mod navigator;
 mod toolbar;
@@ -872,6 +873,16 @@ pub enum PanelAction {
     MediaSetProxyMode { mode: photonic_video::ProxyMode },
     /// Build reusable editing proxies for every file-backed video in the pool.
     MediaGenerateProxies,
+    /// Project policy: auto-queue L7 proxy generation after import (G-15C).
+    MediaSetGenerateProxiesOnImport { enabled: bool },
+    /// Attach a user-supplied proxy file to a video asset (G-15A).
+    MediaAttachProxy {
+        asset: photonic_core::timeline::AssetId,
+    },
+    /// Clear the asset's proxy ref without deleting user-owned attached files.
+    MediaDetachProxy {
+        asset: photonic_core::timeline::AssetId,
+    },
     /// Insert the asset as a clip at the playhead on the first compatible
     /// track (double-click / context menu; drag-to-timeline is the primary
     /// path and is handled in the timeline panel itself).

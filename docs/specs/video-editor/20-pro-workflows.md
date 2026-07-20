@@ -73,7 +73,7 @@ G-10 contains **source-mark semantics** and **source audition** on the single ce
 
 | Concern | Contract |
 |---|---|
-| Status/scope | `open`. Scaffold only. Build source In/Out marks, source-time scrub on the **single** monitor when peaking an asset, Match Frame load, and Insert/Overwrite handoff. Keep sequence work range separate. Dual-pane layout is out of scope (see 24). |
+| Status/scope | `partial`. Single-surface marks + peek + Match Frame + Insert/Overwrite handoff landed (24 D-PM). Dual-pane, source audio clock, and full source-monitor transport polish remain open. |
 | User outcome | Load a clip, audition it on the one monitor, mark a source range, then perform 3-point Insert/Overwrite into the timeline. |
 | Dependencies | [19 §6 G-3 Match Frame/source arming](19-editing-velocity-shot-management.md#6-g-3--match-frame-and-reveal-in-project), [19 §8 G-5 replacement arming](19-editing-velocity-shot-management.md#8-g-5--replace-with-clip--replace-edit), shipped G-6 source patch and Insert/Overwrite, media probe/decode, [24 preview/load contract](24-preview-media-load.md), monitor presentation path. |
 | Deferrals | Gang sync, external reference monitor, dual-pane source\|program, scopes on raw source, source effects preview. |

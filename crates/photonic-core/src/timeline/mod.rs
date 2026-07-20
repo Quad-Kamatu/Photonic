@@ -64,7 +64,7 @@ pub use ids::{
 };
 pub use media::{
     AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe,
-    ProbedColor, ProxyRef, ProxyStatus, VectorRef, VectorStateKey, VideoStreamInfo,
+    ProbedColor, ProxyOrigin, ProxyRef, ProxyStatus, VectorRef, VectorStateKey, VideoStreamInfo,
 };
 pub use ops::{ClipEdge, EditError};
 pub use prop_registry::{PropEntry, PropTargetKind};
