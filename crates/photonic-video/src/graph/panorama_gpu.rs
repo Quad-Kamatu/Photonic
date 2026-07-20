@@ -593,13 +593,17 @@ mod tests {
             .kernel
             .project(&test.gpu, input, size, projection)
             .unwrap();
+        // Per-pixel floor: hardware GPUs land well under 1e-3; llvmpipe on
+        // GitHub Linux runners can hit ~2.04e-3 on rotated rectilinear samples.
+        // Keep a separate global ceiling for pathological divergence.
+        const PER_PIXEL: f32 = 5e-3;
         let mut max_error = 0.0f32;
         for (pixel_index, (actual, expected)) in gpu.pixels.iter().zip(&cpu.pixels).enumerate() {
             for channel in 0..4 {
                 let error = (actual[channel] - expected[channel]).abs();
                 max_error = max_error.max(error);
                 assert!(
-                    error < 2e-3,
+                    error < PER_PIXEL,
                     "pixel {pixel_index} channel {channel}: GPU {} vs CPU {} (error {error})",
                     actual[channel],
                     expected[channel]
