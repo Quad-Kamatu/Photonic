@@ -48,7 +48,8 @@ impl Sidecar {
         cfg: &SidecarConfig,
     ) -> Result<(Self, ChildStdout), DecodeError> {
         let seek_secs = format!("{:.6}", cfg.seek.as_seconds_f64());
-        let mut child = Command::new(&tools.ffmpeg)
+        let mut command = Command::new(&tools.ffmpeg);
+        command
             .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
             .arg("-ss")
             .arg(&seek_secs)
@@ -64,9 +65,11 @@ impl Sidecar {
             .arg("pipe:1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(DecodeError::Spawn)?;
+            .stderr(Stdio::piped());
+        // 37 §2.2: on Linux ask the kernel to SIGKILL this ffmpeg child if the
+        // editor process dies, so a hard-killed parent leaves no orphan decoder.
+        crate::media::child_registry::arm_parent_death_signal(&mut command);
+        let mut child = command.spawn().map_err(DecodeError::Spawn)?;
 
         // We requested `Stdio::piped()`, so stdout should be present — but if
         // ffmpeg was killed / exited between spawn and here, `take` yields None.

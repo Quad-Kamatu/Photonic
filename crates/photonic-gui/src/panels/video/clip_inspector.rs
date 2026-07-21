@@ -985,6 +985,10 @@ fn transition_label(kind: TransitionKind) -> &'static str {
         TransitionKind::DipToColor => "Dip to Color",
         TransitionKind::Wipe => "Wipe",
         TransitionKind::Push => "Push",
+        // Forward-compat (39 §2.2): show the preserved tag; renders as a cut.
+        TransitionKind::Unknown(t) => t.as_str(),
+        // `#[non_exhaustive]`: a kind a newer build adds shows a placeholder.
+        _ => "Unsupported",
     }
 }
 

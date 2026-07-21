@@ -127,6 +127,16 @@ jobs:
       - name: Check MCP API docs are up to date
         run: git diff --exit-code docs/mcp-api.md
 
+      # Structural spec-vs-code drift gate (40-spec-verification.md §3). Blocking:
+      # deterministic and machine-independent, so hard-gate tier per 37 §4.2.
+      # spec-extract carries no photonic-* dependency, so this stays in the cheap
+      # lint job (it needs neither ffmpeg nor the GUI system deps).
+      - name: Extract workspace API index
+        run: cargo run -q -p spec-extract -- --out spec-index.json
+
+      - name: Check spec drift
+        run: python3 tools/check-spec-drift.py --index spec-index.json
+
       # Supply-chain / license / advisory gate using the committed deny.toml.
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -166,11 +176,12 @@ jobs:
     # `cargo test --workspace` path. continue-on-error at the job level so a
     # soak-test flake never blocks merges (nothing in this job gates PRs).
     #
-    # Skeleton only as of this commit: no #[ignore] soak/SS-3 tests exist
-    # yet (they land with the P3 engine work), so `-- --ignored` currently
-    # matches nothing and this job is a no-op that succeeds trivially. It is
-    # advisory, not a real regression gate, until P3 populates it — see
-    # docs/specs/video-editor/11-testing-phasing.md §1.6 / §4.
+    # These #[ignore]-annotated tests now exist and are matched by
+    # `-- --ignored`: crates/photonic-video/tests/playback_soak.rs (SS-1
+    # sustained real-decode soak) and crates/photonic-video/tests/ss3_sync_drift.rs
+    # (SS-3 10-minute synthetic export). The job stays advisory
+    # (continue-on-error) and skips cleanly where ffmpeg / a GPU adapter are
+    # absent — see docs/specs/video-editor/11-testing-phasing.md §1.6 / §4.
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     continue-on-error: true

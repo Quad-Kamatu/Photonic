@@ -356,7 +356,8 @@ pub(crate) fn draw_reframe_handles(
 /// Audio clips are left alone (reframe is a visual-only concept); a clip
 /// already missing from the active sequence/track by the time this runs is
 /// silently skipped rather than aborting the whole batch.
-pub(crate) fn fit_clips_to_active_format(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn fit_clips_to_active_format(
     doc: &mut Document,
     history: &mut CommandHistory,
     selection: &[ClipId],

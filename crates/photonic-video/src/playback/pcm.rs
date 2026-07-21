@@ -40,7 +40,8 @@ impl FfmpegPcmSource {
         start: Tick,
         sample_rate: u32,
     ) -> std::io::Result<FfmpegPcmSource> {
-        let mut child = Command::new(&tools.ffmpeg)
+        let mut command = Command::new(&tools.ffmpeg);
+        command
             .arg("-v")
             .arg("error")
             .arg("-accurate_seek")
@@ -61,8 +62,10 @@ impl FfmpegPcmSource {
             .arg("pipe:1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        // 37 §2.2: SIGKILL this PCM reader if the editor process dies (Linux).
+        crate::media::child_registry::arm_parent_death_signal(&mut command);
+        let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("piped stdout");
         Ok(FfmpegPcmSource {
             child,

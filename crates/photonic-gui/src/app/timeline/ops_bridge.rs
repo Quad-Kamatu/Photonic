@@ -43,7 +43,8 @@ fn commit_batch(history: &mut CommandHistory, doc: &mut Document, cmds: Vec<Time
 /// existing format if one already matches, otherwise add it and activate it —
 /// one undoable step either way. This is the one-click "make this 9:16 / 1:1 /
 /// 16:9" control behind the monitor's format bar (CAP-012).
-pub(crate) fn switch_to_aspect(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn switch_to_aspect(
     history: &mut CommandHistory,
     doc: &mut Document,
     seq_id: SequenceId,
@@ -99,7 +100,8 @@ pub(crate) const ASPECT_PRESETS: &[(&str, u32, u32)] = &[
 /// sequence id. The first video-mode action creates them lazily and undoably
 /// (04 §1.3): `CreateProject` (+ a default 1080p sequence if the project has
 /// none) batched into one step.
-pub(crate) fn ensure_project_and_sequence(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn ensure_project_and_sequence(
     doc: &mut Document,
     history: &mut CommandHistory,
     frame_rate: FrameRate,
@@ -133,7 +135,8 @@ pub(crate) fn ensure_project_and_sequence(
 }
 
 /// Append a new track of `kind` to the active sequence.
-pub(crate) fn add_track(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn add_track(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -377,7 +380,8 @@ fn commit_group(history: &mut CommandHistory, doc: &mut Document, mut cmds: Vec<
 
 // ── Clip edits ──────────────────────────────────────────────────────────────
 
-pub(crate) fn move_clip(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn move_clip(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -411,7 +415,8 @@ pub(crate) fn move_clip(
 /// track + position), rather than composing remove+insert. A linked partner
 /// rides along on ITS OWN track by the same delta (it is never itself
 /// reassigned to `to_track`).
-pub(crate) fn move_clip_cross_track(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn move_clip_cross_track(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -442,7 +447,8 @@ pub(crate) fn move_clip_cross_track(
     commit_group(history, doc, cmds);
 }
 
-pub(crate) fn trim(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn trim(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -526,7 +532,8 @@ fn expand_sync_lock_ripple(
 /// locally-derived `RippleEdit` (a command, not a direct mutation). Every
 /// OTHER sync-locked track (14 §M-9) rides along in the SAME undo step via
 /// `expand_sync_lock_ripple`.
-pub(crate) fn ripple_trim(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn ripple_trim(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -577,7 +584,8 @@ pub(crate) fn ripple_trim(
     commit_group(history, doc, cmds);
 }
 
-pub(crate) fn roll(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn roll(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -594,7 +602,8 @@ pub(crate) fn roll(
     }
 }
 
-pub(crate) fn slip(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn slip(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -610,7 +619,8 @@ pub(crate) fn slip(
     }
 }
 
-pub(crate) fn slide(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn slide(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -626,7 +636,8 @@ pub(crate) fn slide(
     }
 }
 
-pub(crate) fn split(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn split(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -646,7 +657,8 @@ pub(crate) fn split(
 /// step — deleting one half of a linked pair takes the other half with it,
 /// matching the "linked A/V clips move [and delete] as a unit" behavior a
 /// reference NLE gives a linked selection.
-pub(crate) fn remove_clip(
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn remove_clip(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,

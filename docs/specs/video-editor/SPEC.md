@@ -77,7 +77,7 @@ CAP-020 — Editor can save and reopen a project containing all above state in P
 CAP-021 — Editor can render SVG assets to video frames with animation applied (the motion-graphics path), including transparent-background export.
   ↳ Test: animate a vector title, export with alpha; verify frames show correct animation and transparency.
 
-CAP-022 — Editor's project state survives an unexpected termination: on relaunch after a crash or kill, the editor offers recovery of the timeline project with at most a few minutes of work lost.
+CAP-022 — Editor's project state survives an unexpected termination: on relaunch after a crash or kill, the editor offers recovery of the timeline project with at most two minutes of work lost (the autosave interval; see 37 §2.5).
   ↳ Test: build a timeline edit session, kill the process without saving, relaunch; verify the recovery prompt restores the project including timeline state.
 
 ---

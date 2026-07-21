@@ -11,6 +11,7 @@
 use super::anim::{AnimProps, PropSet};
 use super::ids::{AssetId, GradeOpId, GraphId, GraphNodeId};
 use super::prop_registry::PropTargetKind;
+use super::unknown::UnknownTag;
 use serde::{Deserialize, Serialize};
 
 /// An ordered grade stack applied to a clip (or embedded in a `GraphOp::Grade`).
@@ -75,6 +76,7 @@ impl GradeOp {
 /// (07 §1). Serde uses snake_case tags matching `GradeOpParams`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum GradeOpKind {
     Exposure,
     Contrast,
@@ -84,11 +86,29 @@ pub enum GradeOpKind {
     Curves,
     HslQualifier,
     Lut3d,
+    /// Forward-compat (39 §2.2): a variant this build does not know. The
+    /// original serialized tag is preserved verbatim and re-emitted on save.
+    /// Declared last so serde tries the known snake_case tags first.
+    #[serde(untagged)]
+    Unknown(UnknownTag),
 }
 
 impl GradeOpKind {
     pub fn target_kind(self) -> PropTargetKind {
         PropTargetKind::GradeOp(self)
+    }
+
+    /// The preserved tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(self) -> Option<UnknownTag> {
+        match self {
+            GradeOpKind::Unknown(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(self) -> bool {
+        matches!(self, GradeOpKind::Unknown(_))
     }
 }
 
@@ -181,10 +201,13 @@ pub enum GradeOpParams {
         intensity: f32,
         interp: LutInterp,
     },
-    /// Forward-compat: an op kind this build does not understand. Loads inert +
-    /// flagged in UI, never dropped — mirrors 01 §6.2's orphaned-PropPath rule.
-    #[serde(other)]
-    Unknown,
+    /// Forward-compat (39 §2.2): an op kind this build does not understand. The
+    /// whole object — `kind` tag and payload — is retained verbatim and
+    /// re-emitted unchanged (the old `#[serde(other)]` unit variant destroyed
+    /// the payload and rewrote the tag). Loads inert + flagged in UI, never
+    /// dropped. Declared last so serde tries the known tags first.
+    #[serde(untagged)]
+    Unknown(serde_json::Map<String, serde_json::Value>),
 }
 
 impl GradeOpParams {
@@ -199,8 +222,21 @@ impl GradeOpParams {
             GradeOpParams::Curves { .. } => GradeOpKind::Curves,
             GradeOpParams::HslQualifier { .. } => GradeOpKind::HslQualifier,
             GradeOpParams::Lut3d { .. } => GradeOpKind::Lut3d,
-            GradeOpParams::Unknown => return None,
+            GradeOpParams::Unknown(_) => return None,
         })
+    }
+
+    /// The preserved `kind` tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(&self) -> Option<&str> {
+        match self {
+            GradeOpParams::Unknown(map) => map.get("kind").and_then(|v| v.as_str()),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, GradeOpParams::Unknown(_))
     }
 }
 
@@ -390,11 +426,50 @@ mod tests {
     #[test]
     fn grade_op_params_forward_compat_unknown() {
         // A payload tagged with an op kind this build doesn't know loads as
-        // Unknown rather than failing.
+        // Unknown, preserving the WHOLE object verbatim (39 §2.2 rule 1) — the
+        // old `#[serde(other)]` unit variant destroyed the payload.
         let json = r#"{"kind":"future_op","wild":[1,2,3]}"#;
         let p: GradeOpParams = serde_json::from_str(json).unwrap();
-        assert_eq!(p, GradeOpParams::Unknown);
+        assert!(p.is_unknown());
+        assert_eq!(p.unknown_tag(), Some("future_op"));
         assert_eq!(p.kind(), None);
+        // Re-serializes value-equal to the input (payload retained, not dropped).
+        let back: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let orig: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(back, orig);
+    }
+
+    #[test]
+    fn grade_op_kind_unknown_preserves_tag() {
+        let k: GradeOpKind = serde_json::from_str("\"bloom\"").unwrap();
+        assert!(k.is_unknown());
+        assert_eq!(k.unknown_tag().unwrap().as_str(), "bloom");
+        assert_eq!(serde_json::to_string(&k).unwrap(), "\"bloom\"");
+        for (k, tag) in [
+            (GradeOpKind::Exposure, "\"exposure\""),
+            (GradeOpKind::Cdl, "\"cdl\""),
+            (GradeOpKind::Lut3d, "\"lut3d\""),
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), tag);
+            let back: GradeOpKind = serde_json::from_str(tag).unwrap();
+            assert_eq!(back, k);
+            assert!(!back.is_unknown());
+        }
+    }
+
+    #[test]
+    fn grade_op_params_malformed_known_falls_to_unknown_with_known_tag() {
+        // serde's per-variant untagged fallback is greedy: a KNOWN kind with a
+        // malformed field degrades to Unknown at the serde layer (this
+        // regressed the old `#[serde(other)]` unit variant, which errored). The
+        // document-level integrity guard lives in `load::finalize_load`, which
+        // rejects a retained Unknown whose tag is a KNOWN catalog tag. Here we
+        // pin the serde-layer behaviour that feeds that guard.
+        let bad = r#"{"kind":"exposure","stops":"NOPE"}"#;
+        let p: GradeOpParams = serde_json::from_str(bad).unwrap();
+        assert!(p.is_unknown());
+        assert_eq!(p.unknown_tag(), Some("exposure"));
     }
 
     #[test]

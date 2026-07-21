@@ -255,6 +255,16 @@ pub struct PhotonicRenderer {
     /// on-canvas frame); `Some(Transparent)` suppresses the white board quads and
     /// clears the scene to alpha 0 instead of the surround colour.
     pub(crate) export_bg: Option<ExportBackground>,
+
+    /// Shared GPU-health handle (37 §1.3). The device-loss callback installed in
+    /// [`assemble`](Self::assemble) flips this to `Lost`, and `begin_frame` marks
+    /// it lost on a terminal surface error. Cloned out via [`gpu_health`](Self::gpu_health)
+    /// so photonic-video and the app shell observe the same machine.
+    pub(crate) gpu_health: crate::gpu_state::GpuHealth,
+    /// Capability floor result for the adapter that backs this renderer (37 §1.2).
+    /// Empty (floor met) for offscreen/export renderers, which never present video.
+    /// The windowed [`new`](Self::new) constructor fills it from the selected adapter.
+    capability_report: crate::capability::CapabilityReport,
 }
 
 /// One layer's contiguous geometry range in the frame's shared index buffer,
@@ -365,7 +375,12 @@ impl PhotonicRenderer {
                 .await
             {
                 Ok((device, queue)) => {
-                    selected = Some((info, caps, device, queue));
+                    // Capability floor (37 §1.2): evaluated on the *selected*
+                    // adapter while it is still in scope. We do NOT reject the
+                    // adapter here — vector mode must run below the floor; only
+                    // video mode is gated (in photonic-gui), off this report.
+                    let capability = crate::capability::check_capability_floor(&adapter);
+                    selected = Some((info, caps, device, queue, capability));
                     break;
                 }
                 Err(error) => {
@@ -373,16 +388,19 @@ impl PhotonicRenderer {
                 }
             }
         }
-        let Some((adapter_info, caps, device, queue)) = selected else {
+        let Some((adapter_info, caps, device, queue, capability)) = selected else {
             return Err(anyhow!("no GPU adapter could create a device compatible with this window (backends: {backends:?})"));
         };
         let (device, queue) = (Arc::new(device), Arc::new(queue));
         let surface_config = choose_surface_config(&caps, width, height)?;
         let surface_format = surface_config.format;
         tracing::info!(adapter = %adapter_info.name, ?adapter_info.backend, ?adapter_info.device_type, ?surface_format, ?surface_config.present_mode, "Selected GPU adapter and surface configuration");
+        if !capability.meets_floor() {
+            tracing::warn!(reason = %capability.reason(), "GPU below the video-mode capability floor; vector mode only");
+        }
         surface.configure(&device, &surface_config);
 
-        Ok(Self::assemble(
+        let mut renderer = Self::assemble(
             device,
             queue,
             Some(surface),
@@ -393,7 +411,9 @@ impl PhotonicRenderer {
             document,
             Some(history),
             capture_rx,
-        ))
+        );
+        renderer.capability_report = capability;
+        Ok(renderer)
     }
 
     /// Construct a **windowless** renderer that draws only to offscreen textures
@@ -554,6 +574,25 @@ impl PhotonicRenderer {
             tracing::error!("wgpu uncaptured error: {:?}", e);
         }));
 
+        // Device-loss detection (37 §1.3). A driver-triggered loss (`Unknown` —
+        // a TDR, a driver reset, an eGPU unplug) flips the shared health machine
+        // to `Lost` so the engine/app can pause, drop GPU caches and rebuild. Our
+        // own teardown reasons (`Destroyed`/`Dropped` on device drop, plus the
+        // `ReplacedCallback`/`DeviceInvalid` bookkeeping reasons) MUST NOT trip
+        // recovery — they are not real losses.
+        let gpu_health = crate::gpu_state::GpuHealth::new();
+        {
+            let health = gpu_health.clone();
+            device.set_device_lost_callback(move |reason, msg| {
+                if matches!(reason, wgpu::DeviceLostReason::Unknown) {
+                    health.mark_lost();
+                    tracing::error!(?reason, %msg, "wgpu device lost");
+                } else {
+                    tracing::debug!(?reason, %msg, "wgpu device lost callback (teardown)");
+                }
+            });
+        }
+
         let fill_pipeline =
             create_fill_pipeline(&device, surface_format, &camera_bgl, MSAA_SAMPLES);
         // One pipeline variant per separable blend mode, sharing the fill shader.
@@ -712,7 +751,22 @@ impl PhotonicRenderer {
             layer_runs: Vec::new(),
             artboard_idx_end: 0,
             export_bg: None,
+            gpu_health,
+            capability_report: crate::capability::CapabilityReport::default(),
         }
+    }
+
+    /// A cheaply-cloned handle to this renderer's GPU-health machine (37 §1.3),
+    /// so photonic-video and the app shell observe the same device-loss state.
+    pub fn gpu_health(&self) -> crate::gpu_state::GpuHealth {
+        self.gpu_health.clone()
+    }
+
+    /// The capability-floor report for the adapter backing this renderer (37 §1.2).
+    /// Consulted by the app shell to refuse video mode below the floor while
+    /// keeping vector mode alive.
+    pub fn capability_report(&self) -> &crate::capability::CapabilityReport {
+        &self.capability_report
     }
 
     /// Clear colour for the scene background pass. The normal editor frame clears

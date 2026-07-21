@@ -36,6 +36,36 @@ Scope: concrete test scenarios per capability (CAP-001..021), MCP-scripted walkt
 
 Each capability: happy path, edge cases, and failure modes, each mapped to a test layer, the fixture(s) it needs, its pass criteria, and the phase it activates in (11 §9's "closes here" phase is **bold**; a phase name alone means partial coverage lands there).
 
+### 2.1 Per-capability CAP-019 coverage map
+
+The AS-1/2/3 script-vs-GUI pairs (§3) are the headline CAP-019 gate, but they do not touch every capability. This table makes the rest explicit so nothing is silently ungated: for each capability, which acceptance story exercises it, which non-story test file covers it directly, and — critically — where **no MCP verb exists** so a capability can never be reached by any headless script. "NO MCP VERB" rows are the durable-anti-drift targets: once 40 §3.2's spec-assert checker lands they should become `spec-assert: symbol-absent` assertions that self-invalidate the moment a verb is added.
+
+| CAP | AS story | Non-story test coverage | MCP-verb status |
+|---|---|---|---|
+| 001 Import + metadata | AS-1/2/3 (`import_media`) | `photonic-video/tests/preview_media_load.rs`, `export_synthetic.rs` (probe) | `import_media` (live) |
+| 002 Arrange/trim/split/delete | AS-1 | `photonic-core` timeline-ops unit tests; `photonic-gui/tests/video_ui_paths.rs` | `insert_clip`/`split_clip`/`trim_clip`/`remove_clip` (live). **Snapping row is `manual`** — see artifact note below |
+| 003 Ripple/roll/slip/slide | AS-1 (ripple delete) | `photonic-core` ops unit tests; `ops_bridge.rs` (GUI arm) | `trim_clip`/`remove_clip` ripple flags (live); **NO MCP VERB** for standalone `slip`/`slide`/`roll` (present in `ops_bridge`, GUI-only) |
+| 004 Play/pause/scrub/step, A/V sync | indirect (export duration/sync) | `photonic-video/tests/playback_soak.rs`, `ss3_sync_drift.rs` (`#[ignore]`, nightly) | **NO transport MCP verb** — headless reaches frames only via `render_frame_at`; interactive transport is GUI-only |
+| 005 Nested sequences | — | `photonic-core::timeline::ops::create_nested_sequence` tests (`ops.rs:1615`); `insert_clip {kind:nested_sequence}` exercised at `handlers/video.rs:7690` | `insert_clip {kind:nested_sequence}` + `delete_sequence` dangling-ref guard (`schema_gen.rs:4951`) are live. **NO wrap-selection verb** exposing `create_nested_sequence` — the one genuine MCP gap here (corrects this doc's earlier "nesting absent from MCP" claim) |
+| 006/021 Vector clip + alpha export | AS-3 (`.webm` alpha) | `photonic-render/tests/golden_vector_equivalence.rs`; `photonic-video/tests/export_synthetic.rs` (alpha round-trip) | `insert_clip {kind:vector}` (live) |
+| 007 Keyframes + easing | AS-1 (opacity), AS-3 (Bezier x / Linear color) | `photonic-core::timeline::anim` unit tests | `set_keyframe`/`batch_set_keyframes` (live) |
+| 008 Effects/transitions | AS-2 (`cross_dissolve`) | golden corpus effect cases | `set_transition`, effect nodes via graph verbs (live) |
+| 009 Auto captions | AS-1, AS-3 | `photonic-video/src/captions/mock.rs`; handler tests | `auto_caption` w/ `provider:"mock"` (live, offline) |
+| 010 Caption edit | AS-1 (`set_caption_style` karaoke) | `photonic-core` captions unit tests | `set_caption_style` etc. (live) |
+| 011 TTS voiceover | — | mock `TtsProvider` (`captions/mock.rs`) | `generate_voiceover` (live, mock path) |
+| 012 Aspect switch + reframe | AS-1 | `photonic-gui/src/app/reframe.rs`; `video_ui_paths.rs` | `set_sequence_format`/`set_active_format`/`set_clip_prop` (live) |
+| 013 Export presets/codec/container | AS-1/2/3 | `photonic-video/tests/export_synthetic.rs` | `export_sequence` (live) |
+| 014 Proxy transcode | AS-2 (blocked on 4K stand-in, §6 gap 1) | `preview_media_load.rs` (L7) | `generate_proxies` (live) |
+| 015 Color grade + LUT + scopes | AS-2 | golden `grade_cdl`/`grade_curve`/`grade_lut3d`; `photonic-render/src/lut.rs` (`.cube` parse + `channel_swap_rgb_to_gbr.cube` fixture) | `set_grade`/`apply_lut`/`get_scopes` (live) |
+| 016 Node composition | AS-2, AS-3 | golden `node_blur_merge`, `project_graph_vignette` | `create_clip_composition`/`add_graph_node`/`add_graph_edge` (live) |
+| 017 Audio mixer | AS-2 (ducking) | DSP unit tests (09) | `set_clip_audio`/`audio_fx`/`batch_set_keyframes` (live). **Master-bus meter row BLOCKED**: `EngineBridge::master_level()` (`crates/photonic-gui/src/app/engine.rs:203`) returns `None` unconditionally; the 3-step closure plan is written at `engine.rs:185-197`. No AS story may assert a meter value until that seam lands (G-4 / 26 §8 K-0.6) |
+| 018 Undo/redo, all domains | indirect (every AS edit routes through `dispatch_tool`'s undo side-effect) | `photonic-core::history` tests; `history/revision_contract.rs` | undo/redo is a side-effect of the tool-call path, not a distinct verb |
+| 019 MCP parity (headless) | **the AS harness itself** — `photonic-app/tests/acceptance_stories.rs` (script vs GUI arm) | `photonic-mcp/tests/mcp_parity.rs`, `mcp_parity_round2.rs` (per-verb) | n/a (this row IS the gate) |
+| 020 Save/reopen, backward compat | — | `photonic-core/tests/forward_compat.rs`; `photonic-gui/tests/timeline_recovery.rs` | n/a — save/open is a document-path operation, not a timeline verb |
+| 022 Crash recovery | — | `photonic-gui/tests/timeline_recovery.rs:94 recovery_round_trip_preserves_timeline` (drives `recovery_write_for_test`/`recovery_load_for_test` → `write_photon_file`/`load_document`) | n/a — contract is 37 §2; recovery is autosave-path, not an MCP verb |
+
+**Manual-row falsifiability requirement.** Every `manual` row in the matrix below (snapping under CAP-002; caption-accuracy spot-check under CAP-009; master-bus meters under CAP-017) is only a real gate if it produces a checkable artifact. A manual row is considered satisfied for a phase only when its exit-criteria checklist file (11 §6) records: the checklist path, the verification date, and the build hash tested. A manual row with no such artifact is treated as **uncovered**, not passed.
+
 ### CAP-001 — Import + metadata
 
 | Scenario | Layer | Fixture | Pass criteria | Phase |
@@ -345,10 +375,10 @@ Pass criteria: exported frames show the vector title animating per its keyframe 
 
 Per SPEC.md constraints ("Existing vector-editing behaviour and performance must not regress") and 11 §6's per-phase floor:
 
-- **Every phase's exit criteria includes, unconditionally**: `cargo test --workspace --locked` green across all pre-video-era test files (376 tests in `photonic-core`, 63 in `photonic-gui`, plus `photonic-render`'s and `photonic-mcp`'s suites — counts as of this doc's date, see §5's verification run below).
+- **Every phase's exit criteria includes, unconditionally**: `cargo test --workspace --locked` green across all pre-video-era test files (`photonic-core`, `photonic-gui`, `photonic-render`, `photonic-mcp` — for the current per-crate counts see CI, not a hand-copied number here; a frozen census rots the moment a test is added).
 - P1 carries the sharpest version of this gate (00 §7's named top risk): the golden-vector-equivalence corpus (§5 below) IS the concrete mechanism, not a restatement of "be careful."
 - P7's color-space unification work re-runs the SAME P1 corpus as its own gate (03 §2.6 note, 11 §6 P7 row) — the corpus is written once, reused twice.
-- **Known pre-existing gap, unrelated to this spec**: `photonic-gui`'s `no_tofu_glyphs` test currently fails on `main`/this branch (4 flagged glyphs in `dialogs.rs`, `tabs.rs`, `color_popup.rs` predating any video-editor work — verified by stashing all changes from this doc's work and re-running). Not caused by, and out of scope for, the video-editor module; flagged here so a phase's CI run isn't misread as a video-editor regression.
+- The glyph-coverage guard is `photonic-gui`'s `source_has_no_tofu_glyphs` (`crates/photonic-gui/tests/no_tofu_glyphs.rs`); it is part of the unconditional phase floor above like any other test. (Historical note: an earlier draft of this section claimed the test was named `no_tofu_glyphs` and "currently fails" as a pre-existing unrelated gap — both are stale and were deleted, because a standing "expected failure" note trains reviewers to wave a real failure through.)
 
 ---
 
@@ -362,41 +392,29 @@ Two pieces of test code, both written to compile and run against the codebase **
 - Skips with a printed message when no GPU adapter is available (mirrors `headless.rs`'s `try_renderer()` convention exactly).
 - Bless mode: `PHOTONIC_BLESS_GOLDEN=1 cargo test -p photonic-render --test golden_vector_equivalence -- --test-threads=1`.
 - Comparison rule: byte-exact by default; a case carrying `tolerance_db.txt` switches to a PSNR-floor comparison (`blend_nonseparable/tolerance_db.txt` = `45.0`, per 03 §2.6's recommended threshold for `COMPOSITE_SHADER`-touched cases). On failure, writes a per-pixel abs-diff heatmap PNG next to the case (11 §1.2's "dump a diff PNG" convention).
-- **Fixture corpus**: 10 hand-authored `.photon` documents under `tests/golden/`, generated via the checked-in `crates/photonic-render/examples/gen_p1_golden_fixtures.rs` (a dev tool, not CI-run — same convention as `tools/gen-mcp-docs.py`): `paths_fills_basic`, `strokes_basic`, `gradient_linear`, `gradient_radial`, `blend_separable`, `blend_nonseparable`, `text_basic`, `raster_placement`, `effect_stack_color_overlay_stroke`, `boolean_groups`. Spans exactly the surface area 03 §2.6 named (paths+fills, strokes, gradients, blend modes incl. non-separable, text, raster placement, effect-stack, boolean groups).
+- **Fixture corpus**: the hand-authored `.photon` documents under `crates/photonic-render/tests/golden/`, generated via the checked-in `crates/photonic-render/examples/gen_p1_golden_fixtures.rs` (a dev tool, not CI-run — same convention as `tools/gen-mcp-docs.py`). The corpus has since grown well past this doc's original 10 cases (currently 31 case dirs — a P1 architect-gate expansion); the authoritative, self-updating census lives in `crates/photonic-render/tests/golden/README.md`, not a hand-copied list here. It spans the surface area 03 §2.6 named (paths+fills, strokes, gradients, blend modes incl. non-separable, text, raster placement, effect-stack, boolean groups) plus the batch-2 expansion (symbols, compound/nested/boolean variants, pattern/mesh/fluid gradients, masks, adjustment layers).
 - **Verified end-to-end**: bless mode was run once locally (GPU adapter available in this environment) to confirm the harness renders every fixture without panicking and writes valid PNGs, then comparison mode was run and passed against those blessed references. **The blessed PNGs were then deleted** before committing — per the task's "keep PNGs unblessed" instruction, the corpus ships in its pre-bless state; the harness reports "no blessed reference — run with PHOTONIC_BLESS_GOLDEN=1 first" as its current (expected) `cargo test --workspace` result, not a compile error.
 - This corpus is deliberately **separate** from the repo-root `tests/golden/` (11 §1's video/timeline corpus) — documented in both this file's `tests/golden/README.md` and inline in the harness's module doc comment, per 03 §2.6 / 11 §1.1's mutual cross-reference requirement.
 
 ### 5.2 `photonic-core` revision-counter contract tests (03 §2.1)
 
-Location: `crates/photonic-core/src/history/revision_contract.rs`, wired into `history/mod.rs` via `#[cfg(feature = "video-p1-contract")] mod revision_contract;`.
+Location: `crates/photonic-core/src/history/revision_contract.rs`, wired into `history/mod.rs` via `#[cfg(test)] mod revision_contract;`.
 
-**Decision (the task's explicit choice point): feature-gate, not `#[ignore]`.** The API these tests target — `CommandHistory::revision()`, `CommandHistory::changes_since()`, `Command::affected_nodes()`, the `ChangeSummary` type — does not exist in the crate at all (03 §2.1 documents the exact gap: a private `revision` field exists but no accessor, `execute`/`undo`/`redo` never touch it, no `affected_nodes` or `changes_since` anywhere). Tests written against that API therefore **cannot compile**, regardless of `#[ignore]` — `#[ignore]` only skips *running* a test, not *compiling* the crate it lives in. A feature flag, by contrast, keeps the whole module unparsed under default features, so `cargo build/test --workspace` (no extra flags) is provably unaffected by this file's existence.
+**Status: graduated to always-on.** This section originally shipped the module behind a `#[cfg(feature = "video-p1-contract")]` gate as TDD scaffolding for an API (`CommandHistory::revision()`/`changes_since()`, `Command::affected_nodes()`, `ChangeSummary`) that did not yet exist. That API has since landed, so the gate, the empty `video-p1-contract` feature in `photonic-core/Cargo.toml`, and the Cargo.toml comment block were all removed (commit `1ccbeea`): the module is now an ordinary `#[cfg(test)]` module compiled and run by the default `cargo test --workspace`. See the module's own doc comment at `revision_contract.rs:1` for the graduation record. The workspace now carries **zero cargo features** in any of its `Cargo.toml` files.
 
-`video-p1-contract` is declared in `photonic-core/Cargo.toml`, empty (`[]`), off by default. Verified:
-- `cargo build --workspace` (default features): green, `revision_contract.rs` not compiled at all.
-- `cargo test -p photonic-core --features video-p1-contract --no-run`: **16 compile errors**, all `E0599 no method named 'revision'/'changes_since' found` / missing `affected_nodes` — the expected "red" state for an API that doesn't exist yet. This compile failure IS the TDD red phase here; there is no runtime-red state possible when the target symbols don't exist.
+Eight tests, each citing its 03 §2.1 spec line in an assertion message: `revision()` bumps on execute and on undo/redo (2 tests), `Command::affected_nodes()` reports the right `NodeId` for `AddNode` and `UpdateNode` (2 tests), and `changes_since()` covers a single-command touch, a multi-command union, the `from == current revision` empty case, and the `from` predates the ring-overflow case (4 tests) — `revision_contract.rs:42,:65,:101,:120,:140,:169,:204,:227`.
 
-Eight tests, each citing its 03 §2.1 spec line in an assertion message: `revision()` bumps on execute and on undo/redo (2 tests), `Command::affected_nodes()` reports the right `NodeId` for `AddNode` and `UpdateNode` (2 tests), and `changes_since()` covers a single-command touch, a multi-command union, the `from == current revision` empty case, and the `from` predates the ~64-entry ring overflow case (4 tests).
+CI runs `cargo test --workspace --locked --all-features` (`.github/workflows/ci.yml`); with zero features declared that is identical to the default run, and the comment there records the `video-p1-contract` graduation so the `--all-features` flag is not mistaken for still-live scaffolding.
 
-When P1 lands the real API, this module's `#[cfg(feature = "video-p1-contract")]` gate is removed (folded into the crate's always-on test suite) as part of that same change — the feature flag is scaffolding, not a permanent split.
+### 5.3 Verification run
 
-### 5.3 Verification run (this doc's date)
+For current pass/fail state and per-crate test counts, consult CI (`.github/workflows/ci.yml`) rather than a frozen census — the numbers this section used to hardcode (376/63/…) drift on every added test and are not a durable record. The durable facts:
 
-```
-cargo build --workspace                                          # green, warnings only (pre-existing)
-cargo test -p photonic-core --features video-p1-contract --no-run   # 16 compile errors (expected — API doesn't exist)
-cargo test --workspace --no-fail-fast
-  photonic-core (lib, 376 tests)                    ok
-  photonic-core (raster_editing_session, 4 tests)   ok
-  photonic-core (raster_integration, 7 tests)        ok
-  photonic-gui (lib, 63 tests)                       ok
-  photonic-gui (no_tofu_glyphs)                      FAILED — pre-existing, unrelated (see §4)
-  photonic-mcp (lib, 7 tests)                        ok
-  photonic-render (lib, 39 tests)                    ok
-  photonic-render (golden_vector_equivalence)        FAILED — expected: unblessed corpus (see §5.1)
-```
+- The default `cargo test --workspace --locked` build compiles with no cargo features (there are none) and the revision-contract module runs as an ordinary `#[cfg(test)]` module (§5.2).
+- `crates/photonic-render/tests/golden_vector_equivalence.rs` skips (not fails) when no GPU adapter is present and, on a machine with an adapter, compares against the blessed corpus under `crates/photonic-render/tests/golden/`.
+- `photonic-gui`'s glyph guard is `source_has_no_tofu_glyphs` (§4) and is expected to pass, not fail.
 
-Both failures are accounted for and expected; no compile error anywhere in the default build.
+The anti-drift home for these facts is 40 §3.2's spec-assert checker once it lands, not another hand-count in this doc.
 
 ---
 

@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::CorsLayer;
 use tracing::info;
 
 /// Configuration for the MCP server.
@@ -84,6 +83,35 @@ pub struct AppState {
     /// status here; `get_job_status`/`cancel_job` poll it; the background
     /// checkpoint-flush task GCs terminal entries after 10 minutes.
     pub video_jobs: Arc<StdMutex<handlers::video_jobs::JobRegistry>>,
+}
+
+impl AppState {
+    /// Builds a fully in-memory `AppState` for out-of-crate integration tests
+    /// (29 §3 / CAP-019 acceptance-story harness) so callers need not hand-roll
+    /// all nine fields. Shape mirrors `mcp_parity.rs`'s `test_state()`:
+    /// a fresh 1920×1080 document, a 200-entry history, no document path,
+    /// `McpServerConfig::default()` (no bearer secret → the transport auth
+    /// layer is open, but the harness bypasses the transport anyway), an empty
+    /// audit log, and freshly constructed clipboard/video registries.
+    ///
+    /// The `capture_tx` receiver is deliberately leaked: no screenshot is ever
+    /// requested in a headless test, and leaking keeps the channel from
+    /// reporting a disconnected receiver if some path ever does send.
+    pub fn headless_for_test() -> Self {
+        let (capture_tx, capture_rx) = std::sync::mpsc::channel();
+        std::mem::forget(capture_rx);
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("t", 1920.0, 1080.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(200))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(capture_tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
+            video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
+            video_jobs: Arc::new(StdMutex::new(handlers::video_jobs::JobRegistry::new())),
+        }
+    }
 }
 
 /// The MCP server — wraps axum and owns shared state.
@@ -160,11 +188,61 @@ impl McpServer {
     }
 }
 
-fn build_router(state: AppState) -> Router {
+/// Builds the MCP router.
+///
+/// Deliberately carries NO CORS layer (28 §4 point 1): the server has no
+/// legitimate browser client, so it emits no `access-control-allow-origin`
+/// and answers no preflight. Combined with the bearer requirement below —
+/// which forces a preflight for any cross-origin caller — that closes the
+/// "any page you visit can drive your editor" vector. Neither half suffices
+/// alone.
+///
+/// `pub` so integration tests can drive it without binding a socket.
+pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp))
-        .layer(CorsLayer::permissive())
+        // `route_layer`, not `layer`: auth runs only for matched routes (so
+        // unknown paths still 404 without touching the auth path) and, more
+        // importantly, runs BEFORE `handle_mcp` deserializes the body, so an
+        // unauthenticated caller cannot probe the JSON-RPC parser.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ))
         .with_state(state)
+}
+
+/// Rejects every request that does not present the session token
+/// (28 §4 point 2).
+///
+/// On rejection this returns a bare 401 — no body, no JSON-RPC error object,
+/// no `WWW-Authenticate` header — so an unauthenticated prober learns nothing
+/// about what is listening. The presented token is never logged.
+async fn require_bearer(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // No secret configured → open. In production `main.rs` always sets one;
+    // this arm exists for `McpServerConfig::default()`, used only by
+    // in-process test states that bypass the transport entirely.
+    let Some(expected) = state.config.secret.as_deref() else {
+        return next.run(req).await;
+    };
+
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(' '))
+        // The scheme is case-insensitive per RFC 7235; the token is not.
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token);
+
+    match presented {
+        Some(token) if crate::auth::token_eq(token, expected) => next.run(req).await,
+        _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    }
 }
 
 /// Main MCP JSON-RPC handler.

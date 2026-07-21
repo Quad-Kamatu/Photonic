@@ -1695,7 +1695,21 @@ impl Document {
     /// Deserialize from an already-parsed JSON tree, migrating it forward to
     /// [`CURRENT_FORMAT_VERSION`] first. Shared by [`from_json`] and the
     /// `.photon` file wrapper (which carries the document as a sub-value).
-    pub fn from_value(mut value: serde_json::Value) -> Result<Self, serde_json::Error> {
+    ///
+    /// The [`LoadReport`](crate::timeline::load::LoadReport) is discarded; use
+    /// [`from_value_with_report`](Self::from_value_with_report) to observe the
+    /// unknown-variant findings (39 §2.2).
+    pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        Self::from_value_with_report(value).map(|(doc, _report)| doc)
+    }
+
+    /// Like [`from_value`](Self::from_value) but also returns the load-time
+    /// [`LoadReport`](crate::timeline::load::LoadReport), which names any
+    /// unknown enum variants preserved from a newer-build file (39 §2.2 rule 3:
+    /// once per load). The report is empty for a document with no unknowns.
+    pub fn from_value_with_report(
+        mut value: serde_json::Value,
+    ) -> Result<(Self, crate::timeline::load::LoadReport), serde_json::Error> {
         use crate::migration;
 
         // Migrate at the JSON-tree level before struct deserialization so new
@@ -1726,10 +1740,12 @@ impl Document {
         // enforce the per-sequence invariants (reject a corrupt/overlapping
         // timeline with a load error). Only runs when a timeline is present
         // (01 §4, §6.2).
-        if let Some(timeline) = doc.timeline.as_mut() {
-            crate::timeline::load::finalize_load(timeline).map_err(serde::de::Error::custom)?;
-        }
-        Ok(doc)
+        let report = if let Some(timeline) = doc.timeline.as_mut() {
+            crate::timeline::load::finalize_load(timeline).map_err(serde::de::Error::custom)?
+        } else {
+            crate::timeline::load::LoadReport::default()
+        };
+        Ok((doc, report))
     }
 }
 

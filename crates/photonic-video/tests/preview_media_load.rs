@@ -363,6 +363,82 @@ fn preview_cmds_coalesce_and_status_fields_exist() {
     session.shutdown();
 }
 
+// ── AS-1/AS-3 vector `.photon` timeline fixtures (29 §3, brief I task 6) ─────
+
+/// The two vector timeline fixtures load, carry the stably-named nodes whose
+/// ids the acceptance-story scripts hardcode, and expose the property targets
+/// AS-1 (`transform.opacity`) and AS-3 (`node.<id>.fill.color`) drive.
+///
+/// The node ids are the durable contract, recorded in `tests/fixtures/README.md`
+/// and generated deterministically by
+/// `cargo run -p photonic-render --example gen_p1_golden_fixtures -- video-fixtures`.
+#[test]
+fn vector_title_fixtures_load_and_expose_keyframe_targets() {
+    use photonic_core::node::{NodeId, SceneNodeKind};
+    use photonic_core::style::FillKind;
+    use photonic_core::timeline::prop_registry::{is_known, PropTargetKind};
+
+    // Hardcoded, matching gen_p1_golden_fixtures.rs + the fixtures README.
+    let title_asset_node = NodeId::from_u128(0x11A5_0000_0000_0000_0000_0000_0000_0001);
+    let title_doc_title = NodeId::from_u128(0x11D0_0000_0000_0000_0000_0000_0000_0001);
+    let title_doc_subtitle = NodeId::from_u128(0x11D0_0000_0000_0000_0000_0000_0000_0002);
+
+    // Small helper: the node's fill colour, if it has a solid one — this is the
+    // concrete target an AS `node.<id>.fill.color` keyframe binds to. (Vector
+    // node paths are NOT in `prop_registry`, which only covers timeline clip
+    // props like `transform.*`/`params.*`; a node fill target is validated by
+    // resolving the node + its solid fill, not by `is_known`.)
+    fn solid_fill(kind: &SceneNodeKind) -> Option<[f32; 4]> {
+        let fill = match kind {
+            SceneNodeKind::Path(p) => &p.fill,
+            SceneNodeKind::Text(t) => &t.fill,
+            _ => return None,
+        };
+        match fill.kind {
+            FillKind::Solid(c) => Some([c.r, c.g, c.b, c.a]),
+            _ => None,
+        }
+    }
+
+    // AS-1 title asset: exactly one renderable node named "title".
+    let json = std::fs::read_to_string(fixtures_dir().join("title_asset.photon"))
+        .expect("read title_asset.photon");
+    let (doc, _hist) = photonic_core::load_photon(&json).expect("load title_asset.photon");
+    assert_eq!(doc.nodes.len(), 1, "title_asset has one node");
+    let title = doc
+        .nodes
+        .get(&title_asset_node)
+        .expect("title_asset node id resolves (hardcoded contract)");
+    assert_eq!(title.name, "title");
+    assert!(
+        solid_fill(&title.kind).is_some(),
+        "title node exposes a solid fill colour"
+    );
+    // AS-1 fades the *clip* via the timeline `transform.opacity` PropPath.
+    assert!(is_known(PropTargetKind::ClipTransform, "transform.opacity"));
+
+    // AS-3 title doc: two stably-named nodes, each a real fill-color target.
+    let json = std::fs::read_to_string(fixtures_dir().join("title_doc_asset.photon"))
+        .expect("read title_doc_asset.photon");
+    let (doc, _hist) = photonic_core::load_photon(&json).expect("load title_doc_asset.photon");
+    assert_eq!(doc.nodes.len(), 2, "title_doc_asset has two nodes");
+    let headline = doc
+        .nodes
+        .get(&title_doc_title)
+        .expect("title_line node id resolves (hardcoded contract)");
+    assert_eq!(headline.name, "title_line");
+    assert!(
+        solid_fill(&headline.kind).is_some(),
+        "title_line exposes a solid fill for node.<id>.fill.color"
+    );
+    let subtitle = doc
+        .nodes
+        .get(&title_doc_subtitle)
+        .expect("subtitle_line node id resolves (hardcoded contract)");
+    assert_eq!(subtitle.name, "subtitle_line");
+    assert!(solid_fill(&subtitle.kind).is_some());
+}
+
 // ── Windows dual-input staging (temp f32le file) ────────────────────────────
 
 #[test]

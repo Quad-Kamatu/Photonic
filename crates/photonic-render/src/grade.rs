@@ -11,12 +11,17 @@
 //!    the exact §3 formulas — the golden reference the GPU kernels
 //!    ([`crate::grade_gpu`]) must match within tolerance (07 §6.1).
 //!
-//! **Working space (07 §3, D-09):** premultiplied linear-Rec.709. Per 07 §3 the
-//! ops operate on the stored (premultiplied) RGB directly; for opaque pixels
-//! (every golden fixture) that equals straight color. The §3 "Option B" enc/dec
-//! pair is the sRGB transfer pair — [`enc`] (linear→sRGB) / [`dec`] (sRGB→linear)
-//! — applied *internally* around CDL/Wheels/Contrast/LUT only, never around
-//! Exposure/WhiteBalance (07 §3.1/§3.3). Luma weighting is **Rec.709**
+//! **Working space (07 §3, D-09):** premultiplied linear-Rec.709 *storage*. Per
+//! 03 §4.5.3 / 27 A-3 grade operators run on **straight (non-premultiplied)**
+//! colour: [`apply_grade_cpu`] unpremultiplies each pixel by its alpha, runs the
+//! op, then re-premultiplies. Alpha itself is never touched by any grade op. At
+//! α <= [`ALPHA_EPS`] the RGB is carried through unchanged instead of dividing
+//! (03 §4.5.2). For opaque pixels (α == 1, every current golden fixture) the
+//! round trip is the exact identity, so the blessed corpus does not move. The §3
+//! "Option B" enc/dec pair is the sRGB transfer pair — [`enc`] (linear→sRGB) /
+//! [`dec`] (sRGB→linear) — applied *internally* around CDL/Wheels/Contrast/LUT
+//! only, never around Exposure/WhiteBalance (07 §3.1/§3.3); it sits *inside* the
+//! straight-alpha round trip. Luma weighting is **Rec.709**
 //! (0.2126/0.7152/0.0722), deliberately not the raster 601 weights (07 §3).
 
 use std::sync::Arc;
@@ -457,7 +462,7 @@ pub fn resolve(
                 }),
                 None => continue, // offline LUT asset → op is inert this frame
             },
-            GradeOpParams::Unknown => continue, // forward-compat inert op
+            GradeOpParams::Unknown(_) => continue, // forward-compat inert op
         };
         out.push(ResolvedGradeOp {
             payload,
@@ -574,15 +579,43 @@ fn scalar_field_mut<'a>(p: &'a mut GradeOpParams, path: &str) -> Option<&'a mut 
             _ => None,
         },
         Lut3d { intensity, .. } => (path == "params.intensity").then_some(intensity),
-        Curves { .. } | Unknown => None,
+        Curves { .. } | Unknown(_) => None,
     }
 }
 
-// ── CPU reference apply (07 §3) ─────────────────────────────────────────────
+// ── CPU reference apply (07 §3; operand space 03 §4.5.3) ────────────────────
 
-/// Apply a resolved grade stack to a premultiplied-linear RGBA `f32` buffer
-/// (07 §3) — the golden reference for GPU parity. `width`/`height` size the
-/// normalized coordinates power-window masks use (07 §4.1). Alpha is preserved.
+/// α below which a premultiplied pixel's RGB is carried through unchanged
+/// instead of divided out (03 §4.5.2). Must equal the WGSL `1e-6` literal in
+/// [`crate::grade_gpu`] — guarded by `shaders_share_constants_with_rust`.
+pub(crate) const ALPHA_EPS: f32 = 1e-6;
+
+/// Straight (non-premultiplied) linear RGB from a premultiplied pixel, or
+/// `None` when α <= [`ALPHA_EPS`] (03 §4.5.3). The inverse is
+/// [`repremultiply3`]. Shared so the GPU parity path and any future per-channel
+/// non-linear op reuse one definition (03 §4.5).
+#[inline]
+pub(crate) fn unpremultiply3(px: &[f32; 4]) -> Option<[f32; 3]> {
+    let a = px[3];
+    if a <= ALPHA_EPS {
+        return None;
+    }
+    Some([px[0] / a, px[1] / a, px[2] / a])
+}
+
+/// Re-premultiply straight linear RGB by α (03 §4.5.3), the inverse of
+/// [`unpremultiply3`].
+#[inline]
+pub(crate) fn repremultiply3(rgb: [f32; 3], a: f32) -> [f32; 3] {
+    [rgb[0] * a, rgb[1] * a, rgb[2] * a]
+}
+
+/// Apply a resolved grade stack to a premultiplied-linear RGBA `f32` buffer.
+/// Per 03 §4.5.3 each op runs on **straight** colour: unpremultiply → operate →
+/// re-premultiply, once per op (the outer loop re-reads the buffer, so the round
+/// trip is per-op, not one wrap around the stack). `width`/`height` size the
+/// normalized coordinates power-window masks use (07 §4.1). Alpha is preserved
+/// exactly; at α <= [`ALPHA_EPS`] the pixel is left untouched.
 pub fn apply_grade_cpu(pixels: &mut [f32], width: u32, height: u32, ops: &[ResolvedGradeOp]) {
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
@@ -592,8 +625,14 @@ pub fn apply_grade_cpu(pixels: &mut [f32], width: u32, height: u32, ops: &[Resol
             let x = ((idx % width.max(1)) as f32 + 0.5) / w;
             let y = ((idx / width.max(1)) as f32 + 0.5) / h;
             let mask_w = op.mask.map(|m| m.weight(x, y)).unwrap_or(1.0);
-            let rgb = [px[0], px[1], px[2]];
-            let out = apply_op(&op.payload, rgb, mask_w);
+            let a = px[3];
+            // 03 §4.5.3: grade operates on straight colour. Fully transparent
+            // pixels (α <= ALPHA_EPS) carry RGB through unchanged rather than
+            // dividing (03 §4.5.2); for premultiplied storage that RGB is ~0.
+            let Some(rgb) = unpremultiply3(&[px[0], px[1], px[2], a]) else {
+                continue;
+            };
+            let out = repremultiply3(apply_op(&op.payload, rgb, mask_w), a);
             px[0] = out[0];
             px[1] = out[1];
             px[2] = out[2];
@@ -872,6 +911,98 @@ mod tests {
             }
             _ => panic!("wrong payload"),
         }
+    }
+
+    // ── operand space: straight-alpha round trip (03 §4.5.3) ─────────────────
+
+    /// A CDL + Contrast + LUT stack — the three ops whose enc/dec non-linearity
+    /// makes the round trip observable.
+    fn cdl_contrast_lut_stack() -> Vec<ResolvedGradeOp> {
+        let cdl = ResolvedCdl {
+            slope: [1.1, 1.0, 0.9],
+            offset: [0.02, 0.0, -0.01],
+            power: [1.0, 1.0, 1.0],
+            sat: 1.2,
+        };
+        let lut = ResolvedLut3d {
+            table: Arc::new(Lut3d::identity(17)),
+            intensity: 1.0,
+            tetrahedral: false,
+        };
+        vec![
+            ResolvedGradeOp {
+                payload: ResolvedGradePayload::Cdl(cdl),
+                mask: None,
+            },
+            ResolvedGradeOp {
+                payload: ResolvedGradePayload::Contrast {
+                    pivot: 0.4,
+                    amount: 0.3,
+                },
+                mask: None,
+            },
+            ResolvedGradeOp {
+                payload: ResolvedGradePayload::Lut3d(lut),
+                mask: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn grade_is_invariant_under_opacity() {
+        let ops = cdl_contrast_lut_stack();
+        let straight = [0.6f32, 0.3, 0.15];
+        // Opaque pixel: premultiplied storage == straight colour.
+        let mut opaque = [straight[0], straight[1], straight[2], 1.0];
+        apply_grade_cpu(&mut opaque, 1, 1, &ops);
+        // Same colour at α = 0.35, stored premultiplied.
+        let a = 0.35f32;
+        let mut partial = [straight[0] * a, straight[1] * a, straight[2] * a, a];
+        apply_grade_cpu(&mut partial, 1, 1, &ops);
+        // Alpha is untouched by every grade op.
+        assert_eq!(opaque[3], 1.0);
+        assert_eq!(partial[3], a);
+        // Unpremultiplied results agree: the grade did not depend on alpha.
+        for c in 0..3 {
+            let got = partial[c] / a;
+            assert!(
+                (got - opaque[c]).abs() < 1e-6,
+                "channel {c}: partial {got} vs opaque {}",
+                opaque[c]
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_grade_is_bit_identical_to_legacy() {
+        let ops = cdl_contrast_lut_stack();
+        let rgb0 = [0.42f32, 0.71, 0.13];
+        // Legacy path (pre-03 §4.5.3): ops applied directly to the stored RGB,
+        // no unpremultiply round trip. For α == 1 storage == straight, so we
+        // reproduce it by folding `apply_op` over the stack — this is exactly
+        // what the old `apply_grade_cpu` computed.
+        let mut legacy = rgb0;
+        for op in &ops {
+            legacy = apply_op(&op.payload, legacy, 1.0);
+        }
+        let mut px = [rgb0[0], rgb0[1], rgb0[2], 1.0];
+        apply_grade_cpu(&mut px, 1, 1, &ops);
+        // Exact equality: the opaque golden corpus cannot move.
+        assert_eq!(
+            [px[0], px[1], px[2]],
+            legacy,
+            "opaque grade must be bit-identical to legacy"
+        );
+        assert_eq!(px[3], 1.0);
+    }
+
+    #[test]
+    fn fully_transparent_pixel_is_untouched() {
+        let ops = cdl_contrast_lut_stack();
+        let mut px = [0.0f32, 0.0, 0.0, 0.0];
+        let before = px;
+        apply_grade_cpu(&mut px, 1, 1, &ops);
+        assert_eq!(px, before, "α==0 pixel must pass through byte-for-byte");
     }
 
     // ── per-op formulas ───────────────────────────────────────────────────────

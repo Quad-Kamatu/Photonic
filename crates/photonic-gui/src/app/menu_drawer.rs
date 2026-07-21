@@ -725,7 +725,7 @@ impl PhotonicApp {
                             ui.label(
                                 RichText::new("TOOLS")
                                     .small()
-                                    .color(Color32::from_rgb(80, 80, 110)),
+                                    .color(crate::theme::section_header_color(ui)),
                             );
                             ui.add_space(4.0);
 

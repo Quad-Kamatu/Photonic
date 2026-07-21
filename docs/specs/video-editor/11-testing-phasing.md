@@ -79,6 +79,9 @@ Both are `#[ignore]`-annotated in source so a stray `cargo test` locally or in t
 ## 2. Test media corpus
 
 CI's Linux job installs GTK/X11/wgpu/OpenSSL system deps (`ci.yml` lines ~30–38) and **installs `ffmpeg` on all three platforms** (`apt-get` / `brew install ffmpeg` / `choco install ffmpeg`). Decode-path tests that need a real container/codec therefore *can* run in CI, and fixtures can be generated there.
+<!-- spec-assert: ci-step-contains ffmpeg -->
+<!-- SD-4 (27 §3): historically flagged "CI has no ffmpeg"; it is installed on all three runners now, pinned here so a workflow edit that drops it reds the gate. -->
+
 
 **Position:** commit tiny, pre-generated fixture files; provide a **generation script** (`tools/gen-test-fixtures.py`, ffmpeg-dependent, run by a developer locally when a fixture needs regenerating — same shape as `tools/gen-mcp-docs.py`, a checked-in script CI *consumes the output of* rather than *runs*). Do not attempt runtime synthesis of media in the test binary itself (adds a codec dependency to the test harness for no benefit — the fixtures are static test data, not something that needs to vary per run).
 
@@ -272,6 +275,16 @@ This phase touches the *existing* renderer (dirty tracking, persistent GPU buffe
 
 ## 7. Rollout guards
 
+<!-- SD-2 (27 §3): the workspace is already 8 crates (an earlier draft said "7, becomes 8"). One representative public item per crate is pinned so deleting a crate reds the gate. -->
+<!-- spec-assert: symbol-exists crates/photonic-core/src/annotation.rs::Annotation -->
+<!-- spec-assert: symbol-exists crates/photonic-render/src/canvas.rs::CanvasView -->
+<!-- spec-assert: symbol-exists crates/photonic-gui/src/app/engine.rs::EngineBridge -->
+<!-- spec-assert: symbol-exists crates/photonic-mcp/src/auth.rs::TokenStoreError -->
+<!-- spec-assert: symbol-exists crates/photonic-app/src/args.rs::Args -->
+<!-- spec-assert: symbol-exists crates/photonic-embed/src/lib.rs::Embedder -->
+<!-- spec-assert: symbol-exists crates/photonic-matte/src/lib.rs::remove_background -->
+<!-- spec-assert: symbol-exists crates/photonic-video/src/session.rs::EngineSession -->
+
 **Feature-gating strategy.** Two layers, not one:
 - **Compile-time:** a cargo feature `video` on `photonic-app` (and gating `photonic-video` as an optional workspace dependency). **Position: default-on once P3 lands** (the first phase where the crate does anything runtime-visible) — before P3, the feature doesn't need to exist since there's no code to gate. Keeping it default-on (rather than opt-in) from P3 onward matches this repo's existing practice of not shipping long-lived feature-flagged forks (no evidence of feature-flag-gated modules elsewhere in `Cargo.toml`) and avoids a second matrix of "with/without video" CI configurations, which the existing 3-OS matrix is already carrying enough of.
 - **Runtime:** the video *mode* (UI entry point, 04) stays hidden/unreachable in the GUI until P2's timeline-panel UI merges — this is naturally gated by the UI simply not existing yet, no explicit flag needed for P1-P2. From P2 onward, the mode is reachable but each phase only exposes the capabilities that phase actually shipped (e.g., P2 users can arrange/cut but "Play" does nothing useful until P3 — either disable the control or let it no-op with a clear "playback coming soon" state; **recommendation: disable + tooltip**, cheaper than a real stub and avoids a confusing dead click).
@@ -285,6 +298,11 @@ This phase touches the *existing* renderer (dirty tracking, persistent GPU buffe
 ## 8. New test dependencies
 
 `proptest` (`Cargo.toml:79`) and `criterion` (`photonic-video/Cargo.toml:88`) are **present**. **`insta` is absent**, so §3.2's IR-snapshot strategy is **unimplemented** — an open task, not a shipped capability.
+<!-- spec-assert: dep-present proptest -->
+<!-- spec-assert: dep-present criterion -->
+<!-- spec-assert: dep-absent insta -->
+<!-- SD-5 (27 §3): the earlier "none of proptest/insta/criterion exist" claim hid that two are present and only insta is absent. These pin the split so §3.2's snapshot strategy can never be silently re-described as shipped. -->
+
 
 **CI must run `cargo test --all-features`.** Verified 2026-07-20: `photonic-core`'s `video-p1-contract` feature gates 8 passing contract tests out of the default test run, and nothing detects that. This is one line of CI config and it catches the whole class — see [40 §3.6](40-spec-verification.md#36-the-complement-lints-and---all-features), which ranks it as the cheapest of the three verification mechanisms and the one that should land first.
 

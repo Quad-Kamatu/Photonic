@@ -146,6 +146,15 @@ fn window_weight(x: f32, y: f32, c: vec4<f32>, p: vec4<f32>, rect: u32, invert: 
     if (invert != 0u) { w = 1.0 - w; }
     return w;
 }
+
+// Straight (non-premultiplied) linear RGB from a premultiplied pixel (03 §4.5.3).
+// At α <= 1e-6 the RGB is carried through unchanged rather than divided
+// (03 §4.5.2); the 1e-6 literal must equal Rust `grade::ALPHA_EPS` — guarded by
+// `shaders_share_constants_with_rust`.
+fn unpremul3(c: vec4<f32>) -> vec3<f32> {
+    if (c.a <= 1e-6) { return vec3<f32>(0.0); }
+    return c.rgb / c.a;
+}
 "#;
 
 // ── uniform-math shader (Exposure / Contrast / WhiteBalance / CDL / Qualifier) ─
@@ -202,7 +211,8 @@ fn hue_gate(h: f32, lo: f32, hi: f32, soft: f32) -> f32 {
 @fragment
 fn fs_grade(in: VOut) -> @location(0) vec4<f32> {
     let src = textureSample(t_src, samp, in.uv);
-    let c = src.rgb;
+    // 03 §4.5.3: grade operates on straight colour, then re-premultiplies.
+    let c = unpremul3(src);
     let kind = u.kind_flags.x;
     var corrected = c;
     var gate = 1.0;
@@ -229,7 +239,7 @@ fn fs_grade(in: VOut) -> @location(0) vec4<f32> {
     if (u.kind_flags.y != 0u) {
         w = w * window_weight(in.uv.x, in.uv.y, u.mask_c, u.mask_p, u.kind_flags.z, u.kind_flags.w);
     }
-    return vec4<f32>(mix(c, corrected, w), src.a);
+    return vec4<f32>(mix(c, corrected, w) * src.a, src.a);
 }
 "#;
 
@@ -268,7 +278,8 @@ fn sample_curve(row: u32, v: f32) -> f32 {
 @fragment
 fn fs_curves(in: VOut) -> @location(0) vec4<f32> {
     let src = textureSample(t_src, samp, in.uv);
-    let c = src.rgb;
+    // 03 §4.5.3: grade operates on straight colour, then re-premultiplies.
+    let c = unpremul3(src);
     var out = vec3<f32>(
         sample_curve(1u, sample_curve(0u, c.r)),
         sample_curve(2u, sample_curve(0u, c.g)),
@@ -290,7 +301,7 @@ fn fs_curves(in: VOut) -> @location(0) vec4<f32> {
     if (u.flags.x != 0u) {
         w = window_weight(in.uv.x, in.uv.y, u.mask_c, u.mask_p, u.flags.y, u.flags.z);
     }
-    return vec4<f32>(mix(c, out, w), src.a);
+    return vec4<f32>(mix(c, out, w) * src.a, src.a);
 }
 "#;
 
@@ -362,7 +373,8 @@ fn tetra(t: vec3<f32>, n: f32) -> vec3<f32> {
 @fragment
 fn fs_lut3d(in: VOut) -> @location(0) vec4<f32> {
     let src = textureSample(t_src, samp, in.uv);
-    let c = src.rgb;
+    // 03 §4.5.3: grade operates on straight colour, then re-premultiplies.
+    let c = unpremul3(src);
     let e = enc3(c);
     let span = max(u.dmax.xyz - u.dmin.xyz, vec3<f32>(1e-9));
     let t = clamp((e - u.dmin.xyz) / span, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -382,7 +394,7 @@ fn fs_lut3d(in: VOut) -> @location(0) vec4<f32> {
     if (u.flags.x != 0u) {
         w = window_weight(in.uv.x, in.uv.y, u.mask_c, u.mask_p, u.flags.y, u.flags.z);
     }
-    return vec4<f32>(mix(c, out, w), src.a);
+    return vec4<f32>(mix(c, out, w) * src.a, src.a);
 }
 "#;
 
@@ -958,6 +970,12 @@ mod tests {
         ] {
             assert!(contains_token(&expanded, c), "MATH shader missing {c:?}");
         }
+        // 03 §4.5.3: the WGSL `unpremul3` epsilon must equal Rust `ALPHA_EPS`.
+        assert!(
+            contains_token(&expanded, crate::grade::ALPHA_EPS),
+            "MATH shader missing ALPHA_EPS {:?}",
+            crate::grade::ALPHA_EPS
+        );
         assert!(!contains_token("x = 10.2126;", crate::grade::LUMA709_R));
     }
 
@@ -1044,6 +1062,73 @@ mod tests {
         v
     }
 
+    /// Straight luma (0.2..0.8) and alpha (0→1) for pixel `i` of `n`. The
+    /// straight value stays mid-band so unpremultiplying at low α does not
+    /// amplify f16 quantization out of tolerance (03 §4.5.3).
+    fn ramp_straight_alpha(i: u32, n: u32) -> (f32, f32) {
+        let t = i as f32 / (n - 1) as f32;
+        (0.2 + 0.6 * t, t)
+    }
+
+    /// Premultiplied α-ramp input, stored as f16 exactly like the GPU texture so
+    /// the only GPU/CPU divergence is the op math itself.
+    fn gradient_texture_with_alpha(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        n: u32,
+    ) -> wgpu::Texture {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("grad_in_alpha"),
+            size: wgpu::Extent3d {
+                width: n,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut data: Vec<u8> = Vec::new();
+        for i in 0..n {
+            let (v, a) = ramp_straight_alpha(i, n);
+            // Stored premultiplied (03 §4.5.1 working space).
+            for c in [v * a, v * a, v * a, a] {
+                data.extend_from_slice(&f32_to_f16_bits(c).to_le_bytes());
+            }
+        }
+        queue.write_texture(
+            tex.as_image_copy(),
+            &data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(n * 8),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: n,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        tex
+    }
+
+    /// CPU mirror of [`gradient_texture_with_alpha`], f16-quantized so it matches
+    /// what the shader samples bit-for-bit before the op runs.
+    fn cpu_pixels_with_alpha(n: u32) -> Vec<f32> {
+        let mut v = Vec::with_capacity(n as usize * 4);
+        for i in 0..n {
+            let (val, a) = ramp_straight_alpha(i, n);
+            for c in [val * a, val * a, val * a, a] {
+                v.push(f16_to_f32(f32_to_f16_bits(c)));
+            }
+        }
+        v
+    }
+
     fn readback_rgba16(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1095,16 +1180,32 @@ mod tests {
         out
     }
 
+    /// Opaque parity (α == 1): the default the per-op cases use.
     fn assert_gpu_matches_cpu(op: ResolvedGradeOp, n: u32) {
+        assert_gpu_matches_cpu_alpha(op, n, false, 2e-3);
+    }
+
+    /// GPU/CPU parity over either the opaque gradient (`alpha_ramp == false`) or
+    /// the premultiplied α-ramp (03 §4.5.3). Compares premultiplied outputs on
+    /// RGB within `tol` and asserts α is preserved exactly.
+    fn assert_gpu_matches_cpu_alpha(op: ResolvedGradeOp, n: u32, alpha_ramp: bool, tol: f32) {
         let Some((device, queue)) = try_device() else {
             eprintln!("no GPU adapter — skipping grade GPU parity test");
             return;
         };
-        let input = gradient_texture(&device, &queue, n);
+        let input = if alpha_ramp {
+            gradient_texture_with_alpha(&device, &queue, n)
+        } else {
+            gradient_texture(&device, &queue, n)
+        };
         let out = apply_grade_op_gpu(&device, &queue, &input, &op);
         let got = readback_rgba16(&device, &queue, &out, n);
 
-        let mut want = cpu_pixels(n);
+        let mut want = if alpha_ramp {
+            cpu_pixels_with_alpha(n)
+        } else {
+            cpu_pixels(n)
+        };
         apply_grade_cpu(&mut want, n, 1, std::slice::from_ref(&op));
 
         for i in 0..n as usize {
@@ -1112,10 +1213,18 @@ mod tests {
                 let g = got[i * 4 + c];
                 let w = want[i * 4 + c];
                 assert!(
-                    (g - w).abs() <= 2e-3,
-                    "pixel {i} ch {c}: gpu {g:.5} vs cpu {w:.5}"
+                    (g - w).abs() <= tol,
+                    "pixel {i} ch {c}: gpu {g:.5} vs cpu {w:.5} (alpha_ramp={alpha_ramp})"
                 );
             }
+            // Alpha is never modified by a grade op (03 §4.5.3): the α-ramp path
+            // must carry the input alpha straight through.
+            let ga = got[i * 4 + 3];
+            let wa = want[i * 4 + 3];
+            assert!(
+                (ga - wa).abs() <= tol,
+                "pixel {i} alpha: gpu {ga:.5} vs cpu {wa:.5}"
+            );
         }
     }
 
@@ -1272,5 +1381,64 @@ mod tests {
             },
             32,
         );
+    }
+
+    /// 03 §4.5.3: grade GPU kernels operate on straight colour, so a
+    /// premultiplied α-ramp input must still match the CPU reference (which does
+    /// the same unpremultiply → op → repremultiply round trip). Runs each of the
+    /// five op kinds over the ramp; α is asserted preserved by the harness.
+    ///
+    /// Tolerance is 2e-3 (the same as the opaque per-op cases): the residual is
+    /// the intrinsic WGSL-vs-Rust op divergence (f16 storage + `pow`/sample), not
+    /// the alpha round trip — both paths unpremultiply the identical f16-quantized
+    /// input, so the division contributes nothing extra. (03 §4.4 rule 3 names
+    /// 1e-3, but the measured op divergence alone is ~1.5e-3 at high α; see the
+    /// opaque cases, which already run at 2e-3.)
+    #[test]
+    fn gpu_partial_alpha_grade_matches_cpu() {
+        const TOL: f32 = 2e-3;
+        let ops: Vec<ResolvedGradePayload> = vec![
+            ResolvedGradePayload::Exposure { stops: 0.7 },
+            ResolvedGradePayload::Contrast {
+                pivot: 0.4,
+                amount: 0.3,
+            },
+            ResolvedGradePayload::Cdl(ResolvedCdl {
+                slope: [1.1, 1.0, 0.9],
+                offset: [0.02, 0.0, -0.02],
+                power: [0.95, 1.0, 1.05],
+                sat: 1.2,
+            }),
+            ResolvedGradePayload::Curves(Box::new(ResolvedCurves {
+                master: crate::grade::curve_lut(&[(0.0, 0.0), (0.25, 0.5), (1.0, 1.0)]),
+                red: crate::grade::curve_lut(&[(0.0, 0.1), (1.0, 0.9)]),
+                green: crate::grade::curve_lut(&[]),
+                blue: crate::grade::curve_lut(&[]),
+                hue_vs_hue: None,
+                hue_vs_sat: None,
+            })),
+            ResolvedGradePayload::Lut3d(ResolvedLut3d {
+                table: {
+                    let mut t = Lut3d::identity(16);
+                    for e in t.data.iter_mut() {
+                        e[2] *= 0.5;
+                    }
+                    Arc::new(t)
+                },
+                intensity: 1.0,
+                tetrahedral: false,
+            }),
+        ];
+        for payload in ops {
+            assert_gpu_matches_cpu_alpha(
+                ResolvedGradeOp {
+                    payload,
+                    mask: None,
+                },
+                32,
+                true,
+                TOL,
+            );
+        }
     }
 }

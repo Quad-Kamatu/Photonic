@@ -7,6 +7,30 @@
 //! (02 §2, 03 §4.4 rule 2 — the operation order matches the shader path). Blend
 //! math reuses `photonic_core::raster::blend` so `Merge` agrees with the CPU
 //! compositor where they overlap (03 §4.4 rule 4).
+//!
+//! ## Operand space (03 §4.5, normative)
+//!
+//! This module is the named reference implementation of §4.5. Every operator —
+//! and every future 30-effect-catalogue entry — arrives at its input in one
+//! defined encoding/alpha state; the four rules, stated once here, exist so no
+//! op re-decides them (closes 27 A-1 / A-3):
+//!
+//! 1. **Linear light** (§4.5.1). Blending happens in linear-light Rec.709 on
+//!    every compositor. [`Image`] storage is linear; there is no transfer curve
+//!    on the operands. Deliberate divergence from Photoshop/CSS.
+//! 2. **Straight alpha for blend** (§4.5.2). Blend functions take straight
+//!    (non-premultiplied) colour: unpremultiply → blend → re-premultiply using
+//!    the W3C form `Cs' = (1-αb)·Cs + αb·B(Cb,Cs)`,
+//!    `co = αs·Cs' + (1-αs)·bottom_premul`. [`merge_pixel`] is the reference.
+//! 3. **Unpremult → op → repremult for grade / per-channel non-linear ops**
+//!    (§4.5.3). Any op that is non-linear in RGB (grade, invert, …) must run on
+//!    straight colour: [`invert`] and `grade::apply_grade_cpu` both do this.
+//! 4. **sRGB render target for the fixed-function / `COMPOSITE_SHADER` path**
+//!    (§4.5.4). The GPU vector document renders to an sRGB target so the
+//!    hardware blend unit lands in linear.
+//!
+//! Two helpers — [`ALPHA_EPS`], [`unpremultiply`], [`repremultiply`] — are the
+//! single citable primitives every op is expected to reuse for rules 2 and 3.
 
 use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
@@ -176,21 +200,26 @@ pub fn invert(input: &Image) -> Image {
     let mut out = Image::new(input.width, input.height);
     for (o, p) in out.pixels.iter_mut().zip(input.pixels.iter()) {
         let a = p[3];
-        let straight = if a > 1e-6 {
+        // 03 §4.5.3: invert is per-channel non-linear, so operate on straight
+        // colour. At α <= ALPHA_EPS carry `[0;3]` through (premultiplied RGB is
+        // already 0 there); no pixel moves relative to the pre-helper code.
+        let straight = unpremultiply(*p)
+            .map(|s| {
+                [
+                    s[0].clamp(0.0, 1.0),
+                    s[1].clamp(0.0, 1.0),
+                    s[2].clamp(0.0, 1.0),
+                ]
+            })
+            .unwrap_or([0.0, 0.0, 0.0]);
+        *o = repremultiply(
             [
-                (p[0] / a).clamp(0.0, 1.0),
-                (p[1] / a).clamp(0.0, 1.0),
-                (p[2] / a).clamp(0.0, 1.0),
-            ]
-        } else {
-            [0.0, 0.0, 0.0]
-        };
-        *o = [
-            (1.0 - straight[0]) * a,
-            (1.0 - straight[1]) * a,
-            (1.0 - straight[2]) * a,
+                1.0 - straight[0],
+                1.0 - straight[1],
+                1.0 - straight[2],
+            ],
             a,
-        ];
+        );
     }
     out
 }
@@ -228,8 +257,10 @@ fn sample_clamped(img: &Image, x: u32, y: u32) -> [f32; 4] {
 fn merge_pixel(tp: [f32; 4], bp: [f32; 4], mode: BlendMode, opacity: f32) -> [f32; 4] {
     let a_s = tp[3] * opacity; // effective source alpha
     let a_b = bp[3];
-    let cs = unpremultiply(tp);
-    let cb = unpremultiply(bp);
+    // At α <= ALPHA_EPS the premultiplied RGB is already 0, so carrying `[0;3]`
+    // through is the "carry RGB unchanged" outcome (03 §4.5.2) and moves no pixel.
+    let cs = unpremultiply(tp).unwrap_or([0.0; 3]);
+    let cb = unpremultiply(bp).unwrap_or([0.0; 3]);
     // Backdrop-blended source color: Cs' = (1-αb)·Cs + αb·B(Cb, Cs).
     let blended = if mode == BlendMode::Normal {
         cs
@@ -247,15 +278,33 @@ fn merge_pixel(tp: [f32; 4], bp: [f32; 4], mode: BlendMode, opacity: f32) -> [f3
     out
 }
 
-/// Straight (unpremultiplied) linear RGB from a premultiplied pixel.
+/// α below which RGB is carried through unchanged instead of divided (03 §4.5.2).
+///
+/// For premultiplied storage α == 0 implies RGB == 0, so callers of
+/// [`unpremultiply`] that substitute `[0.0; 3]` for the `None` case reproduce
+/// exactly the "carry RGB through unchanged" outcome the spec describes for
+/// straight-alpha buffers — the two agree in practice.
+pub const ALPHA_EPS: f32 = 1e-6;
+
+/// Straight (unpremultiplied) linear RGB from a premultiplied pixel, or `None`
+/// when α <= [`ALPHA_EPS`] (03 §4.5.2). The inverse is [`repremultiply`]. Shared
+/// as the single citable primitive so every operator (grade, blend, future
+/// catalogue effects) unpremultiplies one way (03 §4.5).
 #[inline]
-fn unpremultiply(p: [f32; 4]) -> [f32; 3] {
+pub fn unpremultiply(p: [f32; 4]) -> Option<[f32; 3]> {
     let a = p[3];
-    if a > 1e-6 {
-        [p[0] / a, p[1] / a, p[2] / a]
+    if a > ALPHA_EPS {
+        Some([p[0] / a, p[1] / a, p[2] / a])
     } else {
-        [0.0, 0.0, 0.0]
+        None
     }
+}
+
+/// Re-premultiply straight linear RGB by α (03 §4.5.2), the inverse of
+/// [`unpremultiply`]. Returns the full premultiplied `[r, g, b, a]`.
+#[inline]
+pub fn repremultiply(rgb: [f32; 3], a: f32) -> [f32; 4] {
+    [rgb[0] * a, rgb[1] * a, rgb[2] * a, a]
 }
 
 #[cfg(test)]
@@ -458,6 +507,65 @@ mod tests {
             assert!(v.abs() < 1e-6, "channel {c} = {v}");
         }
         assert!((p[3] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unpremultiply_repremultiply_round_trips() {
+        // For α > ALPHA_EPS the round trip is the identity within 1e-6; below the
+        // threshold `unpremultiply` reports `None` (03 §4.5.2).
+        let straight = [0.3f32, 0.6, 0.85];
+        for a in [1e-7f32, 1e-6, 0.01, 0.5, 1.0] {
+            let premul = repremultiply(straight, a);
+            assert!((premul[3] - a).abs() < 1e-9, "alpha carried for α={a}");
+            match unpremultiply(premul) {
+                Some(back) => {
+                    assert!(a > ALPHA_EPS, "α={a} should have been below threshold");
+                    for c in 0..3 {
+                        assert!(
+                            (back[c] - straight[c]).abs() <= 1e-6,
+                            "α={a} ch{c}: {} vs {}",
+                            back[c],
+                            straight[c]
+                        );
+                    }
+                }
+                None => assert!(a <= ALPHA_EPS, "α={a} wrongly reported transparent"),
+            }
+        }
+    }
+
+    #[test]
+    fn merge_pixel_unchanged_after_helper_extraction() {
+        // Re-assert the four existing merge vectors bit-for-bit, proving the
+        // `unpremultiply`/`repremultiply` extraction moved no pixel (T7).
+        // 1. opaque red over opaque blue, Normal, opacity 1 → red.
+        let red = premult(1.0, 0.0, 0.0, 1.0);
+        let blue = premult(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(
+            merge_pixel(red, blue, BlendMode::Normal, 1.0),
+            [1.0, 0.0, 0.0, 1.0]
+        );
+        // 2. opaque white over opaque black, opacity 0.5 → premult 0.5 grey.
+        let white = premult(1.0, 1.0, 1.0, 1.0);
+        let black = premult(0.0, 0.0, 0.0, 1.0);
+        let g = merge_pixel(white, black, BlendMode::Normal, 0.5);
+        for c in 0..3 {
+            assert!((g[c] - 0.5).abs() < 1e-6, "ch{c} = {}", g[c]);
+        }
+        assert!((g[3] - 1.0).abs() < 1e-6);
+        // 3. transparent top keeps backdrop.
+        let clear = premult(0.0, 0.0, 0.0, 0.0);
+        let backdrop = premult(0.3, 0.4, 0.5, 1.0);
+        let keep = merge_pixel(clear, backdrop, BlendMode::Normal, 1.0);
+        assert!((keep[0] - 0.3).abs() < 1e-6);
+        assert!((keep[1] - 0.4).abs() < 1e-6);
+        assert!((keep[2] - 0.5).abs() < 1e-6);
+        assert!((keep[3] - 1.0).abs() < 1e-6);
+        // 4. opaque red over transparent → premultiplied red, alpha 1.
+        assert_eq!(
+            merge_pixel(red, [0.0; 4], BlendMode::Normal, 1.0),
+            premult(1.0, 0.0, 0.0, 1.0)
+        );
     }
 
     #[test]

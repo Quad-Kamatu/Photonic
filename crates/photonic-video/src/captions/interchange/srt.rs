@@ -136,4 +136,24 @@ mod tests {
         assert!(cues.is_empty());
         assert_eq!(summary.cues_imported, 0);
     }
+
+    #[test]
+    fn japanese_cue_round_trips_without_interpolated_spaces() {
+        // A CJK cue is distributed one CaptionWord per grapheme cluster
+        // (42 §6.5), but re-joining it for export must not fabricate spaces
+        // between clusters — a space would be baked into the exported subtitle.
+        let input =
+            "1\n00:00:01,000 --> 00:00:03,000\n\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\n"; // こんにちは
+        let (cues, _) = parse_srt(input).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert!(cues[0].words.len() > 1, "CJK cue distributes per cluster");
+        assert_eq!(cues[0].text(), "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}");
+        let written = write_srt(&cues);
+        assert!(written.contains("\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}"));
+        // No space anywhere between the two leading clusters.
+        assert!(
+            !written.contains("\u{3053}\u{0020}\u{3093}"),
+            "no interpolated space in exported cue text"
+        );
+    }
 }

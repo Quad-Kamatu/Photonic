@@ -144,6 +144,11 @@ fn op_ports(op: &GraphOp) -> (Vec<Port>, Vec<Port>) {
         ),
         GraphOp::Text { .. } => (&[], &[p(0, Image, "out")]),
         GraphOp::Note { .. } => (&[], &[]),
+        // Forward-compat (39 §2.2): an op this build does not understand is
+        // drawn as an inert unary passthrough — one image in, one image out,
+        // mirroring how it lowers in the engine. Non-editable, but movable and
+        // deletable; never guessed into a known op's ports.
+        GraphOp::Unknown(_) => (&[p(0, Image, "in")], &[p(0, Image, "out")]),
     };
     (i.to_vec(), o.to_vec())
 }
@@ -374,6 +379,9 @@ fn op_title(op: &GraphOp) -> String {
         GraphOp::TimeOffset { .. } => "Time Offset".into(),
         GraphOp::Switch => "Switch".into(),
         GraphOp::Note { .. } => "Note".into(),
+        // Forward-compat (39 §2.2): show the preserved op tag verbatim so the
+        // user sees exactly what a newer build wrote; the node is non-editable.
+        GraphOp::Unknown(_) => op.unknown_tag().unwrap_or("Unknown").to_string(),
     }
 }
 
@@ -866,6 +874,31 @@ fn added_graph_id(cmds: &[TimelineCmd]) -> Option<GraphId> {
 
 // ── Central canvas ─────────────────────────────────────────────────────────────
 
+/// One rung of the node-canvas Esc cancel ladder (41 §3 R-6). A single Esc press
+/// discharges exactly one, in priority order, so the gesture unwinds one step at a
+/// time and an in-flight wire is cancelled — never orphaned (R-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EscLevel {
+    /// A wire drag is in flight → cancel just the wire.
+    CancelWire,
+    /// No wire, but a node is selected → clear just the selection.
+    ClearSelection,
+    /// Nothing pending → leave the canvas for the timeline.
+    CloseCanvas,
+}
+
+/// Which ladder rung a single Esc press discharges, given the current canvas
+/// state. Pure so the ordering is unit-testable without an egui context.
+pub(crate) fn esc_level(wire_in_flight: bool, has_selection: bool) -> EscLevel {
+    if wire_in_flight {
+        EscLevel::CancelWire
+    } else if has_selection {
+        EscLevel::ClearSelection
+    } else {
+        EscLevel::CloseCanvas
+    }
+}
+
 /// Central-panel node canvas content state (08 §6.1), drawn in place of the
 /// program monitor while [`VideoPanelUi::node_canvas_active`] is set. Owns
 /// `&mut Document` + `&mut CommandHistory` so it can commit graph edits directly
@@ -878,12 +911,6 @@ pub(crate) fn draw_node_canvas(
     history: &mut CommandHistory,
     vid: &mut VideoPanelUi,
 ) {
-    // Esc always returns to the timeline (08 §6.1 escape path).
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        *vid.node_canvas_active = false;
-        return;
-    }
-
     let gid = *vid.open_graph;
     let Some(gid) = gid else {
         draw_no_graph_placeholder(ui, rect, doc, history, vid);
@@ -968,6 +995,46 @@ pub(crate) fn draw_node_canvas(
     // gates on (41 §3 R-5: never gate key handling on pointer position).
     if resp.clicked() || resp.drag_started() {
         resp.request_focus();
+    }
+    // Own arrow/Tab/Delete/Esc on the *focused* canvas across frames. Without an
+    // EventFilter, egui's focus navigation turns the first Tab/Arrow into a focus
+    // move — stealing canvas focus so the second press never reaches
+    // `handle_keyboard` (41 §3 R-4/R-5). `tab: true` because the canvas owns Tab as
+    // its node-cycle key; `escape: true` because it also owns Esc for the R-6
+    // cancel ladder below — with `escape: false` egui would clear canvas focus on
+    // the same Esc, so the ladder's `contains_focus` gate could never fire.
+    if resp.has_focus() {
+        ui.ctx().memory_mut(|m| {
+            m.set_focus_lock_filter(
+                resp.id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            )
+        });
+    }
+    // Esc discharges one rung of the R-6 cancel ladder per press, gated on canvas
+    // focus so it can't tear the canvas down from a menu or text field. `consume_key`
+    // so the same Esc isn't also seen by other panels that frame. Never `return`s
+    // early — the frame must still paint (08 §6.1). This replaces the old
+    // unconditional top-of-fn `key_pressed(Escape)`, which fired app-wide and
+    // abandoned an in-flight wire instead of cancelling it.
+    if resp.has_focus()
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    {
+        let wire_in_flight = matches!(
+            ui.data(|d| d.get_temp::<Interaction>(interaction_id())),
+            Some(Interaction::Wire { .. })
+        );
+        match esc_level(wire_in_flight, vid.selected_graph_node.is_some()) {
+            // Cancel only the wire — no orphaned edge, no history entry (R-7).
+            EscLevel::CancelWire => ui.data_mut(|d| d.remove::<Interaction>(interaction_id())),
+            EscLevel::ClearSelection => *vid.selected_graph_node = None,
+            EscLevel::CloseCanvas => *vid.node_canvas_active = false,
+        }
     }
     let origin = canvas_rect.min;
 
@@ -2437,6 +2504,29 @@ mod tests {
 
     fn approx(a: Pos2, b: Pos2) -> bool {
         (a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3
+    }
+
+    #[test]
+    fn esc_ladder_unwinds_in_order_without_history_entries() {
+        // One Esc press = one rung, in priority order: wire → selection → close.
+        assert_eq!(esc_level(true, true), EscLevel::CancelWire);
+        assert_eq!(esc_level(true, false), EscLevel::CancelWire);
+        assert_eq!(esc_level(false, true), EscLevel::ClearSelection);
+        assert_eq!(esc_level(false, false), EscLevel::CloseCanvas);
+
+        // The ladder is pure state / UI manipulation — none of its effects commit
+        // a command, so the undo revision is untouched across the whole
+        // selection→canvas-closed progression (41 §8 item 5).
+        let history = CommandHistory::default();
+        let rev = history.revision();
+        for (wire, sel) in [(true, true), (false, true), (false, false)] {
+            let _ = esc_level(wire, sel);
+        }
+        assert_eq!(
+            history.revision(),
+            rev,
+            "Esc cancel ladder must not add a history entry"
+        );
     }
 
     #[test]

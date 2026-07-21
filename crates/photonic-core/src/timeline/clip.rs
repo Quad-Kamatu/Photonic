@@ -14,6 +14,7 @@ use super::grade::Grade;
 use super::ids::{AssetId, ClipId, GraphId, SequenceId};
 use super::prop_registry::PropTargetKind;
 use super::time::Tick;
+use super::unknown::UnknownTag;
 use crate::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -166,15 +167,36 @@ pub enum ClipSource {
     Text {
         content: TextClipContent,
     },
+    /// Forward-compat (39 §2.2): a source kind this build does not know. The
+    /// whole object — `source` tag and payload — is retained verbatim and
+    /// re-emitted unchanged. Renders as a placeholder frame (same as a missing
+    /// asset), never guessed. Declared last so serde tries the known tags first.
+    #[serde(untagged)]
+    Unknown(serde_json::Map<String, serde_json::Value>),
 }
 
 impl ClipSource {
-    /// The asset this source references, if any (for relink/GC).
+    /// The asset this source references, if any (for relink/GC). An unknown
+    /// source references no known asset, so it is never GC-relinked — the
+    /// desired conservative behaviour.
     pub fn asset(&self) -> Option<AssetId> {
         match self {
             ClipSource::Asset { asset } | ClipSource::Vector { asset } => Some(*asset),
             _ => None,
         }
+    }
+
+    /// The preserved `source` tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(&self) -> Option<&str> {
+        match self {
+            ClipSource::Unknown(map) => map.get("source").and_then(|v| v.as_str()),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, ClipSource::Unknown(_))
     }
 }
 
@@ -608,12 +630,34 @@ impl Transition {
 /// v1 transition catalog (08 §2.0b). Additive-only.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TransitionKind {
     CrossDissolve,
     DipToBlack,
     DipToColor,
     Wipe,
     Push,
+    /// Forward-compat (39 §2.2): a variant this build does not know. The
+    /// original serialized tag is preserved verbatim and re-emitted on save.
+    /// An unknown transition renders as a hard cut (never a guessed dissolve).
+    /// Declared last so serde tries the known snake_case tags first.
+    #[serde(untagged)]
+    Unknown(UnknownTag),
+}
+
+impl TransitionKind {
+    /// The preserved tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(self) -> Option<UnknownTag> {
+        match self {
+            TransitionKind::Unknown(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(self) -> bool {
+        matches!(self, TransitionKind::Unknown(_))
+    }
 }
 
 /// Transition parameters (union across the catalog; only the fields relevant to
@@ -1046,5 +1090,59 @@ mod tests {
         let j = serde_json::to_string(&c).unwrap();
         let back: Clip = serde_json::from_str(&j).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn transition_kind_unknown_preserves_tag() {
+        let k: TransitionKind = serde_json::from_str("\"iris_wipe\"").unwrap();
+        assert!(k.is_unknown());
+        assert_eq!(k.unknown_tag().unwrap().as_str(), "iris_wipe");
+        assert_eq!(serde_json::to_string(&k).unwrap(), "\"iris_wipe\"");
+        // Known variants still resolve, not shadowed by the untagged fallback.
+        for (k, tag) in [
+            (TransitionKind::CrossDissolve, "\"cross_dissolve\""),
+            (TransitionKind::DipToBlack, "\"dip_to_black\""),
+            (TransitionKind::DipToColor, "\"dip_to_color\""),
+            (TransitionKind::Wipe, "\"wipe\""),
+            (TransitionKind::Push, "\"push\""),
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), tag);
+            let back: TransitionKind = serde_json::from_str(tag).unwrap();
+            assert_eq!(back, k);
+            assert!(!back.is_unknown());
+        }
+    }
+
+    #[test]
+    fn clip_source_unknown_preserves_payload() {
+        let raw = r#"{"source":"holo_gen","seed":7,"nested":{"a":[1,2]}}"#;
+        let src: ClipSource = serde_json::from_str(raw).unwrap();
+        assert!(src.is_unknown());
+        assert_eq!(src.unknown_tag(), Some("holo_gen"));
+        assert_eq!(src.asset(), None, "unknown source references no known asset");
+        // The whole object round-trips value-equal to the input.
+        let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&src).unwrap()).unwrap();
+        let orig: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(back, orig);
+
+        // Known source tags still resolve to their concrete variant.
+        let asset: ClipSource =
+            serde_json::from_str(r#"{"source":"adjustment"}"#).unwrap();
+        assert!(!asset.is_unknown());
+        assert!(matches!(asset, ClipSource::Adjustment));
+    }
+
+    #[test]
+    fn clip_source_malformed_known_falls_to_unknown_with_known_tag() {
+        // serde's per-variant untagged fallback is greedy: a KNOWN tag with a
+        // malformed field degrades to Unknown at the serde layer (verified
+        // empirically). The document-level integrity guard therefore lives in
+        // `load::finalize_load`, which rejects a retained Unknown whose tag is
+        // a KNOWN catalog tag (see `load::KNOWN_CLIP_SOURCE_TAGS`). Here we only
+        // pin the serde-layer behaviour so the load guard has a defined input.
+        let bad = r#"{"source":"solid_color","color":"not-a-color"}"#;
+        let src: ClipSource = serde_json::from_str(bad).unwrap();
+        assert!(src.is_unknown());
+        assert_eq!(src.unknown_tag(), Some("solid_color"));
     }
 }

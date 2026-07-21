@@ -391,4 +391,30 @@ DOMAIN_MAX 1.0 1.0 1.0
             assert!((out[c] - 0.5).abs() < 1e-6, "{out:?}");
         }
     }
+
+    #[test]
+    fn parse_channel_swap_fixture_exact_sample() {
+        // 29 §6 gap 2 / CAP-015: the checked-in test LUT is a pure RGB→GBR
+        // channel swap at LUT_3D_SIZE 2. Because the transform is a coordinate
+        // permutation (linear), trilinear interpolation reproduces it exactly,
+        // so the fixture yields byte-level assertions in AS-2, not tolerances.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../photonic-video/tests/fixtures/channel_swap_rgb_to_gbr.cube"
+        );
+        let src = std::fs::read_to_string(path).expect("read channel-swap .cube fixture");
+        let lut = parse_cube(&src).expect("parse channel-swap .cube fixture");
+        assert_eq!(lut.size, 2);
+        assert_eq!(lut.domain_min, [0.0, 0.0, 0.0]);
+        assert_eq!(lut.domain_max, [1.0, 1.0, 1.0]);
+        // (r,g,b) -> (g,b,r). Sampling (0.25, 0.5, 0.75) -> (0.5, 0.75, 0.25).
+        let out = lut.sample_trilinear([0.25, 0.5, 0.75]);
+        assert!((out[0] - 0.5).abs() < 1e-6, "r {out:?}");
+        assert!((out[1] - 0.75).abs() < 1e-6, "g {out:?}");
+        assert!((out[2] - 0.25).abs() < 1e-6, "b {out:?}");
+        // A grid corner confirms the permutation directly: input (1,0,0) is the
+        // pure-red node, whose GBR image is pure blue (0,0,1).
+        let corner = lut.sample_trilinear([1.0, 0.0, 0.0]);
+        assert_eq!(corner, [0.0, 0.0, 1.0]);
+    }
 }

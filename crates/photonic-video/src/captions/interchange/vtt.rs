@@ -271,4 +271,22 @@ mod tests {
         assert!(!summary.any_words_approximated);
         assert_eq!(reparsed[0].words, cues[0].words);
     }
+
+    #[test]
+    fn japanese_cue_round_trips_without_interpolated_spaces() {
+        // Plain export re-joins per-cluster CJK words (42 §6.5) with no
+        // fabricated spaces — the emitted cue text must read こんにちは.
+        let input =
+            "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\n"; // こんにちは
+        let (cues, _) = parse_vtt(input).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert!(cues[0].words.len() > 1, "CJK cue distributes per cluster");
+        assert_eq!(cues[0].text(), "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}");
+        let written = write_vtt(&cues, false);
+        assert!(written.contains("\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}"));
+        assert!(
+            !written.contains("\u{3053}\u{0020}\u{3093}"),
+            "no interpolated space in exported cue text"
+        );
+    }
 }

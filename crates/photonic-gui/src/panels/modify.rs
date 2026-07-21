@@ -19,7 +19,7 @@ pub(crate) fn draw_combine(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.label(
             RichText::new("Combine & Paths")
                 .small()
-                .color(Color32::from_rgb(80, 80, 110)),
+                .color(crate::theme::section_header_color(ui)),
         );
         ui.add_space(2.0);
     }

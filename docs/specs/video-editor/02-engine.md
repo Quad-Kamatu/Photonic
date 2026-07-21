@@ -43,6 +43,12 @@ pub struct EngineFrame {                      // what GUI presents
 
 Threads:
 - **Engine thread** — owns playback state machine, graph compile/eval scheduling. Receives `EngineCmd` via crossbeam channel; publishes `EngineFrame` + `EngineStatus` (playhead, dropped frames, cache stats) via `arc_swap` (`ArcSwap`/`ArcSwapOption`) — GUI never blocks on engine.
+<!-- spec-assert: dep-present arc_swap -->
+<!-- spec-assert: dep-absent triple_buffer -->
+<!-- spec-assert: symbol-exists crates/photonic-video/src/session.rs::EngineSession -->
+<!-- SD-8 (27 §3): earlier drafts claimed frames publish via `triple_buffer`/watch; the real mechanism is `arc_swap`. These pin the dependency reality so a re-introduction of `triple_buffer` (or removal of `arc_swap`) reds the gate. -->
+<!-- SD-6/SD-10 (27 §3): the EngineCmd variant list and the cache-key type are structural claims better carried by a `spec-source` anchored block (40 §3.1); the anchored mechanism is implemented and fixture-tested (tools/spec-extract/tests/cases/anchored/), but wiring a live block into this doc requires the drift gate to run with `--spec-extract`, deferred so the lint-job gate stays a single cheap step. Tracked here rather than faked with per-variant assertions (40 §2). -->
+
 - **Audio thread** — cpal callback; real-time-safe (no locks/allocs in callback); pulls from lock-free ring filled by mixer worker. Owns the **master clock** (§4).
 - **Decode workers** — pool (N = cores/2, min 2) driving sidecar processes + pipe reads.
 - **GUI thread** — presents latest `EngineFrame` texture in the monitor; sends intents.

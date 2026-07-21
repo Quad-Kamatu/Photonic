@@ -32,6 +32,17 @@ use photonic_core::{
 };
 
 fn main() {
+    // `--example gen_p1_golden_fixtures video-fixtures` writes ONLY the two
+    // acceptance-story vector fixtures into `photonic-video/tests/fixtures/`
+    // (29 §3's fixture table, brief I task 6). It deliberately does NOT touch
+    // the golden corpus, so a harness author can regenerate the `.photon`
+    // timeline fixtures without churning the 31 blessed golden `project.photon`
+    // files. Default (no arg) keeps the original golden-corpus behaviour.
+    if std::env::args().nth(1).as_deref() == Some("video-fixtures") {
+        write_video_fixtures();
+        return;
+    }
+
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     for (name, doc) in fixtures() {
         let dir = root.join(&name);
@@ -45,6 +56,87 @@ fn main() {
          PHOTONIC_BLESS_GOLDEN=1 cargo test -p photonic-render --test golden_vector_equivalence -- --test-threads=1\n\
          then review `git diff --stat tests/golden/` before committing."
     );
+}
+
+/// Write the AS-1/AS-3 vector timeline fixtures next to the video test-media
+/// corpus. See [`title_asset`] / [`title_doc_asset`] for the stable node-id
+/// contract the acceptance-story scripts hardcode.
+fn write_video_fixtures() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../photonic-video/tests/fixtures");
+    for (name, doc) in [
+        ("title_asset", title_asset()),
+        ("title_doc_asset", title_doc_asset()),
+    ] {
+        let json = save_photon(&doc, None).expect("serialize video fixture");
+        let path = dir.join(format!("{name}.photon"));
+        std::fs::write(&path, json).expect("write .photon fixture");
+        println!("wrote {}", path.display());
+    }
+    println!(
+        "\nNote: node ids are hardcoded (deterministic); the top-level `layers`/\
+         `nodes` map key ORDER may still vary between runs because `save_photon`\
+         serialises `Document`'s HashMaps directly. That does not affect loading,\
+         node resolution, or rendering — only exact byte order."
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Acceptance-story vector fixtures (29 §3 fixture table, brief I task 6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+use photonic_core::node::NodeId;
+
+/// Stable node id for `title_asset`'s single title node. AS-1 fades this clip
+/// in via the *clip*'s `transform.opacity` (a timeline PropPath), but a stable
+/// node id keeps the fixture diff-reproducible.
+const TITLE_ASSET_NODE: u128 = 0x11A5_0000_0000_0000_0000_0000_0000_0001;
+/// Stable node id for `title_doc_asset`'s headline node — AS-3 keyframes
+/// `node.<TITLE_DOC_TITLE_NODE>.fill.color`. Recorded in the fixtures README.
+const TITLE_DOC_TITLE_NODE: u128 = 0x11D0_0000_0000_0000_0000_0000_0000_0001;
+/// Stable node id for `title_doc_asset`'s subtitle node.
+const TITLE_DOC_SUBTITLE_NODE: u128 = 0x11D0_0000_0000_0000_0000_0000_0000_0002;
+
+/// AS-1 title clip: a single text node exposing a solid fill so an opacity
+/// fade + `fill.color` binding both have a real target. One renderable node,
+/// named `title`, id [`TITLE_ASSET_NODE`].
+fn title_asset() -> Document {
+    let mut doc = Document::new("title-asset", 1920.0, 1080.0);
+    let lid = doc.active_layer_id.unwrap();
+    let mut text = TextNode::new("Photonic");
+    text.font_size = 96.0;
+    text.fill = Fill::solid(Color::new(1.0, 1.0, 1.0, 1.0));
+    let mut node = SceneNode::new("title", lid, SceneNodeKind::Text(text));
+    node.id = NodeId::from_u128(TITLE_ASSET_NODE);
+    node.transform = Transform::translate(200.0, 480.0);
+    doc.add_node(node, Some(lid));
+    doc
+}
+
+/// AS-3 motion-graphics title document: two stably-named text nodes
+/// (`title_line` = [`TITLE_DOC_TITLE_NODE`], `subtitle_line` =
+/// [`TITLE_DOC_SUBTITLE_NODE`]) each carrying a solid fill, so the AS-3 script's
+/// `node.<id>.fill.color` keyframe target resolves against a real colour.
+fn title_doc_asset() -> Document {
+    let mut doc = Document::new("title-doc-asset", 1920.0, 1080.0);
+    let lid = doc.active_layer_id.unwrap();
+
+    let mut title = TextNode::new("Motion");
+    title.font_size = 120.0;
+    title.fill = Fill::solid(Color::new(0.95, 0.2, 0.2, 1.0));
+    let mut n = SceneNode::new("title_line", lid, SceneNodeKind::Text(title));
+    n.id = NodeId::from_u128(TITLE_DOC_TITLE_NODE);
+    n.transform = Transform::translate(200.0, 360.0);
+    doc.add_node(n, Some(lid));
+
+    let mut sub = TextNode::new("Graphics");
+    sub.font_size = 64.0;
+    sub.fill = Fill::solid(Color::new(0.15, 0.3, 0.8, 1.0));
+    let mut n = SceneNode::new("subtitle_line", lid, SceneNodeKind::Text(sub));
+    n.id = NodeId::from_u128(TITLE_DOC_SUBTITLE_NODE);
+    n.transform = Transform::translate(200.0, 560.0);
+    doc.add_node(n, Some(lid));
+
+    doc
 }
 
 fn fixtures() -> Vec<(&'static str, Document)> {

@@ -208,6 +208,11 @@ pub fn entries(kind: PropTargetKind) -> &'static [PropEntry] {
             EffectKind::LumaKey => EFFECT_LUMAKEY,
             EffectKind::Invert => EFFECT_INVERT,
             EffectKind::MaskShapeGen => EFFECT_MASKSHAPE,
+            // Forward-compat (39 §2.2): an unknown kind has zero registered
+            // paths, so every PropertyTrack targeting it is flagged orphaned by
+            // `flag_orphaned_property_tracks` — retained, not dropped, eval
+            // falls back to base. Never guess a similar known kind's paths.
+            EffectKind::Unknown(_) => &[],
         },
         PropTargetKind::GradeOp(g) => match g {
             GradeOpKind::Exposure => GRADE_EXPOSURE,
@@ -218,6 +223,8 @@ pub fn entries(kind: PropTargetKind) -> &'static [PropEntry] {
             GradeOpKind::Curves => GRADE_CURVES,
             GradeOpKind::HslQualifier => GRADE_HSLQUAL,
             GradeOpKind::Lut3d => GRADE_LUT3D,
+            // Forward-compat (39 §2.2): see the EffectKind::Unknown note above.
+            GradeOpKind::Unknown(_) => &[],
         },
         PropTargetKind::TrackAudioParams => TRACK_AUDIO,
         PropTargetKind::ClipAudioParams => CLIP_AUDIO,
@@ -227,6 +234,8 @@ pub fn entries(kind: PropTargetKind) -> &'static [PropEntry] {
             AudioFxKind::Compressor => AUDIOFX_COMPRESSOR,
             AudioFxKind::Gate => AUDIOFX_GATE,
             AudioFxKind::Limiter => AUDIOFX_LIMITER,
+            // Forward-compat (39 §2.2): see the EffectKind::Unknown note above.
+            AudioFxKind::Unknown(_) => &[],
         },
         PropTargetKind::GraphNode => &[],
     }
@@ -310,5 +319,22 @@ mod tests {
     #[test]
     fn unknown_path_is_orphaned_not_resolved() {
         assert!(resolve(PropTargetKind::Effect(EffectKind::Blur), "params.nope").is_none());
+    }
+
+    #[test]
+    fn unknown_variant_kinds_have_no_registered_paths() {
+        // Forward-compat (39 §2.2): an unknown effect/grade/audio kind registers
+        // zero paths, so every PropertyTrack targeting it is flagged orphaned
+        // (retained, not dropped) rather than resolving to a guessed kind.
+        let tag = super::super::unknown::UnknownTag::intern("film_look");
+        assert!(entries(PropTargetKind::Effect(EffectKind::Unknown(tag))).is_empty());
+        assert!(entries(PropTargetKind::GradeOp(GradeOpKind::Unknown(tag))).is_empty());
+        assert!(entries(PropTargetKind::AudioFx(AudioFxKind::Unknown(tag))).is_empty());
+        // And such a path never resolves (→ orphaned at load, never guessed).
+        assert!(resolve(
+            PropTargetKind::Effect(EffectKind::Unknown(tag)),
+            "params.radius"
+        )
+        .is_none());
     }
 }

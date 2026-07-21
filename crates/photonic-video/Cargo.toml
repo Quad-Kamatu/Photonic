@@ -64,6 +64,12 @@ pollster = { workspace = true }
 # Uniform-buffer packing for the evaluator's fill/merge passes (graph/eval.rs).
 # Already the render crate's uniform-packing crate; MIT/Apache/Zlib.
 bytemuck = { workspace = true }
+# PNG encode/decode + `RgbaImage` for the always-compiled `testing::frame_compare`
+# module (29 §3 / CAP-019): the acceptance-story harness in another crate needs
+# the 11 §1.2 two-layer metric and its diff-heatmap output, so the comparator can
+# no longer live only in this crate's test binary. Promoted from a dev-dependency
+# to a normal one for exactly that reason; already a vetted workspace dependency.
+image = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # Named pipe (FIFO) for the export encoder's second (audio) piped ffmpeg
@@ -86,11 +92,6 @@ tiny_http = "0.12"
 # not needed for the console pass/fail this crate's benches print; only
 # `cargo_bench_support` is required for the standard `cargo bench` harness.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-# Golden-frame corpus harness (11 §1): PNG encode/decode for the blessed
-# CPU-reference frames. `image` is already a vetted workspace dependency
-# (canvas screenshots / raster buffers in five other crates), so reusing it
-# here adds no new dependency footprint. cargo-deny clean.
-image = { workspace = true }
 # Golden-case `meta.toml` parsing (11 §1.1: ticks/format/notes per case). The
 # generator writes the TOML text directly; only the harness deserializes it.
 # Already resolved in the workspace lock; MIT/Apache-2.0, cargo-deny clean.

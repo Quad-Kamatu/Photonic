@@ -287,6 +287,8 @@ Applied independently of (and combinable with) karaoke coloring:
 
 ## 7. Interchange (SRT/VTT/ASS)
 
+<!-- spec-assert: dep-absent subparse -->
+<!-- SD-13 (27 §3): `subparse` was proposed but never adopted; the hand-written parsers stand. Pinned so a re-introduction reds the gate against this "not a dependency" claim. -->
 Rust dependency: **subparse** was proposed (MIT/Apache-2.0) as a single parser for SRT/VTT/ASS, but is **not a dependency** — `captions/interchange/{srt,vtt,ass}.rs` are hand-written, which is also the precedent [34](34-interchange.md) follows. Retained here as rationale for the shape — one permissive dependency instead of format-specific ones (satisfies the no-copyleft constraint). `libass` is explicitly **not** a dependency: rendering is our own `CaptionOverlay` IR path (§5), never libass compositing.
 
 ### 7.1 Import mapping

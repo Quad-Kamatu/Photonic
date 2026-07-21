@@ -37,7 +37,7 @@ const BG_ELEVATED: Color32 = Color32::from_rgb(19, 19, 31);
 const BG_WIDGET: Color32 = Color32::from_rgb(26, 26, 40);
 const BORDER: Color32 = Color32::from_rgb(30, 30, 50);
 const TEXT_PRIMARY: Color32 = Color32::from_rgb(232, 232, 242);
-const TEXT_MUTED: Color32 = Color32::from_rgb(122, 122, 154);
+const TEXT_MUTED: Color32 = Color32::from_rgb(138, 138, 168); // #8A8AA8 secondary (WCAG AA)
 
 // Canvas size presets, grouped by use-case: (group, &[(label, width, height)]).
 // Dimensions are in pixels (paper sizes at 96 DPI, photo/poster noted per group).

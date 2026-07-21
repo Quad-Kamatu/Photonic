@@ -508,7 +508,7 @@ fn draw_word_editor(
     ui.label(
         RichText::new("WORDS")
             .small()
-            .color(Color32::from_rgb(80, 80, 110)),
+            .color(crate::theme::section_header_color(ui)),
     );
     let sel_word_id = id("word_sel").with(cue.id);
     let mut selected_word: Option<usize> = ui.data(|d| d.get_temp(sel_word_id));

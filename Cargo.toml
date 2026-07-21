@@ -8,6 +8,7 @@ members = [
     "crates/photonic-embed",
     "crates/photonic-matte",
     "crates/photonic-video",
+    "tools/spec-extract",
 ]
 resolver = "2"
 

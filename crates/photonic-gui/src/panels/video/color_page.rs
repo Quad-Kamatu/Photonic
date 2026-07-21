@@ -64,15 +64,25 @@ fn section_header(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .small()
-            .color(Color32::from_rgb(80, 80, 110)),
+            .color(crate::theme::section_header_color(ui)),
     );
     ui.add_space(2.0);
 }
 
-/// True while a text field / draggable holds keyboard focus — suppresses the
-/// panel's bare-key shortcuts (D bypass, curve arrow-nudge) so typing is safe.
-fn keyboard_captured(ui: &Ui) -> bool {
-    ui.memory(|m| m.focused().is_some())
+/// Nudge curve point `i` by `(dx, dy) * step`, applying the same endpoint /
+/// neighbour clamping as pointer drag: endpoints keep their pinned x (0 or 1),
+/// interior points stay strictly between their neighbours, and y is clamped to
+/// `[0, 1]`. Extracted so the keyboard path is unit-testable without an egui
+/// context (41 §9 step 1).
+pub(crate) fn nudge_point(points: &[(f32, f32)], i: usize, dx: f32, dy: f32, step: f32) -> (f32, f32) {
+    let mut p = points[i];
+    if i != 0 && i != points.len() - 1 {
+        let lo = points[i - 1].0 + 1e-3;
+        let hi = points[i + 1].0 - 1e-3;
+        p.0 = (p.0 + dx * step).clamp(lo, hi);
+    }
+    p.1 = (p.1 + dy * step).clamp(0.0, 1.0);
+    p
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +180,11 @@ fn kind_label(kind: GradeOpKind) -> &'static str {
         GradeOpKind::Curves => "Curves",
         GradeOpKind::HslQualifier => "HSL Qualifier",
         GradeOpKind::Lut3d => "3D LUT",
+        // Forward-compat (39 §2.2): show the preserved tag as the display name;
+        // the op is non-editable but retained verbatim.
+        GradeOpKind::Unknown(t) => t.as_str(),
+        // `#[non_exhaustive]`: a kind a newer build adds shows a placeholder.
+        _ => "Unsupported",
     }
 }
 
@@ -217,6 +232,10 @@ fn default_op(kind: GradeOpKind, luts: &[(AssetId, String)]) -> GradeOp {
             intensity: 1.0,
             interp: LutInterp::Trilinear,
         },
+        // The add-corrector menu (`ALL_KINDS`) only offers the eight known
+        // kinds, and an unknown op is a load-only state that is never created
+        // from the UI (39 §2.2 rule 4: never guess). This arm is unreachable.
+        _ => unreachable!("default_op is only called for user-selectable known kinds"),
     };
     GradeOp::new(kind, params)
 }
@@ -276,9 +295,12 @@ pub(crate) fn draw_color_controls(
     let mut g = orig.clone();
 
     // ── Pinned header: global bypass (= before/after, 07 §5) + scopes toggle ──
-    let captured = keyboard_captured(ui);
     ui.horizontal(|ui| {
-        let d_pressed = !captured && ui.input(|i| i.key_pressed(egui::Key::D));
+        // Bare-key bypass toggle. Suppressed only while a text field is capturing
+        // keys (`wants_keyboard_input`), never on global focus-emptiness (41 §3
+        // R-5); `consume_key` so a focused TextEdit that also wants 'D' wins.
+        let d_pressed = !ui.ctx().wants_keyboard_input()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::D));
         let resp = ui.selectable_label(g.bypass, format!("{} Bypass", ph::EYE_SLASH));
         if resp.clicked() || d_pressed {
             g.bypass = !g.bypass;
@@ -358,7 +380,7 @@ pub(crate) fn draw_color_controls(
         ui.horizontal(|ui| {
             ui.checkbox(&mut op.enabled, "")
                 .on_hover_text("Enable / bypass this corrector");
-            let unknown = matches!(op.params.base, GradeOpParams::Unknown);
+            let unknown = matches!(op.params.base, GradeOpParams::Unknown(_));
             let label = if unknown {
                 RichText::new("Unsupported op").color(ui.visuals().warn_fg_color)
             } else if op.enabled {
@@ -499,7 +521,7 @@ fn draw_op_editor(
             intensity,
             interp,
         } => lut_editor(ui, asset, intensity, interp, luts),
-        GradeOpParams::Unknown => {
+        GradeOpParams::Unknown(_) => {
             ui.label(
                 RichText::new(
                     "This corrector was made by a newer Photonic build and can't be edited here. \
@@ -861,6 +883,21 @@ fn curve_plot(ui: &mut Ui, points: &mut Vec<(f32, f32)>, channel: usize) {
     // suppression the old gate reached for is a property of this check.
     if let Some(i) = sel {
         if resp.has_focus() {
+            // Hold the arrow keys on the focused plot across frames. Without an
+            // EventFilter, egui's focus navigation turns the first Arrow into a
+            // focus move and steals focus off the plot, so only one nudge would
+            // land (41 §3 R-4/R-5). Mirror egui's own Slider; leave `tab`/`escape`
+            // false so Tab still exits the plot and Esc can free it.
+            ui.ctx().memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    resp.id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
             let (dx, dy, big) = ui.input(|inp| {
                 (
                     (inp.key_pressed(egui::Key::ArrowRight) as i32
@@ -872,14 +909,7 @@ fn curve_plot(ui: &mut Ui, points: &mut Vec<(f32, f32)>, channel: usize) {
             });
             if dx != 0.0 || dy != 0.0 {
                 let step = if big { 0.05 } else { 0.005 };
-                let mut p = points[i];
-                if i != 0 && i != points.len() - 1 {
-                    let lo = points[i - 1].0 + 1e-3;
-                    let hi = points[i + 1].0 - 1e-3;
-                    p.0 = (p.0 + dx * step).clamp(lo, hi);
-                }
-                p.1 = (p.1 + dy * step).clamp(0.0, 1.0);
-                points[i] = p;
+                points[i] = nudge_point(points, i, dx, dy, step);
             }
             let del = ui.input(|inp| {
                 inp.key_pressed(egui::Key::Delete) || inp.key_pressed(egui::Key::Backspace)
@@ -1378,6 +1408,30 @@ mod tests {
     fn neutral_and_pure_luma_have_no_chroma() {
         assert!(deltas_to_chroma_xy([0.0, 0.0, 0.0]).length() < 1e-6);
         assert!(deltas_to_chroma_xy([0.3, 0.3, 0.3]).length() < 1e-5);
+    }
+
+    #[test]
+    fn two_consecutive_nudges_move_two_steps() {
+        // The regression the focus-lock fixes: before it, egui stole focus off the
+        // plot after the first Arrow, so the second nudge silently did nothing.
+        // The extracted logic proves two nudges compose to 2*step.
+        let mut pts = vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)];
+        let step = 0.005;
+        pts[1] = nudge_point(&pts, 1, 0.0, 1.0, step);
+        pts[1] = nudge_point(&pts, 1, 0.0, 1.0, step);
+        assert!((pts[1].1 - (0.5 + 2.0 * step)).abs() < 1e-6);
+        // A middle point's x stays strictly inside its neighbours; a horizontal
+        // nudge moves it too.
+        let moved = nudge_point(&pts, 1, 1.0, 0.0, step);
+        assert!(moved.0 > 0.5 && moved.0 < 1.0);
+    }
+
+    #[test]
+    fn endpoints_keep_pinned_x() {
+        let pts = vec![(0.0, 0.2), (0.5, 0.5), (1.0, 0.8)];
+        // Endpoint x never moves regardless of dx.
+        assert_eq!(nudge_point(&pts, 0, 1.0, 0.0, 0.05).0, 0.0);
+        assert_eq!(nudge_point(&pts, 2, -1.0, 0.0, 0.05).0, 1.0);
     }
 
     #[test]

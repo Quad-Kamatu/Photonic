@@ -12,6 +12,7 @@ use super::effect_kind::EffectParams;
 use super::ids::TrackId;
 use super::prop_registry::PropTargetKind;
 use super::time::Tick;
+use super::unknown::UnknownTag;
 use serde::{Deserialize, Serialize};
 
 /// Per-track audio: fader/pan automation, mute/solo, and a pre-fader fx chain.
@@ -240,11 +241,32 @@ impl AudioFxUnit {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AudioFxKind {
     Eq,
     Compressor,
     Limiter,
     Gate,
+    /// Forward-compat (39 §2.2): a variant this build does not know. The
+    /// original serialized tag is preserved verbatim and re-emitted on save.
+    /// Declared last so serde tries the known snake_case tags first.
+    #[serde(untagged)]
+    Unknown(UnknownTag),
+}
+
+impl AudioFxKind {
+    /// The preserved tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(self) -> Option<UnknownTag> {
+        match self {
+            AudioFxKind::Unknown(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(self) -> bool {
+        matches!(self, AudioFxKind::Unknown(_))
+    }
 }
 
 /// Overwrite a freshly seeded param bag with the concrete per-kind defaults
@@ -281,12 +303,34 @@ fn apply_fx_defaults(kind: AudioFxKind, params: &mut EffectParams) {
             set("params.ceiling_db", -1.0);
             set("params.release_ms", 50.0);
         }
+        // Forward-compat (39 §2.2): no known defaults for a variant this build
+        // does not understand; the retained tag renders inert.
+        AudioFxKind::Unknown(_) => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_fx_kind_unknown_preserves_tag() {
+        let k: AudioFxKind = serde_json::from_str("\"exciter\"").unwrap();
+        assert!(k.is_unknown());
+        assert_eq!(k.unknown_tag().unwrap().as_str(), "exciter");
+        assert_eq!(serde_json::to_string(&k).unwrap(), "\"exciter\"");
+        for (k, tag) in [
+            (AudioFxKind::Eq, "\"eq\""),
+            (AudioFxKind::Compressor, "\"compressor\""),
+            (AudioFxKind::Limiter, "\"limiter\""),
+            (AudioFxKind::Gate, "\"gate\""),
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), tag);
+            let back: AudioFxKind = serde_json::from_str(tag).unwrap();
+            assert_eq!(back, k);
+            assert!(!back.is_unknown());
+        }
+    }
 
     #[test]
     fn master_bus_seeds_limiter() {

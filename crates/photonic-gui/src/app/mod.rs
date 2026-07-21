@@ -30,7 +30,10 @@ pub(crate) mod mode;
 pub(crate) mod monitor;
 mod proportional_move;
 mod recovery;
-pub(crate) mod reframe;
+// `pub` (29 §3 / CAP-019): the acceptance-story harness's GUI arm calls
+// `reframe::fit_clips_to_active_format` directly, the same entry the reframe
+// widget uses.
+pub mod reframe;
 mod rulers;
 mod tabs;
 /// Timeline panel + edit interact helpers. `pub` so UI-path integration tests

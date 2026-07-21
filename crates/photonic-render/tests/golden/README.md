@@ -78,7 +78,29 @@ in CI.
 | `raster_placement` | A placed + scaled raster node |
 | `effect_stack_color_overlay_stroke` | Layer-Styles effect stack (`ColorOverlay` + `StrokeEffect`), no own fill/stroke |
 | `boolean_groups` | Live (non-destructive) boolean union (#25) rendered as its single resolved path |
+| `boolean_subtract` / `boolean_intersect` / `boolean_exclude` | The remaining live-boolean ops, same operand pair |
+| `symbol_instances` | Three symbol instances of one master (recolor override + hidden definition) |
+| `variable_width_stroke` | `WidthProfile`-attached stroke (renders flat-width under headless today — forward guard) |
+| `effect_glow_stack` | `outer_glow` + `inner_glow` + `gaussian_glow` together |
+| `effect_shadow_feather` | `drop_shadow` + `feather` together |
+| `isolated_layer_opacity` / `isolated_layer_blend` | Isolated-layer compositing via layer opacity / non-Normal blend |
+| `pattern_fill_grid` | Tiled `PatternFill` |
+| `gradient_mesh` | Mesh gradient over an object bounding box |
+| `gradient_fluid` | Fluid (freeform-point) gradient |
+| `text_on_path` | Type-on-a-path text node (renders blank under headless — see fixture note) |
+| `mixed_vector_raster_zorder` | Interleaved raster/vector nodes routed through the CPU compositor |
+| `dense_many_nodes` | ~210 small shapes — tessellation-cache / persistent-buffer scale case |
+| `compound_path` | A single `is_compound` path of two disjoint subpaths |
+| `nested_groups` | Group-in-group ancestor-opacity propagation, two levels |
+| `raster_mask` | Raster node with a hard-edge layer mask |
+| `adjustment_layer_raster` | Non-destructive adjustment layer over a solid fill |
+| `stroke_arrowheads` | Arrowhead + dash stroke (renders plain solid under headless — forward guard) |
+
+(Case count is authoritative here — 31 dirs as of this writing; keep this
+table in step with `ls tests/golden/`. Docs that cite a corpus size, e.g.
+`29-qa-spec.md` §5.1, point back to this README rather than hardcoding a
+number.)
 
 Budget: this corpus + `tests/golden/` fixtures must stay well under the
-10 MB standing budget (`11-testing-phasing.md` §1.5); ten ~120×120 PNGs is a
+10 MB standing budget (`11-testing-phasing.md` §1.5); thirty-odd small PNGs is a
 few hundred KB total.

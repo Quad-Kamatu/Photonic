@@ -62,13 +62,24 @@ impl CaptionCue {
         }
     }
 
-    /// The cue's plain text (words joined with spaces).
+    /// The cue's plain text. Words are joined with a single U+0020 **only where
+    /// one belongs** (42 §6.5): no space is inserted on either side of a
+    /// scriptio-continua cluster (CJK / Kana / Thai / …), so a cue tokenized per
+    /// cluster re-joins seamlessly (`こんにちは`, not `こ ん に ち は`). For an
+    /// all-ASCII cue this is byte-identical to the old `join(" ")`.
     pub fn text(&self) -> String {
-        self.words
-            .iter()
-            .map(|w| w.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
+        let mut out = String::new();
+        let mut prev: Option<&str> = None;
+        for w in &self.words {
+            if let Some(p) = prev {
+                if crate::text_metrics::needs_separator(p, &w.text) {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&w.text);
+            prev = Some(&w.text);
+        }
+        out
     }
 }
 
@@ -193,6 +204,38 @@ mod tests {
             ],
         );
         assert_eq!(cue.text(), "hello world");
+    }
+
+    #[test]
+    fn cue_text_omits_spaces_between_scriptio_continua_clusters() {
+        // Per-cluster Japanese tokens re-join with no interpolated spaces
+        // (42 §6.5) — the exported/rendered caption must read こんにちは.
+        let ja = |c: &str| CaptionWord::new(c, Tick(0), Tick(1));
+        let cue = CaptionCue::new(
+            Tick(0),
+            Tick(5),
+            vec![
+                ja("\u{3053}"),
+                ja("\u{3093}"),
+                ja("\u{306B}"),
+                ja("\u{3061}"),
+                ja("\u{306F}"),
+            ],
+        );
+        assert_eq!(cue.text(), "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}"); // こんにちは
+
+        // Mixed Latin + CJK: a space only where the seam is not scriptio-continua.
+        let cue = CaptionCue::new(
+            Tick(0),
+            Tick(4),
+            vec![
+                CaptionWord::new("Photonic", Tick(0), Tick(1)),
+                CaptionWord::new("\u{306F}", Tick(1), Tick(2)),
+                CaptionWord::new("\u{901F}", Tick(2), Tick(3)),
+                CaptionWord::new("\u{3044}", Tick(3), Tick(4)),
+            ],
+        );
+        assert_eq!(cue.text(), "Photonic\u{306F}\u{901F}\u{3044}"); // Photonicは速い
     }
 
     #[test]

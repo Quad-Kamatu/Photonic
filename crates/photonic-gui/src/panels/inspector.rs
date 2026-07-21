@@ -1368,7 +1368,7 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             ui.label(
                 RichText::new("Typography")
                     .small()
-                    .color(Color32::from_rgb(80, 80, 110)),
+                    .color(crate::theme::section_header_color(ui)),
             );
             ui.add_space(2.0);
         }

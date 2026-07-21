@@ -489,7 +489,9 @@ fn save_thumb_to_disk(
     buf.extend_from_slice(&thumb.height.to_le_bytes());
     buf.extend_from_slice(&(thumb.rgba.len() as u32).to_le_bytes());
     buf.extend_from_slice(&thumb.rgba);
-    std::fs::write(thumb_disk_path(cache_dir, hash, bucket, px), buf)
+    // Temp-and-rename (37 §2.3): a crash mid-write never leaves a truncated
+    // thumbnail that a later read would accept as valid.
+    crate::media::atomic_write::write_atomic(&thumb_disk_path(cache_dir, hash, bucket, px), &buf)
 }
 
 fn load_thumb_from_disk(cache_dir: &Path, hash: &str, bucket: i64, px: u32) -> Option<RgbaThumb> {

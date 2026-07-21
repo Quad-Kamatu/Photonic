@@ -15,6 +15,34 @@ the "one script, one job" convention started by `gen-mcp-docs.py`.
   run locally when a fixture needs to change; CI consumes the committed
   output rather than regenerating it. See that directory's own `README.md`.
 
+## Structural spec-verification gates
+
+Unlike the generators above (which produce artefacts humans then read or
+commit), these are **run by CI** on every PR to fail the build when the spec
+docs drift from the code (`40-spec-verification.md` §3).
+
+- **`spec-extract`** (Rust crate under `tools/spec-extract/`) — parses every
+  `crates/*/src|tests/**/*.rs` with `syn` and emits a JSON structural index of
+  the workspace's public API (struct/enum/const/static/fn/type/trait, with
+  field and variant order preserved). It is the ONLY Rust parser in the drift
+  system and depends on no `photonic-*` crate, so the cheap `lint` job can run
+  it. `cargo run -q -p spec-extract -- --out spec-index.json`.
+- **`check-spec-drift.py`** — evaluates inline `<!-- spec-assert: … -->`
+  claims in `docs/` against that index (const values, `dep-present`/`-absent`,
+  `symbol-exists`, `ci-step-contains`, `feature-present`/`-absent`, and
+  `if X then Y` conditionals). Anchored ```rust `// spec-source:` blocks are
+  compared structurally by piping each block through `spec-extract
+  --stdin-fragment` (§3.1); pass `--spec-extract <bin>` when such blocks exist.
+  Exit 0 clean, 1 drift, 2 malformed assertion.
+  `python3 tools/check-spec-drift.py --index spec-index.json`.
+- **`gen-acceptance-index.py`** — regenerates
+  `docs/specs/video-editor/ACCEPTANCE.md` from the per-doc `## <n>. Acceptance`
+  tables and cross-references `Covers: ACC-…` annotations in the source tree
+  (`40-spec-verification.md` §4). Run by CI with `--check` as a hard gate: a
+  `covered` row with no backing `Covers:` test, a `Covers:` naming an unknown
+  id, a reason-less `waived` row, or a duplicate/mislocated id fails the build.
+  `python3 tools/gen-acceptance-index.py > docs/specs/video-editor/ACCEPTANCE.md`.
+
 ## Acceptance-story MCP scripts
 
 - **`as1_arrange_cut.py`** — AS-1 "Social clip" story, arrange + cut slice

@@ -31,17 +31,17 @@
 
 use std::path::{Path, PathBuf};
 
-use image::{Rgba, RgbaImage};
 use photonic_core::timeline::{AssetId, Tick, TimelineProject, VectorRef, VectorStateKey};
 use photonic_video::graph::eval_cpu::{evaluate, FrameProvider};
 use photonic_video::graph::ops::Image;
 use photonic_video::graph::{compile, Quality};
+// 11 §1.2's two-layer metric + its sRGB PNG round-trip and diff-heatmap now live
+// in the always-compiled `photonic_video::testing::frame_compare` module so this
+// harness and the cross-crate acceptance-story harness (29 §3) share one source.
+use photonic_video::testing::frame_compare::{
+    decode_png, diff_heatmap, encode_png, measure, MAX_ABS_TOL, MIN_PSNR_DB,
+};
 use serde::Deserialize;
-
-/// 11 §1.2 per-channel bound: max abs diff, linear-light RGBA, CPU-vs-CPU.
-const MAX_ABS_TOL: f32 = 0.02;
-/// 11 §1.2 aggregate bound: PSNR ≥ 40 dB, CPU-vs-CPU reference.
-const MIN_PSNR_DB: f64 = 40.0;
 
 /// Repo-root `tests/golden/video/` (two levels up from this crate's manifest).
 fn corpus_dir() -> PathBuf {
@@ -125,140 +125,6 @@ impl FrameProvider for PatternProvider {
     fn raster_vector(&mut self, _: VectorRef, _: VectorStateKey, w: u32, h: u32) -> Image {
         Self::quadrants(w, h)
     }
-}
-
-// ── sRGB transfer (self-consistent PNG round-trip) ───────────────────────────
-//
-// The blessed PNG stores the CPU-reference frame; compare mode reconstructs a
-// working image from it and diffs against a freshly-evaluated one. The only
-// error introduced is this round-trip's own 8-bit quantisation (compile+eval is
-// bit-deterministic, 02 §2), which stays well inside the 0.02 / 40 dB bounds —
-// independent of exactly which sRGB variant the compiler used to build the
-// reference values, since encode and decode here are mutual inverses.
-
-fn linear_to_srgb(c: f32) -> f32 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-fn srgb_to_linear(c: f32) -> f32 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.040_45 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Working image (premultiplied linear) → straight-alpha sRGB8 PNG buffer.
-/// Un-premultiply, sRGB-encode RGB, keep alpha linear — the natural, eyeball-
-/// able display encoding.
-fn encode_png(img: &Image) -> RgbaImage {
-    let mut buf = RgbaImage::new(img.width, img.height);
-    let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    for y in 0..img.height {
-        for x in 0..img.width {
-            let p = img.pixel(x, y);
-            let a = p[3].clamp(0.0, 1.0);
-            let (r, g, b) = if a > 1e-6 {
-                (p[0] / a, p[1] / a, p[2] / a)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            buf.put_pixel(
-                x,
-                y,
-                Rgba([
-                    to8(linear_to_srgb(r)),
-                    to8(linear_to_srgb(g)),
-                    to8(linear_to_srgb(b)),
-                    to8(a),
-                ]),
-            );
-        }
-    }
-    buf
-}
-
-/// PNG buffer → working image (premultiplied linear) — the exact inverse of
-/// [`encode_png`].
-fn decode_png(buf: &RgbaImage) -> Image {
-    let (w, h) = buf.dimensions();
-    let mut pixels = Vec::with_capacity((w * h) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            let Rgba([r, g, b, a]) = *buf.get_pixel(x, y);
-            let af = a as f32 / 255.0;
-            pixels.push([
-                srgb_to_linear(r as f32 / 255.0) * af,
-                srgb_to_linear(g as f32 / 255.0) * af,
-                srgb_to_linear(b as f32 / 255.0) * af,
-                af,
-            ]);
-        }
-    }
-    Image {
-        width: w,
-        height: h,
-        pixels,
-    }
-}
-
-// ── comparison metric (11 §1.2, both layers required) ────────────────────────
-
-struct Metric {
-    max_abs: f32,
-    psnr_db: f64,
-}
-
-fn measure(reference: &Image, actual: &Image) -> Result<Metric, String> {
-    if reference.width != actual.width || reference.height != actual.height {
-        return Err(format!(
-            "dimension mismatch: reference {}x{} vs actual {}x{}",
-            reference.width, reference.height, actual.width, actual.height
-        ));
-    }
-    let n = reference.pixels.len();
-    let mut max_abs = 0.0f32;
-    let mut sse = 0.0f64;
-    for (rp, ap) in reference.pixels.iter().zip(actual.pixels.iter()) {
-        for c in 0..4 {
-            let d = (rp[c] - ap[c]).abs();
-            max_abs = max_abs.max(d);
-            sse += (d as f64) * (d as f64);
-        }
-    }
-    let mse = sse / (n as f64 * 4.0);
-    // Linear-light working values are in [0, 1], so PSNR uses MAX = 1.0.
-    let psnr_db = if mse <= 0.0 {
-        f64::INFINITY
-    } else {
-        -10.0 * mse.log10()
-    };
-    Ok(Metric { max_abs, psnr_db })
-}
-
-/// Amplified abs-diff heatmap dumped next to a failure (11 §1.2 "diff PNG").
-fn diff_heatmap(reference: &Image, actual: &Image) -> RgbaImage {
-    let mut buf = RgbaImage::new(reference.width, reference.height);
-    for y in 0..reference.height {
-        for x in 0..reference.width {
-            let rp = reference.pixel(x, y);
-            let ap = actual.pixel(x, y);
-            let mut d = 0.0f32;
-            for c in 0..4 {
-                d = d.max((rp[c] - ap[c]).abs());
-            }
-            // Scale so the 0.02 tolerance maps to full white.
-            let v = ((d / MAX_ABS_TOL).clamp(0.0, 1.0) * 255.0) as u8;
-            buf.put_pixel(x, y, Rgba([v, 0, 0, 255]));
-        }
-    }
-    buf
 }
 
 // ── harness ──────────────────────────────────────────────────────────────────

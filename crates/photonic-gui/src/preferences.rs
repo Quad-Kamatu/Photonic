@@ -63,7 +63,7 @@ pub struct AppPreferences {
     /// recovery folder). See the autosave loop in `app::PhotonicApp::draw`.
     #[serde(default = "default_true")]
     pub autosave_enabled: bool,
-    /// Seconds between autosave passes. Default 5 minutes.
+    /// Seconds between autosave passes. Default 2 minutes.
     #[serde(default = "default_autosave_interval_secs")]
     pub autosave_interval_secs: f64,
 
@@ -156,7 +156,7 @@ fn default_nudge_distance() -> f64 {
 }
 
 fn default_autosave_interval_secs() -> f64 {
-    300.0
+    120.0
 }
 
 fn default_open_drawer() -> Option<DrawerGroup> {
@@ -232,7 +232,7 @@ impl Default for AppPreferences {
             console_open_on_start: false,
             nudge_distance: 1.0,
             autosave_enabled: true,
-            autosave_interval_secs: 300.0,
+            autosave_interval_secs: 120.0,
             history_limit_mode: HistoryLimitMode::Size,
             history_max_steps: 200,
             history_max_mb: 50.0,
@@ -342,5 +342,18 @@ impl AppPreferences {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 37 §2.5 lowered the autosave default to two minutes. The `Default` impl
+    /// and the serde `default = ...` fn must agree on that single number.
+    #[test]
+    fn autosave_default_is_two_minutes() {
+        assert_eq!(AppPreferences::default().autosave_interval_secs, 120.0);
+        assert_eq!(default_autosave_interval_secs(), 120.0);
     }
 }

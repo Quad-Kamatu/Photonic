@@ -7,8 +7,9 @@
 //!
 //! Two passes, exactly as spec'd:
 //! - **Pass 1 (build)** — greedy forward scan, flushing a cue on a silence
-//!   gap, a projected overflow of `max_chars_per_line * max_lines_per_cue`,
-//!   or a sentence-ending previous word.
+//!   gap, a projected overflow of `max_cells_per_line * max_lines_per_cue`
+//!   (half-width cells, 42 §6.3, not scalar count), or a sentence-ending
+//!   previous word.
 //! - **Pass 2 (repair)** — split any cue whose duration exceeds
 //!   `max_cue_duration` (recursively, in case one split still leaves a half
 //!   too long), then merge any cue whose duration is under
@@ -25,7 +26,10 @@ use super::provider::TranscribedWord;
 /// scope — the settings UI/persistence).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupingParams {
-    pub max_chars_per_line: usize,
+    /// Per-line budget in **half-width cells** (42 §6.3), not scalar count: a
+    /// Latin letter is 1 cell, a CJK ideograph 2, zero-advance combining marks
+    /// 0.
+    pub max_cells_per_line: usize,
     pub max_lines_per_cue: usize,
     pub min_cue_duration: Tick,
     pub max_cue_duration: Tick,
@@ -35,7 +39,20 @@ pub struct GroupingParams {
 impl Default for GroupingParams {
     fn default() -> Self {
         GroupingParams {
-            max_chars_per_line: 42,
+            // 42 cells × 2 lines = 84 cells/cue — byte-identical to the old
+            // 42-char default for ASCII (a Latin letter is exactly 1 cell), so
+            // no existing golden regresses.
+            //
+            // TODO(42 §6.4): the per-language budget table (item 2) sets this
+            // per `CaptionTrack.language` — e.g. Japanese must be 26 cells, not
+            // 42×2. 42 §6.4's own table lists `max_cells_per_line = 84 (Latin)`,
+            // which is an internally inconsistent x2 of the Netflix CPL (under
+            // §6.3's weighting a Latin letter is 1 cell, so 42 CPL == 42 cells,
+            // not 84); only the CJK/JP/KR rows are self-consistent. Flagged to
+            // the spec owner — shipping the smallest correct interpretation (42)
+            // rather than the table's 84, which would silently double the Latin
+            // budget and break the ASCII no-regression property (42 §8).
+            max_cells_per_line: 42,
             max_lines_per_cue: 2,
             min_cue_duration: ticks_from_millis(800),
             max_cue_duration: Tick::from_seconds(6),
@@ -45,8 +62,8 @@ impl Default for GroupingParams {
 }
 
 impl GroupingParams {
-    fn max_chars_per_cue(&self) -> usize {
-        self.max_chars_per_line * self.max_lines_per_cue
+    fn max_cells_per_cue(&self) -> usize {
+        self.max_cells_per_line * self.max_lines_per_cue
     }
 }
 
@@ -57,20 +74,29 @@ const fn ticks_from_millis(ms: i64) -> Tick {
     Tick(TICKS_PER_SECOND / 1000 * ms)
 }
 
+/// True if `text`'s last non-closing-punctuation, non-whitespace scalar is a
+/// 42 §6.5 sentence terminator. Stripping trailing closing punctuation first
+/// makes `He said "stop."` end its sentence on the `.` rather than the quote.
 fn ends_sentence(text: &str) -> bool {
-    matches!(
-        text.trim_end().chars().last(),
-        Some('.') | Some('!') | Some('?')
-    )
+    let t = photonic_core::text_metrics::strip_trailing_closing_punctuation(text);
+    matches!(t.chars().last(), Some(c) if photonic_core::text_metrics::is_sentence_terminator(c))
 }
 
-/// Character length of `words` joined with single spaces (matches how
-/// `CaptionCue::text()` renders them), used for the `max_chars_per_cue` cap.
-fn joined_char_len(words: &[TranscribedWord]) -> usize {
-    if words.is_empty() {
-        return 0;
+/// Half-width cell width (42 §6.3) of `words` re-joined the way
+/// `CaptionCue::text()` renders them, used for the `max_cells_per_cue` cap. A
+/// separator cell is counted only for adjacent pairs that actually render a
+/// space (`needs_separator`) — never between two scriptio-continua clusters.
+fn joined_cell_width(words: &[TranscribedWord]) -> usize {
+    let mut total = 0;
+    for (i, w) in words.iter().enumerate() {
+        total += photonic_core::text_metrics::cell_width(&w.text);
+        if let Some(next) = words.get(i + 1) {
+            if photonic_core::text_metrics::needs_separator(&w.text, &next.text) {
+                total += 1;
+            }
+        }
     }
-    words.iter().map(|w| w.text.chars().count()).sum::<usize>() + (words.len() - 1)
+    total
 }
 
 fn cue_duration(cue: &CaptionCue) -> Tick {
@@ -110,11 +136,17 @@ fn build_pass(words: &[TranscribedWord], params: &GroupingParams) -> Vec<Caption
         }
         let last = current.last().unwrap();
         let gap = word.start.saturating_sub(last.end);
-        let projected_chars = joined_char_len(&current) + 1 + word.text.chars().count();
+        let sep = if photonic_core::text_metrics::needs_separator(&last.text, &word.text) {
+            1
+        } else {
+            0
+        };
+        let projected_cells =
+            joined_cell_width(&current) + sep + photonic_core::text_metrics::cell_width(&word.text);
         let prev_ends_sentence = ends_sentence(&last.text);
 
         if gap > params.gap_merge_threshold
-            || projected_chars > params.max_chars_per_cue()
+            || projected_cells > params.max_cells_per_cue()
             || prev_ends_sentence
         {
             cues.push(flush(std::mem::take(&mut current)));
@@ -212,13 +244,13 @@ fn cue_from_caption_words(words: Vec<photonic_core::timeline::CaptionWord>) -> C
 
 /// Merges any cue shorter than `min_cue_duration` into the following cue
 /// (or, if it's the last cue, into the preceding one), provided the merge
-/// stays within `max_chars_per_cue`; otherwise the cue is left short. Single
+/// stays within `max_cells_per_cue`; otherwise the cue is left short. Single
 /// left-to-right pass.
 fn merge_short_cues(cues: Vec<CaptionCue>, params: &GroupingParams) -> Vec<CaptionCue> {
     if cues.len() <= 1 {
         return cues;
     }
-    let max_chars = params.max_chars_per_cue();
+    let max_cells = params.max_cells_per_cue();
     let mut result: Vec<CaptionCue> = Vec::with_capacity(cues.len());
     let mut iter = cues.into_iter().peekable();
 
@@ -234,14 +266,14 @@ fn merge_short_cues(cues: Vec<CaptionCue>, params: &GroupingParams) -> Vec<Capti
         // *its* follower. (06 §3.5: every short cue is offered a forward merge;
         // single left-to-right pass.)
         if iter.peek().is_some() {
-            if merged_char_len(&cue, iter.peek().unwrap()) <= max_chars {
+            if merged_cell_width(&cue, iter.peek().unwrap()) <= max_cells {
                 let next = iter.next().unwrap();
                 result.push(merge_cues(cue, next));
             } else {
                 result.push(cue);
             }
         } else if let Some(prev) = result.pop() {
-            if merged_char_len(&prev, &cue) <= max_chars {
+            if merged_cell_width(&prev, &cue) <= max_cells {
                 result.push(merge_cues(prev, cue));
             } else {
                 result.push(prev);
@@ -254,18 +286,25 @@ fn merge_short_cues(cues: Vec<CaptionCue>, params: &GroupingParams) -> Vec<Capti
     result
 }
 
-fn merged_char_len(a: &CaptionCue, b: &CaptionCue) -> usize {
-    let total_words = a.words.len() + b.words.len();
-    if total_words == 0 {
-        return 0;
-    }
-    let chars: usize = a
+/// Half-width cell width (42 §6.3) of two cues merged into one, using the same
+/// render-accurate separator rule as [`joined_cell_width`].
+fn merged_cell_width(a: &CaptionCue, b: &CaptionCue) -> usize {
+    let words: Vec<&str> = a
         .words
         .iter()
         .chain(b.words.iter())
-        .map(|w| w.text.chars().count())
-        .sum();
-    chars + (total_words - 1)
+        .map(|w| w.text.as_str())
+        .collect();
+    let mut total = 0;
+    for (i, text) in words.iter().enumerate() {
+        total += photonic_core::text_metrics::cell_width(text);
+        if let Some(next) = words.get(i + 1) {
+            if photonic_core::text_metrics::needs_separator(text, next) {
+                total += 1;
+            }
+        }
+    }
+    total
 }
 
 fn merge_cues(a: CaptionCue, b: CaptionCue) -> CaptionCue {
@@ -419,10 +458,10 @@ mod tests {
 
     #[test]
     fn short_cue_still_merges_forward_after_a_prior_overflow() {
-        // Three cues after Pass 1: A (short, 60 chars), B (short, 30 chars),
-        // C (long, 10 chars), each forced apart by >250ms gaps. A+B = 91 chars
+        // Three cues after Pass 1: A (short, 60 cells), B (short, 30 cells),
+        // C (long, 10 cells), each forced apart by >250ms gaps. A+B = 91 cells
         // > 84 budget, so A cannot merge into B and is left short. B, however,
-        // is itself short and B+C = 41 chars <= 84, so B MUST still merge
+        // is itself short and B+C = 41 cells <= 84, so B MUST still merge
         // forward into C (06 §3.5: every short cue is offered a forward merge).
         // Regression guard: a naive pass that consumes B while rejecting the
         // A+B merge would strand B and wrongly yield three cues.
@@ -443,8 +482,8 @@ mod tests {
 
     #[test]
     fn short_cue_left_short_when_merge_would_overflow_char_budget() {
-        // "Hi." (3) + space (1) + 82 = 86 chars, which *exceeds* the
-        // max_chars_per_cue budget of 42*2=84. Merging is therefore disallowed
+        // "Hi." (3) + space (1) + 82 = 86 cells, which *exceeds* the
+        // max_cells_per_cue budget of 42*2=84. Merging is therefore disallowed
         // ("provided the merge doesn't exceed ..." — 06 §3.5), so the short
         // "Hi." cue is left short rather than losing text. (At exactly 84 the
         // merge would be permitted — the budget is an inclusive ceiling.)
@@ -481,5 +520,114 @@ mod tests {
         assert_eq!(params.min_cue_duration, Tick(564_480_000)); // 0.8s
         assert_eq!(params.gap_merge_threshold, Tick(176_400_000)); // 250ms
         assert_eq!(params.max_cue_duration, Tick::from_seconds(6));
+    }
+
+    // ---- Task 2: half-width cell budget (42 §6.3/§6.5) ----
+
+    /// Grouping over a scriptio-continua script budgets by cells, not scalars,
+    /// and inserts no separator between clusters. Parameterised here with a
+    /// 26-cell line (max_lines 1) — the Japanese budget item 2 will apply
+    /// automatically once `CaptionTrack.language` lands (42 §6.4). 13 full-width
+    /// ideographs == 26 cells fit exactly; the 14th (28 cells) overflows.
+    fn ja_words(n: usize) -> Vec<TranscribedWord> {
+        // Contiguous single-ideograph words, 100ms each (no gaps).
+        (0..n)
+            .map(|i| w("\u{65E5}", (i as i64) * 100, (i as i64) * 100 + 100))
+            .collect()
+    }
+
+    #[test]
+    fn japanese_thirteen_fullwidth_fit_one_cue_fourteen_split() {
+        let params = GroupingParams {
+            max_cells_per_line: 26,
+            max_lines_per_cue: 1,
+            ..GroupingParams::default()
+        };
+        // 13 ideographs = 26 cells == budget → single cue.
+        let cues = group_words_into_cues(&ja_words(13), &params);
+        assert_eq!(cues.len(), 1, "13 fullwidth chars (26 cells) must stay one cue");
+        assert_eq!(cues[0].words.len(), 13);
+        // 14 ideographs = 28 cells > budget → the 14th starts a new cue. The
+        // trailing single-word cue cannot merge back (28 cells > 26 budget).
+        let cues = group_words_into_cues(&ja_words(14), &params);
+        assert_eq!(cues.len(), 2, "14 fullwidth chars (28 cells) must split");
+        assert_eq!(cues[0].words.len(), 13);
+        assert_eq!(cues[1].words.len(), 1);
+    }
+
+    #[test]
+    fn trailing_quote_after_period_still_ends_a_sentence() {
+        // Regression for the ASCII bug: `stop."` ends in a closing quote, but
+        // the terminating `.` beneath it must still force a cue break.
+        let words = vec![
+            w("stop.\"", 0, 900),
+            w("Go", 900, 1400),
+            w("now", 1400, 2000),
+        ];
+        let cues = group_words_into_cues(&words, &GroupingParams::default());
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text(), "stop.\"");
+        assert_eq!(cues[1].text(), "Go now");
+    }
+
+    #[test]
+    fn cjk_and_devanagari_terminators_force_a_break() {
+        // 終わり。 ends on the ideographic full stop; 次 starts a fresh cue.
+        let words = vec![
+            w("\u{7D42}\u{308F}\u{308A}\u{3002}", 0, 900), // 終わり。
+            w("\u{6B21}", 900, 1800),                      // 次
+        ];
+        let cues = group_words_into_cues(&words, &GroupingParams::default());
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text(), "\u{7D42}\u{308F}\u{308A}\u{3002}");
+
+        // क्या। ends on the Devanagari danda.
+        let words = vec![
+            w("\u{0915}\u{094D}\u{092F}\u{093E}\u{0964}", 0, 900), // क्या।
+            w("\u{0939}\u{093E}\u{0901}", 900, 1800),              // हाँ
+        ];
+        let cues = group_words_into_cues(&words, &GroupingParams::default());
+        assert_eq!(cues.len(), 2);
+    }
+
+    #[test]
+    fn ascii_semicolon_does_not_end_a_sentence() {
+        // ASCII ';' (U+003B) is NOT the Greek question mark (U+037E), so it must
+        // not force a cue break — these two words stay in one cue.
+        let words = vec![w("hello;", 0, 900), w("world", 900, 1800)];
+        let cues = group_words_into_cues(&words, &GroupingParams::default());
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text(), "hello; world");
+    }
+
+    #[test]
+    fn cue_boundaries_are_deterministic_across_platforms() {
+        // 42 §9 test 5: frozen fixture — a Japanese run whose cell budget forces
+        // exactly one split, plus a sentence terminator. The boundary ticks are
+        // hard-coded; because the budget touches no font/locale/float, equality
+        // against these integers on any runner IS the cross-platform proof.
+        let params = GroupingParams {
+            max_cells_per_line: 4,
+            max_lines_per_cue: 1,
+            min_cue_duration: Tick(0),
+            ..GroupingParams::default()
+        };
+        // Four ideographs (8 cells) over a 4-cell budget → split after the 2nd
+        // (2 clusters = 4 cells fit; the 3rd overflows).
+        let words = vec![
+            w("\u{65E5}", 0, 100),
+            w("\u{672C}", 100, 200),
+            w("\u{8A9E}", 200, 300),
+            w("\u{6587}", 300, 400),
+        ];
+        let cues = group_words_into_cues(&words, &params);
+        let bounds: Vec<(i64, i64)> = cues.iter().map(|c| (c.start.0, c.end.0)).collect();
+        assert_eq!(
+            bounds,
+            vec![
+                (ticks_from_millis(0).0, ticks_from_millis(200).0),
+                (ticks_from_millis(200).0, ticks_from_millis(400).0),
+            ]
+        );
     }
 }

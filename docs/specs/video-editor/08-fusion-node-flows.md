@@ -12,6 +12,10 @@ Scope per 00 §5: node type catalog, per-clip + project graphs, node-editor UI, 
 
 > **Dependency status:** `egui-snarl` is **not** in any `Cargo.toml`, and `photonic-gui` has no node-editor module. References to it below describe an intended integration, not a shipped one.
 
+<!-- spec-assert: dep-absent egui-snarl -->
+<!-- SD-13 (27 §3): `egui-snarl` is referenced as an intended integration but is not adopted; pinned so a partial addition can never leave this "not in any Cargo.toml" claim stale. -->
+
+
 **Canonical terminology (used set-wide):** `NodeGraph` = the data structure (01 §8); **composition** = a per-clip graph; **project graph** = the project-level graph; "Fusion" appears only as an analogy to DaVinci Resolve's page, never as a type or feature name. The phrase "node flow" (this doc's title lineage) is retired from prose — title and filename stay for doc-map stability. **Viewer** = the node editor's composed-output inset (§6.1), distinct from the **program monitor** (04 §3), which always shows the timeline's true output.
 
 - `NodeGraph` (01 §8): one arena entry per composition (per-clip or project), `nodes: HashMap<GraphNodeId, GraphNode>`, `edges: Vec<GraphEdge>` typed by `OutPort`/`InPort`, exactly one `Output` node, `ui: HashMap<GraphNodeId, NodePos>`.

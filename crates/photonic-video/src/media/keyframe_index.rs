@@ -106,7 +106,9 @@ impl KeyframeIndex {
     pub fn save(&self, cache_dir: &Path, content_hash: &str) -> Result<(), IndexError> {
         std::fs::create_dir_all(cache_dir).map_err(IndexError::Io)?;
         let bytes = serde_json::to_vec(self).map_err(IndexError::Json)?;
-        std::fs::write(keyframe_cache_path(cache_dir, content_hash), bytes).map_err(IndexError::Io)
+        // Temp-and-rename (37 §2.3) so a crash never leaves a truncated index.
+        super::atomic_write::write_atomic(&keyframe_cache_path(cache_dir, content_hash), &bytes)
+            .map_err(IndexError::Io)
     }
 
     /// Load from cache, else build + persist (the import-time path).
@@ -166,7 +168,9 @@ impl PtsIndex {
     pub fn save(&self, cache_dir: &Path, content_hash: &str) -> Result<(), IndexError> {
         std::fs::create_dir_all(cache_dir).map_err(IndexError::Io)?;
         let bytes = serde_json::to_vec(self).map_err(IndexError::Json)?;
-        std::fs::write(pts_cache_path(cache_dir, content_hash), bytes).map_err(IndexError::Io)
+        // Temp-and-rename (37 §2.3) so a crash never leaves a truncated index.
+        super::atomic_write::write_atomic(&pts_cache_path(cache_dir, content_hash), &bytes)
+            .map_err(IndexError::Io)
     }
 
     pub fn load_or_build(

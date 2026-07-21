@@ -4,6 +4,10 @@
 //! Probing and index building **block** (they shell out to `ffprobe`); the
 //! engine runs them on worker threads. Nothing in this module spawns threads.
 
+/// Atomic file writes for cache/export outputs (37 §2.3): temp-and-rename.
+pub mod atomic_write;
+/// Orphaned ffmpeg-child reaping (37 §2.2): pid/session registry + reaper.
+pub mod child_registry;
 pub mod ffmpeg_locate;
 pub mod keyframe_index;
 /// Import-ladder L3 poster stills (24-preview-media-load).
@@ -13,6 +17,8 @@ pub mod proxy;
 /// Clip thumbnails + waveform loading, sidecar-cached (spec 15, NLE parity 10).
 pub mod thumbnails;
 
+pub use atomic_write::{staging_path, sweep_stale_staging, write_atomic};
+pub use child_registry::{ChildRecord, ChildRegistry};
 pub use ffmpeg_locate::{locate, FfmpegTools, LocateError, FFMPEG_DIR_ENV};
 pub use keyframe_index::{
     cache_dir_for_project, keyframe_cache_path, keyframe_index_ready, IndexError, KeyframeIndex,

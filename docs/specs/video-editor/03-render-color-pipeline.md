@@ -10,6 +10,9 @@ D-09 mode overlay: sections below remain normative for `LinearRec709Sdr`, the de
 
 ## 1. Current renderer state (baseline this doc changes)
 
+<!-- spec-assert: symbol-exists crates/photonic-video/src/session.rs::EngineSession -->
+<!-- SD-1 (27 §3): historically claimed `photonic-video` "does not exist yet"; the crate and its EngineSession are now real, pinned here so a regression that deletes the crate reds the gate. -->
+
 Verified against current code, cited so P1 work has an exact starting line:
 
 - `PhotonicRenderer` (`renderer/mod.rs:63`) drives a windowed surface, `AutoVsync` present mode (`renderer/mod.rs:234`), 4x MSAA (`const MSAA_SAMPLES: u32 = 4`, `renderer/mod.rs:46`).

@@ -8,28 +8,17 @@
 //! a freshly built `AppState`, so the assertions exercise the exact code
 //! path a real MCP client hits via `dispatch::dispatch_tool`.
 
-use photonic_core::history::CommandHistory;
-use photonic_core::{AuditLog, Document};
 use photonic_mcp::handlers;
 use photonic_mcp::protocol::{ContentItem, ToolResult};
-use photonic_mcp::server::{AppState, McpServerConfig};
+use photonic_mcp::server::AppState;
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Mutex;
 
+/// Builds the shared headless `AppState`. Delegates to the crate's own
+/// `AppState::headless_for_test()` (server.rs) so this file and the
+/// out-of-crate acceptance-story harness (29 §3 / CAP-019) construct the
+/// exact same nine-field shape and cannot drift.
 fn test_state() -> AppState {
-    let (tx, _rx) = std::sync::mpsc::channel();
-    AppState {
-        document: Arc::new(Mutex::new(Document::new("t", 1920.0, 1080.0))),
-        history: Arc::new(Mutex::new(CommandHistory::new(200))),
-        document_path: Arc::new(StdMutex::new(None)),
-        capture_tx: Arc::new(StdMutex::new(tx)),
-        config: McpServerConfig::default(),
-        audit_log: Arc::new(StdMutex::new(AuditLog::new())),
-        clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
-        video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
-        video_jobs: Arc::new(StdMutex::new(handlers::video_jobs::JobRegistry::new())),
-    }
+    AppState::headless_for_test()
 }
 
 /// Pulls the JSON payload a handler attached via `ToolResult::with_data` —
@@ -394,5 +383,31 @@ async fn set_clip_prop_color_label_set_omit_and_clear_are_distinct() {
     assert!(
         after_clear.get("color_label").is_none(),
         "explicit null clears the label"
+    );
+}
+
+/// Proves the real tool-call entry point is reachable from an out-of-crate
+/// integration test (29 §3 / CAP-019). The acceptance-story harness relies on
+/// `photonic_mcp::dispatch::dispatch_tool` being `pub`; this smoke test guards
+/// against it silently re-narrowing to `pub(crate)`.
+#[tokio::test]
+async fn dispatch_tool_is_reachable_from_integration_tests() {
+    let state = AppState::headless_for_test();
+    let result = photonic_mcp::dispatch::dispatch_tool(
+        &state,
+        "create_sequence",
+        json!({
+            "name": "t",
+            "frame_rate": { "num": 30, "den": 1 },
+            "formats": [{ "name": "Main", "width": 1920, "height": 1080 }]
+        }),
+    )
+    .await
+    .expect("dispatch_tool returned a transport error");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "create_sequence via dispatch_tool errored: {:?}",
+        result.content
     );
 }

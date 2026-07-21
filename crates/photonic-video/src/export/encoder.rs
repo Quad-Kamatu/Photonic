@@ -657,13 +657,16 @@ impl EncoderProcess {
             std::fs::create_dir_all(parent).map_err(EncodeError::Io)?;
         }
 
-        let mut child = match Command::new(&tools.ffmpeg)
+        let mut command = Command::new(&tools.ffmpeg);
+        command
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        // 37 §2.2: SIGKILL this encoder if the editor process dies (Linux), so a
+        // hard kill can never leave ffmpeg finalizing a file behind our back.
+        crate::media::child_registry::arm_parent_death_signal(&mut command);
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
                 if let Some(s) = audio_sidecar {

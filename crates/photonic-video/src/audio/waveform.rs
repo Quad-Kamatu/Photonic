@@ -216,7 +216,8 @@ pub fn save_to_dir(pyramid: &WaveformPyramid, cache_dir: &Path) -> std::io::Resu
     let path = cache_path(cache_dir, &pyramid.asset_hash);
     let json = serde_json::to_vec(pyramid)
         .expect("WaveformPyramid has no non-finite-float-sensitive serde impl to fail on");
-    std::fs::write(&path, json)?;
+    // Temp-and-rename (37 §2.3) so a crash never leaves a truncated waveform.
+    crate::media::atomic_write::write_atomic(&path, &json)?;
     Ok(path)
 }
 

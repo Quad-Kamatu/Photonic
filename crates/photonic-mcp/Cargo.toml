@@ -15,7 +15,6 @@ photonic-video = { path = "../photonic-video" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -30,3 +29,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 kurbo = { workspace = true }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` (drives the router without binding a socket) lives
+# behind `util`; the workspace `tower` dep is featureless.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

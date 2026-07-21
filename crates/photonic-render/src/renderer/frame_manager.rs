@@ -101,6 +101,11 @@ impl PhotonicRenderer {
                     // skipped frame rather than a hard error.
                     Err(wgpu::SurfaceError::Timeout) => return Ok(None),
                     Err(e) => {
+                        // A surface that stays invalid after a reconfigure+retry
+                        // is not the routine Lost/Outdated case — treat it as a
+                        // possible device loss and flag the shared health machine
+                        // (37 §1.3) before bubbling the error.
+                        self.gpu_health.mark_lost();
                         return Err(anyhow::anyhow!(
                             "window surface still invalid after reconfigure: {e:?}"
                         ));
@@ -109,6 +114,7 @@ impl PhotonicRenderer {
             }
             Err(wgpu::SurfaceError::Timeout) => return Ok(None),
             Err(e) => {
+                self.gpu_health.mark_lost();
                 return Err(anyhow::anyhow!("failed to acquire window surface: {e:?}"));
             }
         };

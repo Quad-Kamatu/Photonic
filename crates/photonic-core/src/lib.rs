@@ -2,6 +2,7 @@ pub mod annotation;
 pub mod audit;
 pub mod color;
 pub mod color_cmyk;
+pub mod diag;
 pub mod diagnostics;
 pub mod document;
 pub mod effects;
@@ -17,6 +18,7 @@ pub mod photon_file;
 pub mod raster;
 pub mod selection;
 pub mod style;
+pub mod text_metrics;
 pub mod timeline;
 pub mod tokens;
 pub mod transform;
@@ -26,6 +28,7 @@ pub mod units;
 pub use annotation::{Annotation, AnnotationId};
 pub use audit::{audit_timestamp, AuditEntry, AuditLog};
 pub use color::Color;
+pub use diag::{DiagCode, Diagnostic, Remedy, Severity, Subject};
 pub use diagnostics::{crash_dir, CrashReport};
 pub use document::{
     sample_fill_at, ActionSet, Artboard, ArtboardId, CharacterStyle, ColorSwatch,

@@ -155,27 +155,9 @@ impl CaptionCompositor {
             let wrap_w = (cue.max_width.clamp(0.0, 1.0) * w as f32).max(font_size);
             buf.set_size(&mut st.font_system, Some(wrap_w), None);
 
-            // Per-word coloured spans, joined by spaces (space inherits the
-            // preceding word's attrs for consistent metrics).
-            let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(cue.words.len() * 2);
-            for (wi, word) in cue.words.iter().enumerate() {
-                if word.text.is_empty() {
-                    continue;
-                }
-                let attrs = Attrs::new()
-                    .family(Family::Name(&word.font_family))
-                    .weight(Weight(word.font_weight))
-                    .color(GlyphonColor::rgba(
-                        word.color[0],
-                        word.color[1],
-                        word.color[2],
-                        word.color[3],
-                    ));
-                if wi > 0 {
-                    spans.push((" ", attrs));
-                }
-                spans.push((word.text.as_str(), attrs));
-            }
+            // Per-word coloured spans, joined only where a separator belongs
+            // (42 §6.5): no space is emitted between scriptio-continua clusters.
+            let spans = build_caption_spans(&cue.words);
             buf.set_rich_text(&mut st.font_system, spans, Attrs::new(), Shaping::Advanced);
             buf.shape_until_scroll(&mut st.font_system, false);
             buffers.push(buf);
@@ -254,5 +236,87 @@ impl CaptionCompositor {
         }
         queue.submit([enc.finish()]);
         st.atlas.trim();
+    }
+}
+
+/// Build the glyphon rich-text spans for one cue's words. Each non-empty word
+/// contributes its coloured span; a single `" "` separator span is inserted
+/// between two words **only where one belongs** (42 §6.5) — never between
+/// scriptio-continua clusters (CJK / Kana / Thai / …), so a per-cluster
+/// tokenized caption renders `こんにちは`, not `こ ん に ち は`. The separator
+/// inherits the following word's attrs (unchanged from the previous inline
+/// form). Empty words are skipped, and the previous *non-empty* word's text
+/// drives the separator decision.
+fn build_caption_spans(words: &[CaptionWordRun]) -> Vec<(&str, Attrs<'_>)> {
+    let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(words.len() * 2);
+    let mut prev: Option<&str> = None;
+    for word in words {
+        if word.text.is_empty() {
+            continue;
+        }
+        let attrs = Attrs::new()
+            .family(Family::Name(&word.font_family))
+            .weight(Weight(word.font_weight))
+            .color(GlyphonColor::rgba(
+                word.color[0],
+                word.color[1],
+                word.color[2],
+                word.color[3],
+            ));
+        if let Some(p) = prev {
+            if photonic_core::text_metrics::needs_separator(p, word.text.as_str()) {
+                spans.push((" ", attrs));
+            }
+        }
+        spans.push((word.text.as_str(), attrs));
+        prev = Some(word.text.as_str());
+    }
+    spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(text: &str) -> CaptionWordRun {
+        CaptionWordRun {
+            text: text.to_string(),
+            font_family: "sans-serif".to_string(),
+            font_weight: 400,
+            color: [255, 255, 255, 255],
+        }
+    }
+
+    #[test]
+    fn ascii_words_get_space_separators() {
+        let words = [word("Hello"), word("world")];
+        let spans = build_caption_spans(&words);
+        let texts: Vec<&str> = spans.iter().map(|s| s.0).collect();
+        assert_eq!(texts, vec!["Hello", " ", "world"]);
+    }
+
+    #[test]
+    fn scriptio_continua_cue_has_no_space_span() {
+        // A Japanese cue tokenized per cluster must render with no interpolated
+        // spaces (42 §6.5).
+        let words = [
+            word("\u{3053}"),
+            word("\u{3093}"),
+            word("\u{306B}"),
+            word("\u{3061}"),
+            word("\u{306F}"),
+        ];
+        let spans = build_caption_spans(&words);
+        assert!(spans.iter().all(|s| s.0 != " "), "no separator span expected");
+        let joined: String = spans.iter().map(|s| s.0).collect();
+        assert_eq!(joined, "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}");
+    }
+
+    #[test]
+    fn empty_words_are_skipped() {
+        let words = [word("hi"), word(""), word("there")];
+        let spans = build_caption_spans(&words);
+        let texts: Vec<&str> = spans.iter().map(|s| s.0).collect();
+        assert_eq!(texts, vec!["hi", " ", "there"]);
     }
 }

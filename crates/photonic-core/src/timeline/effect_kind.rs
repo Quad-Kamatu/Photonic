@@ -8,6 +8,7 @@
 
 use super::anim::{PropPath, PropSet, PropValue};
 use super::prop_registry::{self, PropTargetKind};
+use super::unknown::UnknownTag;
 use serde::{Deserialize, Serialize};
 
 /// The v1 effect catalog (08 §3, normative; additive-only). `Transform2D`/`Crop`
@@ -23,12 +24,30 @@ pub enum EffectKind {
     LumaKey,
     Invert,
     MaskShapeGen,
+    /// Forward-compat (39 §2.2): a variant this build does not know. The
+    /// original serialized tag is preserved verbatim and re-emitted on save.
+    /// Declared last so serde tries the known snake_case tags first.
+    #[serde(untagged)]
+    Unknown(UnknownTag),
 }
 
 impl EffectKind {
     /// The registry key for this effect's params.
     pub fn target_kind(self) -> PropTargetKind {
         PropTargetKind::Effect(self)
+    }
+
+    /// The preserved tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(self) -> Option<UnknownTag> {
+        match self {
+            EffectKind::Unknown(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(self) -> bool {
+        matches!(self, EffectKind::Unknown(_))
     }
 }
 
@@ -133,5 +152,32 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: EffectParams = serde_json::from_str(&json).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn unknown_variant_preserves_tag_verbatim() {
+        let k: EffectKind = serde_json::from_str("\"film_look\"").unwrap();
+        assert!(k.is_unknown());
+        assert_eq!(k.unknown_tag().unwrap().as_str(), "film_look");
+        // Re-emits the original tag byte-for-byte (39 §2.2 rule 1).
+        assert_eq!(serde_json::to_string(&k).unwrap(), "\"film_look\"");
+    }
+
+    #[test]
+    fn known_variants_are_not_shadowed_by_unknown_fallback() {
+        for (k, tag) in [
+            (EffectKind::Blur, "\"blur\""),
+            (EffectKind::Sharpen, "\"sharpen\""),
+            (EffectKind::Glow, "\"glow\""),
+            (EffectKind::ChromaKey, "\"chroma_key\""),
+            (EffectKind::LumaKey, "\"luma_key\""),
+            (EffectKind::Invert, "\"invert\""),
+            (EffectKind::MaskShapeGen, "\"mask_shape_gen\""),
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), tag);
+            let back: EffectKind = serde_json::from_str(tag).unwrap();
+            assert_eq!(back, k, "known tag {tag} must not degrade to Unknown");
+            assert!(!back.is_unknown());
+        }
     }
 }

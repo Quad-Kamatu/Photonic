@@ -178,10 +178,20 @@ pub enum GraphOp {
     Note {
         text: String,
     },
+    /// Forward-compat (39 §2.2): an op this build does not know. The whole
+    /// object — `op` tag and payload — is retained verbatim and re-emitted
+    /// unchanged. Lowers to passthrough of its primary input (an inert unary
+    /// filter), never guessed. Declared last so serde tries known tags first.
+    #[serde(untagged)]
+    Unknown(serde_json::Map<String, serde_json::Value>),
 }
 
 impl GraphOp {
     /// True for ops with no input ports (sources / generators, 08 §3.3).
+    ///
+    /// `Unknown` falls through to `false` (no wildcard needed): it is treated
+    /// as a unary filter, i.e. passthrough of its primary input — the correct
+    /// inert default for an op whose arity this build cannot know (39 §2.2).
     pub fn is_source(&self) -> bool {
         matches!(
             self,
@@ -193,6 +203,19 @@ impl GraphOp {
                 | GraphOp::Text { .. }
                 | GraphOp::Note { .. }
         )
+    }
+
+    /// The preserved `op` tag if this is an unknown (forward-compat) variant.
+    pub fn unknown_tag(&self) -> Option<&str> {
+        match self {
+            GraphOp::Unknown(map) => map.get("op").and_then(|v| v.as_str()),
+            _ => None,
+        }
+    }
+
+    /// True if this is a forward-compat variant this build does not understand.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, GraphOp::Unknown(_))
     }
 }
 

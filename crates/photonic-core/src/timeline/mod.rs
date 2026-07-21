@@ -25,8 +25,10 @@ pub mod load;
 pub mod media;
 pub mod ops;
 pub mod prop_registry;
+pub mod scale;
 pub mod sequence;
 pub mod time;
+pub mod unknown;
 
 // ── Curated re-exports (the surface most callers use) ───────────────────────
 
@@ -68,8 +70,14 @@ pub use media::{
 };
 pub use ops::{ClipEdge, EditError};
 pub use prop_registry::{PropEntry, PropTargetKind};
+pub use scale::{
+    TARGET_ASSETS_PER_PROJECT, TARGET_CLIPS_PER_SEQUENCE, TARGET_CUES_PER_CAPTION_TRACK,
+    TARGET_GRAPH_NODES_PER_COMPOSITION, TARGET_KEYFRAMES_PER_PROPERTY_TRACK,
+    TARGET_SEQUENCES_PER_PROJECT, TARGET_TRACKS_PER_SEQUENCE,
+};
 pub use sequence::{
     Marker, ProjectVideoSettings, Sequence, SequenceFormat, TimelineProject, Track, TrackKind,
     ValidationError,
 };
 pub use time::{FrameRate, Tick, TICKS_PER_SECOND};
+pub use unknown::UnknownTag;

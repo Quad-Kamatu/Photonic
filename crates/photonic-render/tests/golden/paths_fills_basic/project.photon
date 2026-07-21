@@ -1,15 +1,15 @@
 {
-  "format_version": 2,
-  "id": "e5557068-eb19-43d3-9585-2829604b86ba",
+  "format_version": 4,
+  "id": "ee23e2c3-d75f-40dd-b140-a0806e775590",
   "name": "paths-fills-basic",
   "width": 120.0,
   "height": 120.0,
   "layer_order": [
-    "4f2c8e28-4081-46cf-86b1-28fd96eb1bd0"
+    "3a450e9d-cb47-418d-8ba2-5692c6812340"
   ],
   "layers": {
-    "4f2c8e28-4081-46cf-86b1-28fd96eb1bd0": {
-      "id": "4f2c8e28-4081-46cf-86b1-28fd96eb1bd0",
+    "3a450e9d-cb47-418d-8ba2-5692c6812340": {
+      "id": "3a450e9d-cb47-418d-8ba2-5692c6812340",
       "name": "Layer 1",
       "visible": true,
       "locked": false,
@@ -22,16 +22,16 @@
       "lock_pixels": false,
       "lock_position": false,
       "node_ids": [
-        "c675abd4-3efc-4d5c-8870-6e9675712ca0",
-        "82029b9a-267d-4970-8517-bf237fc3265c"
+        "8812947d-4fd9-494d-b6f3-f1bb118eaf6d",
+        "57a127c2-7f69-43c9-8671-044dca4a17e9"
       ]
     }
   },
   "nodes": {
-    "c675abd4-3efc-4d5c-8870-6e9675712ca0": {
-      "id": "c675abd4-3efc-4d5c-8870-6e9675712ca0",
+    "8812947d-4fd9-494d-b6f3-f1bb118eaf6d": {
+      "id": "8812947d-4fd9-494d-b6f3-f1bb118eaf6d",
       "name": "rect",
-      "layer_id": "4f2c8e28-4081-46cf-86b1-28fd96eb1bd0",
+      "layer_id": "3a450e9d-cb47-418d-8ba2-5692c6812340",
       "kind": {
         "type": "path",
         "path_data": {
@@ -73,10 +73,10 @@
         "is_compound": false
       }
     },
-    "82029b9a-267d-4970-8517-bf237fc3265c": {
-      "id": "82029b9a-267d-4970-8517-bf237fc3265c",
+    "57a127c2-7f69-43c9-8671-044dca4a17e9": {
+      "id": "57a127c2-7f69-43c9-8671-044dca4a17e9",
       "name": "ellipse",
-      "layer_id": "4f2c8e28-4081-46cf-86b1-28fd96eb1bd0",
+      "layer_id": "3a450e9d-cb47-418d-8ba2-5692c6812340",
       "kind": {
         "type": "path",
         "path_data": {
@@ -119,7 +119,7 @@
       }
     }
   },
-  "active_layer_id": "4f2c8e28-4081-46cf-86b1-28fd96eb1bd0",
+  "active_layer_id": "3a450e9d-cb47-418d-8ba2-5692c6812340",
   "annotations": {},
   "guides": [],
   "recent_colors": [],
@@ -147,7 +147,7 @@
   "workspaces": [],
   "artboards": [
     {
-      "id": "58f4e9b3-becc-4626-9e61-544a2e460d70",
+      "id": "cbc1490e-4976-4da1-a2f5-a4146c4de734",
       "name": "Artboard 1",
       "x": 0.0,
       "y": 0.0,
@@ -155,6 +155,9 @@
       "height": 120.0
     }
   ],
-  "active_artboard": "58f4e9b3-becc-4626-9e61-544a2e460d70",
+  "active_artboard": "cbc1490e-4976-4da1-a2f5-a4146c4de734",
+  "dpi": 72.0,
+  "display_unit": "px",
+  "color_mode": "rgb",
   "photon_format": 1
 }

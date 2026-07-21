@@ -584,6 +584,18 @@ fn transition_mix(
             )));
             merge_over(b, incoming, outgoing, t)
         }
+        // Forward-compat (39 §2.2): an unknown transition renders as a HARD CUT
+        // — the incoming clip directly, no blend — never a guessed dissolve.
+        // `TransitionKind` is `#[non_exhaustive]`, so this wildcard also catches
+        // any future known kind a newer build adds (inert cut until this build
+        // learns to render it), which is the correct conservative default.
+        _ => {
+            b.diag(CompileDiagnostic::plain(format!(
+                "{kind:?} transition renders as a hard cut (this build does not \
+                 understand it)"
+            )));
+            incoming
+        }
     }
 }
 
@@ -894,6 +906,19 @@ fn build_clip_source(
                 },
                 vec![],
             )
+        }
+        ClipSource::Unknown(_) => {
+            // Forward-compat (39 §2.2): a source kind this build does not
+            // understand renders as a transparent placeholder — the same inert
+            // treatment as a missing/offline asset — never guessed. The original
+            // `source` object is retained verbatim in the model.
+            let _ = seq;
+            b.diag(CompileDiagnostic::plain(format!(
+                "unknown clip source {:?} renders as a placeholder (this build \
+                 does not understand it)",
+                clip.source.unknown_tag().unwrap_or("?")
+            )));
+            b.transparent(format)
         }
     }
 }
@@ -1414,6 +1439,20 @@ fn lower_node_uncached(
                 vec![(input, OutPort::default())],
             )
         }
+        GraphOp::Unknown(_) => {
+            // Forward-compat (39 §2.2): an op this build does not understand
+            // lowers to passthrough of its primary input (an inert unary
+            // filter), or the missing-input default when unwired — never
+            // guessed. The original `op` object is retained verbatim in the
+            // model.
+            b.diag(CompileDiagnostic::at(
+                lc.graph.id,
+                node.id,
+                "unknown graph op renders as passthrough (this build does not \
+                 understand it)",
+            ));
+            lower_primary_or_default(b, lc, primary(), tick, cycle)
+        }
     }
 }
 
@@ -1689,18 +1728,21 @@ fn fade_word_opacity(w: &CaptionWord, tick: Tick) -> f32 {
     ((tick.0 - start) as f32 / lead as f32).clamp(0.0, 1.0)
 }
 
-/// Typewriter reveal (06 §5.2): the first
-/// `floor(char_count * clamp((t − start)/(end − start), 0, 1))` characters of the
-/// word; the full text for any other animation.
+/// Typewriter reveal (06 §5.2, 42 §6.5): the first
+/// `floor(grapheme_count * clamp((t − start)/(end − start), 0, 1))` **grapheme
+/// clusters** of the word; the full text for any other animation. Revealing per
+/// grapheme (not per scalar) never emits a Devanagari matra without its base or
+/// truncates an emoji ZWJ sequence mid-run; for pure ASCII it is byte-identical
+/// at every tick, so no golden frame changes.
 fn reveal_text(text: &str, anim: CaptionAnim, w: &CaptionWord, tick: Tick) -> String {
     if !matches!(anim, CaptionAnim::Typewriter) {
         return text.to_string();
     }
     let span = (w.end - w.start).0.max(1) as f32;
     let f = ((tick - w.start).0 as f32 / span).clamp(0.0, 1.0);
-    let total = text.chars().count();
+    let total = photonic_core::text_metrics::graphemes(text).count();
     let n = (total as f32 * f).floor() as usize;
-    text.chars().take(n).collect()
+    photonic_core::text_metrics::graphemes(text).take(n).collect()
 }
 
 fn lerp_color(a: Color, b: Color, f: f32) -> Color {
@@ -2180,6 +2222,69 @@ mod tests {
         OutPort as GOutPort, Sequence, Track, TrackKind,
     };
     use photonic_core::Color;
+
+    // ---- Task 5: Typewriter reveal by grapheme cluster (42 §6.5) ----
+
+    fn caption_word(text: &str, start: i64, end: i64) -> CaptionWord {
+        CaptionWord::new(text, Tick(start), Tick(end))
+    }
+
+    #[test]
+    fn reveal_ascii_is_byte_identical_per_scalar() {
+        // "hello" over [0, 500] reveals one more char per 100-tick step — pins
+        // the no-regression claim for ASCII.
+        let w = caption_word("hello", 0, 500);
+        let steps = ["h", "he", "hel", "hell", "hello"];
+        for (i, want) in steps.iter().enumerate() {
+            let tick = Tick(((i + 1) as i64) * 100);
+            assert_eq!(reveal_text("hello", CaptionAnim::Typewriter, &w, tick), *want);
+        }
+    }
+
+    #[test]
+    fn reveal_never_splits_a_devanagari_cluster() {
+        // नमस्ते — every revealed prefix is a whole number of grapheme clusters,
+        // so the output never begins with a combining matra/virama.
+        let text = "\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}";
+        let clusters: Vec<&str> = photonic_core::text_metrics::graphemes(text).collect();
+        let w = caption_word(text, 0, 600);
+        for step in 0..=12 {
+            let tick = Tick(step * 50);
+            let out = reveal_text(text, CaptionAnim::Typewriter, &w, tick);
+            // Output equals the first k whole clusters for some k.
+            let k = photonic_core::text_metrics::graphemes(&out).count();
+            let expected: String = clusters.iter().take(k).copied().collect();
+            assert_eq!(out, expected);
+            // Never starts with the virama (U+094D) or matra (U+0947).
+            if let Some(c) = out.chars().next() {
+                assert!(c != '\u{094D}' && c != '\u{0947}');
+            }
+        }
+    }
+
+    #[test]
+    fn reveal_emoji_zwj_is_all_or_nothing() {
+        // A ZWJ family emoji is one grapheme cluster: the reveal is either empty
+        // or the whole sequence, never a partial ZWJ run.
+        let text = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        let w = caption_word(text, 0, 400);
+        for step in 0..=8 {
+            let tick = Tick(step * 50);
+            let out = reveal_text(text, CaptionAnim::Typewriter, &w, tick);
+            assert!(out.is_empty() || out == text, "partial ZWJ run: {out:?}");
+        }
+    }
+
+    #[test]
+    fn reveal_non_typewriter_returns_full_text() {
+        let text = "\u{65E5}\u{672C}\u{8A9E}";
+        let w = caption_word(text, 0, 300);
+        for anim in [CaptionAnim::None, CaptionAnim::FadeWords, CaptionAnim::SlideUp] {
+            for step in 0..=6 {
+                assert_eq!(reveal_text(text, anim, &w, Tick(step * 50)), text);
+            }
+        }
+    }
 
     fn base_project() -> (TimelineProject, SequenceId) {
         let mut project = TimelineProject::new();

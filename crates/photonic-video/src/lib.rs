@@ -38,6 +38,12 @@ pub mod pool;
 /// self-contained and compile-checked without front-running P2's crate work.
 pub mod contract;
 
+/// Cross-crate test-support surface (29 §3 / CAP-019). Always compiled — NOT
+/// `#[cfg(test)]` — because integration tests in other crates (the acceptance-
+/// story harness) must be able to import [`testing::frame_compare`], the single
+/// home of the 11 §1.2 frame-comparison metric.
+pub mod testing;
+
 // ── Facade re-exports (02 §1) — the names Wire-phase consumers import ────────
 pub use graph::eval::GpuContext;
 pub use media::thumbnails::{RgbaThumb, ThumbHandle, ThumbnailCache, WaveformCache};

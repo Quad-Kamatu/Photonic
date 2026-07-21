@@ -1,7 +1,9 @@
 pub mod canvas;
+pub mod capability;
 pub mod caption;
 pub mod color;
 pub mod compositor;
+pub mod gpu_state;
 pub mod grade;
 pub mod grade_gpu;
 pub mod headless;
@@ -15,7 +17,11 @@ pub mod text_path;
 pub mod video;
 
 pub use canvas::CanvasView;
+pub use capability::{
+    check_capability_floor, CapabilityReport, CapabilityRequirement, MIN_TEXTURE_DIMENSION_2D,
+};
 pub use caption::{CaptionCompositor, CaptionCueRun, CaptionWordRun};
+pub use gpu_state::{backoff_delay, GpuHealth, GpuState, MAX_RECOVERY_ATTEMPTS};
 pub use color::{Colorimetry, Matrix, Range};
 pub use grade::{
     apply_grade_cpu, resolve, ResolvedCdl, ResolvedCurves, ResolvedGradeOp, ResolvedGradePayload,

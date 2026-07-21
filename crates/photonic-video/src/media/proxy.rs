@@ -304,6 +304,8 @@ pub fn generate_proxy(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     lower_background_priority(&mut command);
+    // 37 §2.2: SIGKILL this proxy transcode if the editor process dies (Linux).
+    crate::media::child_registry::arm_parent_death_signal(&mut command);
     let mut child = command.spawn().map_err(ProxyError::Spawn)?;
 
     let status = loop {

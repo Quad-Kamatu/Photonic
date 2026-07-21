@@ -1112,6 +1112,20 @@ fn fx_editor(ui: &mut Ui, unit: &mut AudioFxUnit, open_fx: &mut Option<FxSel>) {
                     " ms",
                 );
             }
+            // Forward-compat (39 §2.2): an fx kind this build does not
+            // understand is non-editable but retained verbatim. `AudioFxKind`
+            // is `#[non_exhaustive]`, so this wildcard also covers any future
+            // kind a newer build adds.
+            _ => {
+                ui.label(
+                    egui::RichText::new(
+                        "This effect was made by a newer Photonic build and can't be \
+                         edited here. It is preserved untouched.",
+                    )
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+                );
+            }
         }
     });
 }
@@ -1224,6 +1238,9 @@ fn fx_kind_label(kind: AudioFxKind) -> &'static str {
         AudioFxKind::Compressor => "Comp",
         AudioFxKind::Gate => "Gate",
         AudioFxKind::Limiter => "Limiter",
+        // Forward-compat (39 §2.2): show the preserved tag as the display name.
+        AudioFxKind::Unknown(t) => t.as_str(),
+        _ => "Unsupported",
     }
 }
 
@@ -1233,6 +1250,8 @@ fn fx_kind_icon(kind: AudioFxKind) -> &'static str {
         AudioFxKind::Compressor => ph::WAVE_SINE,
         AudioFxKind::Gate => ph::GAUGE,
         AudioFxKind::Limiter => ph::SHIELD,
+        // Forward-compat (39 §2.2): a neutral marker for an fx this build lacks.
+        _ => ph::QUESTION,
     }
 }
 

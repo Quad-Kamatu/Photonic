@@ -824,6 +824,10 @@ fn clip_label(track: &Track, id: ClipId) -> Option<String> {
             // a compile-blocking non-exhaustive match in this story's own
             // territory file, not a new feature of this story.
             ClipSource::Text { .. } => "Title",
+            // Forward-compat (39 §2.2): a source kind this build does not
+            // understand shows its preserved tag verbatim; it behaves as an
+            // opaque clip everywhere else (trim/move/split), never guessed.
+            ClipSource::Unknown(_) => c.source.unknown_tag().unwrap_or("Unknown"),
         }
         .to_string(),
     )

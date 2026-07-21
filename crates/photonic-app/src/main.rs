@@ -495,10 +495,10 @@ impl ApplicationHandler for PhotonicWinitApp {
         // ── egui setup ───────────────────────────────────────────────────────
         let egui_ctx = egui::Context::default();
         egui_ctx.set_visuals(photonic_gui::build_dark_theme());
-        egui_ctx.style_mut(|s| {
-            s.spacing.item_spacing = egui::vec2(6.0, 4.0);
-            s.spacing.button_padding = egui::vec2(8.0, 3.0);
-        });
+        // Spacing (incl. the 24px WCAG SC 2.5.8 hit-target floor, 41 §5 R-9)
+        // persists across theme switches: `set_visuals` replaces only
+        // `Style::visuals`, leaving `Style::spacing` intact.
+        egui_ctx.style_mut(photonic_gui::theme::apply_spacing);
 
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
