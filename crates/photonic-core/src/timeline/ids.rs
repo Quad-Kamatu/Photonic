@@ -80,6 +80,13 @@ id_newtype! {
     GradeOpId,
     /// Identifies a media bin (folder) in the media pool.
     BinId,
+    /// Identifies a [`MarkerCategory`](crate::timeline::MarkerCategory) in
+    /// [`TimelineProject::marker_categories`](crate::timeline::TimelineProject).
+    /// Referenced by stable id, never by index (35 §1.3).
+    MarkerCategoryId,
+    /// Identifies a [`GroupNode`](crate::timeline::GroupNode) in
+    /// [`Sequence::groups`](crate::timeline::Sequence) (35 §3).
+    GroupId,
 }
 
 #[cfg(test)]
@@ -91,6 +98,30 @@ mod tests {
         // Two fresh ids differ; the nil sentinel is stable.
         assert_ne!(ClipId::new(), ClipId::new());
         assert_eq!(ClipId::nil(), ClipId::nil());
+        // The markers/groups migration ids behave identically.
+        assert_ne!(MarkerCategoryId::new(), MarkerCategoryId::new());
+        assert_eq!(MarkerCategoryId::nil(), MarkerCategoryId::nil());
+        assert_ne!(GroupId::new(), GroupId::new());
+        assert_eq!(GroupId::nil(), GroupId::nil());
+    }
+
+    #[test]
+    fn marker_category_and_group_ids_serde_transparent() {
+        // `#[serde(transparent)]` → the JSON is the bare uuid string, mirroring
+        // `id_serde_is_transparent_uuid`.
+        let cat = MarkerCategoryId::new();
+        let cat_json = serde_json::to_string(&cat).unwrap();
+        let as_uuid: Uuid = serde_json::from_str(&cat_json).unwrap();
+        assert_eq!(as_uuid, cat.0);
+        let round: MarkerCategoryId = serde_json::from_str(&cat_json).unwrap();
+        assert_eq!(round, cat);
+
+        let grp = GroupId::new();
+        let grp_json = serde_json::to_string(&grp).unwrap();
+        let as_uuid: Uuid = serde_json::from_str(&grp_json).unwrap();
+        assert_eq!(as_uuid, grp.0);
+        let round: GroupId = serde_json::from_str(&grp_json).unwrap();
+        assert_eq!(round, grp);
     }
 
     #[test]

@@ -4,7 +4,9 @@ use super::audio::{MasterBus, TrackAudio};
 use super::captions::CaptionTrack;
 use super::clip::Clip;
 use super::graph::NodeGraph;
-use super::ids::{ClipId, CueId, GraphId, MarkerId, SequenceId, TrackId};
+use super::ids::{
+    ClipId, CueId, GraphId, GroupId, MarkerCategoryId, MarkerId, SequenceId, TrackId,
+};
 use super::media::MediaPool;
 use super::time::{FrameRate, Tick};
 use crate::Color;
@@ -30,6 +32,12 @@ pub struct TimelineProject {
     pub project_graph: Option<GraphId>,
     #[serde(default)]
     pub settings: ProjectVideoSettings,
+    /// Project-level marker categories (35 §1.3), referenced by stable
+    /// [`MarkerCategoryId`], never by index. The vec order is display order and
+    /// carries no semantics; ids are unique within the vec. Optional — a project
+    /// carries none until the command layer seeds them on first use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marker_categories: Vec<MarkerCategory>,
 }
 
 impl TimelineProject {
@@ -43,7 +51,15 @@ impl TimelineProject {
             graphs: HashMap::new(),
             project_graph: None,
             settings: ProjectVideoSettings::default(),
+            marker_categories: Vec::new(),
         }
+    }
+
+    /// The category with this id, if present. Categories are addressed by
+    /// stable id, never by index (35 §1.3); a marker pointing at a missing
+    /// category renders neutral rather than being silently remapped.
+    pub fn marker_category(&self, id: MarkerCategoryId) -> Option<&MarkerCategory> {
+        self.marker_categories.iter().find(|c| c.id == id)
     }
 
     /// Insert a sequence, appending it to the UI order and making it active if
@@ -122,6 +138,11 @@ pub struct Sequence {
     pub caption_tracks: Vec<CaptionTrack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// Group tree (35 §3): a parent-pointer forest of [`GroupNode`]s, keyed by
+    /// [`GroupId`]. Clips point at their immediate group via
+    /// [`Clip::group`](super::clip::Clip).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub groups: HashMap<GroupId, GroupNode>,
     #[serde(default)]
     pub audio_master: MasterBus,
     /// In/out for preview + export.
@@ -142,6 +163,7 @@ impl Sequence {
             audio_tracks: Vec::new(),
             caption_tracks: Vec::new(),
             markers: Vec::new(),
+            groups: HashMap::new(),
             audio_master: MasterBus::new(),
             work_range: None,
         }
@@ -201,6 +223,14 @@ impl Sequence {
         let mut dup = self.clone();
         dup.id = SequenceId::new();
         let mut link_remap: HashMap<LinkGroupId, LinkGroupId> = HashMap::new();
+        // Groups are remapped to fresh ids for the same reason link groups are:
+        // so a grouped set stays grouped *within* the copy without tying it back
+        // to the original (ids resolve across sequences).
+        let group_remap: HashMap<GroupId, GroupId> = dup
+            .groups
+            .keys()
+            .map(|old| (*old, GroupId::new()))
+            .collect();
         for track in dup
             .video_tracks
             .iter_mut()
@@ -213,7 +243,25 @@ impl Sequence {
                     let fresh = *link_remap.entry(old).or_default();
                     clip.link_group = Some(fresh);
                 }
+                if let Some(old) = clip.group {
+                    clip.group = group_remap.get(&old).copied();
+                }
+                for m in &mut clip.markers {
+                    m.id = MarkerId::new();
+                }
             }
+        }
+        if !group_remap.is_empty() {
+            dup.groups = dup
+                .groups
+                .drain()
+                .map(|(old, mut node)| {
+                    let fresh = group_remap[&old];
+                    node.id = fresh;
+                    node.parent = node.parent.and_then(|p| group_remap.get(&p).copied());
+                    (fresh, node)
+                })
+                .collect();
         }
         for marker in &mut dup.markers {
             marker.id = MarkerId::new();
@@ -236,9 +284,74 @@ impl Sequence {
             .unwrap_or(Tick::ZERO)
     }
 
+    /// The parent chain of a group, leaf→root, cycle-guarded (35 §3). A cycle or
+    /// a dangling `parent` stops the walk (the returned prefix is still valid);
+    /// [`validate`](Self::validate) is the authority that rejects such states.
+    pub fn group_chain(&self, g: GroupId) -> Vec<GroupId> {
+        let mut chain = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut cur = Some(g);
+        while let Some(id) = cur {
+            if !visited.insert(id) {
+                break; // cycle
+            }
+            let Some(node) = self.groups.get(&id) else {
+                break; // dangling parent ref
+            };
+            chain.push(id);
+            cur = node.parent;
+        }
+        chain
+    }
+
+    /// The root of a group's parent chain (35 §3), or `None` if `g` is unknown.
+    pub fn topmost_group(&self, g: GroupId) -> Option<GroupId> {
+        self.group_chain(g).last().copied()
+    }
+
+    /// Every clip in this sequence whose group chain contains `g` — the
+    /// transitive members (35 §3).
+    pub fn group_members(&self, g: GroupId) -> Vec<(TrackId, ClipId)> {
+        let mut out = Vec::new();
+        for track in self.tracks() {
+            for clip in &track.clips {
+                if let Some(cg) = clip.group {
+                    if self.group_chain(cg).contains(&g) {
+                        out.push((track.id, clip.id));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Clips whose *immediate* group is `g` (35 §3).
+    pub fn direct_group_members(&self, g: GroupId) -> Vec<(TrackId, ClipId)> {
+        let mut out = Vec::new();
+        for track in self.tracks() {
+            for clip in &track.clips {
+                if clip.group == Some(g) {
+                    out.push((track.id, clip.id));
+                }
+            }
+        }
+        out
+    }
+
+    /// Groups whose immediate `parent` is `g` (35 §3).
+    pub fn child_groups(&self, g: GroupId) -> Vec<GroupId> {
+        self.groups
+            .values()
+            .filter(|n| n.parent == Some(g))
+            .map(|n| n.id)
+            .collect()
+    }
+
     /// Enforce the per-track invariants (01 §4): every clip has `duration > 0`,
     /// clips are sorted by `start`, and no two clips on one track overlap.
-    /// Debug-asserted after every edit op and checked on load.
+    /// Also enforces the group-tree invariants (35 §3): no cycles, referenced
+    /// group ids exist in-sequence, no empty groups, and no single-member
+    /// `Normal` groups. Debug-asserted after every edit op and checked on load.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.formats.is_empty() {
             return Err(ValidationError::NoFormats(self.id));
@@ -263,7 +376,108 @@ impl Sequence {
                 prev_end = Some(clip.end());
             }
         }
+        self.validate_groups()?;
         Ok(())
+    }
+
+    /// The group-tree pass of [`validate`](Self::validate) (35 §3).
+    fn validate_groups(&self) -> Result<(), ValidationError> {
+        // Every `Clip.group` names a group that exists in-sequence.
+        for track in self.tracks() {
+            for clip in &track.clips {
+                if let Some(g) = clip.group {
+                    if !self.groups.contains_key(&g) {
+                        return Err(ValidationError::UnknownGroup { group: g });
+                    }
+                }
+            }
+        }
+        for node in self.groups.values() {
+            // A named parent must exist in-sequence.
+            if let Some(p) = node.parent {
+                if !self.groups.contains_key(&p) {
+                    return Err(ValidationError::UnknownGroup { group: p });
+                }
+            }
+            // The parent chain must terminate (no cycle). Walk with a visited
+            // set; a repeat means the chain from `node` re-enters itself.
+            let mut visited = std::collections::HashSet::new();
+            let mut cur = Some(node.id);
+            while let Some(id) = cur {
+                if !visited.insert(id) {
+                    return Err(ValidationError::GroupCycle { group: node.id });
+                }
+                cur = self.groups.get(&id).and_then(|n| n.parent);
+            }
+        }
+        for node in self.groups.values() {
+            let direct = self.direct_group_members(node.id).len();
+            let children = self.child_groups(node.id).len();
+            // No empty groups: zero direct clip members and zero child groups.
+            if direct == 0 && children == 0 {
+                return Err(ValidationError::EmptyGroup { group: node.id });
+            }
+            // No single-member `Normal` group (a group of one is just a clip).
+            // `AvLink`/`Unknown` are exempt: an A/V pair mid-edit may transiently
+            // hold one member, and an unknown kind must never be dissolved.
+            if node.kind == GroupKind::Normal && self.group_members(node.id).len() == 1 {
+                return Err(ValidationError::SingletonNormalGroup { group: node.id });
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove degenerate groups after a membership change (35 §3) — the ops-layer
+    /// counterpart to [`validate`](Self::validate)'s rejection. Removes empty
+    /// groups and singleton `Normal` groups bottom-up, reparenting orphaned
+    /// children to the removed group's parent, and returns the dissolved ids (so
+    /// a command can capture them for its inverse). `AvLink` and `Unknown` groups
+    /// are never dissolved.
+    pub fn dissolve_degenerate_groups(&mut self) -> Vec<GroupId> {
+        let mut dissolved = Vec::new();
+        loop {
+            // Find one degenerate group to remove this pass. Working one at a
+            // time keeps membership/child counts consistent as we reparent.
+            let victim = self.groups.values().find_map(|node| {
+                if node.kind == GroupKind::AvLink || node.kind == GroupKind::Unknown {
+                    return None;
+                }
+                let direct = self.direct_group_members(node.id).len();
+                let children = self.child_groups(node.id).len();
+                let empty = direct == 0 && children == 0;
+                let singleton = node.kind == GroupKind::Normal
+                    && self.group_members(node.id).len() == 1;
+                if empty || singleton {
+                    Some(node.id)
+                } else {
+                    None
+                }
+            });
+            let Some(victim) = victim else { break };
+            let parent = self.groups.get(&victim).and_then(|n| n.parent);
+            // Reparent orphaned child groups and direct clip members to the
+            // removed group's parent.
+            let child_ids = self.child_groups(victim);
+            for cid in child_ids {
+                if let Some(child) = self.groups.get_mut(&cid) {
+                    child.parent = parent;
+                }
+            }
+            for track in self
+                .video_tracks
+                .iter_mut()
+                .chain(self.audio_tracks.iter_mut())
+            {
+                for clip in &mut track.clips {
+                    if clip.group == Some(victim) {
+                        clip.group = parent;
+                    }
+                }
+            }
+            self.groups.remove(&victim);
+            dissolved.push(victim);
+        }
+        dissolved
     }
 }
 
@@ -273,6 +487,15 @@ pub enum ValidationError {
     NoFormats(SequenceId),
     NonPositiveDuration { track: TrackId, clip_start: Tick },
     OverlapOrUnsorted { track: TrackId, at: Tick },
+    /// A group's parent chain does not terminate (35 §3).
+    GroupCycle { group: GroupId },
+    /// A `Clip.group` or `GroupNode.parent` names a group absent from the
+    /// sequence (35 §3).
+    UnknownGroup { group: GroupId },
+    /// A group with zero direct clip members and zero child groups (35 §3).
+    EmptyGroup { group: GroupId },
+    /// A `GroupKind::Normal` group with exactly one transitive member (35 §3).
+    SingletonNormalGroup { group: GroupId },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -287,6 +510,16 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::OverlapOrUnsorted { track, at } => {
                 write!(f, "clip at {at:?} on track {track} overlaps or is unsorted")
+            }
+            ValidationError::GroupCycle { group } => {
+                write!(f, "group {group} parent chain does not terminate")
+            }
+            ValidationError::UnknownGroup { group } => {
+                write!(f, "reference to unknown group {group}")
+            }
+            ValidationError::EmptyGroup { group } => write!(f, "group {group} is empty"),
+            ValidationError::SingletonNormalGroup { group } => {
+                write!(f, "normal group {group} has a single member")
             }
         }
     }
@@ -389,28 +622,213 @@ impl TrackKind {
     }
 }
 
-/// A sequence marker.
+/// A project-level marker category (35 §1.3): a named, coloured, glyphed class
+/// a [`Marker`] may reference by stable [`MarkerCategoryId`]. Categories are
+/// optional and live on [`TimelineProject::marker_categories`]; a marker's own
+/// `color` (when set) overrides the category colour.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MarkerCategory {
+    pub id: MarkerCategoryId,
+    pub name: String,
+    pub color: Color,
+    #[serde(default)]
+    pub glyph: MarkerGlyph,
+}
+
+impl MarkerCategory {
+    /// A category with a fresh id, the given name and colour, and the default
+    /// [`MarkerGlyph::Diamond`].
+    pub fn new(name: impl Into<String>, color: Color) -> Self {
+        MarkerCategory {
+            id: MarkerCategoryId::new(),
+            name: name.into(),
+            color,
+            glyph: MarkerGlyph::default(),
+        }
+    }
+
+    /// A small ordered seed set of categories for a project's first use. Called
+    /// lazily by the command layer, never by [`TimelineProject::new`] — §1.3
+    /// categories are optional. Each entry has a fresh, distinct id and a
+    /// distinct glyph.
+    pub fn default_seed() -> Vec<MarkerCategory> {
+        vec![
+            MarkerCategory {
+                id: MarkerCategoryId::new(),
+                name: "Marker".to_string(),
+                color: Color::rgb(0.90, 0.80, 0.10),
+                glyph: MarkerGlyph::Diamond,
+            },
+            MarkerCategory {
+                id: MarkerCategoryId::new(),
+                name: "Cut".to_string(),
+                color: Color::rgb(0.85, 0.20, 0.20),
+                glyph: MarkerGlyph::Bar,
+            },
+            MarkerCategory {
+                id: MarkerCategoryId::new(),
+                name: "Note".to_string(),
+                color: Color::rgb(0.20, 0.55, 0.90),
+                glyph: MarkerGlyph::Circle,
+            },
+            MarkerCategory {
+                id: MarkerCategoryId::new(),
+                name: "Todo".to_string(),
+                color: Color::rgb(0.95, 0.55, 0.10),
+                glyph: MarkerGlyph::Flag,
+            },
+            MarkerCategory {
+                id: MarkerCategoryId::new(),
+                name: "Chapter".to_string(),
+                color: Color::rgb(0.35, 0.75, 0.35),
+                glyph: MarkerGlyph::Triangle,
+            },
+        ]
+    }
+}
+
+/// The rendered glyph of a marker category (41 §7; ships with this migration).
+/// `Diamond` is the default because the ruler already paints diamonds.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerGlyph {
+    #[default]
+    Diamond,
+    Circle,
+    Square,
+    Triangle,
+    Flag,
+    Bar,
+}
+
+/// How a [`Marker`] is anchored (35 §1). `Timecode` markers sit at an absolute
+/// sequence tick; `Content` markers are relative to their owning clip. Clip
+/// markers are always `Content`; sequence markers default `Timecode`.
+///
+/// `Unknown` is the 39 §2.2 forward-compat arm: a v5 file written by a later
+/// build may carry an anchor token this build does not know. It must exist from
+/// birth or such a file would strand this loader. Every consumer treats
+/// `Unknown` as `Timecode` (inert), and it is never dropped. `#[serde(other)]`
+/// loses the original token — the smallest correct interpretation for a
+/// unit-only enum, matching the historical `GradeOpKind` precedent; 39 §2.2's
+/// verbatim-preservation task owns upgrading it to a payload-carrying form.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MarkerAnchor {
+    #[default]
+    Timecode,
+    Content,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A marker. Scope is implied by location: [`Sequence::markers`] holds sequence
+/// markers, [`Clip::markers`](super::clip::Clip) holds clip markers. `duration`
+/// of 0 is a point marker; `> 0` a ranged marker. `color`, when set, overrides
+/// the category colour. `category` is referenced by stable id (35 §1).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Marker {
     pub id: MarkerId,
     pub at: Tick,
-    pub name: String,
+    /// 0 = point marker; `> 0` = ranged. Never `Option` (35 §1).
     #[serde(default)]
-    pub color: Option<Color>,
+    pub duration: Tick,
+    pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// A [`MarkerCategory`] referenced by stable id, never index. A missing
+    /// category renders neutral + flagged, never silently remapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<MarkerCategoryId>,
+    /// Per-marker override of the category colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    #[serde(default)]
+    pub anchor: MarkerAnchor,
 }
 
 impl Marker {
+    /// A point sequence marker (anchor [`MarkerAnchor::Timecode`], zero
+    /// duration).
     pub fn new(at: Tick, name: impl Into<String>) -> Self {
         Marker {
             id: MarkerId::new(),
             at,
+            duration: Tick::ZERO,
             name: name.into(),
-            color: None,
             note: String::new(),
+            category: None,
+            color: None,
+            anchor: MarkerAnchor::Timecode,
         }
     }
+
+    /// A clip-scoped marker (anchor [`MarkerAnchor::Content`]). Clip markers are
+    /// always `Content` (§1.5); `at` is clip-relative.
+    pub fn clip_scoped(at: Tick, name: impl Into<String>) -> Self {
+        Marker {
+            anchor: MarkerAnchor::Content,
+            ..Marker::new(at, name)
+        }
+    }
+
+    /// The exclusive end tick (`at + duration`). A point marker's end equals its
+    /// start. Every consumer writes `[m.at, m.end()]` — no point/range branch.
+    #[inline]
+    pub fn end(&self) -> Tick {
+        self.at + self.duration
+    }
+
+    /// Whether this is a ranged marker (`duration > 0`).
+    #[inline]
+    pub fn is_range(&self) -> bool {
+        self.duration.0 > 0
+    }
+}
+
+/// A node in a sequence's group tree (35 §3). Groups form a parent-pointer
+/// forest: each node names its immediate `parent` (or `None` at the root of a
+/// group chain), and clips point at their immediate group via
+/// [`Clip::group`](super::clip::Clip). Membership and topmost-group queries are
+/// pure walks over `parent` — no project-wide scan.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GroupNode {
+    pub id: GroupId,
+    pub kind: GroupKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<GroupId>,
+}
+
+impl GroupNode {
+    /// A root group of the given kind (no parent).
+    pub fn new(kind: GroupKind) -> Self {
+        GroupNode {
+            id: GroupId::new(),
+            kind,
+            parent: None,
+        }
+    }
+}
+
+/// The kind of a [`GroupNode`] (35 §3). `AvLink` subsumes the deprecated
+/// `link_group` (an A/V pair split from one import); `Normal` is a plain
+/// editor group. Trim propagates only for `AvLink`.
+///
+/// `Unknown` is the 39 §2.2 forward-compat arm: treated as `Normal` for every
+/// behaviour except that it must never be auto-dissolved (dissolving would
+/// destroy data a newer build owns). It must exist from birth. `#[serde(other)]`
+/// loses the original token — the smallest correct unit-only interpretation, per
+/// the brief; 39 §2.2's verbatim-preservation task owns the payload form.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GroupKind {
+    #[default]
+    Normal,
+    AvLink,
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -506,6 +924,10 @@ mod tests {
     fn duplicate_with_fresh_ids_reassigns_all_structural_ids() {
         let mut s = seq_with(vid_track_with(vec![(0, 100), (100, 50)]));
         s.markers.push(Marker::new(Tick(10), "m"));
+        // A clip-scoped marker must survive with a remapped id (35 §1.6).
+        s.video_tracks[0].clips[0]
+            .markers
+            .push(Marker::clip_scoped(Tick(5), "cm"));
         let dup = s.duplicate_with_fresh_ids();
 
         // Fresh identity everywhere so the copy addresses cleanly alongside
@@ -520,6 +942,12 @@ mod tests {
             assert_ne!(a.id, b.id);
         }
         assert_ne!(dup.markers[0].id, s.markers[0].id);
+        // The clip marker got a fresh id but kept its position and name.
+        let dup_cm = &dup.video_tracks[0].clips[0].markers[0];
+        let src_cm = &s.video_tracks[0].clips[0].markers[0];
+        assert_ne!(dup_cm.id, src_cm.id);
+        assert_eq!(dup_cm.at, src_cm.at);
+        assert_eq!(dup_cm.name, src_cm.name);
         // Content (timing) is otherwise identical.
         let spans = |seq: &Sequence| {
             seq.video_tracks[0]
@@ -537,5 +965,268 @@ mod tests {
         let id = p.insert_sequence(Sequence::new("s", FrameRate::FPS_30, 1920, 1080));
         assert_eq!(p.active_sequence, Some(id));
         assert_eq!(p.sequence_order, vec![id]);
+    }
+
+    // ── Marker categories (35 §1.3) ──────────────────────────────────────
+
+    #[test]
+    fn marker_categories_absent_from_json_when_empty() {
+        // Additive discipline: a project with no categories omits the key, so
+        // pre-migration documents stay shape-identical.
+        let p = TimelineProject::new();
+        assert!(p.marker_categories.is_empty());
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("marker_categories"));
+    }
+
+    #[test]
+    fn marker_category_round_trips_with_glyph() {
+        let mut cat = MarkerCategory::new("Chapter", Color::rgb(0.2, 0.6, 0.9));
+        cat.glyph = MarkerGlyph::Triangle;
+        let json = serde_json::to_string(&cat).unwrap();
+        assert!(json.contains("\"triangle\""));
+        let back: MarkerCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cat);
+        // The default glyph is Diamond (the ruler already paints diamonds).
+        assert_eq!(
+            MarkerCategory::new("Marker", Color::WHITE).glyph,
+            MarkerGlyph::Diamond
+        );
+    }
+
+    #[test]
+    fn default_seed_ids_are_unique() {
+        let seed = MarkerCategory::default_seed();
+        assert!(!seed.is_empty());
+        let mut ids: Vec<_> = seed.iter().map(|c| c.id).collect();
+        let n = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "seed category ids must be unique");
+        // `default_seed` is lazy: `TimelineProject::new` never seeds.
+        assert!(TimelineProject::new().marker_categories.is_empty());
+    }
+
+    // ── Marker duration / anchor (35 §1) ─────────────────────────────────
+
+    #[test]
+    fn marker_defaults_are_point_timecode() {
+        let m = Marker::new(Tick(42), "m");
+        assert_eq!(m.duration, Tick::ZERO);
+        assert!(!m.is_range());
+        assert_eq!(m.anchor, MarkerAnchor::Timecode);
+        assert_eq!(m.category, None);
+        // A clip-scoped marker is Content-anchored (§1.5).
+        assert_eq!(Marker::clip_scoped(Tick(0), "c").anchor, MarkerAnchor::Content);
+    }
+
+    #[test]
+    fn marker_v4_json_without_new_fields_loads() {
+        // §1.6: additive, no-op for existing data — a v4 marker JSON with only
+        // id/at/name loads with the new fields defaulted.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","at":100,"name":"x"}"#;
+        let m: Marker = serde_json::from_str(json).unwrap();
+        assert_eq!(m.duration, Tick::ZERO);
+        assert_eq!(m.anchor, MarkerAnchor::Timecode);
+        assert_eq!(m.category, None);
+        assert_eq!(m.color, None);
+    }
+
+    #[test]
+    fn marker_end_is_at_plus_duration() {
+        let mut m = Marker::new(Tick(100), "ranged");
+        m.duration = Tick(50);
+        assert_eq!(m.end(), Tick(150));
+        assert!(m.is_range());
+        // A point marker's end equals its start.
+        assert_eq!(Marker::new(Tick(100), "pt").end(), Tick(100));
+    }
+
+    #[test]
+    fn unknown_marker_anchor_loads_inert() {
+        // A v5 file written by a later build may carry an anchor token this
+        // build does not know; it must load as the inert `Unknown` arm, never
+        // error (39 §2.2).
+        let json =
+            r#"{"id":"00000000-0000-0000-0000-000000000001","at":0,"name":"x","anchor":"content_relative_future"}"#;
+        let m: Marker = serde_json::from_str(json).unwrap();
+        assert_eq!(m.anchor, MarkerAnchor::Unknown);
+    }
+
+    // ── Group tree (35 §3) ───────────────────────────────────────────────
+
+    /// A sequence with one video track holding `n` back-to-back clips; returns
+    /// the sequence and the clip ids in order.
+    fn seq_with_clips(n: usize) -> (Sequence, Vec<ClipId>) {
+        let mut t = Track::new(TrackKind::Video, "V1");
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let c = Clip::new(ClipSource::Adjustment, Tick(i as i64 * 100), Tick(100));
+            ids.push(c.id);
+            t.clips.push(c);
+        }
+        let mut s = Sequence::new("seq", FrameRate::FPS_30, 1920, 1080);
+        s.video_tracks.push(t);
+        (s, ids)
+    }
+
+    fn set_clip_group(s: &mut Sequence, clip: ClipId, g: Option<GroupId>) {
+        for track in s.video_tracks.iter_mut() {
+            for c in &mut track.clips {
+                if c.id == clip {
+                    c.group = g;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn groups_absent_from_json_when_empty() {
+        let (s, _) = seq_with_clips(1);
+        assert!(s.groups.is_empty());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("groups"));
+    }
+
+    #[test]
+    fn validate_rejects_group_cycle() {
+        let (mut s, ids) = seq_with_clips(2);
+        let a = GroupNode::new(GroupKind::Normal);
+        let b = GroupNode::new(GroupKind::Normal);
+        let (aid, bid) = (a.id, b.id);
+        // a → b → a is a cycle.
+        let mut a = a;
+        let mut b = b;
+        a.parent = Some(bid);
+        b.parent = Some(aid);
+        s.groups.insert(aid, a);
+        s.groups.insert(bid, b);
+        set_clip_group(&mut s, ids[0], Some(aid));
+        set_clip_group(&mut s, ids[1], Some(bid));
+        assert!(matches!(
+            s.validate(),
+            Err(ValidationError::GroupCycle { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_group_ref() {
+        let (mut s, ids) = seq_with_clips(1);
+        // A clip points at a group that does not exist in-sequence.
+        set_clip_group(&mut s, ids[0], Some(GroupId::new()));
+        assert!(matches!(
+            s.validate(),
+            Err(ValidationError::UnknownGroup { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_empty_group() {
+        let (mut s, _) = seq_with_clips(1);
+        let g = GroupNode::new(GroupKind::Normal);
+        let gid = g.id;
+        s.groups.insert(gid, g); // no members, no children
+        assert!(matches!(
+            s.validate(),
+            Err(ValidationError::EmptyGroup { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_singleton_normal_group_but_allows_singleton_avlink() {
+        let (mut s, ids) = seq_with_clips(2);
+        // A Normal group with one member is rejected.
+        let g = GroupNode::new(GroupKind::Normal);
+        let gid = g.id;
+        s.groups.insert(gid, g);
+        set_clip_group(&mut s, ids[0], Some(gid));
+        assert!(matches!(
+            s.validate(),
+            Err(ValidationError::SingletonNormalGroup { .. })
+        ));
+        // The same shape as an AvLink group is allowed (a pair mid-edit).
+        if let Some(node) = s.groups.get_mut(&gid) {
+            node.kind = GroupKind::AvLink;
+        }
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn topmost_group_walks_to_root() {
+        let (mut s, ids) = seq_with_clips(3);
+        let root = GroupNode::new(GroupKind::Normal);
+        let mut child = GroupNode::new(GroupKind::Normal);
+        let (rid, cid) = (root.id, child.id);
+        child.parent = Some(rid);
+        s.groups.insert(rid, root);
+        s.groups.insert(cid, child);
+        // Two clips in the child (so it is not a singleton Normal group) and one
+        // directly in the root, keeping the sequence valid.
+        set_clip_group(&mut s, ids[0], Some(cid));
+        set_clip_group(&mut s, ids[1], Some(cid));
+        set_clip_group(&mut s, ids[2], Some(rid));
+        assert_eq!(s.topmost_group(cid), Some(rid));
+        assert_eq!(s.group_chain(cid), vec![cid, rid]);
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn group_members_is_transitive() {
+        let (mut s, ids) = seq_with_clips(2);
+        let root = GroupNode::new(GroupKind::Normal);
+        let mut child = GroupNode::new(GroupKind::Normal);
+        let (rid, cid) = (root.id, child.id);
+        child.parent = Some(rid);
+        s.groups.insert(rid, root);
+        s.groups.insert(cid, child);
+        // ids[0] is in the child; ids[1] directly in the root.
+        set_clip_group(&mut s, ids[0], Some(cid));
+        set_clip_group(&mut s, ids[1], Some(rid));
+        // The root's transitive members include the child's clip.
+        let members = s.group_members(rid);
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().any(|(_, c)| *c == ids[0]));
+        assert!(members.iter().any(|(_, c)| *c == ids[1]));
+        // The child only sees its own.
+        assert_eq!(s.group_members(cid).len(), 1);
+        assert_eq!(s.direct_group_members(rid).len(), 1);
+    }
+
+    #[test]
+    fn dissolve_degenerate_groups_reparents_children() {
+        let (mut s, ids) = seq_with_clips(2);
+        // root ← mid ← (clip0); root also directly holds clip1. `mid` has one
+        // clip and one... actually make `mid` empty of direct clips but with a
+        // child to force dissolution while its child survives.
+        let root = GroupNode::new(GroupKind::Normal);
+        let mut mid = GroupNode::new(GroupKind::Normal);
+        let mut leaf = GroupNode::new(GroupKind::Normal);
+        let (rid, mid_id, lid) = (root.id, mid.id, leaf.id);
+        mid.parent = Some(rid);
+        leaf.parent = Some(mid_id);
+        s.groups.insert(rid, root);
+        s.groups.insert(mid_id, mid);
+        s.groups.insert(lid, leaf);
+        // clip0 in leaf, clip1 directly in root. `mid` has zero direct clips and
+        // one child (leaf) → not empty, but leaf is a singleton Normal → leaf
+        // dissolves first, reparenting clip0 to mid; then mid holds one clip and
+        // is itself a singleton Normal → dissolves, reparenting clip0 to root.
+        set_clip_group(&mut s, ids[0], Some(lid));
+        set_clip_group(&mut s, ids[1], Some(rid));
+
+        let dissolved = s.dissolve_degenerate_groups();
+        assert!(dissolved.contains(&lid));
+        assert!(dissolved.contains(&mid_id));
+        assert!(!s.groups.contains_key(&lid));
+        assert!(!s.groups.contains_key(&mid_id));
+        // clip0 reparented up to the surviving root.
+        let clip0_group = s.video_tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == ids[0])
+            .and_then(|c| c.group);
+        assert_eq!(clip0_group, Some(rid));
+        // The result is a valid sequence (root now has two members).
+        assert!(s.validate().is_ok());
     }
 }

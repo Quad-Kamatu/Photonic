@@ -12,8 +12,11 @@
 //! - `DecodeVideo` / `DecodeStill` / `RasterVector` — resolved by a
 //!   [`GpuFrameSource`] (decode rings + the headless vector renderer at the
 //!   session layer; never called for the solid-color paths tests exercise).
-//! - `Merge` — a premultiplied `over` composite. **Normal only in P3** — the
-//!   full 26-mode `COMPOSITE_SHADER` wiring (03 §2.4) is the seam noted below.
+//! - `Merge` — a premultiplied `over` composite honouring all 26 blend modes
+//!   (K-0.3a / 03 §2.4), the WGSL twin of `graph::ops::merge_pixel` + the CPU
+//!   `blend_rgb` reference. `Normal` keeps the exact fast-path expression so the
+//!   golden corpus does not shift; every other mode unpremultiplies, blends, and
+//!   re-composites per the W3C model.
 //! - `Grade` — the resolved grade stack, run through
 //!   [`photonic_render::apply_grade_stack_gpu`] (07 §3), byte-for-byte the WGSL
 //!   twin of `eval_cpu`'s `apply_grade_cpu` (GPU/CPU parity, 03 §4.4).
@@ -27,6 +30,7 @@
 
 use std::sync::Arc;
 
+use photonic_core::layer::BlendMode;
 use photonic_core::timeline::EffectKind;
 use wgpu::util::DeviceExt;
 
@@ -36,6 +40,186 @@ use crate::graph::ir::{FrameGraph, IrOp, TextureDesc};
 use crate::pool::DEFAULT_BUDGET_BYTES;
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Uniform for the 26-mode merge pass: the blend-mode id and the layer opacity.
+/// Same field layout as [`photonic_render::pipeline::CompositeParams`] so the two
+/// composite paths stay in lockstep.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct MergeParams {
+    mode: u32,
+    opacity: f32,
+    _pad: [f32; 2],
+}
+
+/// Stable numeric id for a blend mode, fed to the merge shader's `switch`.
+///
+/// This mirrors `photonic_render::pipeline::blend_mode_index` exactly (declaration
+/// order, HSL modes ≥ 12, Photoshop extras 16..=25). The canonical mapping is
+/// `pub(crate)` in `photonic-render`; once it is promoted to `pub` and re-exported
+/// this local copy should be replaced by that re-export rather than kept forked.
+/// The exhaustive `match` (no wildcard) makes any future `BlendMode` variant a
+/// compile error here until it is given an id, so the fork cannot silently drift.
+fn merge_mode_index(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::HardLight => 8,
+        BlendMode::SoftLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+        BlendMode::Hue => 12,
+        BlendMode::Saturation => 13,
+        BlendMode::Color => 14,
+        BlendMode::Luminosity => 15,
+        BlendMode::LinearDodge => 16,
+        BlendMode::LinearBurn => 17,
+        BlendMode::Subtract => 18,
+        BlendMode::Divide => 19,
+        BlendMode::VividLight => 20,
+        BlendMode::LinearLight => 21,
+        BlendMode::PinLight => 22,
+        BlendMode::HardMix => 23,
+        BlendMode::DarkerColor => 24,
+        BlendMode::LighterColor => 25,
+    }
+}
+
+/// The merge fragment shader body (26 blend modes). Working textures are
+/// `Rgba16Float`, **premultiplied**, linear — so unlike `COMPOSITE_SHADER` (which
+/// samples straight-alpha sRGB) this unpremultiplies before blending and keeps the
+/// premultiplied source-over math of `graph::ops::merge_pixel` byte-for-byte:
+/// `Normal` uses the exact fast-path expression (golden-corpus invariant); every
+/// other mode blends `B(cb, cs)` then `Cs' = (1-αb)·Cs + αb·B`, and composites
+/// `out = αs·Cs' + (1-αs)·bot`. The `blend_channel`/HSL helpers are the WGSL twins
+/// of `photonic_core::raster::blend` (and identical to `COMPOSITE_SHADER`'s).
+const MERGE_FS: &str = r#"
+@group(0) @binding(0) var t_top: texture_2d<f32>;
+@group(0) @binding(1) var t_bot: texture_2d<f32>;
+@group(0) @binding(2) var s: sampler;
+struct M { mode: u32, opacity: f32, pad: vec2<f32> }
+@group(0) @binding(3) var<uniform> m: M;
+
+fn screen1(cb: f32, cs: f32) -> f32 { return cb + cs - cb * cs; }
+fn hard_light1(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return cb * (2.0 * cs); }
+    return screen1(cb, 2.0 * cs - 1.0);
+}
+fn soft_light1(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb); }
+    var d: f32;
+    if (cb <= 0.25) { d = ((16.0 * cb - 12.0) * cb + 4.0) * cb; } else { d = sqrt(cb); }
+    return cb + (2.0 * cs - 1.0) * (d - cb);
+}
+fn color_dodge1(cb: f32, cs: f32) -> f32 {
+    if (cb == 0.0) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (1.0 - cs), 1.0);
+}
+fn color_burn1(cb: f32, cs: f32) -> f32 {
+    if (cb >= 1.0) { return 1.0; }
+    if (cs <= 0.0) { return 0.0; }
+    return 1.0 - min((1.0 - cb) / cs, 1.0);
+}
+fn vivid_light1(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return color_burn1(cb, min(2.0 * cs, 1.0)); }
+    return color_dodge1(cb, min(2.0 * (cs - 0.5), 1.0));
+}
+fn blend_channel(mode: u32, cb: f32, cs: f32) -> f32 {
+    switch (mode) {
+        case 1u:  { return cb * cs; }
+        case 2u:  { return screen1(cb, cs); }
+        case 3u:  { return hard_light1(cs, cb); }
+        case 4u:  { return min(cb, cs); }
+        case 5u:  { return max(cb, cs); }
+        case 6u:  { return color_dodge1(cb, cs); }
+        case 7u:  { return color_burn1(cb, cs); }
+        case 8u:  { return hard_light1(cb, cs); }
+        case 9u:  { return soft_light1(cb, cs); }
+        case 10u: { return abs(cb - cs); }
+        case 11u: { return cb + cs - 2.0 * cb * cs; }
+        case 16u: { return min(cb + cs, 1.0); }
+        case 17u: { return max(cb + cs - 1.0, 0.0); }
+        case 18u: { return max(cb - cs, 0.0); }
+        case 19u: { if (cs <= 0.0) { return 1.0; } return min(cb / cs, 1.0); }
+        case 20u: { return vivid_light1(cb, cs); }
+        case 21u: { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); }
+        case 22u: {
+            if (cs <= 0.5) { return min(cb, 2.0 * cs); }
+            return max(cb, 2.0 * cs - 1.0);
+        }
+        case 23u: {
+            if (vivid_light1(cb, cs) < 0.5) { return 0.0; }
+            return 1.0;
+        }
+        default:  { return cs; }
+    }
+}
+fn lum(c: vec3<f32>) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+fn clip_color(c: vec3<f32>) -> vec3<f32> {
+    let l = lum(c);
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    var o = c;
+    if (n < 0.0) { o = vec3<f32>(l) + (o - vec3<f32>(l)) * (l / max(l - n, 1e-6)); }
+    if (x > 1.0) { o = vec3<f32>(l) + (o - vec3<f32>(l)) * ((1.0 - l) / max(x - l, 1e-6)); }
+    return o;
+}
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    let d = l - lum(c);
+    return clip_color(c + vec3<f32>(d));
+}
+fn sat(c: vec3<f32>) -> f32 { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+fn set_sat(c: vec3<f32>, sval: f32) -> vec3<f32> {
+    let cmin = min(min(c.r, c.g), c.b);
+    let cmax = max(max(c.r, c.g), c.b);
+    let rng = cmax - cmin;
+    if (rng <= 0.0) { return vec3<f32>(0.0); }
+    return (c - vec3<f32>(cmin)) * (sval / rng);
+}
+@fragment
+fn fs(i: VOut) -> @location(0) vec4<f32> {
+    let top = textureSample(t_top, s, i.uv);
+    let bot = textureSample(t_bot, s, i.uv);
+    // Normal: exact fast-path expression, byte-for-byte the pre-K-0.3a shader so
+    // the golden corpus does not shift.
+    if (m.mode == 0u) {
+        let t = top * m.opacity;
+        return t + bot * (1.0 - t.a);
+    }
+    let a_s = top.a * m.opacity;
+    let a_b = bot.a;
+    var cs = vec3<f32>(0.0);
+    if (top.a > 1e-6) { cs = top.rgb / top.a; }
+    var cb = vec3<f32>(0.0);
+    if (bot.a > 1e-6) { cb = bot.rgb / bot.a; }
+    let mode = m.mode;
+    var blended: vec3<f32>;
+    if (mode == 12u)      { blended = set_lum(set_sat(cs, sat(cb)), lum(cb)); }
+    else if (mode == 13u) { blended = set_lum(set_sat(cb, sat(cs)), lum(cb)); }
+    else if (mode == 14u) { blended = set_lum(cs, lum(cb)); }
+    else if (mode == 15u) { blended = set_lum(cb, lum(cs)); }
+    else if (mode == 24u) { if (lum(cb) <= lum(cs)) { blended = cb; } else { blended = cs; } }
+    else if (mode == 25u) { if (lum(cb) >= lum(cs)) { blended = cb; } else { blended = cs; } }
+    else {
+        blended = vec3<f32>(
+            blend_channel(mode, cb.r, cs.r),
+            blend_channel(mode, cb.g, cs.g),
+            blend_channel(mode, cb.b, cs.b),
+        );
+    }
+    let cs_prime = (1.0 - a_b) * cs + a_b * blended;
+    let out_rgb = a_s * cs_prime + (1.0 - a_s) * bot.rgb;
+    let out_a = a_s + a_b * (1.0 - a_s);
+    return vec4<f32>(out_rgb, out_a);
+}
+"#;
 
 /// Shared wgpu device/queue handle (02 §1: "shares wgpu Device/Queue with
 /// renderer"). Cheap to clone (two `Arc`s).
@@ -316,10 +500,16 @@ impl Evaluator {
                 self.passes
                     .fill(&self.gpu, target, [color.r, color.g, color.b, color.a]);
             }
-            IrOp::Merge { opacity, .. } => match (inputs.first(), inputs.get(1)) {
+            IrOp::Merge { mode, opacity } => match (inputs.first(), inputs.get(1)) {
                 (Some(top), Some(bottom)) => {
-                    self.passes
-                        .merge(&self.gpu, &top.texture, &bottom.texture, *opacity, target);
+                    self.passes.merge(
+                        &self.gpu,
+                        &top.texture,
+                        &bottom.texture,
+                        *mode,
+                        *opacity,
+                        target,
+                    );
                 }
                 (Some(only), None) | (None, Some(only)) => {
                     self.passes.blit(&self.gpu, &only.texture, target);
@@ -527,7 +717,7 @@ impl Passes {
         );
         let invert_pipeline = make_pipeline(device, &blit_bgl, &invert_src, "fs");
 
-        // Merge: premultiplied `over`, Normal only (26-mode seam).
+        // Merge: premultiplied `over`, all 26 blend modes (K-0.3a, 03 §2.4).
         let merge_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("merge_bgl"),
             entries: &[
@@ -537,9 +727,7 @@ impl Passes {
                 uniform_entry(3),
             ],
         });
-        let merge_src = format!(
-            "{QUAD_VS}\n@group(0) @binding(0) var t_top: texture_2d<f32>;\n@group(0) @binding(1) var t_bot: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct M {{ opacity: f32, _p0: f32, _p1: f32, _p2: f32 }}\n@group(0) @binding(3) var<uniform> m: M;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let top = textureSample(t_top, s, i.uv) * m.opacity;\n  let bot = textureSample(t_bot, s, i.uv);\n  return top + bot * (1.0 - top.a);\n}}\n"
-        );
+        let merge_src = format!("{QUAD_VS}\n{MERGE_FS}");
         let merge_pipeline = make_pipeline(device, &merge_bgl, &merge_src, "fs");
 
         Passes {
@@ -684,17 +872,23 @@ impl Passes {
         gpu: &GpuContext,
         top: &wgpu::Texture,
         bottom: &wgpu::Texture,
+        mode: BlendMode,
         opacity: f32,
         target: &wgpu::Texture,
     ) {
         let tv = top.create_view(&Default::default());
         let bv = bottom.create_view(&Default::default());
-        let uni = [opacity, 0.0, 0.0, 0.0];
+        // Clamp opacity to match the CPU reference `graph::ops::merge` exactly.
+        let uni = MergeParams {
+            mode: merge_mode_index(mode),
+            opacity: opacity.clamp(0.0, 1.0),
+            _pad: [0.0; 2],
+        };
         let buf = gpu
             .device()
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("merge_uni"),
-                contents: bytemuck::cast_slice(&uni),
+                contents: bytemuck::bytes_of(&uni),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
         let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1307,6 +1501,111 @@ mod tests {
                     g[k],
                     c[k]
                 );
+            }
+        }
+    }
+
+    /// Every `BlendMode`, so a new variant added without a shader case fails here.
+    const ALL_BLEND_MODES: [BlendMode; 26] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+        BlendMode::LinearDodge,
+        BlendMode::LinearBurn,
+        BlendMode::Subtract,
+        BlendMode::Divide,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::PinLight,
+        BlendMode::HardMix,
+        BlendMode::DarkerColor,
+        BlendMode::LighterColor,
+    ];
+
+    /// A two-`SolidColor` → `Merge` graph: `top` over `bottom` under `mode` at
+    /// full opacity. Colours are premultiplied linear (the working space), so the
+    /// CPU and GPU evaluators start from identical pixels.
+    fn merge_graph(
+        top: crate::graph::ir::LinearColor,
+        bottom: crate::graph::ir::LinearColor,
+        mode: BlendMode,
+    ) -> crate::graph::compile::CompiledFrame {
+        let graph = FrameGraph {
+            nodes: vec![
+                IrNode {
+                    op: IrOp::SolidColor { color: top },
+                    inputs: vec![],
+                    content_hash: ContentHash(700),
+                },
+                IrNode {
+                    op: IrOp::SolidColor { color: bottom },
+                    inputs: vec![],
+                    content_hash: ContentHash(701),
+                },
+                IrNode {
+                    op: IrOp::Merge { mode, opacity: 1.0 },
+                    inputs: vec![
+                        (IrNodeId(0), OutPort::default()),
+                        (IrNodeId(1), OutPort::default()),
+                    ],
+                    content_hash: ContentHash(702),
+                },
+            ],
+            output: Some(IrNodeId(2)),
+        };
+        crate::graph::compile::CompiledFrame {
+            graph,
+            diagnostics: vec![],
+        }
+    }
+
+    /// K-0.3a / E-9: the GPU Merge pass must agree with the CPU `blend_rgb`
+    /// reference for every one of the 26 blend modes, over both an opaque and a
+    /// transparent backdrop (a semi-transparent top exercises the `Cs'` mix and
+    /// the source-over composite). Closes the CPU/GPU divergence the Normal-only
+    /// shader left. Self-skips without a GPU adapter; run `--test-threads=1`.
+    #[test]
+    fn merge_gpu_matches_cpu_for_every_blend_mode() {
+        use crate::graph::ir::LinearColor;
+        // Semi-transparent top (straight 0.7,0.35,0.55 @ α0.5, premultiplied) over
+        // an opaque and a transparent backdrop. Colours are chosen to sit clear of
+        // every mode's discontinuities — in particular `HardMix`'s 0.5 threshold,
+        // where a sub-ULP CPU/GPU difference would flip the output 0↔1 (an inherent
+        // discontinuity of the mode, not a divergence in the composite math).
+        let top = LinearColor {
+            r: 0.35,
+            g: 0.175,
+            b: 0.275,
+            a: 0.5,
+        };
+        let opaque = LinearColor {
+            r: 0.25,
+            g: 0.6,
+            b: 0.4,
+            a: 1.0,
+        };
+        let transparent = LinearColor {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
+        for mode in ALL_BLEND_MODES {
+            for bottom in [opaque, transparent] {
+                assert_graph_gpu_matches_cpu(&merge_graph(top, bottom, mode), 1e-3);
             }
         }
     }

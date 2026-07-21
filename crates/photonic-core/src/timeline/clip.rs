@@ -11,8 +11,9 @@ use super::audio::ClipAudio;
 use super::captions::CaptionStyle;
 use super::effect_kind::{EffectKind, EffectParams};
 use super::grade::Grade;
-use super::ids::{AssetId, ClipId, GraphId, SequenceId};
+use super::ids::{AssetId, ClipId, GraphId, GroupId, SequenceId};
 use super::prop_registry::PropTargetKind;
+use super::sequence::Marker;
 use super::time::Tick;
 use super::unknown::UnknownTag;
 use crate::Color;
@@ -63,6 +64,15 @@ pub struct Clip {
     /// `None` = unlabeled (14 §M-1, gap #7's data half).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_label: Option<u8>,
+    /// Clip-scoped markers (35 §1). `Marker.at` is clip-relative (0 = clip
+    /// start); use [`Clip::marker_sequence_tick`] for the sequence position.
+    /// Clip markers are always [`MarkerAnchor::Content`](super::sequence::MarkerAnchor).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+    /// The clip's immediate group (35 §3), or `None` if ungrouped. Resolves in
+    /// [`Sequence::groups`](super::sequence::Sequence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupId>,
     /// Groups this clip with its linked partner(s) (e.g. an A/V pair split
     /// from one media import) so an editor can move them as a unit. `None` =
     /// unlinked (14 §M-2, gap #8's data half — the GUI move-together wiring
@@ -98,6 +108,8 @@ impl Clip {
             audio: None,
             enabled: true,
             color_label: None,
+            markers: Vec::new(),
+            group: None,
             link_group: None,
             multicam: None,
         }
@@ -107,6 +119,13 @@ impl Clip {
     #[inline]
     pub fn end(&self) -> Tick {
         self.start + self.duration
+    }
+
+    /// The sequence-relative tick of a clip-scoped marker (35 §1): `clip.start`
+    /// plus the marker's clip-relative `at`. Callers must not re-derive this.
+    #[inline]
+    pub fn marker_sequence_tick(&self, m: &Marker) -> Tick {
+        self.start + m.at
     }
 
     /// Whether this clip overlaps `[start, end)` on the timeline.
@@ -1019,6 +1038,27 @@ mod tests {
         let j = serde_json::to_string(&c).unwrap();
         assert!(!j.contains("color_label"));
         assert!(!j.contains("link_group"));
+    }
+
+    #[test]
+    fn clip_markers_absent_from_json_when_empty() {
+        // Additive discipline: a clip with no markers omits the key, so
+        // pre-migration clips stay shape-identical.
+        let c = Clip::new(ClipSource::Adjustment, Tick(0), Tick(10));
+        assert!(c.markers.is_empty());
+        assert_eq!(c.group, None);
+        let j = serde_json::to_string(&c).unwrap();
+        assert!(!j.contains("markers"));
+        assert!(!j.contains("\"group\""));
+    }
+
+    #[test]
+    fn clip_marker_is_clip_relative() {
+        // A clip marker's `at` is clip-relative; the sequence position is
+        // `clip.start + m.at` (35 §1).
+        let c = Clip::new(ClipSource::Adjustment, Tick(500), Tick(100));
+        let m = Marker::clip_scoped(Tick(10), "cm");
+        assert_eq!(c.marker_sequence_tick(&m), Tick(510));
     }
 
     #[test]

@@ -62,7 +62,8 @@ pub use graph::{
     NodePos, OutPort, TextGen, TimeSource,
 };
 pub use ids::{
-    AssetId, BinId, ClipId, CueId, GradeOpId, GraphId, GraphNodeId, MarkerId, SequenceId, TrackId,
+    AssetId, BinId, ClipId, CueId, GradeOpId, GraphId, GraphNodeId, GroupId, MarkerCategoryId,
+    MarkerId, SequenceId, TrackId,
 };
 pub use media::{
     AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe,
@@ -76,8 +77,8 @@ pub use scale::{
     TARGET_SEQUENCES_PER_PROJECT, TARGET_TRACKS_PER_SEQUENCE,
 };
 pub use sequence::{
-    Marker, ProjectVideoSettings, Sequence, SequenceFormat, TimelineProject, Track, TrackKind,
-    ValidationError,
+    GroupKind, GroupNode, Marker, MarkerAnchor, MarkerCategory, MarkerGlyph, ProjectVideoSettings,
+    Sequence, SequenceFormat, TimelineProject, Track, TrackKind, ValidationError,
 };
 pub use time::{FrameRate, Tick, TICKS_PER_SECOND};
 pub use unknown::UnknownTag;
