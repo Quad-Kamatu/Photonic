@@ -3,6 +3,37 @@
 **Status:** Live authoritative backlog  
 **Date:** 2026-07-10
 
+## 0. Implementation progress — `feat/video-editor-module`
+
+Landed and pushed on this branch (most recent first). Each row is committed with tests green; adversarially verified where noted.
+
+| Area | Status | Commit | Notes |
+|---|---|---|---|
+| **03 §4.5.3** grade operand space (A-3) | ✅ done | `a05ec8e` | grade ops run straight-alpha (unpremult→op→repremult); shared `ALPHA_EPS` with GPU shader |
+| **03 §4.5.4** live canvas linear (A-1) | ✅ done | `5a62494` | document renders to offscreen sRGB target, blitted into egui; canvas blends in linear like headless. *Follow-up:* CPU compositor isolated-layer path is P7-deferred (§4.3) |
+| **26 §8 K-0.1** export wiring | ✅ done | `fca5eda` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
+| **26 §8 K-0.2** render passthrough effects | 🟡 partial | `fca5eda` | `ResolvedParams` real+hashed for **all** effects; LumaKey/ChromaKey/MaskShapeGen wired CPU+GPU. *Remaining:* Blur/Sharpen/Glow (need golden/video re-bless + shared blur primitive) |
+| **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `9b2ec60` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
+| **26 §8 K-0.4** Wipe/Push passes | 🟠 in progress | — | wave in flight |
+| **26 §8 K-0.5** `lut_provider` threading | 🟠 in progress | — | wave in flight |
+| **26 §8 K-0.6** audio FX chain + mixer + meter | ✅ done | `367511d` | mixer owns track/master fx, discontinuity policy, declick tail. *Remaining:* G-4 master-meter GUI publish; 31 §3 latency compensation |
+| **26 §8 K-0.9** `sync_lock` propagation (core) | 🟠 in progress | — | wave in flight (core half) |
+| **30** effect manifest (E-3/X-4) | ✅ done | `48fb5da`,`49bd585` | schema + 7 authored manifests + `EffectKind`↔`EffectId` bridge + migration/inert-unknown; MCP `list_effect_kinds`/`set_effect_param` generated with range refusal. *Remaining:* full raster bridge (K-B16, 61 kernels) |
+| **31 §2/§3** DSP reset/latency contracts (E-10) | ✅ done | `1ccbeea` | mandatory `reset(AudioDiscontinuity)` + latency/tail across all units |
+| **35** markers, effect scopes, groups | ✅ done | `9b2ec60`,`367511d`,`49bd585` | marker categories/anchors, clip markers, group tree; Track/master/asset effect scopes applied in compile; V4→V5 migration; version bumped |
+| **36** error model (taxonomy) | ✅ done | `a05ec8e` | `core::diag` taxonomy + catalogue tests. *Remaining:* wire `EngineStatus.last_error` → `Diagnostic` |
+| **37** robustness | ✅ done | `a05ec8e` | capability floor, gpu_state, atomic_write, child reaping, scale targets, CI split |
+| **38** sequence semantics | ✅ done | `435a3a6` | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup (23 tests, mutation-verified). *Remaining:* core-side LoadNotice + transition-out-at-cut validation (wave in flight) |
+| **39 §2.2** unknown-preserving variants | ✅ done | `a05ec8e` | forward-compat inert round-trip |
+| **40 §7** spec verification infra | ✅ done | `a05ec8e` | `tools/spec-extract`, drift + acceptance-index scripts |
+| **41** accessibility | ✅ done | `1ccbeea`,`a05ec8e` | curve-editor/node-editor focus fixes, keyboard-gate + contrast lints |
+| **42 §10** localization (text metrics) | ✅ done | `a05ec8e` | `core::text_metrics` Unicode cell measurement + caption wiring |
+| **28 §9** MCP transport hardening | ✅ done | `a05ec8e` | bearer token, no permissive CORS |
+| **29 QA-1** acceptance-story harness | 🟡 scaffold | `a05ec8e` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
+| **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
+
+**Not yet started:** K-0.7 (export-audio mux + loudness), K-0.8 (`Probe` wiring), 30 full raster bridge (K-B16), 31 §3 latency compensation, 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`).
+
 ## 1. Authority and precedence
 
 This file owns live video backlog status, priority, gates, and delivery order. Detailed contracts remain in linked owner docs. Repo-root `ROADMAP.md` remains historical vector/MCP rationale.
