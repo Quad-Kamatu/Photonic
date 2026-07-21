@@ -17,6 +17,7 @@ pub mod captions;
 pub mod clip;
 pub mod commands;
 pub mod effect_kind;
+pub mod effect_manifest;
 pub mod grade;
 pub mod graph;
 pub mod graph_ops;
@@ -53,6 +54,14 @@ pub use commands::{
     StyleTarget, TimelineCmd, TrackSettings, TtsCmd,
 };
 pub use effect_kind::{EffectKind, EffectParams};
+// NB: `effect_manifest::Display` is intentionally NOT re-exported at the
+// timeline root — the name would collide with `std::fmt::Display` for callers
+// that glob `use photonic_core::timeline::*`. Reach it via `effect_manifest::Display`.
+pub use effect_manifest::{
+    manifest, manifests, AlphaBehaviour, Applicability, BitDepth, Caps, EffectCategory, EffectId,
+    EffectManifest, EffectMigration, GpuSupport, MigrationError, OperandSpace, ParamKind,
+    ParamSpec, UiHint, MANIFESTS, MIGRATIONS,
+};
 pub use grade::{
     parse_cdl_xml, write_cdl_xml, CdlParams, CdlXmlError, Grade, GradeMask, GradeOp, GradeOpKind,
     GradeOpParams, LutInterp, MaskRef, WindowShape,

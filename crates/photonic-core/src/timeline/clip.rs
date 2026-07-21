@@ -10,6 +10,7 @@ use super::anim::{cubic_bezier_ease, AnimProps, Interp, PropSet};
 use super::audio::ClipAudio;
 use super::captions::CaptionStyle;
 use super::effect_kind::{EffectKind, EffectParams};
+use super::effect_manifest::EffectId;
 use super::grade::Grade;
 use super::ids::{AssetId, ClipId, GraphId, GroupId, SequenceId};
 use super::prop_registry::PropTargetKind;
@@ -608,23 +609,82 @@ impl PropSet for ClipTransform {
 }
 
 /// One effect in a clip's ordered stack.
+///
+/// `id`/`version` are the data-driven manifest identity (spec §10). They are
+/// additive to the v4 shape: absent in old files (defaulting to the empty
+/// sentinel / 0), they are backfilled from `kind` in
+/// [`finalize_load`](super::load::finalize_load). `kind` is retained as the
+/// projection of `id` for the legacy dispatch paths; it is removed after one
+/// format version.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClipEffect {
     pub kind: EffectKind,
+    /// Stable manifest id. Empty (`EffectId::EMPTY`) in v4 files; backfilled from
+    /// `kind` on load. An id with no manifest loads inert-and-preserved (§2.6).
+    #[serde(default = "ClipEffect::default_id", skip_serializing_if = "EffectId::is_empty")]
+    pub id: EffectId,
+    /// Manifest schema version this effect's params conform to. 0 in v4 files;
+    /// backfilled to the manifest's current version on load.
+    #[serde(default = "ClipEffect::default_version", skip_serializing_if = "is_zero_u16")]
+    pub version: u16,
     #[serde(default = "super::grade::default_true")]
     pub enabled: bool,
+    /// Set on load for an effect whose `id` this build has no manifest for: its
+    /// `params` are preserved untouched and it is skipped by the compiler, the
+    /// same way a disabled effect is (§2.6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inert: bool,
     pub params: AnimProps<EffectParams>,
 }
 
 impl ClipEffect {
-    /// An effect seeded with its kind's default params.
+    /// An effect seeded with its kind's default params (legacy neutral seed).
     pub fn new(kind: EffectKind) -> Self {
         ClipEffect {
             kind,
+            id: EffectId::EMPTY,
+            version: 0,
             enabled: true,
+            inert: false,
             params: AnimProps::new(EffectParams::seed(kind.target_kind())),
         }
     }
+
+    /// An effect seeded from a manifest's explicit [`ParamSpec::default`]s.
+    /// `None` if this build has no manifest for `id`. Unlike [`Self::new`]
+    /// (neutral seed), this uses the manifest's declared defaults — which agree
+    /// with the neutral seed for the seven v1 kinds (proven by test).
+    pub fn from_manifest(id: EffectId) -> Option<Self> {
+        use super::anim::PropPath;
+        let m = super::effect_manifest::manifest(id.clone())?;
+        let mut params = EffectParams::new();
+        for spec in m.params {
+            params.set(PropPath::new(spec.path), spec.default);
+        }
+        let kind = id
+            .legacy_kind()
+            .unwrap_or_else(|| EffectKind::Unknown(UnknownTag::intern(id.as_str())));
+        Some(ClipEffect {
+            kind,
+            id: m.id.clone(),
+            version: m.version,
+            enabled: true,
+            inert: false,
+            params: AnimProps::new(params),
+        })
+    }
+
+    fn default_id() -> EffectId {
+        EffectId::EMPTY
+    }
+
+    fn default_version() -> u16 {
+        0
+    }
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
 }
 
 /// A clip-level transition (01 §5, catalog in 08 §2.0b).

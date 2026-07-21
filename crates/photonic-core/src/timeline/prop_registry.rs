@@ -321,6 +321,34 @@ mod tests {
         assert!(resolve(PropTargetKind::Effect(EffectKind::Blur), "params.nope").is_none());
     }
 
+    /// Spec §2/§9 step 1: the effect blocks are a *projection* of the effect
+    /// manifest table, not a parallel structure. `entries()` still returns the
+    /// `&'static` blocks above (30+ callers depend on that), so the projection
+    /// relationship is enforced here rather than by restructuring callers: for
+    /// every legacy effect kind, `entries(Effect(k))` must equal the manifest's
+    /// projected params in path/kind/range and order.
+    #[test]
+    fn projection_matches_legacy_blocks() {
+        use super::super::effect_manifest;
+        for kind in [
+            EffectKind::Blur,
+            EffectKind::Sharpen,
+            EffectKind::Glow,
+            EffectKind::ChromaKey,
+            EffectKind::LumaKey,
+            EffectKind::Invert,
+            EffectKind::MaskShapeGen,
+        ] {
+            let legacy = entries(PropTargetKind::Effect(kind));
+            let projected = effect_manifest::entries_for_effect(kind);
+            assert_eq!(
+                legacy,
+                projected.as_slice(),
+                "manifest projection must reproduce the legacy block for {kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn unknown_variant_kinds_have_no_registered_paths() {
         // Forward-compat (39 §2.2): an unknown effect/grade/audio kind registers

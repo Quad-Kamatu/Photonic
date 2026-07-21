@@ -134,7 +134,19 @@ pub struct PhotonicRenderer {
     pub(crate) device: Arc<wgpu::Device>,
     pub(crate) queue: Arc<wgpu::Queue>,
     pub(crate) surface_config: wgpu::SurfaceConfiguration,
+    /// The swapchain *presentation* format only. It is a non-sRGB `*Unorm`
+    /// surface (see `choose_surface_config`), so writing document pixels raw
+    /// into it would blend in the wrong space (audit A-1). The document pass
+    /// therefore targets [`scene_format`](Self::scene_format), not this.
     pub(crate) surface_format: wgpu::TextureFormat,
+    /// The colour encoding the document fill/blend pass renders in — always
+    /// [`pipeline::SCENE_FORMAT`](crate::pipeline::SCENE_FORMAT)
+    /// (`Rgba8UnormSrgb`), independent of the presentation `surface_format`.
+    /// An sRGB target makes fixed-function blending decode→blend→re-encode in
+    /// linear light (03 §4.5.1), so on-canvas rendering matches the headless
+    /// export path (`headless::FORMAT`, the same sRGB format). Read back via
+    /// [`scene_format`](Self::scene_format); guarded sRGB by the invariant test.
+    pub(crate) scene_format: wgpu::TextureFormat,
 
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
     /// One fill-pipeline variant per separable blend mode (Multiply/Screen/
@@ -700,6 +712,7 @@ impl PhotonicRenderer {
             queue,
             surface_config,
             surface_format,
+            scene_format: crate::pipeline::SCENE_FORMAT,
             fill_pipeline,
             blend_pipelines,
             camera_buffer,
@@ -804,6 +817,16 @@ impl PhotonicRenderer {
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.surface_format
+    }
+
+    /// The colour encoding the document fill/blend pass renders in — always the
+    /// sRGB [`pipeline::SCENE_FORMAT`](crate::pipeline::SCENE_FORMAT), never the
+    /// non-sRGB presentation [`surface_format`](Self::surface_format). Exposed so
+    /// tests can pin the invariant that the document pass stays sRGB (linear-light
+    /// blending, 03 §4.5.1) rather than silently regressing to the swapchain's
+    /// non-sRGB format.
+    pub fn scene_format(&self) -> wgpu::TextureFormat {
+        self.scene_format
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -2195,6 +2218,49 @@ mod surface_config_tests {
         );
         assert!(
             adapter_rank(wgpu::DeviceType::IntegratedGpu) < adapter_rank(wgpu::DeviceType::Cpu)
+        );
+    }
+}
+
+#[cfg(test)]
+mod scene_format_tests {
+    use super::*;
+
+    /// Build a windowless renderer, or `None` on a machine without a GPU adapter
+    /// (headless CI) so the test skips cleanly — the same convention as the
+    /// offscreen capture tests (`capture.rs`'s `offscreen`).
+    fn try_offscreen() -> Option<PhotonicRenderer> {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let doc = Document::new("scene_fmt", 8.0, 8.0);
+        pollster::block_on(PhotonicRenderer::new_offscreen(
+            8,
+            8,
+            Arc::new(Mutex::new(doc)),
+            rx,
+        ))
+    }
+
+    /// The document fill/blend pass MUST render in an sRGB format so blending runs
+    /// in linear light (03 §4.5.1). This replaces `pipeline.rs`'s vacuous
+    /// `windowed_scene_format_derivation_is_srgb` (which asserted a property of
+    /// `TextureFormat::add_srgb_suffix()`, a stdlib function the crate never
+    /// calls, and so guarded nothing): it pins the *renderer's* exposed scene
+    /// format, failing if a future change ever points the document pass back at
+    /// the non-sRGB presentation surface format.
+    #[test]
+    fn offscreen_document_target_is_srgb() {
+        let Some(r) = try_offscreen() else {
+            eprintln!("no GPU adapter — skipping scene_format invariant test");
+            return;
+        };
+        assert_eq!(
+            r.scene_format(),
+            crate::pipeline::SCENE_FORMAT,
+            "document pass must target pipeline::SCENE_FORMAT",
+        );
+        assert!(
+            r.scene_format().is_srgb(),
+            "scene_format must be sRGB so document blending runs in linear light",
         );
     }
 }

@@ -37,6 +37,24 @@ impl EffectKind {
         PropTargetKind::Effect(self)
     }
 
+    /// The stable [`EffectId`](super::effect_manifest::EffectId) this kind maps
+    /// to (spec §10). Total over the seven v1 variants; an unknown variant maps
+    /// to an owned id built from its preserved tag (which has no manifest, so it
+    /// loads inert).
+    pub fn effect_id(self) -> super::effect_manifest::EffectId {
+        use super::effect_manifest::EffectId;
+        match self {
+            EffectKind::Blur => EffectId::new_static("blur.gaussian"),
+            EffectKind::Sharpen => EffectId::new_static("sharpen.unsharp"),
+            EffectKind::Glow => EffectId::new_static("stylize.glow"),
+            EffectKind::ChromaKey => EffectId::new_static("key.chroma"),
+            EffectKind::LumaKey => EffectId::new_static("key.luma"),
+            EffectKind::Invert => EffectId::new_static("color.invert"),
+            EffectKind::MaskShapeGen => EffectId::new_static("util.mask_shape"),
+            EffectKind::Unknown(tag) => EffectId::new(tag.as_str().to_string()),
+        }
+    }
+
     /// The preserved tag if this is an unknown (forward-compat) variant.
     pub fn unknown_tag(self) -> Option<UnknownTag> {
         match self {

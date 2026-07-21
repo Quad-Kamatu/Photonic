@@ -112,6 +112,7 @@ fn flag_tracks(tracks: &mut [PropertyTrack], kind: PropTargetKind) {
 /// can surface them exactly once per load; existing callers that discard it are
 /// unaffected.
 pub fn finalize_load(project: &mut TimelineProject) -> Result<LoadReport, LoadError> {
+    finalize_effect_ids(project);
     flag_orphaned_property_tracks(project);
     // Integrity guard BEFORE diagnosing/validating: a retained `Unknown` whose
     // tag is a KNOWN catalog tag is corrupt data (a malformed known variant that
@@ -247,6 +248,13 @@ pub fn flag_orphaned_property_tracks(project: &mut TimelineProject) {
             for clip in &mut track.clips {
                 flag_tracks(&mut clip.transform.tracks, PropTargetKind::ClipTransform);
                 for effect in &mut clip.effects {
+                    // An inert effect (unknown manifest id) has no registry block
+                    // to resolve against; flagging every track orphaned would
+                    // perturb the byte-identical round trip §2.6 requires, so its
+                    // tracks are left exactly as loaded.
+                    if effect.inert {
+                        continue;
+                    }
                     flag_tracks(
                         &mut effect.params.tracks,
                         PropTargetKind::Effect(effect.kind),
@@ -273,6 +281,63 @@ pub fn flag_orphaned_property_tracks(project: &mut TimelineProject) {
     }
     // Graph-node params resolve leniently (`PropTargetKind::GraphNode` accepts
     // any path), so they are never orphaned — no pass needed for `project.graphs`.
+}
+
+// ── Effect id backfill / migration / inert preservation (spec 30 §2.6, §10) ──
+
+/// Reconcile each clip effect's manifest identity, in place, before orphan
+/// flagging runs (spec §10):
+///
+/// 1. **Backfill.** An absent `id` (empty sentinel — a v4 file) is filled from
+///    the effect's legacy `kind`; conversely, an `id` that maps to a legacy kind
+///    overwrites `kind`, keeping the two consistent.
+/// 2. **Migrate.** For a known id whose stored `version` is older than the
+///    manifest's, [`migrate`](super::effect_manifest::migrate) advances the
+///    params to the current version. A pre-versioning sentinel (`version == 0`)
+///    is assumed current and simply stamped, not migrated.
+/// 3. **Inert preservation.** An id with no manifest (a future build's effect)
+///    is marked `inert` and disabled, its `params` left untouched so
+///    re-serialization is byte-identical (§2.6). Its `kind` is left as its serde
+///    default (an `Unknown` tag), so the unknown-variant scan still reports it.
+///
+/// Load-time migration is deliberately *not* an undoable edit (§10): it runs
+/// here, before the history is constructed, so no history code is involved.
+fn finalize_effect_ids(project: &mut TimelineProject) {
+    use super::effect_manifest::{manifest, migrate};
+    for seq in project.sequences.values_mut() {
+        for track in seq
+            .video_tracks
+            .iter_mut()
+            .chain(seq.audio_tracks.iter_mut())
+        {
+            for clip in &mut track.clips {
+                for effect in &mut clip.effects {
+                    if effect.id.is_empty() {
+                        effect.id = effect.kind.effect_id();
+                    }
+                    if let Some(k) = effect.id.legacy_kind() {
+                        effect.kind = k;
+                    }
+                    match manifest(effect.id.clone()) {
+                        Some(m) => {
+                            if effect.version == 0 {
+                                effect.version = m.version;
+                            } else if effect.version < m.version {
+                                if let Ok(v) = migrate(&effect.id, effect.version, &mut effect.params.base)
+                                {
+                                    effect.version = v;
+                                }
+                            }
+                        }
+                        None => {
+                            effect.inert = true;
+                            effect.enabled = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Unknown-variant scan (39 §2.2 rule 3) ───────────────────────────────────
