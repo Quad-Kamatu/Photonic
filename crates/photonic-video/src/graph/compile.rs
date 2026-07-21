@@ -15,7 +15,12 @@
 //! 1. per enabled video track, find the clip covering `t`;
 //! 2. per clip build the chain source → **asset effects/grade** → Transform2D →
 //!    clip effects → clip grade (the four effect scopes, 35 §2, all share the one
-//!    "effects beneath grade" ordering rule in [`apply_stack`]);
+//!    "effects beneath grade" ordering rule in [`apply_stack`]). **Frame-rate
+//!    conform (38 §3):** a source whose rate ≠ the sequence rate is conformed by
+//!    nearest-covering-source-frame selection — `DecodeVideo { src_time }` picks
+//!    the covering source frame with no blending and no rate conversion, so
+//!    preview and export are identical (they differ only in `proxy`). A per-clip
+//!    `FrameRateConformed` Info states this; it is not emergent behaviour.
 //! 3. per-clip composition splices the clip's **source op only** (02 §2 step 3 /
 //!    08 §4), the still-applied Transform2D/effects/grade chain riding on top;
 //! 4. fold tracks with `Merge` — each track's own content passes through its
@@ -28,6 +33,15 @@
 //! 7. `TimeOffset` expansion by re-lowering the upstream subgraph at `t−offset`
 //!    (dedup-by-hash keeps it bounded; soft cap 4 distinct offsets);
 //! 8. constant-fold / dead-branch-eliminate (disabled clips, opacity 0).
+//!
+//! **Nesting is one cache subtree (38 §2.5):** a nested sequence lowers through
+//! the same content-hash dedup as everything else, so N nest clips referencing
+//! the same sequence at the same effective `src_time` (same source_in and same
+//! start-relative offset, no per-clip transform/effect differences) collapse to
+//! ONE shared subtree — the inner sources evaluate once, not N times. This is a
+//! strong argument for nesting over duplication and is otherwise invisible; it is
+//! stated here and pinned by `ten_identical_nests_share_one_subtree`. A nest also
+//! renders in the OUTER format, not the inner sequence's `active_format` (38 §2.3).
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,10 +49,11 @@ use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
     self, AnchorSpace, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack,
-    CaptionWord, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp,
-    EffectParams, GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams,
-    GraphOp, InPort, KaraokeMode, LutInterp, NodeGraph, PropPath, PropSet, PropTargetKind, PropValue,
-    Sequence, SequenceFormat, SequenceId, TextClipContent, TimelineProject, TransitionKind,
+    CaptionWord, Clip, ClipEffect, ClipId, ClipSource, ClipTransform, EaseCurve, EffectKind,
+    FrameRate, Grade, GradeOp, EffectParams, GradeOpKind, GradeOpParams, GraphId, GraphNode,
+    GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode, LutInterp, NodeGraph, PropPath,
+    PropSet, PropTargetKind, PropValue, Ratio, Sequence, SequenceFormat, SequenceId, SpeedMap,
+    TextClipContent, TimelineProject, TransitionKind,
 };
 use photonic_core::Color;
 use photonic_render::caption::CaptionWordRun;
@@ -77,14 +92,48 @@ pub struct ViewNodeOverride {
     pub node: GraphNodeId,
 }
 
+/// A stable diagnostic code for the coded compile/load conditions 38 registers
+/// (§1.2 / §2.2 / §2.4 / §3.5). Kept as a compiler-local enum until 36 §3's
+/// `DiagCode` registry lands; the variant names are byte-identical to 36's
+/// registry (`TransitionHandleClipped`, `NestedSequenceShortened`,
+/// `FrameRateConformed`) so folding `CompileCode` into `DiagCode::Compile*` /
+/// `Media::*` is a mechanical rename.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CompileCode {
+    /// 38 §1.2 — a transition was shortened (Info) or suppressed (Warning)
+    /// because the outgoing clip's source handle is too short.
+    TransitionHandleClipped,
+    /// 38 §2.4 — a nest references past the inner sequence's content; the last
+    /// rendered frame is held (Warning).
+    NestedSequenceShortened,
+    /// 38 §2.2 / §3.5 — a source (or nested sequence) rate differs from the
+    /// sequence rate; frames are conformed by nearest-covering selection (Info).
+    FrameRateConformed,
+}
+
+/// Severity of a [`CompileDiagnostic`]. Mirrors 36 §3's `Severity` so the two
+/// merge without a value remap when the shared registry lands.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum DiagSeverity {
+    #[default]
+    Info,
+    Warning,
+    Error,
+}
+
 /// A compile diagnostic (02 §2 step 3 / 08 §6.6). Carries the offending
 /// `GraphNodeId` where one applies so the node editor can badge the exact node,
-/// not just show a generic "composition failed" toast.
+/// not just show a generic "composition failed" toast. `code`/`severity`/`clip`
+/// are the typed channel 38 needs (defaulting to an uncoded `Info` with no clip,
+/// so every pre-existing `plain`/`at` call is unchanged).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompileDiagnostic {
     pub message: String,
     pub graph: Option<GraphId>,
     pub node: Option<GraphNodeId>,
+    pub code: Option<CompileCode>,
+    pub severity: DiagSeverity,
+    pub clip: Option<ClipId>,
 }
 
 impl CompileDiagnostic {
@@ -93,6 +142,9 @@ impl CompileDiagnostic {
             message: message.into(),
             graph: None,
             node: None,
+            code: None,
+            severity: DiagSeverity::Info,
+            clip: None,
         }
     }
     fn at(graph: GraphId, node: GraphNodeId, message: impl Into<String>) -> Self {
@@ -100,6 +152,26 @@ impl CompileDiagnostic {
             message: message.into(),
             graph: Some(graph),
             node: Some(node),
+            code: None,
+            severity: DiagSeverity::Info,
+            clip: None,
+        }
+    }
+    /// A coded, severity-tagged diagnostic optionally anchored to a clip (38's
+    /// typed channel). The subject is the clip, not a graph node.
+    fn coded(
+        code: CompileCode,
+        severity: DiagSeverity,
+        clip: Option<ClipId>,
+        message: impl Into<String>,
+    ) -> Self {
+        CompileDiagnostic {
+            message: message.into(),
+            graph: None,
+            node: None,
+            code: Some(code),
+            severity,
+            clip,
         }
     }
 }
@@ -272,6 +344,31 @@ impl Builder {
         self.diagnostics.push(d);
     }
 
+    /// Whether a coded diagnostic with this `(code, clip)` subject was already
+    /// emitted this compile — the once-per-(code, clip) dedupe 38 §2.2/§2.4/§3.5
+    /// require. `compile()` is per-tick, so "once" here means once per compiled
+    /// frame graph; session-level coalescing is 36 §4.1's job.
+    fn has_coded(&self, code: CompileCode, clip: Option<ClipId>) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.code == Some(code) && d.clip == clip)
+    }
+
+    /// Push a coded diagnostic only if an identical `(code, clip)` was not
+    /// already recorded (dedupe).
+    fn diag_coded_once(
+        &mut self,
+        code: CompileCode,
+        severity: DiagSeverity,
+        clip: Option<ClipId>,
+        message: impl Into<String>,
+    ) {
+        if !self.has_coded(code, clip) {
+            self.diagnostics
+                .push(CompileDiagnostic::coded(code, severity, clip, message));
+        }
+    }
+
     /// Append a node, deduplicating by content hash. Inputs must already exist.
     fn push(&mut self, op: IrOp, inputs: Vec<(IrNodeId, OutPort)>) -> IrNodeId {
         let input_hashes: Vec<u128> = inputs
@@ -382,33 +479,55 @@ fn fold_sequence(
             continue;
         }
 
-        // Transition partner (02 §2 step 1 / 08 §2.0b): during a clip-overlap
-        // window, blend the outgoing + incoming partner by the eased mix factor.
-        // A successful transition contributes a single track image at opacity 1
-        // (each partner's own opacity is baked into its side of the mix).
-        if let Some(tr) = active_transition(clips, idx, tick) {
-            if let Some(node) = build_transition(
-                b,
-                project,
-                seq,
-                format_index,
-                format,
-                clips,
-                &tr,
-                tick,
-                quality,
-                cycle,
-            ) {
-                // Track scope (35 §2.4(a)): the track effects/grade act on this
-                // track's OWN content (the transition image, opacity 1) before it
-                // merges — never on the accumulator. Sequence-relative keyframes.
-                // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
-                let node = apply_stack(b, &track.effects, track.grade.as_ref(), node, tick);
-                acc = Some(fold_over(b, acc, node, track.opacity, track.blend));
-                continue;
+        // Transition partner (02 §2 step 1 / 08 §2.0b, 38 §1): at a cut the
+        // incoming clip's `transition_in` borrows the OUTGOING clip past its own
+        // out point, into its remaining source handle, and mixes. The overlap
+        // duration is clamped to that handle (38 §1.1). A successful transition
+        // contributes a single track image at opacity 1 (each partner's own
+        // opacity is baked into its side of the mix).
+        match active_transition(project, clips, idx, tick) {
+            Some(tr) => {
+                if let Some(node) = build_transition(
+                    b,
+                    project,
+                    seq,
+                    format_index,
+                    format,
+                    clips,
+                    &tr,
+                    tick,
+                    quality,
+                    cycle,
+                ) {
+                    // Track scope (35 §2.4(a)): the track effects/grade act on
+                    // this track's OWN content (the transition image, opacity 1)
+                    // before it merges — never on the accumulator. Sequence-
+                    // relative keyframes.
+                    // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
+                    let node = apply_stack(b, &track.effects, track.grade.as_ref(), node, tick);
+                    acc = Some(fold_over(b, acc, node, track.opacity, track.blend));
+                    continue;
+                }
+                // Partner unavailable (disabled / opacity-0 / Adjustment): fall
+                // through to the plain covering-clip render below.
             }
-            // Partner unavailable (disabled / opacity-0 / Adjustment): fall
-            // through to the plain covering-clip render below.
+            None => {
+                // 38 §1.2 case 3: an authored `transition_in` whose outgoing
+                // handle is exhausted (clamped to zero) does not render — warn
+                // and fall through to the plain covering-clip render.
+                if let Some(cid) = suppressed_transition_clip(project, clips, idx, tick) {
+                    b.diag_coded_once(
+                        CompileCode::TransitionHandleClipped,
+                        DiagSeverity::Warning,
+                        Some(cid),
+                        format!(
+                            "transition on clip {} not rendered: the outgoing clip has \
+                             no source handle past its out point (38 §1.2)",
+                            clips[idx].name
+                        ),
+                    );
+                }
+            }
         }
 
         let Some((image, opacity)) = build_clip_chain(
@@ -423,6 +542,14 @@ fn fold_sequence(
             cycle,
         ) else {
             continue; // step 8: invisible / opacity-0 clip folded away.
+        };
+        // 38 §1.3: a `transition_out` at a gap / sequence end is a FADE-OUT (no
+        // partner, no borrowed handle) — the clip's chain merged toward
+        // transparent over the window. At a cut it is inert (the incoming clip's
+        // `transition_in` owns the cut), so `active_fade_out` returns `None` there.
+        let image = match active_fade_out(clips, idx, tick) {
+            Some(t) => bake_opacity(b, image, (1.0 - t).clamp(0.0, 1.0)),
+            None => image,
         };
         // Track scope (35 §2.4(a)): the track effects/grade act on this track's
         // OWN composited content before it merges into the accumulator — never on
@@ -451,49 +578,168 @@ struct ActiveTransition {
     params: timeline::TransitionParams,
     /// Eased mix in `0..1`.
     t: f32,
+    /// `Some` when the requested overlap was shortened to fit the outgoing
+    /// clip's available source handle (38 §1.1) — drives the
+    /// `TransitionHandleClipped` Info once the mix is confirmed to render.
+    handle_clip: Option<HandleClip>,
 }
 
-/// Detect a transition active at `tick` for the covering clip `idx` (08 §2.0b).
-/// A `transition_in` borrows the previous clip as the outgoing partner; a
-/// `transition_out` borrows the next clip as the incoming partner. Returns `None`
-/// when no transition is active or the partner index is out of range.
-fn active_transition(clips: &[Clip], idx: usize, tick: Tick) -> Option<ActiveTransition> {
+/// Record of a transition whose requested duration exceeded the outgoing clip's
+/// available source handle (38 §1.1). `available < requested`; `available == 0`
+/// means the transition is suppressed entirely.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct HandleClip {
+    requested: Tick,
+    available: Tick,
+}
+
+/// Timeline-domain ticks of material the outgoing `clip` can borrow PAST its out
+/// point for a transition (38 §1.1). `None` = unbounded / unknown (never clamp):
+/// generators are infinite, an absent probe is unknown, a freeze-frame never
+/// runs out.
+fn available_handle_ticks(project: &TimelineProject, clip: &Clip) -> Option<Tick> {
+    let source_duration: Tick = match &clip.source {
+        // Generators / vectors are infinite; an unknown source is inert.
+        ClipSource::SolidColor { .. }
+        | ClipSource::Adjustment
+        | ClipSource::Text { .. }
+        | ClipSource::Vector { .. }
+        | ClipSource::Unknown(_) => return None,
+        ClipSource::NestedSequence { sequence } => project.sequences.get(sequence)?.content_end(),
+        ClipSource::Asset { asset } => project.media.assets.get(asset)?.probe.as_ref()?.duration,
+    };
+    // Source ticks consumed at the out point, then the source ticks remaining.
+    let out_src = clip.source_in + clip.speed.source_delta(clip.duration);
+    let avail_src = (source_duration.0 - out_src.0).max(0);
+    // Convert source-domain ticks back to the timeline domain via the speed
+    // ratio (source ticks per timeline tick): `avail_timeline = avail_src / r`.
+    // Mirrors `scale_ticks` (clip.rs) with multiply-before-divide in i128.
+    let r = match &clip.speed {
+        SpeedMap::Constant(r) => *r,
+        // v1 approximation: past a clip's out point the ramp has ended, so the
+        // LAST key's ratio is the one that holds — exact for the only case the
+        // ramp can be in past the out point.
+        SpeedMap::Keyframed { keys } => keys.last().map(|k| k.ratio).unwrap_or(Ratio::ONE),
+    };
+    if r.num == 0 {
+        return None; // a frozen source never runs out.
+    }
+    let avail_timeline = (avail_src as i128 * r.den as i128) / r.num as i128;
+    Some(Tick(avail_timeline.max(0) as i64))
+}
+
+/// Clamp a requested transition duration to the outgoing clip's available source
+/// handle (38 §1.1). Returns `(requested, None)` when nothing constrains it
+/// (`available_handle_ticks` is `None`, or the handle already covers the
+/// request); `(available, Some(..))` when the handle is shorter (`available` may
+/// be zero, meaning suppress).
+fn clamp_transition(
+    project: &TimelineProject,
+    outgoing: &Clip,
+    requested: Tick,
+) -> (Tick, Option<HandleClip>) {
+    match available_handle_ticks(project, outgoing) {
+        Some(available) if available < requested => (
+            available,
+            Some(HandleClip {
+                requested,
+                available,
+            }),
+        ),
+        _ => (requested, None),
+    }
+}
+
+/// Detect a two-clip transition active at `tick` for the covering clip `idx`
+/// (08 §2.0b, 38 §1). Only a `transition_in` at a cut mixes two clips: it
+/// borrows the previous clip as the outgoing partner, over a window clamped to
+/// that partner's source handle (38 §1.1). A `transition_out` is a fade-out, not
+/// a two-clip mix (38 §1.3) — see [`active_fade_out`]. Returns `None` when no
+/// transition is active or the handle clamps the overlap to zero (38 §1.2 case 3,
+/// which falls through to the plain covering-clip render).
+fn active_transition(
+    project: &TimelineProject,
+    clips: &[Clip],
+    idx: usize,
+    tick: Tick,
+) -> Option<ActiveTransition> {
     let clip = &clips[idx];
-    // Start-boundary transition: this clip transitions IN from the previous clip.
-    if let Some(tr) = &clip.transition_in {
-        if idx > 0 && tr.duration.0 > 0 {
-            let start = clip.start;
-            let end = clip.start + tr.duration;
-            if start <= tick && tick < end {
-                let raw = (tick - start).0 as f32 / tr.duration.0 as f32;
-                return Some(ActiveTransition {
-                    outgoing: idx - 1,
-                    incoming: idx,
-                    kind: tr.kind,
-                    params: tr.params,
-                    t: ease(tr.params.curve, raw),
-                });
-            }
-        }
+    let tr = clip.transition_in.as_ref()?;
+    if idx == 0 || tr.duration.0 <= 0 {
+        return None;
     }
-    // End-boundary transition: this clip transitions OUT into the next clip.
-    if let Some(tr) = &clip.transition_out {
-        if idx + 1 < clips.len() && tr.duration.0 > 0 {
-            let start = clip.end() - tr.duration;
-            let end = clip.end();
-            if start <= tick && tick < end {
-                let raw = (tick - start).0 as f32 / tr.duration.0 as f32;
-                return Some(ActiveTransition {
-                    outgoing: idx,
-                    incoming: idx + 1,
-                    kind: tr.kind,
-                    params: tr.params,
-                    t: ease(tr.params.curve, raw),
-                });
-            }
-        }
+    let outgoing = &clips[idx - 1];
+    let (duration, handle_clip) = clamp_transition(project, outgoing, tr.duration);
+    if duration.0 <= 0 {
+        return None; // 38 §1.2 case 3: handle exhausted → no transition.
     }
-    None
+    let start = clip.start;
+    let end = clip.start + duration;
+    if start <= tick && tick < end {
+        let raw = (tick - start).0 as f32 / duration.0 as f32;
+        Some(ActiveTransition {
+            outgoing: idx - 1,
+            incoming: idx,
+            kind: tr.kind,
+            params: tr.params,
+            t: ease(tr.params.curve, raw),
+            handle_clip,
+        })
+    } else {
+        None
+    }
+}
+
+/// The `ClipId` of a covering clip whose authored `transition_in` window covers
+/// `tick` but whose outgoing handle clamps the overlap to zero (38 §1.2 case 3).
+/// Used only to emit the suppression Warning; `None` otherwise.
+fn suppressed_transition_clip(
+    project: &TimelineProject,
+    clips: &[Clip],
+    idx: usize,
+    tick: Tick,
+) -> Option<ClipId> {
+    let clip = &clips[idx];
+    let tr = clip.transition_in.as_ref()?;
+    if idx == 0 || tr.duration.0 <= 0 {
+        return None;
+    }
+    // Only relevant on frames the authored overlap would have covered.
+    let start = clip.start;
+    let end = clip.start + tr.duration;
+    if !(start <= tick && tick < end) {
+        return None;
+    }
+    let (duration, handle_clip) = clamp_transition(project, &clips[idx - 1], tr.duration);
+    (handle_clip.is_some() && duration.0 == 0).then_some(clip.id)
+}
+
+/// Detect a `transition_out` FADE-OUT active at `tick` for clip `idx` (38 §1.3),
+/// returning the eased progress `t∈0..1` (0 = fully visible, 1 = faded out). A
+/// `transition_out` is legal only where no clip starts at this clip's end (a gap
+/// or the sequence end); at a cut it is inert (the incoming clip's
+/// `transition_in` owns the transition), so this returns `None` there.
+fn active_fade_out(clips: &[Clip], idx: usize, tick: Tick) -> Option<f32> {
+    let clip = &clips[idx];
+    let tr = clip.transition_out.as_ref()?;
+    if tr.duration.0 <= 0 {
+        return None;
+    }
+    // A clip starting exactly at this clip's end means a cut — not a fade-out.
+    let at_cut = clips
+        .get(idx + 1)
+        .is_some_and(|next| next.start == clip.end());
+    if at_cut {
+        return None;
+    }
+    let start = clip.end() - tr.duration;
+    let end = clip.end();
+    if start <= tick && tick < end {
+        let raw = (tick - start).0 as f32 / tr.duration.0 as f32;
+        Some(ease(tr.params.curve, raw))
+    } else {
+        None
+    }
 }
 
 /// Build the transition mix node, or `None` when a partner can't contribute
@@ -521,6 +767,20 @@ fn build_transition(
         || matches!(incoming_clip.source, ClipSource::Adjustment)
     {
         return None;
+    }
+    // 38 §1.1: a shortened overlap (the outgoing handle ran out) renders at the
+    // clamped duration; record it once the mix is confirmed to render.
+    if let Some(hc) = &tr.handle_clip {
+        b.diag_coded_once(
+            CompileCode::TransitionHandleClipped,
+            DiagSeverity::Info,
+            Some(incoming_clip.id),
+            format!(
+                "transition on clip {} shortened to {} ticks (outgoing source handle \
+                 {} < requested {}, 38 §1.1)",
+                incoming_clip.name, hc.available.0, hc.available.0, hc.requested.0
+            ),
+        );
     }
     let (out_img, out_op) = build_clip_chain(
         b,
@@ -902,6 +1162,39 @@ fn build_clip_source(
                 .get(asset)
                 .map(|a| a.kind)
                 .unwrap_or(AssetKind::Video);
+            // 38 §3.5: a video source whose frame rate differs from the sequence
+            // rate is conformed by nearest-covering-source-frame selection (the
+            // `DecodeVideo { src_time }` below is already that, identical in
+            // preview and export — 38 §3.2). State it with a per-clip Info. The
+            // comparison is on the RATIONAL value, so 30/1 and 60/2 are equal.
+            if kind == AssetKind::Video {
+                if let Some(src_rate) = project
+                    .media
+                    .assets
+                    .get(asset)
+                    .and_then(|a| a.probe.as_ref())
+                    .and_then(|p| p.video.as_ref())
+                    .map(|v| v.frame_rate)
+                {
+                    if !rates_equal(src_rate, seq.frame_rate) {
+                        b.diag_coded_once(
+                            CompileCode::FrameRateConformed,
+                            DiagSeverity::Info,
+                            Some(clip.id),
+                            format!(
+                                "clip {} is {}/{} on a {}/{} sequence; frames are conformed \
+                                 by nearest-covering-source-frame selection (30→24 drops, \
+                                 24→30 repeats)",
+                                clip.name,
+                                src_rate.num,
+                                src_rate.den,
+                                seq.frame_rate.num,
+                                seq.frame_rate.den
+                            ),
+                        );
+                    }
+                }
+            }
             match kind {
                 AssetKind::Image => b.push(IrOp::DecodeStill { asset: *asset }, vec![]),
                 AssetKind::Video | AssetKind::Audio | AssetKind::VectorDoc | AssetKind::Lut3d => b
@@ -937,6 +1230,8 @@ fn build_clip_source(
             src_time,
             quality,
             cycle,
+            seq.frame_rate,
+            clip.id,
         ),
         ClipSource::SolidColor { color } => b.push(
             IrOp::SolidColor {
@@ -981,19 +1276,35 @@ fn build_clip_source(
     }
 }
 
+/// Two frame rates are equal as RATIONAL values (30/1 == 60/2), so an
+/// equivalent rate never reads as a mismatch (38 §3.5).
+fn rates_equal(a: FrameRate, b: FrameRate) -> bool {
+    a.num as u64 * b.den as u64 == b.num as u64 * a.den as u64
+}
+
 /// Recursively compile a nested sequence (CAP-005) and splice its program as a
 /// source. Cycle-guarded: a re-entrant sequence yields a transparent placeholder
 /// plus a diagnostic (never an infinite recursion / black frame).
+///
+/// 38 §2: the nest renders in the OUTER (parent) format — the inner sequence's
+/// own `active_format`/`formats` do NOT govern (§2.3), so an inner clip reframes
+/// to its host. Inner caption tracks render inside the nest (§2.3), at the inner
+/// timebase (`src_time`). A rate mismatch emits one Info per nest (§2.2); a
+/// reference past the inner content holds the last rendered frame + Warning
+/// (§2.4). `host_rate`/`nest_clip` carry the host sequence's rate and the nest
+/// clip's id so those per-nest diagnostics have a subject without another borrow.
 #[allow(clippy::too_many_arguments)]
 fn build_nested_sequence(
     b: &mut Builder,
     project: &TimelineProject,
     sequence: SequenceId,
-    _parent_format_index: usize,
+    parent_format_index: usize,
     parent_format: &SequenceFormat,
     src_time: Tick,
     quality: Quality,
     cycle: &mut HashSet<SequenceId>,
+    host_rate: FrameRate,
+    nest_clip: ClipId,
 ) -> IrNodeId {
     if cycle.contains(&sequence) {
         b.diag(CompileDiagnostic::plain(format!(
@@ -1008,30 +1319,88 @@ fn build_nested_sequence(
         return b.transparent(parent_format);
     };
 
-    let nested_format_index = nested
-        .active_format
-        .min(nested.formats.len().saturating_sub(1));
-    let Some(nested_format) = nested.formats.get(nested_format_index) else {
-        b.diag(CompileDiagnostic::plain(format!(
-            "nested sequence {sequence} has no formats; substituting transparent"
-        )));
-        return b.transparent(parent_format);
+    // 38 §2.2: rate mismatch → one Info per nest (Tick is rate-independent, so
+    // this is a sampling note, not a change in what is rendered).
+    if !rates_equal(nested.frame_rate, host_rate) {
+        b.diag_coded_once(
+            CompileCode::FrameRateConformed,
+            DiagSeverity::Info,
+            Some(nest_clip),
+            format!(
+                "nested sequence {} runs at {}/{} inside a {}/{} host; it is sampled at \
+                 the requested tick (38 §2.2)",
+                nested.name,
+                nested.frame_rate.num,
+                nested.frame_rate.den,
+                host_rate.num,
+                host_rate.den
+            ),
+        );
+    }
+
+    // 38 §2.4: if the nest references past the inner sequence's content, hold the
+    // last rendered frame (fold at a FIXED `inner_end − ticks_per_frame`, which
+    // is content-hash-stable across the tail so the node cache serves it once)
+    // and warn. The outer clip's layout is never mutated — the compiler is a pure
+    // function of the snapshot.
+    let inner_end = nested.content_end();
+    let fold_tick = if inner_end > Tick::ZERO && src_time >= inner_end {
+        b.diag_coded_once(
+            CompileCode::NestedSequenceShortened,
+            DiagSeverity::Warning,
+            Some(nest_clip),
+            format!(
+                "nested sequence {} ({} ticks) is shorter than the nest clip references; \
+                 holding the last rendered frame (38 §2.4)",
+                nested.name, inner_end.0
+            ),
+        );
+        let tpf = nested.frame_rate.ticks_per_frame();
+        Tick((inner_end.0 - tpf.0).max(0))
+    } else {
+        if inner_end == Tick::ZERO {
+            // Empty inner sequence: the transparent fallback below stands, but the
+            // reference is still "shortened" — warn (38 §2.4).
+            b.diag_coded_once(
+                CompileCode::NestedSequenceShortened,
+                DiagSeverity::Warning,
+                Some(nest_clip),
+                format!(
+                    "nested sequence {} is empty; the nest renders transparent (38 §2.4)",
+                    nested.name
+                ),
+            );
+        }
+        src_time
     };
+
     // Arm the cycle guard around the recursive fold ONLY: every early return
-    // above leaves the visited-set untouched, so a bail-out (missing / no-format
-    // nested sequence referenced more than once) never poisons a sibling lower.
+    // above leaves the visited-set untouched, so a bail-out (missing nested
+    // sequence referenced more than once) never poisons a sibling lower.
+    // 38 §2.3: fold in the OUTER format — pass the parent's index/format through
+    // so an inner clip's `reframe` entry for the OUTER format index is what
+    // applies (a nest reframes to its host).
     cycle.insert(sequence);
     let program = fold_sequence(
         b,
         project,
         nested,
-        nested_format_index,
-        nested_format,
-        src_time,
+        parent_format_index,
+        parent_format,
+        fold_tick,
         quality,
         cycle,
     );
     cycle.remove(&sequence);
+
+    // 38 §2.3: the inner sequence's own caption tracks are part of the picture —
+    // splice them here (they are invisible to the top-level `splice_captions`).
+    // Captions resolve at the inner timebase (`fold_tick`, the held frame's tick
+    // in the tail case), against the render (outer/parent) format. They ride ON
+    // TOP of the inner fold but UNDER the outer clip's Transform2D/effects/grade,
+    // which is automatic: this returns the clip's SOURCE op and `build_clip_chain`
+    // appends the rest of the chain after it.
+    let program = splice_captions(b, nested, parent_format, fold_tick, program);
 
     program.unwrap_or_else(|| b.transparent(parent_format))
 }
@@ -3506,5 +3875,931 @@ mod tests {
             IrOp::ChannelCombine => "ChannelCombine",
             IrOp::Output { .. } => "Output",
         }
+    }
+
+    // ── 38 §1/§2/§3 sequence-semantics tests ──────────────────────────────────
+    use photonic_core::timeline::{
+        MediaProbe, ProbedColor, Ratio, SpeedMap, Transition, VideoStreamInfo,
+    };
+
+    /// One FPS_30 frame in ticks — the unit the transition-handle tests count in.
+    fn tpf30() -> i64 {
+        FrameRate::FPS_30.ticks_per_frame().0
+    }
+    /// `n` FPS_30 frames as a `Tick`.
+    fn f30(n: i64) -> Tick {
+        Tick(tpf30() * n)
+    }
+
+    /// Any `Merge` whose opacity is strictly between 0 and 1 — the signature of a
+    /// live transition / fade mix (plain fully-opaque folds never emit one here,
+    /// since the test clips all sit at track/clip opacity 1).
+    fn has_fractional_merge(graph: &FrameGraph) -> bool {
+        graph.nodes.iter().any(|n| {
+            matches!(n.op, IrOp::Merge { opacity, .. } if opacity > 0.0 && opacity < 1.0)
+        })
+    }
+
+    /// Content hash of the graph's `Output` node — the whole render subtree's
+    /// identity (equal hash ⇒ identical pixels ⇒ the node cache serves one entry).
+    fn output_hash(graph: &FrameGraph) -> u128 {
+        let out = graph.output.expect("graph has an output");
+        graph.nodes[out.0 as usize].content_hash.0
+    }
+
+    fn count_code(out: &CompiledFrame, code: CompileCode) -> usize {
+        out.diagnostics
+            .iter()
+            .filter(|d| d.code == Some(code))
+            .count()
+    }
+
+    /// A video asset with a probe carrying just a `duration` (no video stream, so
+    /// the per-clip conform check in §3.5 stays silent) — for handle math.
+    fn video_asset_dur(project: &mut TimelineProject, duration: Tick) -> AssetId {
+        let mut asset = MediaAsset::from_file(AssetKind::Video, "/tmp/handle.mp4");
+        asset.probe = Some(MediaProbe {
+            duration,
+            video: None,
+            audio: None,
+            container: "mp4".into(),
+            codec: "h264".into(),
+        });
+        let id = asset.id;
+        project.media.insert(asset);
+        id
+    }
+
+    /// A video asset whose probe reports `rate` as its video-stream frame rate —
+    /// drives the §3.5 conform Info.
+    fn video_asset_rate(project: &mut TimelineProject, rate: FrameRate) -> AssetId {
+        let mut asset = MediaAsset::from_file(AssetKind::Video, "/tmp/rate.mp4");
+        asset.probe = Some(MediaProbe {
+            duration: Tick::from_seconds(10),
+            video: Some(VideoStreamInfo {
+                width: 1920,
+                height: 1080,
+                frame_rate: rate,
+                pixel_aspect: 1.0,
+                color: ProbedColor::default(),
+                keyframe_index_cached: false,
+            }),
+            audio: None,
+            container: "mp4".into(),
+            codec: "h264".into(),
+        });
+        let id = asset.id;
+        project.media.insert(asset);
+        id
+    }
+
+    // ---- Task 1: handle computation + duration clamp (38 §1.1/§1.2) ----
+
+    /// A requested overlap longer than the outgoing clip's available source handle
+    /// is clamped to the handle: the transition window genuinely shortens (mix live
+    /// inside the clamped window, inert past it).
+    #[test]
+    fn transition_clamps_to_available_handle() {
+        let (mut project, seq_id) = base_project();
+        // Outgoing asset: 30-frame clip with 10 frames of handle past its out point.
+        let out_asset = video_asset_dur(&mut project, f30(40));
+        let in_asset = {
+            let a = MediaAsset::from_file(AssetKind::Video, "/tmp/in.mp4");
+            let id = a.id;
+            project.media.insert(a);
+            id
+        };
+        let tk = add_video_track(&mut project, seq_id);
+        let a = Clip::new(ClipSource::Asset { asset: out_asset }, f30(0), f30(30));
+        let mut b = Clip::new(ClipSource::Asset { asset: in_asset }, f30(30), f30(60));
+        b.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, f30(40)));
+        let clips = &mut project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk].clips;
+        clips.push(a);
+        clips.push(b);
+
+        // tick = B.start + 5f: inside the CLAMPED 10-frame window ⇒ a live mix.
+        let inside = compile(&project, seq_id, 0, f30(35), Quality::FULL, None);
+        assert!(
+            has_fractional_merge(&inside.graph),
+            "transition mixes inside the clamped window"
+        );
+        // The shortening is recorded as an Info (not a suppression Warning).
+        assert_eq!(count_code(&inside, CompileCode::TransitionHandleClipped), 1);
+        let clipped = inside
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(CompileCode::TransitionHandleClipped))
+            .unwrap();
+        assert_eq!(clipped.severity, DiagSeverity::Info);
+
+        // tick = B.start + 20f: past the clamped window (would be inside the
+        // authored 40f window) ⇒ plain covering-clip render, no mix.
+        let outside = compile(&project, seq_id, 0, f30(50), Quality::FULL, None);
+        assert!(
+            !has_fractional_merge(&outside.graph),
+            "no mix past the clamped window"
+        );
+    }
+
+    /// A zero-length handle (probe ends exactly at the out point) suppresses the
+    /// transition entirely: no mix, and a `TransitionHandleClipped` Warning.
+    #[test]
+    fn transition_with_zero_handle_does_not_render() {
+        let (mut project, seq_id) = base_project();
+        // probe.duration == out point ⇒ zero handle.
+        let out_asset = video_asset_dur(&mut project, f30(30));
+        let in_asset = {
+            let a = MediaAsset::from_file(AssetKind::Video, "/tmp/in.mp4");
+            let id = a.id;
+            project.media.insert(a);
+            id
+        };
+        let tk = add_video_track(&mut project, seq_id);
+        let a = Clip::new(ClipSource::Asset { asset: out_asset }, f30(0), f30(30));
+        let mut b = Clip::new(ClipSource::Asset { asset: in_asset }, f30(30), f30(60));
+        b.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, f30(40)));
+        let clips = &mut project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk].clips;
+        clips.push(a);
+        clips.push(b);
+
+        let out = compile(&project, seq_id, 0, f30(35), Quality::FULL, None);
+        assert!(
+            !has_fractional_merge(&out.graph),
+            "zero handle ⇒ no transition mix"
+        );
+        assert_eq!(count_code(&out, CompileCode::TransitionHandleClipped), 1);
+        let d = out
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(CompileCode::TransitionHandleClipped))
+            .unwrap();
+        assert_eq!(d.severity, DiagSeverity::Warning, "suppression is a Warning");
+    }
+
+    /// An outgoing asset with no probe is of unknown length — never clamped, so the
+    /// full authored window renders.
+    #[test]
+    fn transition_with_no_probe_is_not_clamped() {
+        let (mut project, seq_id) = base_project();
+        let out_asset = {
+            let a = MediaAsset::from_file(AssetKind::Video, "/tmp/noprobe.mp4");
+            let id = a.id;
+            project.media.insert(a);
+            id
+        };
+        let in_asset = {
+            let a = MediaAsset::from_file(AssetKind::Video, "/tmp/in.mp4");
+            let id = a.id;
+            project.media.insert(a);
+            id
+        };
+        let tk = add_video_track(&mut project, seq_id);
+        let a = Clip::new(ClipSource::Asset { asset: out_asset }, f30(0), f30(30));
+        let mut b = Clip::new(ClipSource::Asset { asset: in_asset }, f30(30), f30(60));
+        b.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, f30(40)));
+        let clips = &mut project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk].clips;
+        clips.push(a);
+        clips.push(b);
+
+        // tick = B.start + 20f: inside the FULL 40f window (no clamp) ⇒ a live mix.
+        let out = compile(&project, seq_id, 0, f30(50), Quality::FULL, None);
+        assert!(
+            has_fractional_merge(&out.graph),
+            "no probe ⇒ full window mixes"
+        );
+        assert_eq!(
+            count_code(&out, CompileCode::TransitionHandleClipped),
+            0,
+            "unknown length is never clamped"
+        );
+    }
+
+    /// The source→timeline handle conversion honours clip speed: 2× playback halves
+    /// the timeline-domain handle for the same source material.
+    #[test]
+    fn available_handle_respects_constant_speed() {
+        let mut project = TimelineProject::new();
+        // 1s clip with 20 source-frames of material past its out point.
+        let asset_1x = video_asset_dur(&mut project, f30(30) + f30(20));
+        let clip_1x = Clip::new(ClipSource::Asset { asset: asset_1x }, f30(0), f30(30));
+        assert_eq!(
+            available_handle_ticks(&project, &clip_1x),
+            Some(f30(20)),
+            "1× speed: 20 source-frames = 20 timeline-frames"
+        );
+
+        // Same 20 source-frames of handle, but at 2× (out point consumes 2s of src).
+        let asset_2x = video_asset_dur(&mut project, Tick::from_seconds(2) + f30(20));
+        let mut clip_2x = Clip::new(ClipSource::Asset { asset: asset_2x }, f30(0), f30(30));
+        clip_2x.speed = SpeedMap::Constant(Ratio::new(2, 1));
+        assert_eq!(
+            available_handle_ticks(&project, &clip_2x),
+            Some(f30(10)),
+            "2× speed halves the timeline-domain handle"
+        );
+    }
+
+    // ---- Task 2: typed diagnostic channel defaults (38 §1.2 shared type) ----
+
+    #[test]
+    fn compile_diagnostic_defaults_are_info_and_uncoded() {
+        let d = CompileDiagnostic::plain("x");
+        assert_eq!(d.severity, DiagSeverity::Info);
+        assert!(d.code.is_none());
+        assert!(d.clip.is_none());
+        // `at` keeps the same defaults for code/severity/clip.
+        let d2 = CompileDiagnostic::at(GraphId::new(), GraphNodeId::new(), "y");
+        assert_eq!(d2.severity, DiagSeverity::Info);
+        assert!(d2.code.is_none());
+        assert!(d2.clip.is_none());
+    }
+
+    // ---- Task 3: one transition per cut (38 §1.3), compiler side ----
+
+    /// A `transition_out` at the sequence end (no following clip) is a fade-out:
+    /// the clip is merged toward transparent over the window (a fractional merge),
+    /// and is inert outside it.
+    #[test]
+    fn transition_out_at_sequence_end_fades_to_transparent() {
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        let mut a = solid_clip(
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            0,
+            f30(100).0,
+        );
+        a.transition_out = Some(Transition::new(TransitionKind::CrossDissolve, f30(20)));
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(a);
+
+        // Inside the fade window [end-20f, end) ⇒ merged toward transparent.
+        let fading = compile(&project, seq_id, 0, f30(90), Quality::FULL, None);
+        assert!(
+            has_fractional_merge(&fading.graph),
+            "fade-out merges toward transparent"
+        );
+        // Before the window ⇒ fully opaque, no fade merge.
+        let solid = compile(&project, seq_id, 0, f30(50), Quality::FULL, None);
+        assert!(
+            !has_fractional_merge(&solid.graph),
+            "no fade before the window"
+        );
+    }
+
+    /// Both a `transition_out` on the outgoing clip AND a `transition_in` on the
+    /// incoming clip set at the same cut (bypassing validation): only the incoming
+    /// clip's `transition_in` window produces a mix — the `transition_out` is inert
+    /// at a cut (38 §1.3), never a second transition.
+    #[test]
+    fn no_double_transition_at_a_cut() {
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        let mut a = solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            f30(100).0,
+        );
+        // Illegal per Sequence::validate, but set directly here to prove the
+        // compiler ignores a transition_out at a cut.
+        a.transition_out = Some(Transition::new(TransitionKind::CrossDissolve, f30(20)));
+        let mut b = solid_clip(
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            f30(100).0,
+            f30(100).0,
+        );
+        b.transition_in = Some(Transition::new(TransitionKind::CrossDissolve, f30(20)));
+        let clips = &mut project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk].clips;
+        clips.push(a);
+        clips.push(b);
+
+        // In A's transition_out window [80f, 100f) — before the cut, covering A.
+        // transition_out at a cut is inert ⇒ no mix.
+        let before_cut = compile(&project, seq_id, 0, f30(90), Quality::FULL, None);
+        assert!(
+            !has_fractional_merge(&before_cut.graph),
+            "transition_out at a cut is inert"
+        );
+        // In B's transition_in window [100f, 120f) — after the cut, covering B.
+        // The incoming clip's transition_in is the only mix path ⇒ a mix.
+        let after_cut = compile(&project, seq_id, 0, f30(110), Quality::FULL, None);
+        assert!(
+            has_fractional_merge(&after_cut.graph),
+            "transition_in owns the cut"
+        );
+    }
+
+    // ---- Task 4: nest renders in the OUTER format (38 §2.3) ----
+
+    /// A nest renders in the outer format, not the inner sequence's own format:
+    /// the `Output` is the outer dimensions, and an inner clip's per-format reframe
+    /// keyed by the OUTER format index is the transform that applies.
+    #[test]
+    fn nest_uses_outer_format_not_inner() {
+        let mut project = TimelineProject::new();
+
+        // Inner sequence is portrait 1080×1920 with a full-frame solid whose
+        // reframe entry for OUTER format index 0 is a non-identity transform.
+        let mut inner = Sequence::new("inner", FrameRate::FPS_30, 1080, 1920);
+        let inner_id = inner.id;
+        let mut it = Track::new(TrackKind::Video, "V1");
+        let mut inner_clip = solid_clip(
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            0,
+            Tick::from_seconds(2).0,
+        );
+        let reframe = ClipTransform {
+            x: 10.0,
+            rotation: 0.3,
+            ..ClipTransform::default()
+        };
+        inner_clip.reframe.insert(0, reframe);
+        it.clips.push(inner_clip);
+        inner.video_tracks.push(it);
+        project.insert_sequence(inner);
+
+        // Outer sequence is landscape 1920×1080.
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 1920, 1080);
+        let outer_id = outer.id;
+        let mut ot = Track::new(TrackKind::Video, "V1");
+        ot.clips.push(Clip::new(
+            ClipSource::NestedSequence { sequence: inner_id },
+            Tick(0),
+            Tick::from_seconds(2),
+        ));
+        outer.video_tracks.push(ot);
+        project.insert_sequence(outer);
+
+        let out = compile(&project, outer_id, 0, Tick(0), Quality::FULL, None);
+        // Output is the OUTER format's dimensions.
+        assert!(
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Output { w: 1920, h: 1080 })),
+            "nest outputs the outer format"
+        );
+
+        let outer_format = SequenceFormat::new("16:9", 1920, 1080);
+        let inner_format = SequenceFormat::new("16:9", 1080, 1920);
+        let want = clip_transform_matrix(&reframe, &outer_format);
+        let unwanted = clip_transform_matrix(&reframe, &inner_format);
+        assert_ne!(want, unwanted, "the two formats must disagree for a real test");
+        // The inner clip's reframe transform was resolved against the OUTER format.
+        assert!(
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(&n.op, IrOp::Transform2D { mat, .. } if *mat == want)),
+            "inner reframe resolves against the outer format"
+        );
+    }
+
+    // ---- Task 5: nested caption tracks render inside the nest (38 §2.3) ----
+
+    fn inner_with_caption(name: &str) -> Sequence {
+        let mut inner = Sequence::new(name, FrameRate::FPS_30, 4, 4);
+        let mut v = Track::new(TrackKind::Video, "V1");
+        v.clips.push(solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0));
+        inner.video_tracks.push(v);
+        inner.caption_tracks.push(wordpop_track()); // cue [0, 200)
+        inner
+    }
+
+    /// An inner sequence's enabled caption track renders inside the nest — the
+    /// compiled graph carries a `CaptionOverlay` even though the outer sequence has
+    /// no caption tracks.
+    #[test]
+    fn nested_sequence_captions_render() {
+        let mut project = TimelineProject::new();
+        let inner = inner_with_caption("inner");
+        let inner_id = inner.id;
+        project.insert_sequence(inner);
+
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 4, 4);
+        let outer_id = outer.id;
+        let mut ot = Track::new(TrackKind::Video, "V1");
+        ot.clips.push(Clip::new(
+            ClipSource::NestedSequence { sequence: inner_id },
+            Tick(0),
+            Tick::from_seconds(2),
+        ));
+        outer.video_tracks.push(ot);
+        project.insert_sequence(outer);
+
+        // src_time = 50 is inside the inner cue [0, 200).
+        let out = compile(&project, outer_id, 0, Tick(50), Quality::FULL, None);
+        assert!(
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            "inner caption track overlays inside the nest"
+        );
+    }
+
+    /// Nested captions resolve at the INNER timebase (`src_time`), not the outer
+    /// tick: a cue covering the mapped `src_time` but not the outer tick still
+    /// renders.
+    #[test]
+    fn nested_sequence_caption_uses_inner_timebase() {
+        let mut project = TimelineProject::new();
+        let inner = inner_with_caption("inner");
+        let inner_id = inner.id;
+        project.insert_sequence(inner);
+
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 4, 4);
+        let outer_id = outer.id;
+        let mut ot = Track::new(TrackKind::Video, "V1");
+        // Nest starts at 5s, so at outer tick 5s+50 the mapped src_time is 50
+        // (inside the cue) while the outer tick (~5s) is far past it.
+        let start = Tick::from_seconds(5);
+        ot.clips.push(Clip::new(
+            ClipSource::NestedSequence { sequence: inner_id },
+            start,
+            Tick::from_seconds(5),
+        ));
+        outer.video_tracks.push(ot);
+        project.insert_sequence(outer);
+
+        let out = compile(&project, outer_id, 0, start + Tick(50), Quality::FULL, None);
+        assert!(
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::CaptionOverlay { .. })),
+            "caption resolves at the inner timebase, not the outer tick"
+        );
+    }
+
+    // ---- Task 6: one Info per nest on inner/outer rate mismatch (38 §2.2) ----
+
+    fn nest_project(host_rate: FrameRate, inner_rate: FrameRate) -> (TimelineProject, SequenceId) {
+        let mut project = TimelineProject::new();
+        let mut inner = Sequence::new("inner", inner_rate, 4, 4);
+        let inner_id = inner.id;
+        let mut v = Track::new(TrackKind::Video, "V1");
+        v.clips.push(solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            Tick::from_seconds(5).0,
+        ));
+        inner.video_tracks.push(v);
+        project.insert_sequence(inner);
+
+        let mut outer = Sequence::new("outer", host_rate, 4, 4);
+        let outer_id = outer.id;
+        let mut ot = Track::new(TrackKind::Video, "V1");
+        ot.clips.push(Clip::new(
+            ClipSource::NestedSequence { sequence: inner_id },
+            Tick(0),
+            Tick::from_seconds(2),
+        ));
+        outer.video_tracks.push(ot);
+        project.insert_sequence(outer);
+        (project, outer_id)
+    }
+
+    #[test]
+    fn nest_at_different_rate_emits_one_info() {
+        let (project, outer_id) = nest_project(FrameRate::FPS_24, FrameRate::FPS_30);
+        let out = compile(&project, outer_id, 0, Tick(0), Quality::FULL, None);
+        let coded: Vec<_> = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == Some(CompileCode::FrameRateConformed))
+            .collect();
+        assert_eq!(coded.len(), 1, "exactly one rate-mismatch Info");
+        assert_eq!(coded[0].severity, DiagSeverity::Info);
+        assert!(coded[0].clip.is_some(), "the nest clip is the subject");
+
+        // §2.2: sampling only — the rendered graph is unchanged vs a matching rate.
+        let (matched, matched_id) = nest_project(FrameRate::FPS_24, FrameRate::FPS_24);
+        let mout = compile(&matched, matched_id, 0, Tick(0), Quality::FULL, None);
+        assert_eq!(
+            out.graph.nodes.len(),
+            mout.graph.nodes.len(),
+            "rate mismatch changes diagnostics, not the render"
+        );
+    }
+
+    #[test]
+    fn nest_at_matching_rate_emits_nothing() {
+        let (project, outer_id) = nest_project(FrameRate::FPS_30, FrameRate::FPS_30);
+        let out = compile(&project, outer_id, 0, Tick(0), Quality::FULL, None);
+        assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
+    }
+
+    #[test]
+    fn two_nests_at_different_rates_emit_two() {
+        // Two nest clips (distinct ids) referencing FPS_30 inners in a FPS_24 host.
+        let mut project = TimelineProject::new();
+        let mk_inner = |project: &mut TimelineProject| -> SequenceId {
+            let mut inner = Sequence::new("inner", FrameRate::FPS_30, 4, 4);
+            let id = inner.id;
+            let mut v = Track::new(TrackKind::Video, "V1");
+            v.clips.push(solid_clip(
+                Color {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                0,
+                Tick::from_seconds(5).0,
+            ));
+            inner.video_tracks.push(v);
+            project.insert_sequence(inner);
+            id
+        };
+        let inner_a = mk_inner(&mut project);
+        let inner_b = mk_inner(&mut project);
+
+        let mut outer = Sequence::new("outer", FrameRate::FPS_24, 4, 4);
+        let outer_id = outer.id;
+        for inner in [inner_a, inner_b] {
+            let mut t = Track::new(TrackKind::Video, "V");
+            t.clips.push(Clip::new(
+                ClipSource::NestedSequence { sequence: inner },
+                Tick(0),
+                Tick::from_seconds(2),
+            ));
+            outer.video_tracks.push(t);
+        }
+        project.insert_sequence(outer);
+
+        let out = compile(&project, outer_id, 0, Tick(0), Quality::FULL, None);
+        assert_eq!(
+            count_code(&out, CompileCode::FrameRateConformed),
+            2,
+            "distinct nest clips each get their own Info"
+        );
+    }
+
+    // ---- Task 7: shortened inner sequence holds the last frame + Warning (38 §2.4) ----
+
+    /// Build outer+inner where the inner runs red [0,1s), green [1s,2s) and the
+    /// nest clip references far past the inner's 2s content.
+    fn shortened_nest() -> (TimelineProject, SequenceId, ClipId) {
+        let mut project = TimelineProject::new();
+        let mut inner = Sequence::new("inner", FrameRate::FPS_30, 4, 4);
+        let inner_id = inner.id;
+        let mut v = Track::new(TrackKind::Video, "V1");
+        v.clips.push(solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            Tick::from_seconds(1).0,
+        ));
+        v.clips.push(solid_clip(
+            Color {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Tick::from_seconds(1).0,
+            Tick::from_seconds(1).0,
+        ));
+        inner.video_tracks.push(v);
+        project.insert_sequence(inner);
+
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 4, 4);
+        let outer_id = outer.id;
+        let mut ot = Track::new(TrackKind::Video, "V1");
+        let nest = Clip::new(
+            ClipSource::NestedSequence { sequence: inner_id },
+            Tick(0),
+            Tick::from_seconds(10),
+        );
+        let nest_id = nest.id;
+        ot.clips.push(nest);
+        outer.video_tracks.push(ot);
+        project.insert_sequence(outer);
+        (project, outer_id, nest_id)
+    }
+
+    fn render4(graph: &FrameGraph) -> [f32; 4] {
+        let img = crate::graph::eval_cpu::evaluate(
+            graph,
+            (4, 4),
+            &mut crate::graph::eval_cpu::EmptyProvider,
+        );
+        img.pixels[0]
+    }
+
+    #[test]
+    fn nest_past_inner_end_holds_last_frame() {
+        let (project, outer_id, _nest) = shortened_nest();
+        // Two ticks well past the inner's 2s content: both hold the same last frame.
+        let a = compile(&project, outer_id, 0, Tick::from_seconds(3), Quality::FULL, None);
+        let b = compile(&project, outer_id, 0, Tick::from_seconds(4), Quality::FULL, None);
+        assert_eq!(
+            output_hash(&a.graph),
+            output_hash(&b.graph),
+            "the held frame is content-hash-stable across the tail"
+        );
+        // The held frame is the inner's LAST rendered frame — green, not red or
+        // transparent (which is what a raw past-the-end lookup would give).
+        let held = render4(&a.graph);
+        assert!(held[1] > 0.9 && held[0] < 0.1, "held last frame is green: {held:?}");
+
+        // A tick inside the inner content renders the earlier (red) frame — proving
+        // the tail hold is not simply the whole nest reading one colour.
+        let mid = compile(&project, outer_id, 0, Tick(Tick::from_seconds(1).0 / 2), Quality::FULL, None);
+        let midpx = render4(&mid.graph);
+        assert!(midpx[0] > 0.9 && midpx[1] < 0.1, "mid content is red: {midpx:?}");
+    }
+
+    #[test]
+    fn nest_past_inner_end_warns_once() {
+        let (project, outer_id, nest_id) = shortened_nest();
+        let out = compile(&project, outer_id, 0, Tick::from_seconds(3), Quality::FULL, None);
+        let coded: Vec<_> = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == Some(CompileCode::NestedSequenceShortened))
+            .collect();
+        assert_eq!(coded.len(), 1, "exactly one shortened Warning");
+        assert_eq!(coded[0].severity, DiagSeverity::Warning);
+        assert_eq!(coded[0].clip, Some(nest_id), "warning names the nest clip");
+    }
+
+    #[test]
+    fn nest_shortening_does_not_change_layout() {
+        let (project, outer_id, nest_id) = shortened_nest();
+        let before = project
+            .sequences
+            .get(&outer_id)
+            .unwrap()
+            .video_tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == nest_id)
+            .map(|c| (c.start, c.duration))
+            .unwrap();
+        let _ = compile(&project, outer_id, 0, Tick::from_seconds(3), Quality::FULL, None);
+        let after = project
+            .sequences
+            .get(&outer_id)
+            .unwrap()
+            .video_tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == nest_id)
+            .map(|c| (c.start, c.duration))
+            .unwrap();
+        assert_eq!(before, after, "compile never mutates clip layout");
+    }
+
+    // ---- Task 8: Media::FrameRateConformed per mismatched-rate clip (38 §3.5) ----
+
+    fn asset_clip_seq(seq_rate: FrameRate, asset: AssetId) -> (TimelineProject, SequenceId) {
+        // The asset lives outside; caller inserts. Here we just wire the clip.
+        let mut project = TimelineProject::new();
+        let seq = Sequence::new("seq", seq_rate, 320, 180);
+        let id = seq.id;
+        project.insert_sequence(seq);
+        let _ = asset;
+        (project, id)
+    }
+
+    /// A 30fps source on a 24fps sequence emits exactly one conform Info naming the
+    /// clip.
+    #[test]
+    fn conform_info_emitted_once_for_mismatched_source_rate() {
+        let (mut project, seq_id) = asset_clip_seq(FrameRate::FPS_24, AssetId::new());
+        let aid = video_asset_rate(&mut project, FrameRate::FPS_30);
+        let tk = add_video_track(&mut project, seq_id);
+        let clip = Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4));
+        let cid = clip.id;
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(clip);
+        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        let coded: Vec<_> = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == Some(CompileCode::FrameRateConformed))
+            .collect();
+        assert_eq!(coded.len(), 1);
+        assert_eq!(coded[0].severity, DiagSeverity::Info);
+        assert_eq!(coded[0].clip, Some(cid));
+    }
+
+    #[test]
+    fn no_conform_info_for_matching_rate() {
+        let (mut project, seq_id) = asset_clip_seq(FrameRate::FPS_24, AssetId::new());
+        let aid = video_asset_rate(&mut project, FrameRate::FPS_24);
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
+        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
+    }
+
+    #[test]
+    fn no_conform_info_for_equivalent_rational_rate() {
+        // 60/2 is 30/1 as a rational — not a mismatch on a 30fps sequence.
+        let (mut project, seq_id) = asset_clip_seq(FrameRate::FPS_30, AssetId::new());
+        let aid = video_asset_rate(&mut project, FrameRate::new(60, 2));
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
+        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
+    }
+
+    #[test]
+    fn no_conform_info_without_probe() {
+        let (mut project, seq_id) = asset_clip_seq(FrameRate::FPS_24, AssetId::new());
+        // Bare asset: no probe ⇒ unknown rate ⇒ no diagnostic.
+        let asset = MediaAsset::from_file(AssetKind::Video, "/tmp/bare.mp4");
+        let aid = asset.id;
+        project.media.insert(asset);
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
+        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
+    }
+
+    /// Acceptance 10: conform is identical in preview and export — the
+    /// `DecodeVideo` `src_time` is the same, only `proxy` differs.
+    #[test]
+    fn conform_src_time_identical_preview_vs_full() {
+        let (mut project, seq_id) = asset_clip_seq(FrameRate::FPS_24, AssetId::new());
+        let aid = video_asset_rate(&mut project, FrameRate::FPS_30);
+        let tk = add_video_track(&mut project, seq_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
+        let decode = |q: Quality| -> (Tick, bool) {
+            compile(&project, seq_id, 0, Tick::from_seconds(1), q, None)
+                .graph
+                .nodes
+                .iter()
+                .find_map(|n| match &n.op {
+                    IrOp::DecodeVideo { src_time, proxy, .. } => Some((*src_time, *proxy)),
+                    _ => None,
+                })
+                .expect("decode node present")
+        };
+        let (t_prev, p_prev) = decode(Quality::PREVIEW);
+        let (t_full, p_full) = decode(Quality::FULL);
+        assert_eq!(t_prev, t_full, "same src_time in preview and export");
+        assert!(p_prev && !p_full, "they differ only in proxy");
+    }
+
+    // ---- Task 9: identical nest subtrees dedup to one node (38 §2.5) ----
+
+    #[test]
+    fn ten_identical_nests_share_one_subtree() {
+        let mut project = TimelineProject::new();
+        let mut inner = Sequence::new("inner", FrameRate::FPS_30, 4, 4);
+        let inner_id = inner.id;
+        let mut v = Track::new(TrackKind::Video, "V1");
+        v.clips.push(solid_clip(
+            Color {
+                r: 0.3,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            },
+            0,
+            Tick::from_seconds(5).0,
+        ));
+        inner.video_tracks.push(v);
+        project.insert_sequence(inner);
+
+        // Ten video tracks, each one identical nest clip (same source_in, start).
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 4, 4);
+        let outer_id = outer.id;
+        for _ in 0..10 {
+            let mut t = Track::new(TrackKind::Video, "V");
+            t.clips.push(Clip::new(
+                ClipSource::NestedSequence { sequence: inner_id },
+                Tick(0),
+                Tick::from_seconds(2),
+            ));
+            outer.video_tracks.push(t);
+        }
+        project.insert_sequence(outer);
+
+        let out = compile(&project, outer_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        // The one inner source evaluates ONCE, not ten times.
+        let sources = out
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, IrOp::SolidColor { .. } | IrOp::DecodeVideo { .. }))
+            .count();
+        assert_eq!(sources, 1, "the shared inner source is one node, got {sources}");
+        // Every fold Merge shares the same deduped nest subtree as its top input.
+        let tops: Vec<IrNodeId> = out
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.op {
+                IrOp::Merge { .. } => Some(n.inputs[0].0),
+                _ => None,
+            })
+            .collect();
+        assert!(!tops.is_empty(), "the fold produced merges");
+        assert!(
+            tops.iter().all(|&t| t == tops[0]),
+            "all fold merges share one nest subtree top"
+        );
+    }
+
+    /// Companion negative: nests at different source times do NOT share — proving
+    /// the dedup assertion above measures something real.
+    #[test]
+    fn nests_at_different_source_times_do_not_share() {
+        let mut project = TimelineProject::new();
+        // Inner is time-varying: red [0,1s), green [1s,2s).
+        let mut inner = Sequence::new("inner", FrameRate::FPS_30, 4, 4);
+        let inner_id = inner.id;
+        let mut v = Track::new(TrackKind::Video, "V1");
+        v.clips.push(solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            Tick::from_seconds(1).0,
+        ));
+        v.clips.push(solid_clip(
+            Color {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Tick::from_seconds(1).0,
+            Tick::from_seconds(1).0,
+        ));
+        inner.video_tracks.push(v);
+        project.insert_sequence(inner);
+
+        let mut outer = Sequence::new("outer", FrameRate::FPS_30, 4, 4);
+        let outer_id = outer.id;
+        // Nest A samples the red region (source_in 0); nest B samples green
+        // (source_in 1s) — distinct inner frames.
+        for source_in in [Tick(0), Tick::from_seconds(1)] {
+            let mut t = Track::new(TrackKind::Video, "V");
+            let mut c = Clip::new(
+                ClipSource::NestedSequence { sequence: inner_id },
+                Tick(0),
+                Tick::from_seconds(1),
+            );
+            c.source_in = source_in;
+            t.clips.push(c);
+            outer.video_tracks.push(t);
+        }
+        project.insert_sequence(outer);
+
+        let out = compile(&project, outer_id, 0, Tick(0), Quality::FULL, None);
+        let solids = out
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
+            .count();
+        assert_eq!(solids, 2, "different source times ⇒ two distinct inner sources");
     }
 }

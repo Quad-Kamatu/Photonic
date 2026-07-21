@@ -17,4 +17,6 @@ pub mod ops;
 pub mod panorama;
 pub mod panorama_gpu;
 
-pub use compile::{compile, CompileDiagnostic, CompiledFrame, Quality, ViewNodeOverride};
+pub use compile::{
+    compile, CompileCode, CompileDiagnostic, CompiledFrame, DiagSeverity, Quality, ViewNodeOverride,
+};
