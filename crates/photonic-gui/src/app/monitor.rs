@@ -1160,6 +1160,27 @@ impl PhotonicApp {
         // ── Buffering spinner + engine error surface (04 §3.3) ──────────────
         if let Some(bridge) = &self.engine {
             let status = bridge.status();
+
+            // Bridge the floating video export dialog to live engine state: it
+            // is a separate window with no engine handle, so publish the latest
+            // `EngineStatus::export` snapshot onto egui's per-frame store for it
+            // to read, and relay a Cancel it requested back to the engine.
+            use crate::panels::video::export_dialog::{export_cancel_id, export_status_id};
+            ctx.data_mut(|d| d.insert_temp(export_status_id(), status.export.clone()));
+            let cancel_id = export_cancel_id();
+            let cancel_requested = ctx.data_mut(|d| {
+                let v = d.get_temp::<bool>(cancel_id).unwrap_or(false);
+                if v {
+                    d.insert_temp(cancel_id, false);
+                }
+                v
+            });
+            if cancel_requested {
+                bridge
+                    .session()
+                    .send(photonic_video::EngineCmd::CancelExport);
+            }
+
             let tpf = active_frame_rate(doc).ticks_per_frame().0.max(1);
             let presented_time = bridge.presented_frame.map(|(t, _)| t);
             let buffering = !drew_frame && status.playing

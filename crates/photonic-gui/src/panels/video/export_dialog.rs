@@ -31,16 +31,35 @@ use photonic_video::export::presets::{
     self, AudioCodec, AudioEncodeSpec, Container, ExportPreset, FrameRatePolicy, QualityMode,
     ResolutionSpec, VideoCodec, VideoEncodeSpec,
 };
+use photonic_video::session::ExportProgressSnapshot;
 use photonic_video::ExportJob;
+use std::time::Duration;
 
 use super::VideoPanelUi;
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
+const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x56, 0xCF); // `primary`
 const ERROR: Color32 = Color32::from_rgb(0xF8, 0x71, 0x71); // `error`
 const ERROR_BG: Color32 = Color32::from_rgba_premultiplied(0x3A, 0x14, 0x14, 0x60);
 
 fn state_id() -> egui::Id {
     egui::Id::new("video_export_dialog_state")
+}
+
+/// Shared egui-store key on which `app/monitor.rs` publishes the live
+/// [`EngineStatus::export`](photonic_video::EngineStatus) snapshot each frame
+/// for this floating dialog to read. The dialog is a separate window with no
+/// engine handle of its own, so the monitor's per-frame status poll bridges
+/// the two through egui's per-frame data store (05 §3.8 step 8).
+pub(crate) fn export_status_id() -> egui::Id {
+    egui::Id::new("video_export_status")
+}
+
+/// Shared egui-store key the dialog sets to `true` to request cancellation;
+/// `app/monitor.rs` drains it and relays `EngineCmd::CancelExport` to the
+/// engine (the dialog cannot reach the `EngineSession` directly).
+pub(crate) fn export_cancel_id() -> egui::Id {
+    egui::Id::new("video_export_cancel_req")
 }
 
 #[derive(Clone)]
@@ -63,9 +82,148 @@ struct DialogState {
 
 #[derive(Clone)]
 enum JobState {
-    /// The dialog sent `EngineCmd::Export` this frame-ish; `EngineStatus` is
-    /// polled live by the caller each redraw (no snapshot stored here).
+    /// The dialog sent `EngineCmd::Export`; per-frame progress is read live
+    /// off the [`export_status_id`] blackboard each redraw. `output` is kept
+    /// so the success view can show where the file landed (the snapshot does
+    /// not carry the path).
+    Submitted { output: std::path::PathBuf },
+    /// The user pressed Cancel; `app/monitor.rs` has been asked (via
+    /// [`export_cancel_id`]) to relay `EngineCmd::CancelExport`. Distinguishes
+    /// a user cancel from a clean finish once the engine flips `done`.
+    CancelRequested { output: std::path::PathBuf },
+}
+
+impl JobState {
+    fn output(&self) -> &std::path::Path {
+        match self {
+            JobState::Submitted { output } | JobState::CancelRequested { output } => output,
+        }
+    }
+}
+
+/// The phase the export-progress UI is in, derived purely from the live
+/// [`ExportProgressSnapshot`] plus whether the user asked to cancel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExportPhase {
+    /// `EngineCmd::Export` sent, but the engine has not published a snapshot
+    /// yet (or the blackboard was just cleared for a fresh launch).
     Submitted,
+    /// A running snapshot (`!done && error.is_none()`).
+    InProgress,
+    /// `done && error.is_none()` after a clean finish.
+    Done,
+    /// `done` reached while a cancel was outstanding.
+    Cancelled,
+    /// `error.is_some()` — the encode failed.
+    Failed,
+}
+
+/// Pure, egui-free view-model for [`draw_progress`], so the mapping is unit
+/// testable without an `egui::Ui` (05 §3.8 step 8). `draw_progress` renders
+/// exactly this.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ExportView {
+    pub phase: ExportPhase,
+    /// Fractional progress `0.0..=1.0` when it is known; `None` when
+    /// indeterminate (preparing / no frame total yet / terminal-by-text).
+    pub percent: Option<f32>,
+    pub frame: u64,
+    pub total: u64,
+    pub fps: f32,
+    pub eta: Duration,
+    /// The failure message on [`ExportPhase::Failed`], else `None`.
+    pub error: Option<String>,
+    /// Short human phase label ("Rendering", "Export complete", …).
+    pub label: String,
+    /// Whether a Cancel button should be live (only while genuinely running
+    /// and not already requested).
+    pub cancel_enabled: bool,
+}
+
+/// Map the live export snapshot (and whether cancel was requested) to the
+/// [`ExportView`] the progress UI renders. Pure — the honest unit-test seam.
+pub(crate) fn export_view_model(
+    snapshot: Option<&ExportProgressSnapshot>,
+    cancel_requested: bool,
+) -> ExportView {
+    match snapshot {
+        None => ExportView {
+            phase: ExportPhase::Submitted,
+            percent: None,
+            frame: 0,
+            total: 0,
+            fps: 0.0,
+            eta: Duration::ZERO,
+            error: None,
+            label: "Starting export…".to_string(),
+            cancel_enabled: !cancel_requested,
+        },
+        Some(s) if s.error.is_some() => ExportView {
+            phase: ExportPhase::Failed,
+            percent: None,
+            frame: s.frame,
+            total: s.total,
+            fps: 0.0,
+            eta: Duration::ZERO,
+            error: s.error.clone(),
+            label: "Export failed".to_string(),
+            cancel_enabled: false,
+        },
+        Some(s) if s.done && cancel_requested => ExportView {
+            phase: ExportPhase::Cancelled,
+            percent: None,
+            frame: s.frame,
+            total: s.total,
+            fps: 0.0,
+            eta: Duration::ZERO,
+            error: None,
+            label: "Export cancelled".to_string(),
+            cancel_enabled: false,
+        },
+        Some(s) if s.done => ExportView {
+            phase: ExportPhase::Done,
+            percent: Some(1.0),
+            frame: s.frame,
+            total: s.total,
+            fps: 0.0,
+            eta: Duration::ZERO,
+            error: None,
+            label: "Export complete".to_string(),
+            cancel_enabled: false,
+        },
+        Some(s) => {
+            let percent =
+                (s.total > 0).then(|| (s.frame as f32 / s.total as f32).clamp(0.0, 1.0));
+            let label = if cancel_requested {
+                "Cancelling…"
+            } else if s.total == 0 {
+                "Preparing…"
+            } else {
+                "Rendering"
+            };
+            ExportView {
+                phase: ExportPhase::InProgress,
+                percent,
+                frame: s.frame,
+                total: s.total,
+                fps: s.fps,
+                eta: s.eta,
+                error: None,
+                label: label.to_string(),
+                cancel_enabled: !cancel_requested,
+            }
+        }
+    }
+}
+
+/// `mm:ss` ETA, or an em-dash when unknown (zero).
+fn fmt_eta(eta: Duration) -> String {
+    let secs = eta.as_secs();
+    if secs == 0 {
+        "—".to_string()
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
 }
 
 impl DialogState {
@@ -243,7 +401,15 @@ pub(crate) fn draw_export_dialog(
                 {
                     if let Some(job) = build_export_job(doc, seq_id, &state) {
                         *vid.last_export_preset = state.preset.name.clone();
-                        state.job = Some(JobState::Submitted);
+                        state.job = Some(JobState::Submitted {
+                            output: job.output.clone(),
+                        });
+                        // Clear any prior export's terminal snapshot so the
+                        // progress view doesn't flash a stale "complete" before
+                        // the engine publishes this job's first snapshot.
+                        ctx.data_mut(|d| {
+                            d.insert_temp(export_status_id(), Option::<ExportProgressSnapshot>::None)
+                        });
                         launch = Some(job);
                     }
                 }
@@ -291,24 +457,91 @@ pub(crate) fn draw_export_dialog(
 }
 
 fn draw_progress(ui: &mut egui::Ui, state: &mut DialogState) {
-    // 05 §3.8 step 8: non-modal progress with frame/total/fps/ETA/cancel.
-    // `EngineCmd::Export` is a documented P3 stub (surfaces on
-    // `EngineStatus::last_error`) — real per-frame progress is a follow-up
-    // once the engine's export job queue lands; this panel already shows the
-    // *shape* 05 requires and stays interactive (never a blocking modal).
-    ui.label(RichText::new("Export job submitted.").strong());
-    ui.label(
-        RichText::new(
-            "Progress reporting comes online once the engine's export job \
-             queue is wired (tracked seam — `photonic_video::session::EngineCmd::Export`); \
-             check the program monitor's status line for engine errors meanwhile.",
-        )
-        .color(MUTED)
-        .small(),
-    );
-    if ui.button("Close").clicked() {
-        state.job = None;
+    // 05 §3.8 step 8: non-modal progress with frame/total/fps/ETA/cancel, read
+    // live off the engine's `EngineStatus::export` snapshot that `app/monitor.
+    // rs` republishes onto the shared egui store each frame (this floating
+    // window has no engine handle of its own). Never a blocking modal.
+    let snapshot: Option<ExportProgressSnapshot> = ui
+        .ctx()
+        .data(|d| d.get_temp::<Option<ExportProgressSnapshot>>(export_status_id()))
+        .flatten();
+    let cancel_requested = matches!(state.job, Some(JobState::CancelRequested { .. }));
+    let view = export_view_model(snapshot.as_ref(), cancel_requested);
+
+    ui.label(RichText::new(view.label.as_str()).strong());
+
+    match view.phase {
+        ExportPhase::Submitted | ExportPhase::InProgress => {
+            let bar = match view.percent {
+                Some(p) => egui::ProgressBar::new(p).show_percentage(),
+                None => egui::ProgressBar::new(0.0).animate(true),
+            };
+            ui.add(bar);
+            ui.label(
+                RichText::new(format!(
+                    "Frame {}/{} · {:.1} fps · ETA {}",
+                    view.frame,
+                    view.total,
+                    view.fps,
+                    fmt_eta(view.eta)
+                ))
+                .color(MUTED)
+                .small(),
+            );
+            // Keep animating while the export runs.
+            ui.ctx().request_repaint();
+        }
+        ExportPhase::Done => {
+            ui.add(egui::ProgressBar::new(1.0));
+            ui.label(RichText::new("Export complete.").color(ACCENT));
+            if let Some(job) = &state.job {
+                ui.label(
+                    RichText::new(format!("Saved to {}", job.output().display()))
+                        .color(MUTED)
+                        .small(),
+                );
+            }
+        }
+        ExportPhase::Cancelled => {
+            ui.label(RichText::new("Export cancelled — no output written.").color(MUTED));
+        }
+        ExportPhase::Failed => {
+            egui::Frame::none()
+                .fill(ERROR_BG)
+                .inner_margin(egui::Margin::same(6.0))
+                .rounding(3.0)
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        ERROR,
+                        view.error.as_deref().unwrap_or("The export did not complete."),
+                    );
+                });
+        }
     }
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(view.cancel_enabled, egui::Button::new("Cancel"))
+            .clicked()
+        {
+            // Preserve the output path across the phase change and ask the
+            // monitor to relay `EngineCmd::CancelExport` to the engine.
+            if let Some(JobState::Submitted { output }) = &state.job {
+                let output = output.clone();
+                state.job = Some(JobState::CancelRequested { output });
+            }
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(export_cancel_id(), true));
+        }
+        let terminal = matches!(
+            view.phase,
+            ExportPhase::Done | ExportPhase::Cancelled | ExportPhase::Failed
+        );
+        if terminal && ui.button("Close").clicked() {
+            state.job = None;
+        }
+    });
 }
 
 fn draw_preset_picker(ui: &mut egui::Ui, state: &mut DialogState) {
@@ -920,5 +1153,95 @@ mod tests {
             .unwrap();
         let out = default_output_path(&p, "Sequence 1");
         assert!(out.to_string_lossy().ends_with(".gif"));
+    }
+
+    fn snap(frame: u64, total: u64, done: bool, error: Option<&str>) -> ExportProgressSnapshot {
+        ExportProgressSnapshot {
+            job: 1,
+            frame,
+            total,
+            fps: 24.0,
+            eta: Duration::from_secs(75),
+            done,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn view_model_submitted_when_no_snapshot_yet() {
+        let v = export_view_model(None, false);
+        assert_eq!(v.phase, ExportPhase::Submitted);
+        assert_eq!(v.percent, None);
+        assert!(v.cancel_enabled);
+    }
+
+    #[test]
+    fn view_model_in_progress_maps_percent_and_enables_cancel() {
+        let s = snap(30, 120, false, None);
+        let v = export_view_model(Some(&s), false);
+        assert_eq!(v.phase, ExportPhase::InProgress);
+        assert_eq!(v.percent, Some(0.25));
+        assert_eq!(v.frame, 30);
+        assert_eq!(v.total, 120);
+        assert_eq!(v.fps, 24.0);
+        assert!(v.cancel_enabled);
+        assert_eq!(v.label, "Rendering");
+    }
+
+    #[test]
+    fn view_model_preparing_when_total_unknown() {
+        let s = snap(0, 0, false, None);
+        let v = export_view_model(Some(&s), false);
+        assert_eq!(v.phase, ExportPhase::InProgress);
+        assert_eq!(v.percent, None); // indeterminate until a frame total exists
+        assert_eq!(v.label, "Preparing…");
+    }
+
+    #[test]
+    fn view_model_done_is_full_and_disables_cancel() {
+        let s = snap(120, 120, true, None);
+        let v = export_view_model(Some(&s), false);
+        assert_eq!(v.phase, ExportPhase::Done);
+        assert_eq!(v.percent, Some(1.0));
+        assert!(!v.cancel_enabled);
+    }
+
+    #[test]
+    fn view_model_error_takes_priority_and_carries_message() {
+        // Even a `done` snapshot with an error is a failure, not a success.
+        let s = snap(40, 120, true, Some("encoder exited 1"));
+        let v = export_view_model(Some(&s), false);
+        assert_eq!(v.phase, ExportPhase::Failed);
+        assert_eq!(v.error.as_deref(), Some("encoder exited 1"));
+        assert!(!v.cancel_enabled);
+    }
+
+    #[test]
+    fn view_model_cancelled_distinguished_from_clean_done() {
+        // A clean `done` (no error) reached while cancel was requested reads as
+        // Cancelled, not Done — the one distinction the snapshot can't make on
+        // its own (cancel and success both land `done && error.is_none()`).
+        let s = snap(40, 120, true, None);
+        assert_eq!(export_view_model(Some(&s), false).phase, ExportPhase::Done);
+        assert_eq!(
+            export_view_model(Some(&s), true).phase,
+            ExportPhase::Cancelled
+        );
+    }
+
+    #[test]
+    fn view_model_cancel_pending_relabels_and_locks_button() {
+        let s = snap(40, 120, false, None);
+        let v = export_view_model(Some(&s), true);
+        assert_eq!(v.phase, ExportPhase::InProgress);
+        assert_eq!(v.label, "Cancelling…");
+        assert!(!v.cancel_enabled); // already requested — no double-send
+    }
+
+    #[test]
+    fn eta_formats_as_mm_ss_or_dash() {
+        assert_eq!(fmt_eta(Duration::from_secs(75)), "1:15");
+        assert_eq!(fmt_eta(Duration::from_secs(9)), "0:09");
+        assert_eq!(fmt_eta(Duration::ZERO), "—");
     }
 }
