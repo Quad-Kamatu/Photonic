@@ -15,7 +15,7 @@ Scope per 00 §5: the MCP tool surface for every video domain (media, sequence, 
    { "at_ticks": 352800000, "at_tc": "00:00:00;15", "at_seconds": 0.5 }
    ```
    - `at_ticks` (i64): exact, used as-is.
-   - `at_tc` (string, `HH:MM:SS:FF` or `HH:MM:SS;FF` for drop-frame): parsed via the target sequence's `FrameRate::ticks_per_frame` (01 §1); requires a resolvable sequence context (arg validation error `MissingSequenceContext` if the tool has no sequence to interpret against — e.g. a bare asset-level tool).
+   - `at_tc` (string, `HH:MM:SS:FF`): parsed via the target sequence's `FrameRate::ticks_per_frame` (01 §1). **Drop-frame is not implemented** — `parse_timecode` currently accepts `;` but treats it identically to `:`, so a `;` separator does *not* select drop-frame numbering and 29.97 timecode drifts ≈3.6 s/hour. Closing this is [26 K-A12](26-kdenlive-mlt-parity.md#k-a12--timecode-as-a-first-class-concept), and it is a behaviour change to a shipped contract; requires a resolvable sequence context (arg validation error `MissingSequenceContext` if the tool has no sequence to interpret against — e.g. a bare asset-level tool).
    - `at_seconds` (f64): converted `round(seconds * TICKS_PER_SECOND)`; documented as "convenience, sub-tick error possible, not authoritative."
    - If none provided and the field is required → standard `serde` "missing field" error. Docs on every arg struct state precedence per repo comment-doc convention (see `AdjustColorsArgs` field-doc style, `protocol/args/c.rs:524`).
 4. **One command per mutating call.** No tool issues more than one `execute_discrete`/`Command::Batch` per invocation — batch variants (§3) exist precisely so agents don't need N calls + N undo steps for one logical edit (mirrors `Command::Batch` used today for multi-node edits, `doc_data.rs:206`).
@@ -52,9 +52,15 @@ pub struct AppState {
 
 **Single-document assumption holds.** `AppState.document` is one `Arc<Mutex<Document>>` today (`server.rs:63`) — one open project per running Photonic process, matching the existing single-window app model. Video introduces no multi-document concept; `NestedSequence` (01 §5) nests *within* one `Document`'s `TimelineProject`, never across processes. `EngineSession` is therefore also a singleton per `AppState`, not a pool — no `session_id` arg anywhere in §3's catalog.
 
+> **Correction ([39 §3](39-document-lifecycle.md#3-document-identity-a-4)).** [04 §1](04-ui-mode-timeline.md) makes timeline state **per-tab**, and a user may have a vector-only tab and a video-project tab open at once. So the assumption above is not that there is one document — it is that MCP binds to **the active tab**, and that was never stated. With two tabs open, every video tool silently targets whichever document `AppState` holds, and CAP-019 parity becomes unverifiable.
+>
+> Normative resolution: **MCP binds to the active tab.** Add read-only **`get_active_document`** (id, name, path) so an agent can check what it is about to edit, and **`set_active_document { id }`** so multi-project automation is possible without threading an id through 110 tools. Every tool accepts an **optional** `document_id`; when present it must match the active document, else `DocumentMismatch`. `EngineSession` follows the active tab and playback stops on the outgoing one. CAP-019 parity tests must bind explicitly and assert `get_active_document` before acting.
+
 ---
 
-## 3. Tool catalog (89 tools)
+## 3. Tool catalog
+
+> **The catalogue below is illustrative, not authoritative.** The shipped surface is **110** video tool handlers, and this document has historically carried three different counts. Per [27 A-10](27-spec-audit.md#a-10--p2--the-mcp-tool-count-is-stated-four-ways-and-matches-nothing), the fix is to **generate** these tables from `schema_gen.rs::tool_list()` under the existing doc-drift CI gate rather than hand-maintain a count. Until that lands, treat `docs/mcp-api.md` as the source of truth.
 
 Mutating tools always: validate → call `timeline/ops.rs` fn → `execute_discrete` → `ToolOutput::mutating`. Readonly tools: `ToolOutput::readonly`. "Job" = async pattern, §6.
 
@@ -114,7 +120,7 @@ All nine are single-command mutating calls; snapping (to clip edges/playhead/mar
 | Tool | Purpose | Key args | M/R |
 |---|---|---|---|
 | `set_clip_prop` | Universal property setter — name, `transform` (pos/scale/rotation/anchor/opacity), `reframe` override for a format index, `enabled`, `speed` (see below) — mirrors `SetClipProp{old,new}` (01 §10), same shape as existing `update_node` | `clip_id`, `path` (PropPath, 01 §6.2), `value` | mutating |
-| `set_clip_speed` | `SpeedMap::Constant` only in v1 (01 §5.1); ramps rejected with `NotSupportedV1` | `clip_id`, `ratio: {num,den}` | mutating |
+| `set_clip_speed` | Accepts `SpeedMap::Constant` **and** `SpeedMap::Keyframed` ramps (01 §5.1) — the handler builds keyed ramps and is covered by `mcp_parity_round2.rs`. An earlier restriction to constants was never shipped | `clip_id`, `ratio: {num,den}` \| `keys` | mutating |
 | `set_transition` | Add/replace/remove (`null`) `transition_in`/`transition_out` | `clip_id`, `edge: in\|out`, `transition: {kind,duration_*,params}\|null` | mutating |
 | `list_clips` | List clips on a track or whole sequence, filterable by time range | `track_id?`, `sequence_id?`, `range?` | readonly |
 | `get_clip` | Full clip dump incl. `AnimProps` tracks, effects, grade ref, composition ref | `clip_id` | readonly |
@@ -219,7 +225,7 @@ All nine are single-command mutating calls; snapping (to clip edges/playhead/mar
 | `save_export_preset` | Create/overwrite a custom preset (app-level config, 05 §3.6 — no document mutation, no undo step) | `name`, `preset` | readonly (config side effect) |
 | `delete_export_preset` | Remove a custom preset; built-ins are read-only, `NotSupportedV1`-style refusal | `name` | readonly (config side effect) |
 
-**Total: 89 tools** across 15 domains. The count is a design outcome, not a target: CAP-019 requires literal parity with 21 GUI capabilities across 4 structurally distinct subsystems (edit/grade/caption/graph), and consolidation already folds ~15 would-be singleton tools into `op`-field variants (`set_sequence_format`, `grade_preset`, `audio_fx`) and read-folds (`get_clip` absorbs `list_keyframes`, `get_graph` absorbs kind-listing where sensible). Recommendation: accept 89; do not force further merges — each remaining tool maps to exactly one `TimelineCmd`/`GraphCmd`/`CaptionCmd`/`AudioCmd` variant (01 §10), and collapsing further would require multiplexed `op` fields on structurally unrelated operations (anti-pattern: `set_clip_prop`-style generic setters only work because the target IS a flat property bag; edit ops are not).
+**Count:** 110 video tools ship today; the figure below (89) was this document's design-time estimate and is retained only for its rationale. The count is a design outcome, not a target: CAP-019 requires literal parity with 21 GUI capabilities across 4 structurally distinct subsystems (edit/grade/caption/graph), and consolidation already folds ~15 would-be singleton tools into `op`-field variants (`set_sequence_format`, `grade_preset`, `audio_fx`) and read-folds (`get_clip` absorbs `list_keyframes`, `get_graph` absorbs kind-listing where sensible). Recommendation: accept 89; do not force further merges — each remaining tool maps to exactly one `TimelineCmd`/`GraphCmd`/`CaptionCmd`/`AudioCmd` variant (01 §10), and collapsing further would require multiplexed `op` fields on structurally unrelated operations (anti-pattern: `set_clip_prop`-style generic setters only work because the target IS a flat property bag; edit ops are not).
 
 ---
 
@@ -368,7 +374,7 @@ ToolResult::error(format!("asset {asset_id} is offline"))
 ## 9. Test hooks (feeds 11-testing-phasing.md)
 
 1. **Acceptance-story scripts.** Each of AS-1/AS-2/AS-3 (00 §2) gets one MCP-only script (no GUI) exercising the exact tool sequence a user's pointer/keyboard actions would produce — e.g. AS-1: `import_media` ×2 → `insert_clip` ×N → `auto_caption` (job, poll `get_job_status`) → `set_caption_style` → `set_sequence_format` → `create_sequence`... → `set_grade` → `export_sequence` (job, poll). Output compared against a GUI-produced run of the same story on the golden-frame corpus (11) — this pair (script + GUI run, same story, output diff) **is** the CAP-019 test.
-2. **Doc-drift gate** (already CI-gated for the existing 376 tools) extends automatically once `schema_gen.rs` gains the 84 entries — no new CI wiring, just more surface under the existing gate.
+2. **Doc-drift gate** (already CI-gated for the existing 376 tools) already covers the video surface — `tool_list()` carries all 110 entries, so no new CI wiring is needed. **Outstanding:** generate §3's tables *from* `tool_list()`, and the error-code table in §8 from `DiagCode` ([36 §5](36-error-model.md#5-mcp-mapping)), so neither can drift again.
 3. **Schema/args/dispatch consistency test.** New: a test that for every entry in `tool_list()` under the video domain, (a) a corresponding `*Args` struct exists in `protocol/args/video.rs` deserializable from the schema's `example`/required-fields shape, and (b) a `dispatch_tool_inner` match arm exists calling it. Recommend a `#[test]` in `crates/photonic-mcp/tests/` iterating `tool_list()` names against a static registry macro (avoids relying on the schema JSON and dispatch match staying manually in sync — the existing 376-tool surface has no such test today; introducing one here is scoped to prevent the video domain's much larger single-PR landing from silently drifting mid-implementation across phases P3–P8).
 4. **Job-registry tests.** `get_job_status`/`cancel_job` against a fake instant-completing job (no real ffmpeg/network) to verify the registry/GC/checkpoint-on-completion wiring (§6) independent of engine correctness — these are MCP-layer tests, not engine tests (02/11 own engine correctness).
 5. **`render_frame_at` determinism check.** Two calls, same args, `output_format: raw_rgba16f` → byte-identical (02 §2 "pure function" property) — cheap regression guard runnable in every CI pass, independent of the full golden-frame corpus (11 owns the corpus; this is a fast smoke test for the property the corpus assumes).

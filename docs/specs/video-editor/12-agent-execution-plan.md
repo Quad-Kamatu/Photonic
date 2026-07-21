@@ -1,5 +1,15 @@
 # 12 — Agent Execution Plan: Model Tiers & Parallelism
 
+> **⚠ Superseded for status; retained for sequencing.** This document's P1–P8 wave plan describes a phase model that [ROADMAP.md](ROADMAP.md) §2/§3a replaced — the roadmap now tracks ~60 live `G-`/`D-`/`K-`/`E-`/`X-` items with per-item status, none of which map onto P1–P8. [27 SD-14](27-spec-audit.md#3-sd---spec-versus-code-drift) flagged the phase model as stale across 00, 11 and 12; **00 and 11 were corrected on 2026-07-20 and this document was not**, leaving it the last copy asserting the model straight-faced.
+>
+> What remains durable and should survive any rewrite: **§3's dependency spine** and **§4's choke-point file list** (`history/mod.rs`, `schema_gen.rs`, `dispatch.rs`, `panels/mod.rs`, `app/mod.rs` — all still real and still contended). What is stale: §5's wave schedule and its gates, several of which reference an acceptance harness that does not exist ([29 QA-1](29-qa-spec.md)).
+>
+> Three specific corrections, per the 2026-07-20 audit:
+> - **§3 spine items 0 and 0b are delivered.** `CommandHistory::revision`/`changes_since`/`affected_nodes` all ship; `graph/` holds a full evaluator, not the "types only, no evaluator body" stub this document plans for.
+> - **§6's rollback runbook is not executable.** It opens with "flip the `video` cargo feature off", and **no such feature exists** — the workspace's only `[features]` block is `photonic-core`'s `video-p1-contract`, and `photonic-gui` depends on `photonic-video` unconditionally. Either implement the kill-switch per [11 §7](11-testing-phasing.md) or rewrite the runbook around the revert-range step alone. Discovering step 1 is fiction during an incident is the worst possible time.
+> - **§6's coordination primitives name a task registry** (`TaskCreate`/`TaskList`) that this environment does not provide, while §1 declares the document governed by the `claude-subagent-protocol`, which specifies a Session Agent Registry instead. Pick one.
+
+
 How AI implementation agents build this module: which model tier each role runs on (Fable → Opus → Sonnet), what runs in parallel, what is strictly sequential, and the coordination rules. Governed by the workspace `claude-subagent-protocol` (spawn-once + SendMessage reuse, sonnet-first, permission-before-opus).
 
 ---

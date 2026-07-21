@@ -81,7 +81,7 @@ Per-kind param registry entries (`prop_registry.rs`, 01 §6.2), published like a
 
 - **Device I/O:** `cpal` (Apache-2.0). Recommended over `rodio` — rodio's mixer/source abstractions target playback convenience, not sample-accurate multi-source mixing with a custom real-time graph; cpal gives the raw callback the mixer worker needs.
 - **Mixer graph:** custom, built on cpal's callback. `kira` (MIT/Apache) considered as a middle option (it already has a scene-graph mixer + automation) — position: **don't adopt kira wholesale**, its clock/scene model doesn't match 01's `AnimProps`/`Tick` system or 02's master-clock-is-audio design; instead borrow its block-scheduling and parameter-smoothing approach as prior art. Custom graph stays a thin layer over cpal + `dsp/`.
-- **Resampling:** `rubato` (MIT) — high-quality sinc-based, handles both fixed source→device rate conversion and small drift correction (decode clock vs. device clock over long playback). Position: adopt for v1, no alternative under consideration — determinism (SS-3) needs one consistent resampler for both interactive and export paths.
+- **Resampling:** `rubato` (MIT) — **not yet a dependency**; it appears in no `Cargo.toml`, and `mixer.rs` currently requires sources to arrive already at mix rate, so non-1:1 clip speed has no resampling path. High-quality sinc-based, handles both fixed source→device rate conversion and small drift correction (decode clock vs. device clock over long playback). Position: adopt for v1, no alternative under consideration — determinism (SS-3) needs one consistent resampler for both interactive and export paths.
 - **Decode:** ffmpeg sidecar PCM pipe (02 §3, `-f f32le`), same process/pipe machinery as video — this covers ALL v1 audio decode. `symphonia` is deliberately **not** in the v1 stack: it is MPL-2.0, and the repo's `deny.toml` allows MPL only per-crate (the `option-ext` precedent), so adding it as-written fails `cargo deny` (SPEC constraint: CI gates green). If ever added (in-process decode for tiny UI cues), it requires its own per-crate `[[licenses.exceptions]]` entry in `deny.toml` mirroring `option-ext`. Same discipline applies to the proptest/insta/criterion dev-deps doc 11 recommends — each must pass `cargo deny` transitively at add-time.
 - **Loudness measurement:** own R128/BS.1770-4 implementation (§6.6) — no `ebur128`-binding crate (avoids a native C dependency under cargo-deny; algorithm is small and fully specified).
 
@@ -137,7 +137,7 @@ Applied at track level (`TrackAudioParams.pan`) after the fx chain, before the f
 | Track post-fx | after `fx_chain`, before fader | compressor/gate GR meters (§8) |
 | Track post-fader | after volume_db/pan, before mute gate | channel-strip meter (§8) |
 | Master post-fx | after master `fx_chain` (post-limiter) | limiter GR meter, clip-indicator LED |
-| Output | final, post `MasterBusParams.volume_db` | master strip meter + live LUFS readout (§6.6, §8) |
+| Output | final, post `MasterBusParams.volume_db` | master strip meter + live LUFS readout (§6.6, §8) — **not yet delivered**: `EngineBridge::master_level()` returns `None` and the mixer strip is synthetic. Closed by G-4 + [26 K-0.6](26-kdenlive-mlt-parity.md#8-k-0--foundations); contracts in [31](31-audio-architecture.md) |
 
 ---
 

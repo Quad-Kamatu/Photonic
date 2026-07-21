@@ -157,7 +157,7 @@ Raw word stream becomes a `Vec<CaptionCue>` using these parameters (defaults; ov
 
 | Param | Default | Meaning |
 |---|---|---|
-| `max_chars_per_line` | 42 | wrap width used later at render time (§5); also caps cue-building below |
+| `max_cells_per_line` | 84 (Latin) | **Half-width cells, not `char`s** — see the correction below. Per-language; caps cue-building only |
 | `max_lines_per_cue` | 2 | |
 | `min_cue_duration` | 0.8 s | cues shorter than this get merged forward |
 | `max_cue_duration` | 6.0 s | cues longer than this get split |
@@ -184,7 +184,13 @@ Pass 2 (repair):
 - Any cue with `duration > max_cue_duration` splits at the largest internal gap nearest its midpoint; if no gap exists, splits at the nearest sentence-ending word nearest the midpoint; if neither, splits at the midpoint word boundary.
 - Any cue with `duration < min_cue_duration` merges into the following cue (or the preceding one if it's the last cue), provided the merge doesn't exceed `max_chars_per_line * max_lines_per_cue`; otherwise left short (better than losing text).
 
-Line breaks are **not** stored on `CaptionCue` — only words and their timings persist (01 §7). Wrapping to `max_chars_per_line`/`max_lines_per_cue` is recomputed at render time from `style.max_width` and font metrics (§5.3), so a later font or width change re-flows automatically without touching stored data.
+Line breaks are **not** stored on `CaptionCue` — only words and their timings persist (01 §7).
+
+> **Corrections ([42](42-localization.md)).** Three, and the first is a live defect:
+>
+> 1. **The budget unit is wrong.** `max_chars_per_line: 42` counts Unicode scalars, so a Japanese cue wraps at 42 characters where the correct budget is **13** full-width. Replace with a **half-width cell** count over grapheme clusters, weighted by East Asian Width, skipping zero-advance combining marks — deterministic integer arithmetic, safe to persist, and exactly the model Netflix's own style guides use. Budgets and reading speeds are **per-language** ([42 §6.4](42-localization.md#64-per-language-budgets)); `CaptionTrack` gains `language: Option<String>` (additive, no format-version bump).
+> 2. **Render-time wrap does not consult this budget.** The claim that wrapping targets `max_chars_per_line` "and font metrics" is incorrect — the render path wraps on `style.max_width` alone, using shaped advances and UAX #14. **The character budget is authoring-time only**, and it must stay that way: cue boundaries are persisted, so they may never depend on font metrics, which vary per machine ([42 §6.1](42-localization.md#61-the-rule-that-decides-the-architecture)).
+> 3. **Tokenization and sentence detection are Latin-only.** `split_whitespace` collapses an entire Japanese cue to one token; the terminator set is ASCII `.!?`. Both are corrected in [42 §6.5](42-localization.md#65-tokenization-terminators-reveal).
 
 ### 3.6 Commit
 
@@ -232,7 +238,7 @@ Rendering reads `CaptionTrack`/`CaptionCue`/`CaptionWord`/`CaptionStyle` (01 §7
 
 For a word `w` with `[w.start, w.end)`:
 
-- **FillSweep** — before `w.start`: fully `inactive_color`. At or after `w.end`: fully `active_color` (already-spoken words stay active-colored — standard karaoke read). Within the window: sweep fraction `f = (t − w.start) / (w.end − w.start)`; glyph renders as a left-to-right linear split at `f`, `active_color` on the left portion, `inactive_color` on the right (v1 is LTR-only; RTL sweep direction is future work, not in scope here).
+- **FillSweep** — before `w.start`: fully `inactive_color`. At or after `w.end`: fully `active_color` (already-spoken words stay active-colored — standard karaoke read). Within the window: sweep fraction `f = (t − w.start) / (w.end − w.start)`; glyph renders as a left-to-right linear split at `f`, `active_color` on the left portion, `inactive_color` on the right (RTL: **FillSweep degrades to WordPop for RTL runs** — a binary colour swap is direction-agnostic, so it is correct rather than merely less wrong — and the substitution is reported once per cue. Paragraph direction is an explicit stored `TextDirection`, not inferred from the first strong character. See [42 §7.3](42-localization.md#73-refused-cleanly-in-v1)).
 - **WordPop** — binary swap, no interpolation: `t` in `[w.start, w.end)` → render with `active_color`; else `inactive_color`. `KaraokeStyle` (01 §7) carries no separate pop-scale field, so v1 "pop" is a color swap only — no size/weight change beyond what `CaptionStyle.weight` already sets.
 - **Underline** — same active-window test as WordPop, but instead of recoloring the glyph, draws an underline decoration (using the style's stroke, or `active_color` if no stroke set) beneath the active word only; all glyphs otherwise render at `fill`/`inactive_color`.
 
@@ -281,7 +287,7 @@ Applied independently of (and combinable with) karaoke coloring:
 
 ## 7. Interchange (SRT/VTT/ASS)
 
-Rust dependency: **subparse** (MIT/Apache-2.0) as the single parser covering SRT, VTT, and ASS structural parsing/writing — one permissive dependency instead of format-specific ones (satisfies the no-copyleft constraint). `libass` is explicitly **not** a dependency: rendering is our own `CaptionOverlay` IR path (§5), never libass compositing.
+Rust dependency: **subparse** was proposed (MIT/Apache-2.0) as a single parser for SRT/VTT/ASS, but is **not a dependency** — `captions/interchange/{srt,vtt,ass}.rs` are hand-written, which is also the precedent [34](34-interchange.md) follows. Retained here as rationale for the shape — one permissive dependency instead of format-specific ones (satisfies the no-copyleft constraint). `libass` is explicitly **not** a dependency: rendering is our own `CaptionOverlay` IR path (§5), never libass compositing.
 
 ### 7.1 Import mapping
 

@@ -8,7 +8,9 @@ This doc specs what users **author**; 02 owns how it's **evaluated**. Every `Gra
 
 ## 1. Scope & terminology recap
 
-Scope per 00 §5: node type catalog, per-clip + project graphs, egui-snarl UI, eval semantics, caching.
+Scope per 00 §5: node type catalog, per-clip + project graphs, node-editor UI, eval semantics, caching.
+
+> **Dependency status:** `egui-snarl` is **not** in any `Cargo.toml`, and `photonic-gui` has no node-editor module. References to it below describe an intended integration, not a shipped one.
 
 **Canonical terminology (used set-wide):** `NodeGraph` = the data structure (01 §8); **composition** = a per-clip graph; **project graph** = the project-level graph; "Fusion" appears only as an analogy to DaVinci Resolve's page, never as a type or feature name. The phrase "node flow" (this doc's title lineage) is retired from prose — title and filename stay for doc-map stability. **Viewer** = the node editor's composed-output inset (§6.1), distinct from the **program monitor** (04 §3), which always shows the timeline's true output.
 
@@ -53,7 +55,7 @@ Ports column format: `name:Type`. `Image` = `Rgba16Float` linear premultiplied (
 
 ### 2.0b Transition catalog v1 (clip-level, CAP-008)
 
-Transitions live on clips (01 §5 `Transition { kind, duration, params }`), not in graphs — cataloged here because this doc owns the effect/op registries. The engine renders a transition as a time-parameterized mix during the clip-overlap window (02 §2 step 1's "transition partner"). Named v1 set (PM review — the catalog must be explicit so P6 doesn't ship with one transition):
+Transitions live on clips (01 §5 `Transition { kind, duration, params }`), not in graphs — cataloged here because this doc owns the effect/op registries. The engine renders a transition as a time-parameterized mix over the transition window. **Clips do not overlap** — the compositor samples the outgoing clip past its out point into its source handle ([38 §1.1](38-sequence-semantics.md#11-the-apparent-contradiction-resolved)); the earlier "clip-overlap window" wording described a model that was never built and is unsatisfiable against [01 §4](01-data-model.md)'s non-overlap invariant. Named v1 set (PM review — the catalog must be explicit so P6 doesn't ship with one transition):
 
 | Kind | Params | Behavior over the overlap window t∈0..1 |
 |---|---|---|
@@ -63,7 +65,7 @@ Transitions live on clips (01 §5 `Transition { kind, duration, params }`), not 
 | `Wipe` | direction (L/R/U/D), softness | animated edge reveal |
 | `Push` | direction | a slides out while b slides in |
 
-Audio: clips overlapping under a video transition crossfade with `FadeShape::EqualPower` by default (09 §2). Additional kinds are additive registry entries post-v1.
+Audio: the crossfade window equals the video transition window by default, using the same borrowed handles and the same clamping, with `FadeShape::EqualPower` (09 §2). Boundary declick does **not** engage across a transition — the crossfade already provides continuity ([38 §1.4](38-sequence-semantics.md#14-audio)). Additional kinds are additive registry entries post-v1.
 
 ### 2.1 Post-v1 candidates (explicitly out of scope)
 

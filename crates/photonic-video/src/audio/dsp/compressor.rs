@@ -3,6 +3,7 @@
 
 use photonic_core::timeline::{EffectParams, PropValue};
 
+use super::AudioDiscontinuity;
 use super::envelope::{EnvelopeCoeffs, EnvelopeFollower};
 use super::{db_to_linear, lin_to_db, DspUnit};
 use crate::audio::CHANNELS;
@@ -98,6 +99,12 @@ impl Compressor {
 }
 
 impl DspUnit for Compressor {
+    fn reset(&mut self, _cause: AudioDiscontinuity) {
+        // Envelope-follower state only; gain reduction is derived per sample
+        // from it, so clearing the follower clears the whole detector.
+        self.envelope.reset();
+    }
+
     /// `sidechain`, when `Some`, redirects envelope detection to that buffer
     /// (09 §6.3's ducking mechanism: the sidechain track's post-fx-pre-fader
     /// signal) while gain reduction still applies to `block`'s own signal.

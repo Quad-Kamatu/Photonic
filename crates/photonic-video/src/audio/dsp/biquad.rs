@@ -143,6 +143,15 @@ pub struct BiquadState {
 }
 
 impl BiquadState {
+    /// Clear the two-sample input/output histories. Without this a filter
+    /// rings across a seek, playing back energy from before the jump.
+    pub fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+
     pub fn process(&mut self, c: &BiquadCoeffs, x: f64) -> f64 {
         let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
         self.x2 = self.x1;

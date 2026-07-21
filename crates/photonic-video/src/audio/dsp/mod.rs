@@ -66,6 +66,59 @@ pub trait DspUnit: Send {
     /// Only [`compressor::Compressor`] consults it; every other unit ignores
     /// it.
     fn process(&mut self, sample_rate: u32, block: &mut [f32], sidechain: Option<&[f32]>);
+
+    /// Discard all signal-dependent internal state.
+    ///
+    /// **Mandatory — there is deliberately no default implementation.** A unit
+    /// that silently inherits a no-op `reset` is precisely the bug this
+    /// contract exists to prevent: on the first seek after the fx chain is
+    /// wired, every envelope would smear across the discontinuity and every
+    /// biquad would ring, with nothing to indicate why (31 §2.2).
+    ///
+    /// Reset discards *state*, never *parameters* — a unit is immediately
+    /// usable afterwards with the same `set_params` configuration.
+    ///
+    /// Reset is **not** a fade. Where a discontinuity is audible, the mixer's
+    /// boundary declick handles it (31 §4); this only prevents stale state.
+    fn reset(&mut self, cause: AudioDiscontinuity);
+
+    /// Samples of delay this unit adds between input and output.
+    ///
+    /// The mixer sums these along each path and delay-compensates so every
+    /// path reaching the master bus stays aligned, and subtracts the total
+    /// when deriving the playhead so video does not lead audio (31 §3).
+    fn latency_samples(&self) -> u32 {
+        0
+    }
+
+    /// Samples of output that persist after the input goes silent.
+    ///
+    /// Offline export pulls this many extra samples of silence after the last
+    /// input block so releases and delay lines are not truncated (31 §3.3).
+    fn tail_samples(&self) -> u32 {
+        0
+    }
+}
+
+/// Why a [`DspUnit::reset`] is being requested.
+///
+/// Deliberately payload-free. The mixer-level event carries the `TrackId` and
+/// `Tick` that decide *which* units to reset (31 §2.3's policy: `Seek` and
+/// `Reconfigure` reset everything, `ClipBoundary` resets only units downstream
+/// of that clip so a master-bus compressor does not pump at every edit). This
+/// module keeps its stated boundary of "no knowledge of `Tick`/`AnimProps`
+/// inside the DSP layer itself" — a unit needs to know *that* it was cut, not
+/// *where*.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AudioDiscontinuity {
+    /// The playhead jumped. Everything resets.
+    Seek,
+    /// A clip boundary was crossed on a track feeding this unit.
+    ClipBoundary,
+    /// The fx chain was edited — unit added, removed, or reordered.
+    GraphChanged,
+    /// Sample rate or channel count changed.
+    Reconfigure,
 }
 
 /// Per-sample one-pole coefficient for a time constant `tau_ms` at `fs` Hz —
@@ -216,5 +269,181 @@ mod determinism_tests {
             u
         });
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod discontinuity_tests {
+    use super::*;
+    use crate::audio::CHANNELS;
+
+    const FS: u32 = 48_000;
+    const N: usize = 4096;
+
+    fn tone(n: usize, amp: f32) -> Vec<f32> {
+        (0..n * CHANNELS)
+            .map(|i| {
+                let t = (i / CHANNELS) as f32 / FS as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * amp
+            })
+            .collect()
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b)
+            .fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// 31 §9 item 1 — the real contract: **after `reset`, a unit behaves
+    /// exactly as a freshly constructed one** (same params, no history).
+    ///
+    /// An earlier version of this test asserted "loud input, reset, silence in
+    /// ⇒ silence out". That is **vacuous for every gain-based unit** — a
+    /// compressor, gate or flat EQ multiplies its input, so silence in gives
+    /// silence out whether or not the reset happened. Deleting the entire body
+    /// of `Eq::reset` still passed it. The assertion below instead compares
+    /// against a fresh unit on a *signal* probe, which is sensitive to exactly
+    /// the state `reset` is supposed to discard.
+    fn assert_reset_equals_fresh<U: DspUnit>(
+        mut make: impl FnMut() -> U,
+        configure: impl Fn(&mut U),
+        name: &str,
+    ) {
+        // Path A: loud material, then reset, then the probe.
+        let mut used = make();
+        configure(&mut used);
+        let mut loud = tone(N, 0.9);
+        used.process(FS, &mut loud, None);
+        used.reset(AudioDiscontinuity::Seek);
+        let mut probe_a = tone(N, 0.05);
+        used.process(FS, &mut probe_a, None);
+
+        // Path B: a fresh unit, same params, same probe.
+        let mut fresh = make();
+        configure(&mut fresh);
+        let mut probe_b = tone(N, 0.05);
+        fresh.process(FS, &mut probe_b, None);
+
+        assert!(
+            max_abs_diff(&probe_a, &probe_b) <= 1e-6,
+            "{name}: output after reset differs from a fresh unit by {:.3e} —              state survived the discontinuity",
+            max_abs_diff(&probe_a, &probe_b)
+        );
+
+        // Guard against the inverse vacuity: if the unit is configured such
+        // that history cannot possibly matter, this test proves nothing. A
+        // *non*-reset run must differ, or the fixture is inert.
+        let mut unreset = make();
+        configure(&mut unreset);
+        let mut loud2 = tone(N, 0.9);
+        unreset.process(FS, &mut loud2, None);
+        let mut probe_c = tone(N, 0.05);
+        unreset.process(FS, &mut probe_c, None);
+        assert!(
+            max_abs_diff(&probe_c, &probe_b) > 1e-6,
+            "{name}: fixture is inert — skipping the reset changes nothing, so              this test cannot detect a missing reset"
+        );
+    }
+
+    #[test]
+    fn compressor_reset_equals_fresh() {
+        assert_reset_equals_fresh(
+            compressor::Compressor::new,
+            |c| {
+                let mut p = *c.params();
+                p.threshold_db = -50.0; // actively compressing at both levels
+                p.ratio = 8.0;
+                p.release_ms = 2000.0; // long release ⇒ envelope persists
+                c.set_params(p);
+            },
+            "compressor",
+        );
+    }
+
+    #[test]
+    fn gate_reset_equals_fresh() {
+        assert_reset_equals_fresh(
+            gate::Gate::new,
+            |g| {
+                let mut p = *g.params();
+                p.threshold_db = -30.0; // loud opens it, probe alone would not
+                p.release_ms = 2000.0;
+                p.hold_ms = 500.0;
+                g.set_params(p);
+            },
+            "gate",
+        );
+    }
+
+    #[test]
+    fn eq_reset_equals_fresh() {
+        assert_reset_equals_fresh(
+            eq::Eq::new,
+            |e| {
+                let mut p = *e.params();
+                p.band1.gain_db = 18.0; // non-flat, so the biquads hold energy
+                p.band1.q = 8.0;
+                e.set_params(p);
+            },
+            "eq",
+        );
+    }
+
+    #[test]
+    fn limiter_reset_equals_fresh() {
+        assert_reset_equals_fresh(
+            limiter::Limiter::new,
+            |l| {
+                let mut p = *l.params();
+                p.ceiling_db = -12.0;
+                l.set_params(p);
+            },
+            "limiter",
+        );
+    }
+
+    /// Reset discards state, never configuration.
+    #[test]
+    fn reset_preserves_params() {
+        let mut c = compressor::Compressor::new();
+        let mut p = *c.params();
+        p.threshold_db = -24.0;
+        c.set_params(p);
+        c.reset(AudioDiscontinuity::Seek);
+        assert_eq!(c.params().threshold_db, -24.0);
+    }
+
+    /// The limiter re-primes its delay line rather than shortening it, so its
+    /// reported latency is stable across a reset. Clearing the deques without
+    /// re-priming would silently desync this path against every other path
+    /// feeding the master bus (31 §3.1).
+    #[test]
+    fn limiter_latency_is_stable_across_reset() {
+        let mut l = limiter::Limiter::new();
+        let mut b = tone(N, 0.9);
+        l.process(FS, &mut b, None);
+        let before = l.latency_samples();
+        assert!(before > 0, "limiter should report its lookahead");
+
+        l.reset(AudioDiscontinuity::Seek);
+        let mut b2 = tone(N, 0.9);
+        l.process(FS, &mut b2, None);
+        assert_eq!(before, l.latency_samples(), "latency changed across reset");
+    }
+
+    #[test]
+    fn stateless_units_report_no_latency_or_tail() {
+        for (u, name) in [
+            (
+                Box::new(compressor::Compressor::new()) as Box<dyn DspUnit>,
+                "compressor",
+            ),
+            (Box::new(gate::Gate::new()), "gate"),
+            (Box::new(eq::Eq::new()), "eq"),
+        ] {
+            assert_eq!(u.latency_samples(), 0, "{name}");
+            assert_eq!(u.tail_samples(), 0, "{name}");
+        }
     }
 }

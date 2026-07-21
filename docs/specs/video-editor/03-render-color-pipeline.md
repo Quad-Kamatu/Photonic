@@ -18,12 +18,12 @@ Verified against current code, cited so P1 work has an exact starting line:
 - `scene_renderer.rs:18-24` and `:25-31` call `create_buffer_init` for a fresh vertex buffer and index buffer every frame. No persistent buffer field exists on `PhotonicRenderer` for the document pass.
 - `SCENE_FORMAT = Rgba8UnormSrgb` (`pipeline.rs:14`), deliberately sRGB so the fixed-function blend unit decodes/blends/re-encodes in linear space for `Multiply`/`Screen`-class modes and partial-alpha src-over — this is what keeps canvas and export pixel-identical (issue #145, asserted by test `scene_format_is_srgb_for_linear_blending`, `pipeline.rs:810-818`).
 - `SEPARABLE_BLEND_MODES = [Multiply, Screen, Darken, Lighten]` (`pipeline.rs:23-28`) are the only modes expressible as fixed-function `wgpu::BlendState` (`separable_blend_state`, `pipeline.rs:37`). All other modes are approximated in the live canvas per a documented follow-up (issue #17); true on-canvas isolation for backdrop-read modes is issue #226 (`renderer/mod.rs:506`).
-- `COMPOSITE_SHADER` (`pipeline.rs:577`) is a WGSL full-screen isolation pass implementing all 26 blend modes: 12 W3C separable/blend-only modes plus 8 Photoshop-extra separable modes via `blend_channel` (`pipeline.rs:631-660`), 4 HSL non-separable modes (Hue/Saturation/Color/Luminosity) plus DarkerColor/LighterColor via `fs_composite`'s backdrop-dependent branch (`pipeline.rs:685-720`, helpers `pipeline.rs:661-683`). It naga-validates in CI (`pipeline.rs:924-941`, using `naga = "22"` pinned as a **dev-dependency** of `photonic-render`, `Cargo.toml:31`, specifically so WGSL parses without a GPU). `DrawSegment { mode, start, count }` (`pipeline.rs:83`) is the per-segment draw-call unit the shader would consume. `blend_mode_index` (`pipeline.rs:529`, `#[allow(dead_code)]` at `:528`) is built and ready but not called from any live pass — comment: "wired into the per-layer composite passes in the next increment."
+- `COMPOSITE_SHADER` (`pipeline.rs:592`) is a WGSL full-screen isolation pass implementing all 26 blend modes: 12 W3C separable/blend-only modes plus 8 Photoshop-extra separable modes via `blend_channel` (`pipeline.rs:631-660`), 4 HSL non-separable modes (Hue/Saturation/Color/Luminosity) plus DarkerColor/LighterColor via `fs_composite`'s backdrop-dependent branch (`pipeline.rs:685-720`, helpers `pipeline.rs:661-683`). It naga-validates in CI (`pipeline.rs:924-941`, using `naga = "22"` pinned as a **dev-dependency** of `photonic-render`, `Cargo.toml:31`, specifically so WGSL parses without a GPU). `DrawSegment { mode, start, count }` (`pipeline.rs:83`) is the per-segment draw-call unit the shader would consume. `blend_mode_index` (`pipeline.rs:544`) **is called from the live canvas**: `renderer/mod.rs:602` builds `composite_pipeline` from `COMPOSITE_SHADER`, `scene_renderer.rs:384` sets it, and `blend_mode_index` is invoked at `scene_renderer.rs:225,267`. Per-*node* segment isolation (`segments_need_isolation`) remains headless-only.
 - CPU compositor: `composite_document` (`compositor.rs:48`) and `composite_raster_nodes` (`headless.rs:1329`) work on **straight alpha, gamma/sRGB-encoded** `RGBA8` bytes (`compositor.rs:39`), via `blend_channel`/`blend_rgb` (`photonic-core/src/raster/blend.rs`) operating on raw 0..1 float from u8 with **no degamma step** (confirmed: no `srgb_to_linear` call anywhere in `blend.rs`). This is the opposite mechanism from the GPU path (which gets linear blending for free from the sRGB-format hardware blend unit) reaching the same visual convention — a deliberate asymmetry, not a bug, and the reason §4.3 exists.
 - `HeadlessRenderer::render_rgba_with_opts` (`headless.rs:207-213`) routes per-document to CPU or GPU via the predicate `has_raster || has_pattern || has_isolated_layer || has_non_print_layer || has_stack_effects` (`headless.rs:262-302`, condition definitions + the `if`): true routes the whole doc to CPU compositing via `composite_document` (`headless.rs:334`); false takes the pure-GPU path (`headless.rs:339+`). This exact predicate (`headless.rs:262-302`) is reused unchanged in §2.5.
 - Render-to-offscreen-texture **already exists** and is proven: `capture.rs:22` ("Render to an offscreen texture, read back pixels, encode as PNG"), a dedicated `fill_pipeline_1spp` (sample_count=1, `renderer/mod.rs:113`) shared by window and offscreen capture (`renderer/mod.rs:129`), consumed throughout `headless.rs` (`:89`, `:362`, `:988`). P1 does not invent texture-target rendering — it extends this path to hand back a GPU texture instead of only CPU-readback bytes.
 - Rasters are never GPU-uploaded: zero `write_texture` call sites touching `RasterImage` bytes across the crate; all `create_texture` calls are render targets (MSAA, glow, capture, effects). Glyphon owns the only GPU texture atlas (`TextAtlas`, field `renderer/mod.rs:102`, constructed `renderer/mod.rs:319`).
-- `crates/photonic-video` does not exist yet (P2/P3 create it per 02). `wgpu = "22"` is the workspace-pinned version (`Cargo.toml:workspace deps`).
+- `crates/photonic-video` **exists** (`graph/`, `decode/`, `audio/`, `export/`, `playback/`, `media/`, `session.rs`, plus integration tests). `wgpu = "22"` is the workspace-pinned version (`Cargo.toml:workspace deps`).
 
 ---
 
@@ -69,7 +69,9 @@ Draw calls read `DrawSegment { mode, start, count }` (`pipeline.rs:83`) ranges d
 
 ### 2.4 Wiring `COMPOSITE_SHADER`
 
-`blend_mode_index` (`pipeline.rs:529`) and `COMPOSITE_SHADER` (`pipeline.rs:577`) are validated but unreferenced from any live pass. P1 wires them for the 22 non-fixed-function modes (everything outside `SEPARABLE_BLEND_MODES`): for each `DrawSegment` whose mode isn't one of `[Multiply, Screen, Darken, Lighten]`, render that segment's layer to an isolated offscreen `SCENE_FORMAT` (`Rgba8UnormSrgb`) texture, then run the full-screen `COMPOSITE_SHADER` pass sampling backdrop + isolated layer, writing `blend_mode_index` as a push constant / small uniform. This finally gives on-canvas correctness for HSL modes and backdrop-read modes (Overlay, SoftLight, ColorDodge, ColorBurn), closing issue #17's live-canvas approximation and materially retiring issue #226 (`renderer/mod.rs:506`) for the modes `COMPOSITE_SHADER` already covers.
+> **Operand space is normative in [§4.5](#45-operand-spaces-for-blending-and-grading-normative)** — blending is linear, on straight alpha, and requires an sRGB render target. The live canvas does not currently satisfy that last requirement; §4.5.4 owns the fix.
+
+`blend_mode_index` (`pipeline.rs:544`) and `COMPOSITE_SHADER` (`pipeline.rs:592`) are **wired on the live canvas** (see §2.4). This section's remaining scope is per-segment isolation; P1 wired them for the 22 non-fixed-function modes (everything outside `SEPARABLE_BLEND_MODES`): for each `DrawSegment` whose mode isn't one of `[Multiply, Screen, Darken, Lighten]`, render that segment's layer to an isolated offscreen `SCENE_FORMAT` (`Rgba8UnormSrgb`) texture, then run the full-screen `COMPOSITE_SHADER` pass sampling backdrop + isolated layer, writing `blend_mode_index` as a push constant / small uniform. This finally gives on-canvas correctness for HSL modes and backdrop-read modes (Overlay, SoftLight, ColorDodge, ColorBurn), closing issue #17's live-canvas approximation and materially retiring issue #226 (`renderer/mod.rs:506`) for the modes `COMPOSITE_SHADER` already covers.
 
 Test hook: extend `wgsl_shaders_parse_and_validate`'s table (`pipeline.rs:924-941` pattern) — any new isolation-pass shader added here goes in the same table so CI catches WGSL syntax errors without a GPU.
 
@@ -217,6 +219,50 @@ P7 (07-color-grading.md, per 00 §7) is where full unification (if ever needed �
 4. **Raster/compositor-parity case:** when a vector/raster asset enters the video graph (§4.2 rows 2-3), `eval_cpu`'s version of that boundary conversion must match the CPU compositor's existing output (`composite_document`) exactly where they overlap (documents with no isolated-layer/pattern/effect content) — this is the concrete test that proves Tier A and Tier B (§2.5) are pixel-equivalent, not just "close."
 
 ---
+
+### 4.5 Operand spaces for blending and grading (normative)
+
+Two defects ([27 A-1](27-spec-audit.md#a-1--p0--the-live-canvas-composites-in-gamma-headless-composites-in-linear), [27 A-3](27-spec-audit.md#a-3--p0--grade-operators-apply-transfer-functions-to-premultiplied-alpha)) had the same root cause: **the operand space for an operation was never written down**, so each surface picked one independently. This section fixes the rule in one place. Every new operator — including every entry in [30 §5](30-effect-catalogue.md#5-catalogue)'s catalogue — cites it.
+
+#### 4.5.1 The product position: blend in linear
+
+Photonic blends in **linear light**, everywhere, for every compositor. W3C blend functions are defined on transfer-encoded values, so `Multiply`, `Screen`, `Overlay`, `SoftLight` and the HSL modes differ from Photoshop and CSS. **That difference is deliberate and is a product position, not a defect.**
+
+Rationale: it is physically correct; it is already this document's stated intent for the canvas (§2.4, issue #145); it avoids two transfer-function evaluations per merge on the hottest path in the compositor; and it makes the CPU and GPU evaluators agree trivially, since `blend_rgb` is pure maths over whatever it is handed.
+
+#### 4.5.2 Alpha
+
+Blend functions take **straight** (non-premultiplied) colour. The premultiplied path therefore unpremultiplies, blends, and re-premultiplies. `graph/ops.rs::merge_pixel` already does exactly this and is the reference implementation:
+
+```
+cs = unpremultiply(top);  cb = unpremultiply(bottom)
+Cs' = (1 - αb)·Cs + αb·B(Cb, Cs)          // W3C backdrop-blended source
+co  = αs·Cs' + (1 - αs)·bottom_premul      // premultiplied source-over
+```
+
+Where `α == 0`, carry RGB through unchanged rather than dividing.
+
+#### 4.5.3 Grade operators
+
+Grade ops **must** unpremultiply → operate → repremultiply. [07 §3](07-color-grading.md)'s current statement that ops run "on the stored (premultiplied) RGB directly" is correct only for opaque pixels — and `grade.rs:14-16` records that *every* golden fixture is opaque, which is precisely why this went unnoticed. On partially transparent pixels (every vector title in AS-3, every keyed edge in AS-2) CDL offset, contrast pivot and LUT lookup currently operate on alpha-attenuated values, producing edge fringing and a grade that shifts as opacity is keyframed.
+
+The existing enc/dec discipline is unchanged and orthogonal: the sRGB transfer pair wraps CDL / Wheels / Contrast / LUT **internally**, and never wraps Exposure or WhiteBalance, which are defined in linear stops.
+
+#### 4.5.4 Render-target requirement
+
+`COMPOSITE_SHADER` is correct **only when its render target is sRGB-encoded**, so the hardware decodes on sample and re-encodes on write and the arithmetic lands in linear. `headless.rs` pins `Rgba8UnormSrgb` and satisfies this. The **live canvas does not**: `renderer/mod.rs:71-79` selects a non-sRGB swapchain (`Bgra8Unorm`/`Rgba8Unorm`) because egui shares that surface, and `effects_renderer.rs:17` allocates isolation textures to match — so on screen the same shader blends gamma-encoded values.
+
+**Normative fix: the document renders to an offscreen target at the headless format, and that result is presented into the egui surface.** Canvas and headless then agree *by construction* rather than by keeping two formats in sync; document rendering is decoupled from swapchain-format availability and from egui's conventions; and it matches what the video path already does, where `EngineFrame` is an offscreen texture presented into the monitor. The vector canvas rendering direct-to-swapchain is the outlier.
+
+Rejected: an sRGB `view_formats` view of the swapchain. Cheaper, but it leaves egui and the document sharing one target with opposing colour expectations — the arrangement that caused this.
+
+#### 4.5.5 Required fixtures
+
+The existing corpus **cannot** observe either defect, so these gate the fix:
+
+1. **Partial-alpha grade** — a fixture with α ∈ (0,1) through CDL, curves and a 3D LUT; asserts no fringing and that the grade is invariant under a clip-opacity change.
+2. **Canvas-vs-headless parity** — the same document composited through both paths with a **non-separable** blend mode (an HSL mode or SoftLight); asserts equality within tolerance.
+3. **Non-`Normal` blend across evaluators** — extends [32 §8](32-engine-contracts.md#8-cpugpu-equivalence)'s equivalence sweep.
 
 ## 5. egui overlay & monitor presentation
 

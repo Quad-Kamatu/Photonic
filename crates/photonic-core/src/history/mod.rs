@@ -10,7 +10,7 @@ use uuid::Uuid;
 mod branches;
 mod checkpoints;
 mod coalescing;
-#[cfg(feature = "video-p1-contract")]
+#[cfg(test)]
 mod revision_contract;
 mod stacks;
 mod tree;

@@ -820,6 +820,8 @@ fn curve_plot(ui: &mut Ui, points: &mut Vec<(f32, f32)>, channel: usize) {
     if let Some(p) = resp.interact_pointer_pos() {
         if resp.drag_started() || resp.clicked() {
             sel = nearest_point(points, &to_screen, p, hit);
+            // Selecting a point focuses the plot so arrow-nudge below is reachable.
+            resp.request_focus();
         }
         if resp.dragged() {
             if let Some(i) = sel {
@@ -850,9 +852,15 @@ fn curve_plot(ui: &mut Ui, points: &mut Vec<(f32, f32)>, channel: usize) {
         }
     }
 
-    // Keyboard nudge / delete for the selected point (suppressed while typing).
+    // Keyboard nudge / delete for the selected point.
+    //
+    // Gated on this plot holding focus. It was previously gated on
+    // `!keyboard_captured(ui)` — i.e. on *nothing anywhere* having focus — which
+    // meant the nudge stopped working the moment the plot itself was focused.
+    // Focus-scoped handling is what makes typing safe (41 §3 R-5), so the
+    // suppression the old gate reached for is a property of this check.
     if let Some(i) = sel {
-        if !keyboard_captured(ui) {
+        if resp.has_focus() {
             let (dx, dy, big) = ui.input(|inp| {
                 (
                     (inp.key_pressed(egui::Key::ArrowRight) as i32

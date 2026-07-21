@@ -30,7 +30,9 @@ impl VideoEngine {
 // GUI/MCP → engine: commands. Engine → GUI: state + frames.
 pub enum EngineCmd { Play, Pause, Seek(Tick), Step(i32), SetLoop(Option<(Tick,Tick)>),
                      SetActiveSequence(SequenceId), SetProxyMode(ProxyMode),
-                     Export(ExportJob), CancelExport(JobId), GenerateProxies(Vec<AssetId>),
+                     Export(ExportJob), GenerateProxies(Vec<AssetId>),
+                     ScrubSeek(Tick), SetPreviewTarget(PreviewTarget), SetPreviewQuality(PreviewQuality),
+                     SeekSource { asset: AssetId, time: Tick }, Shutdown,
                      Probe(AssetId), InvalidateRange(SequenceId, Tick, Tick) }
 
 pub struct EngineFrame {                      // what GUI presents
@@ -40,7 +42,7 @@ pub struct EngineFrame {                      // what GUI presents
 ```
 
 Threads:
-- **Engine thread** — owns playback state machine, graph compile/eval scheduling. Receives `EngineCmd` via crossbeam channel; publishes `EngineFrame` + `EngineStatus` (playhead, dropped frames, cache stats) via `triple_buffer`/watch — GUI never blocks on engine.
+- **Engine thread** — owns playback state machine, graph compile/eval scheduling. Receives `EngineCmd` via crossbeam channel; publishes `EngineFrame` + `EngineStatus` (playhead, dropped frames, cache stats) via `arc_swap` (`ArcSwap`/`ArcSwapOption`) — GUI never blocks on engine.
 - **Audio thread** — cpal callback; real-time-safe (no locks/allocs in callback); pulls from lock-free ring filled by mixer worker. Owns the **master clock** (§4).
 - **Decode workers** — pool (N = cores/2, min 2) driving sidecar processes + pipe reads.
 - **GUI thread** — presents latest `EngineFrame` texture in the monitor; sends intents.
@@ -82,15 +84,26 @@ Properties (normative):
 
 ### Compilation (`graph::compile`)
 
-For sequence S, format F, tick t:
-1. For each enabled video track bottom→top: find clip covering t (plus transition partner).
-2. Per clip, build chain: source op (Decode/RasterVector/Nested — nested sequences compile recursively with cycle guard) → speed/trim source-time mapping → default `Transform2D` (from evaluated `AnimProps` + reframe override for F) → `Effect` nodes (enabled, ordered) → `Grade` node if set.
-3. **If `clip.composition` is set (D-06):** the composition substitutes the clip's **source op only** — instantiate the user `NodeGraph`, binding `ClipIn` → the clip's source op (after trim/speed mapping), and feed the graph's `Output` into the REMAINDER of step 2's chain (default `Transform2D` from AnimProps + reframe-for-F → `Effect` nodes → `Grade`). Identity transform / empty effects / `None` grade fold away as no-ops, so a "pure comp" costs nothing extra. This is the Resolve model (Fusion → Edit sizing → Color); grade and per-format reframe remain live on composited clips. Node `AnimProps` evaluate at t. Type-check ports; on error, fall back to the plain source + default chain + surface a diagnostic (never black-frame silently).
-4. Fold tracks with `Merge` nodes (respecting Adjustment clips: they re-root the stack below them through their effect chain).
-5. `CaptionOverlay` from enabled caption tracks (cues covering t).
-6. Splice project graph (`TimelineProject::project_graph`) between fold result and `Output`.
-7. **TimeOffset expansion:** a graph `TimeOffset { offset }` node compiles by duplicating its upstream subgraph re-evaluated at t−offset; duplicates dedup naturally via content hashing (identical subgraph at identical time = identical hash). Soft cap: 4 distinct offsets per composition (diagnostic beyond that) — echo/trails stay bounded (08 §3).
-8. Constant-fold + dead-branch-eliminate (invisible clips, opacity 0, disabled nodes).
+For sequence S, format F, tick t. **Scope order is normative** — rationale and the alternatives considered are in [35 §2](35-model-decisions.md#2-effect-scopes-and-the-adjustment-clip-interaction).
+
+Because clips within a track are non-overlapping, **at tick `t` a track holds at most one clip**: it is empty, carries **content**, or carries an **Adjustment** operator. There is no third case to disambiguate.
+
+1. **Per content clip**, build the chain:
+   `asset effects` (`MediaAsset.effects`/`.grade` — inherited by every instance) → source op (`Decode`/`RasterVector`/`Nested`; nested sequences compile recursively with a cycle guard) → speed/trim source-time mapping → default `Transform2D` (evaluated `AnimProps` + the reframe override for F) → `Effect` nodes (enabled, ordered) → `Grade` if set.
+2. **If `clip.composition` is set (D-06):** the composition substitutes the clip's **source op only** — instantiate the user `NodeGraph`, bind `ClipIn` to the clip's source op (after trim/speed mapping), and feed the graph's `Output` into the remainder of step 1's chain. Identity transform / empty effects / `None` grade fold away, so a pure comp costs nothing extra. Node `AnimProps` evaluate at t. Type-check ports; on error fall back to the plain source plus default chain and surface a diagnostic — never black-frame silently.
+3. **Per track:** take that track's covering content clip (plus transition partner) → `Track.effects` → `Track.grade`. **Track effects apply to that track's own content only, never to the accumulator** — affecting lower tracks is what an Adjustment clip is for. A track whose covering clip is an Adjustment has no own content at t, so its track stack does not apply.
+4. **Fold tracks bottom → top:** `acc = Merge(acc, track_result, Track.blend, Track.opacity)`. Then, if this track's covering clip is an **Adjustment**, apply its stack to the accumulator: `acc = adjustment.grade(adjustment.effects(acc))`. An Adjustment therefore affects everything below it and nothing above it.
+5. **Master:** `Sequence.master_effects` → `Sequence.master_grade`.
+6. `CaptionOverlay` from enabled caption tracks (cues covering t). **Captions composite after the master stack** so a master look never re-grades them — subtitles are burned after grade, per broadcast practice.
+7. Splice the project graph (`TimelineProject::project_graph`) between the caption result and `Output`, keeping the node graph as the final-look surface.
+8. **TimeOffset expansion:** a graph `TimeOffset { offset }` compiles by duplicating its upstream subgraph re-evaluated at t−offset; duplicates dedup naturally via content hashing. Soft cap: 4 distinct offsets per composition. Generalised by the source-range contract in [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access).
+9. Constant-fold + dead-branch-eliminate (invisible clips, opacity 0, disabled nodes, out-of-zone effects).
+
+**Transition handles.** A transition samples its partner past that clip's out point, into remaining source handle. Where the handle is shorter than the transition, **clamp the transition to the available handle and emit a diagnostic**; where it is zero, do not render the transition and warn. Never extend the sequence or move clips to make room ([38 §1.2](38-sequence-semantics.md#12-insufficient-handle)).
+
+**Frame-rate conform.** For a clip whose source rate differs from the sequence rate, map the tick through trim and speed to a source time and select the source frame **covering** it — nearest-source-frame, no blending, identical in preview and export. Emit one `Info` per conformed clip. Blended conform is expressible only once [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access)'s source-range contract exists and must not be built before it ([38 §3](38-sequence-semantics.md#3-frame-rate-conform)).
+
+Effect **applicability** is enforced, not advisory: a manifest declares which scopes it is valid at ([30 §2.3](30-effect-catalogue.md#23-capability-and-applicability)), and the compiler refuses an effect placed at a scope it does not declare.
 
 Compile budget: < 0.5 ms typical (pure CPU, no I/O) — measured in 11.
 
@@ -124,9 +137,9 @@ Failure containment: sidecar crash/EOF → reader reports `DecodeError`; schedul
 | Cache | Key | Storage | Evictor |
 |---|---|---|---|
 | Decoded-frame rings | (asset, quality, pts) | CPU planes | ring position |
-| Node results | IR content hash | GPU textures (budgeted pool, default 1–2 GB) | LRU |
+| Node results | IR content hash | GPU textures (`TexturePool`, byte-budgeted, default ~1.5 GB) | **LRU over unpinned entries**; the displayed `Output` tick is pinned. A separate 16k-entry *rendered-validity* map is flushed wholesale on overflow — that costs re-renders of still-resident textures, not eviction |
 | Vector rasters | VectorStateKey | GPU | LRU |
-| Sequence frames (final) | (seq, format, tick, doc_generation-relevant hash) | GPU, small (player back/fwd) | LRU |
+| Stills / uploads / vector rasters | `(AssetId, Tick, proxy)`, `VectorStateKey` | GPU | clear-on-cap (session caches). **Stills are keyed on `AssetId` alone today** — a defect, since a still then uploads at full resolution regardless of preview scale ([26 K-C8](26-kdenlive-mlt-parity.md#k-c8--key-the-still-image-cache-on-requested-size)) |
 | Waveform pyramids, thumbnails, keyframe indices | asset hash | disk sidecar | size cap |
 
 Invalidation is **hash-natural**: edits change resolved params ⇒ different node hashes ⇒ old entries age out; no manual dirty ranges except `InvalidateRange` for asset relink/proxy swap. `doc_generation` only triggers re-snapshot + recompile, which is cheap.
@@ -142,7 +155,7 @@ Invalidation is **hash-natural**: edits change resolved params ⇒ different nod
 `export::render_loop`: for frame f in work range → compile graph at tick(f) (quality = full, proxy = false) → eval GPU → readback `Rgba16Float` → convert to encoder pix_fmt (linear→transfer per target, tone-unmapped Rec.709 in v1) → write to encoder sidecar stdin (`-f rawvideo`), audio mixed offline (09) piped as f32le on a second input. Muxing, container, codec flags from `ExportPreset` (05 owns the preset catalog: H.264/openh264, AV1/SVT-AV1 or rav1e, WebM/VP9, alpha-capable outputs for CAP-021, GIF).
 - Deterministic: same project + preset ⇒ bit-identical rawvideo stream (SS-3 golden basis); encoder output compared by decode+PSNR in tests (11).
 - Runs on worker threads; `ExportProgress { frame, total, fps, eta }` events; cancellable between frames; GUI stays live.
-- Headless/MCP export uses the identical path (engine owns it, not the GUI) — CAP-019.
+- Headless/MCP export uses the identical render loop — CAP-019. **Status:** `EngineCmd::Export` is currently a NotImplemented stub; the live export path runs from `handlers/video.rs::run_export_job` over a **dedicated** `EngineSession` on a frozen document snapshot, driving `export::render_loop` directly. Wiring `EngineCmd::Export` so the GUI can export is [26 K-0.1](26-kdenlive-mlt-parity.md#8-k-0--foundations); audio muxing is K-0.7.
 
 ## 8. Perf budgets (verified in 11)
 

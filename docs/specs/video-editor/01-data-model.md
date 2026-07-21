@@ -5,7 +5,8 @@
 All types are `Clone + Debug + Serialize + Deserialize + PartialEq` unless noted. All IDs are `Uuid` newtypes, matching the existing `pub type NodeId = Uuid` convention (`node.rs:12`) but as distinct newtypes for type safety:
 
 ```rust
-macro_rules! id_newtype { ... } // ClipId, TrackId, SequenceId, AssetId, GraphId, GraphNodeId, MarkerId, CueId
+macro_rules! id_newtype { ... } // ClipId, TrackId, SequenceId, AssetId, GraphId, GraphNodeId, MarkerId, CueId,
+                                //  MarkerCategoryId (§4.1), GroupId (§4.2), LinkGroupId (deprecated — §4.2)
 pub struct ClipId(pub Uuid); // etc.
 ```
 
@@ -54,6 +55,7 @@ pub struct TimelineProject {
     pub graphs: HashMap<GraphId, NodeGraph>,    // all user node graphs (per-clip + project), one arena (§8)
     pub project_graph: Option<GraphId>,         // spliced after active sequence output
     pub settings: ProjectVideoSettings,         // proxy prefs, cache limits, default rates
+    pub marker_categories: Vec<MarkerCategory>,  // ordered for display; referenced by stable id (§4.1)
 }
 ```
 
@@ -76,7 +78,19 @@ pub struct MediaAsset {
     pub probe: Option<MediaProbe>,              // filled by engine after ffprobe; cached in file
     pub proxy: Option<ProxyRef>,                // engine-managed; path + status
     pub content_hash: Option<String>,           // xxh3 of file head+tail+len; relink identity
+    pub effects: Vec<ClipEffect>,               // asset-level stack, inherited by every instance (35 §2)
+    pub grade: Option<Grade>,                   // asset-level grade — e.g. a per-camera LUT
 }
+
+pub struct MarkerCategory {
+    pub id: MarkerCategoryId,
+    pub name: String,
+    pub color: Color,
+    /// Non-colour distinguisher — colour alone must never carry meaning (41 §7).
+    /// Six is the practical limit at ruler scale.
+    pub glyph: MarkerGlyph,
+}
+pub enum MarkerGlyph { Diamond, Circle, Square, Triangle, Flag, Bar }
 
 pub enum AssetKind { Video, Audio, Image, VectorDoc, Lut3d }
 // VectorDoc: this document or external .photon/.svg
@@ -111,7 +125,10 @@ pub struct Sequence {
     pub video_tracks: Vec<Track>,               // index 0 = bottom of composite stack
     pub audio_tracks: Vec<Track>,
     pub caption_tracks: Vec<CaptionTrack>,      // §7
-    pub markers: Vec<Marker>,                   // {id, at: Tick, name, color, note}
+    pub markers: Vec<Marker>,                   // sequence-scoped markers (§4.1)
+    pub groups: HashMap<GroupId, GroupNode>,    // clip grouping (§4.2)
+    pub master_effects: Vec<ClipEffect>,        // master stack (35 §2)
+    pub master_grade: Option<Grade>,
     pub audio_master: MasterBus,                // 09-audio-mixer.md
     pub work_range: Option<(Tick, Tick)>,       // in/out for preview + export
 }
@@ -130,14 +147,62 @@ pub struct Track {
     pub enabled: bool,                           // video: hidden; audio: muted
     pub locked: bool,
     pub audio: Option<TrackAudio>,               // volume/pan/solo, fx chain, automation (09)
+    pub effects: Vec<ClipEffect>,                // track stack — applies to THIS track's own content only (35 §2)
+    pub grade: Option<Grade>,
+    pub blend: BlendMode,                        // how this track composites onto the accumulator
+    pub opacity: f32,                            // 0.0..=1.0
     pub height_px: f32,                          // UI-only but persisted (like existing panel prefs)
 }
 ```
+
+### 4.1 Markers
+
+One type; **scope is implied by location** — sequence markers on `Sequence.markers`, clip markers on `Clip.markers`. Rationale and alternatives: [35 §1](35-model-decisions.md#1-markers).
+
+```rust
+pub struct Marker {
+    pub id: MarkerId,
+    pub at: Tick,                                // sequence-relative, or clip-relative when clip-scoped
+    pub duration: Tick,                          // 0 = point marker; every marker is a range
+    pub name: String,
+    pub note: String,
+    pub category: Option<MarkerCategoryId>,      // into TimelineProject::marker_categories (§2)
+    pub color: Option<Color>,                    // per-marker override of the category colour
+    pub anchor: MarkerAnchor,
+}
+
+pub enum MarkerAnchor { Timecode, Content }      // stays put under ripple / moves with material
+```
+
+Normative rules:
+- **`duration: Tick`, not `Option<Tick>`.** A point marker is a zero-length range, so `[at, at + duration]` is the only expression any consumer writes.
+- **Categories are referenced by stable id, never by index.** Deleting a category is an undoable op carrying an explicit disposition (reassign or clear); a marker referencing a missing category renders with a neutral fallback and is flagged — never silently remapped.
+- **Anchoring defaults by scope:** clip markers are always `Content` (they travel with the clip and propagate to its copies); sequence markers default to `Timecode`.
+- Markers are snap candidates; a ranged marker contributes **two** (start and end).
+- Clip markers get fresh ids under `duplicate_with_fresh_ids`.
+
+### 4.2 Groups
+
+A parent-pointer tree per sequence. Rationale: [35 §3](35-model-decisions.md#3-groups).
+
+```rust
+pub struct GroupNode { pub id: GroupId, pub kind: GroupKind, pub parent: Option<GroupId> }
+pub enum GroupKind { Normal, AvLink }            // AvLink subsumes the former link_group
+```
+
+Invariants (checked by `Sequence::validate()` alongside the sorted/non-overlapping clip checks):
+- the parent chain terminates — **no cycles**;
+- every referenced `GroupId` exists in the same sequence;
+- **no empty groups** and **no single-member `Normal` groups** — both dissolve automatically;
+- selection is **not** a group — it is session state, never document state.
 
 Invariants (enforced by edit ops in §6, checked by `Sequence::validate()` in debug + on load):
 - Clips within a track are sorted, non-overlapping, `duration > 0`.
 - `clip.start + clip.duration` may exceed any other clip freely across tracks.
 - Track vectors are the z/mix order; no separate order table.
+- **A clip's `transition_out` must be `None` when another clip starts exactly at its end.** A transition at a cut is owned by the *incoming* clip's `transition_in`; `transition_out` is a fade into a gap or the sequence end ([38 §1.3](38-sequence-semantics.md#13-one-transition-per-cut)). Migration where both are set: keep `transition_in`, drop `transition_out`, diagnose.
+- **Transitions borrow, they do not overlap.** During a transition window the compositor samples the incoming clip normally *and* samples the outgoing clip past its own out point into its remaining source handle. Timeline layout is unchanged and the non-overlap invariant above holds. Where the handle is short the transition is **clamped and diagnosed**, never silently extended ([38 §1.2](38-sequence-semantics.md#12-insufficient-handle)).
+- At any tick a track has **at most one** clip (a consequence of non-overlap). This is what makes the effect-scope pipeline in [02 §2](02-engine.md) unambiguous: at time `t` a track is empty, carries **content**, or carries an **Adjustment** operator — never two of those.
 
 ## 5. Clip
 
@@ -156,10 +221,17 @@ pub struct Clip {
     pub grade: Option<Grade>,                    // 07-color-grading.md; stored here, evaluated as graph nodes
     pub composition: Option<GraphId>,            // per-clip node graph (D-06); substitutes the clip's SOURCE op only —
                                                  // transform/effects/grade/reframe still apply on top (02 §2 step 3)
-    pub transition_in: Option<Transition>,       // {kind, duration, params}; overlaps previous clip
-    pub transition_out: Option<Transition>,
+    pub transition_in: Option<Transition>,       // {kind, duration, params}; borrows the previous clip's
+                                                 // source handle — clips do NOT overlap (38 §1.1)
+    pub transition_out: Option<Transition>,      // only meaningful with no following clip (38 §1.3)
     pub audio: Option<ClipAudio>,                // gain, fades, channel map (09)
     pub enabled: bool,
+    pub color_label: Option<u8>,                 // timeline colour label
+    pub markers: Vec<Marker>,                    // clip-scoped markers, travel with the clip (§4.1)
+    pub group: Option<GroupId>,                  // immediate parent in Sequence::groups (§4.2)
+    pub multicam: Option<MulticamGroup>,         // G-20; data-model only until its gate clears
+    #[deprecated = "migrated to GroupKind::AvLink (35 §3.3); retained one format version"]
+    pub link_group: Option<LinkGroupId>,
 }
 
 pub enum ClipSource {
@@ -302,12 +374,61 @@ Normative semantics:
 
 ## 9. Serialization & migration
 
-- Bump `CURRENT_FORMAT_VERSION` 2 → 3 (`document.rs:104`); add no-op `V2ToV3` migration (`migration.rs`) + `docs/format-versions.md` entry (house style, per repo convention).
+### 9.0 Forward compatibility (normative) — [39 §2](39-document-lifecycle.md#2-forward-compatibility-cap-020)
+
+**Every open-ended enum in the persisted model carries an unknown-preserving variant** — `EffectId`, `GraphOp`, `AudioFxKind`, `TransitionKind`, `GradeOpKind`, `MarkerAnchor`, `GroupKind`, `ClipSource`. `GradeOpParams`'s `#[serde(other)]` inert-load is the existing model and generalises. Rules:
+
+- **Preserve the original serialized form verbatim** and re-emit it unchanged on save — a round-trip through an older build is lossless.
+- **Render inert** — unknown effect = passthrough, unknown transition = cut, unknown source = placeholder.
+- **Diagnose once per load**, not per frame: `Project::UnknownVariantPreserved`.
+- **Never drop, never guess.** Approximating an unknown effect with a similar one is worse than omitting it, because the user cannot see it is wrong.
+
+| `format_version` | Behaviour |
+|---|---|
+| Older, inside `COMPAT_WINDOW` | Migrate forward, save at current |
+| Older, outside | Refuse — `Project::VersionTooOld`, naming the version that can read it |
+| Equal | Load |
+| **Newer, minor** | Load with unknown-preservation, **warn before the first save** that newer-only data may be lost, offer save-as-copy |
+| Newer, major | Refuse — `Project::VersionTooNew` |
+
+The "newer, minor" row is the one most products get wrong: silently loading and re-saving a newer file is how a user loses work created on another machine.
+
+Validation rejections (`finalize_load`'s overlap/unsorted check) surface as `Project::ValidationFailed` **naming the offending clip**, not as an opaque failure.
+
+- **Done:** the timeline field landed additively at v3 and `CURRENT_FORMAT_VERSION` is now **4** (`document.rs:110`); `docs/format-versions.md` documents v1–v4, including the v3→v4 `anchor_space` migration described in §5.
+
+### 9.1 The v4 → v5 migration — one step, nine changes
+
+Nine model changes are specified across seven documents, each of which independently describes itself as "additive". **They are one migration and must land as one**, or the format version becomes meaningless and a document written mid-sequence is readable by nothing. This section owns the consolidated inventory; the owning docs keep the rationale.
+
+| Change | Shape | Owner | Data migration? |
+|---|---|---|---|
+| `MarkerCategory` registry on `TimelineProject`; `Marker` gains `duration`, `category`, `anchor`; `Clip.markers` | additive | [35 §1](35-model-decisions.md#1-markers) | **No** — defaults reproduce current behaviour |
+| `MarkerCategory.glyph` | additive | [41 §7](41-accessibility.md#7-colour-only-information) | **No** — default glyph per seeded category |
+| `Sequence.groups` + `Clip.group`; `link_group` deprecated | additive + **projection** | [35 §3](35-model-decisions.md#3-groups) | **Yes** — every `link_group: Some(g)` becomes an `AvLink` group. Behaviour-preserving, and covered by the existing link tests before the field is removed |
+| `Track.effects`/`.grade`/`.blend`/`.opacity`; `Sequence.master_*`; `MediaAsset.effects`/`.grade` | additive | [35 §2](35-model-decisions.md#2-effect-scopes-and-the-adjustment-clip-interaction) | **No** |
+| `ClipEffect` gains `id: EffectId` + `version`; `kind: EffectKind` deprecated | additive + **projection** | [30 §10](30-effect-catalogue.md#10-compatibility) | **Yes** — `id` derived from `kind`; `kind` retained one version |
+| Unknown-preserving variants on every open-ended enum (§9.0) | additive | [39 §2.2](39-document-lifecycle.md#22-generalise-it) | **No** — but it must land **first**, or a v5 document is unreadable by the build that introduces the rest |
+| `CaptionTrack.language`; `CaptionStyle.direction` | additive | [42 §6.4](42-localization.md#64-per-language-budgets), [§7.3](42-localization.md#73-refused-cleanly-in-v1) | **No** — `None` falls back to the Latin budget and emits a hint, never a guess |
+| `ClipAudio.stream` + `.offset` | additive | [31 §7](31-audio-architecture.md#7-per-stream-and-per-channel) | **No** |
+| `Track.height_px` **removed** to a sidecar | **removal** | [39 §1.6](39-document-lifecycle.md#16-what-is-not-undoable) | **Yes** — read from v4, write to the sidecar, drop from the document |
+
+**Ordering is not free.** §9.0's unknown-preserving variants land **before** everything else, because they are what lets a v4 build open a v5 document without data loss — introducing new enum variants first would strand any document written in between. The two projections (`link_group` → group tree, `kind` → `EffectId`) keep their deprecated field for exactly one version, per [30 §10](30-effect-catalogue.md#10-compatibility). `height_px`'s removal is the only lossy step and is the only one that cannot be reverted by loading in an older build.
+
+**A single `docs/format-versions.md` v5 entry covers all nine.** Nine separate entries would imply nine version numbers.
 - `timeline` is `Option` + `#[serde(default)]` → v2 files load untouched; v3 files without video features omit the key entirely (COMPAT_WINDOW satisfied).
 - Asset paths serialize absolute + project-relative (`path`, `rel_path`); loader tries relative first (project moves survive), then absolute, then relink-by-hash.
 - Probe data, proxy refs, waveform/keyframe-index caches: probe persists in-file (it's small, needed for offline layout); waveforms/keyframe indices/thumbnails go to a **cache sidecar dir** `<project>.photon.cache/` — never in the JSON (file bloat + churn).
 
 ## 10. Undo integration
+
+### 10.0 The undo contract (normative) — [39 §1](39-document-lifecycle.md#1-undo-cap-018)
+
+- **One user verb is one undo step**, including fanned-out edits: a group move of nine clips, an import of forty assets, a category deletion reassigning two hundred markers. Corollary: **an operation that cannot be undone atomically must not commit partially** — validate every member, then commit.
+- **Coalescing is bounded**, never open-ended: same command kind *and* same subject · gap < 500 ms · total span ≤ 5 s · broken by selection change, tool change, save, or any other command kind. A continuous drag is one step; a drag, a pause, and another drag are two.
+- **Bounded by both a step count and a byte budget**, the byte budget dominating (one `BulkInsertCues` outweighs a thousand slider steps). **Branches are never auto-trimmed.** A retention floor guarantees a minimum step count regardless of size. Trimming is silent — a memory policy, not an event. Commands carrying bulk payloads (`BulkInsertCues`, `ApplyDuckingPreset`, `SetGrade`, composition paste) are acceptable **because** the byte budget bounds them, but each must report `mem_estimate` honestly or the budget is enforced against a fiction.
+- **Undo is global and does not respect mode.** Undoing a video edit from vector mode is allowed and switches to the mode the command belongs to. Per-mode stacks would break the single-history property that makes a vector asset a first-class timeline citizen.
+- **Jobs:** a job result commits as a normal undoable command at completion; the job captured a document snapshot at submission and is unaffected by later edits or undos; if its target no longer exists, the commit is **skipped with an `Info`**, never resurrected. **Undo never cancels a running job.**
 
 New nested command keeps `history/mod.rs` churn to one arm per group:
 
@@ -325,7 +446,10 @@ pub enum TimelineCmd {
     RippleEdit { .. }, RollEdit { .. }, SlipClip { .. }, SlideClip { .. },
     SetClipProp { old, new },                    // universal property change, mirrors UpdateNode{old,new}
     SetKeyframe { .. }, RemoveKeyframe { .. }, SetKeyframeInterp { .. },
-    AddEffect { .. }, RemoveEffect { .. }, ReorderEffects { .. },
+    AddEffect { .. }, RemoveEffect { .. }, ReorderEffects { .. },   // scope: clip | track | master | asset (35 §2)
+    AddMarker { .. }, RemoveMarker { .. }, SetMarker { old, new },  // sequence- or clip-scoped (§4.1)
+    AddMarkerCategory { .. }, RemoveMarkerCategory { disposition, .. }, SetMarkerCategory { old, new },
+    GroupClips { .. }, UngroupClips { .. }, SetClipGroup { old, new },   // §4.2
     SetGrade { old, new },
     GraphEdit(GraphCmd),                         // add/remove node/edge, set param — 08
     CaptionEdit(CaptionCmd),                     // add/split/merge cues, set text/timing/style — 06

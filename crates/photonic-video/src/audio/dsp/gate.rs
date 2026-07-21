@@ -3,6 +3,7 @@
 
 use photonic_core::timeline::{EffectParams, PropValue};
 
+use super::AudioDiscontinuity;
 use super::envelope::{EnvelopeCoeffs, EnvelopeFollower};
 use super::{db_to_linear, lin_to_db, DspUnit};
 use crate::audio::CHANNELS;
@@ -80,6 +81,13 @@ impl Gate {
 }
 
 impl DspUnit for Gate {
+    fn reset(&mut self, _cause: AudioDiscontinuity) {
+        self.envelope.reset();
+        // Hold must clear too: a gate mid-hold across a cut would keep the
+        // incoming clip open for the remainder of the previous clip's hold.
+        self.hold_remaining_samples = 0;
+    }
+
     fn process(&mut self, sample_rate: u32, block: &mut [f32], _sidechain: Option<&[f32]>) {
         let fs = sample_rate as f64;
         let coeffs = EnvelopeCoeffs::new(self.params.attack_ms, self.params.release_ms, fs);

@@ -6,6 +6,7 @@
 
 use photonic_core::timeline::{EffectParams, PropValue};
 
+use super::AudioDiscontinuity;
 use super::biquad::{BiquadCoeffs, BiquadState};
 use super::DspUnit;
 use crate::audio::CHANNELS;
@@ -121,6 +122,11 @@ struct StereoBiquad {
 }
 
 impl StereoBiquad {
+    fn reset(&mut self) {
+        self.l.reset();
+        self.r.reset();
+    }
+
     fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
         (
             self.l.process(&self.coeffs, l as f64) as f32,
@@ -155,6 +161,15 @@ impl Eq {
 }
 
 impl DspUnit for Eq {
+    fn reset(&mut self, _cause: AudioDiscontinuity) {
+        // Every biquad history, or the filters ring across the discontinuity.
+        self.low_shelf.reset();
+        self.band1.reset();
+        self.band2.reset();
+        self.band3.reset();
+        self.high_shelf.reset();
+    }
+
     fn process(&mut self, sample_rate: u32, block: &mut [f32], _sidechain: Option<&[f32]>) {
         let fs = sample_rate as f64;
         let p = self.params;

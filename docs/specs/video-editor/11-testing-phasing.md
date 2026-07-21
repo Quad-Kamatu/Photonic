@@ -78,7 +78,7 @@ Both are `#[ignore]`-annotated in source so a stray `cargo test` locally or in t
 
 ## 2. Test media corpus
 
-CI's Linux job installs GTK/X11/wgpu/OpenSSL system deps (`ci.yml` lines ~30–38) but **no `ffmpeg`** — confirmed absent from the `apt-get install` list. Two consequences: (a) decode-path tests that need a real container/codec can't run in CI as-is unless ffmpeg is added to the CI matrix (out of scope for this doc — flag as a P3 CI-config task, see §3.4); (b) fixtures cannot be *generated* in CI.
+CI's Linux job installs GTK/X11/wgpu/OpenSSL system deps (`ci.yml` lines ~30–38) and **installs `ffmpeg` on all three platforms** (`apt-get` / `brew install ffmpeg` / `choco install ffmpeg`). Decode-path tests that need a real container/codec therefore *can* run in CI, and fixtures can be generated there.
 
 **Position:** commit tiny, pre-generated fixture files; provide a **generation script** (`tools/gen-test-fixtures.py`, ffmpeg-dependent, run by a developer locally when a fixture needs regenerating — same shape as `tools/gen-mcp-docs.py`, a checked-in script CI *consumes the output of* rather than *runs*). Do not attempt runtime synthesis of media in the test binary itself (adds a codec dependency to the test harness for no benefit — the fixtures are static test data, not something that needs to vary per run).
 
@@ -127,7 +127,7 @@ Cases: one compile snapshot per interesting compile-path branch in 02 §2's comp
 - **09 (audio DSP):** unit tests on synthetic signals (sine sweep through EQ, known-gain compressor test) — pure-function DSP code, no fixtures needed beyond generated-in-test signals (unlike video, audio synthesis in-test is cheap and doesn't need ffmpeg).
 - **06 (captions/TTS providers):** provider trait is mocked at the trait boundary (a `FakeProvider` returning canned word-timed transcripts / canned audio bytes) — no real network call in CI, matching SPEC's "all non-AI capabilities work fully offline" constraint and letting caption *editing* logic (CAP-010) be tested without any provider at all.
 - **MCP end-to-end (CAP-019 / SS-2):** the three acceptance stories (AS-1/2/3, `00-overview.md` §2) scripted as MCP tool-call sequences, run headless, asserting each story's stated outcome (e.g. AS-1: exported MP4 probes as 9:16, has a burned caption track, duration matches cut timeline). Tool wiring itself is `10-mcp-tools.md`'s scope; this doc owns *that these scripts exist and run in CI as the CAP-019 acceptance gate*, one script per story, one test per script.
-- **CI ffmpeg gap (flagged, not resolved here):** §3.3's sidecar-dependent tests and any MCP-script test that exports need ffmpeg present. Recommend adding `ffmpeg` to `ci.yml`'s Linux `apt-get install` line (and equivalent for macOS/Windows runners — `brew install ffmpeg` / a static-binary download) as a P3 CI-config change, tracked alongside the P3 engine work, not deferred silently.
+- **CI ffmpeg: resolved.** `ffmpeg` is installed on all three runners, so §3.3's sidecar-dependent tests and export-driving MCP-script tests can run in CI.
 
 ### 3.5 GUI smoke
 
@@ -221,10 +221,10 @@ This phase touches the *existing* renderer (dirty tracking, persistent GPU buffe
 
 ### P3 — Playback + media (AS-1: play; AS-2: proxy edit)
 
-- [ ] `photonic-video` crate exists, added to `Cargo.toml` workspace `members` (currently 7 crates, becomes 8).
+- [x] `photonic-video` crate exists and is in `Cargo.toml` workspace `members` (8 crates).
 - [ ] Frame-graph IR + `compile`/`eval`/`eval_cpu` for the v1 op set (decode→transform→merge→output per 02 §2) — `insta` snapshot tests (§3.2) exist for the compile paths available at this phase.
 - [ ] **§1's golden-frame infra stands up here** — first real golden cases, since `eval_cpu` now exists for the v1 op set. This is the natural point to build §1's harness (not P1, since there's no video IR yet then).
-- [ ] CI ffmpeg gap (§3.4) resolved: `ffmpeg` added to CI matrix across all 3 OSes — tracked as an explicit P3 task, not silently deferred.
+- [x] CI ffmpeg: `ffmpeg` present in the CI matrix across all 3 OSes.
 - [ ] Engine integration tests (§3.3) pass: seek accuracy, A/V sync (CAP-004 test hook), cache-hit assertions, sidecar-failure containment.
 - [ ] Perf budgets from 02 §8 that apply at this phase (compile, eval, seek, cut-ahead) measured via `criterion` (§4) and meet threshold on the reference dev machine.
 - [ ] CAP-022 crash recovery (D-12): kill the process mid-edit on a timeline project; relaunch offers recovery; restored document contains the timeline state (extends the existing `recovery_path` machinery — test asserts timeline survives the round-trip).
@@ -284,7 +284,11 @@ This phase touches the *existing* renderer (dirty tracking, persistent GPU buffe
 
 ## 8. New test dependencies
 
-None of `proptest`, `insta`, `criterion` exist in `Cargo.toml` today (checked: absent from `[workspace.dependencies]` and `Cargo.lock`). All three are positioned above (§3.1, §3.2, §4) as recommended additions, not requirements the phases are blocked on — a phase can ship without its bench/snapshot/property-test coverage in the worst case, but should not without its plain `#[test]` coverage. Proposed `[workspace.dependencies]` additions, versions as of this doc's date (pin exact via `cargo add` at implementation time, not hand-typed here):
+`proptest` (`Cargo.toml:79`) and `criterion` (`photonic-video/Cargo.toml:88`) are **present**. **`insta` is absent**, so §3.2's IR-snapshot strategy is **unimplemented** — an open task, not a shipped capability.
+
+**CI must run `cargo test --all-features`.** Verified 2026-07-20: `photonic-core`'s `video-p1-contract` feature gates 8 passing contract tests out of the default test run, and nothing detects that. This is one line of CI config and it catches the whole class — see [40 §3.6](40-spec-verification.md#36-the-complement-lints-and---all-features), which ranks it as the cheapest of the three verification mechanisms and the one that should land first.
+
+**Recommendation: do not adopt `insta`.** The IR is content-hashed by construction ([02 §2](02-engine.md)), so an IR "snapshot" is more precisely expressed as an **assertion on the compiled graph's hash and its diagnostic set** — deterministic, tiny, reviewable in a diff, and free of a snapshot-file review workflow. Where a human-readable form is wanted, generate a canonical text dump of the `FrameGraph` and compare it as a plain string with a normal `assert_eq!`. That keeps the guarantee and removes the dependency, and it composes with [40 §4](40-spec-verification.md#4-acceptance-index)'s acceptance tracking rather than adding a parallel review surface. Either way, §3.2 should be rewritten to describe what is actually built. All three are positioned above (§3.1, §3.2, §4) as recommended additions, not requirements the phases are blocked on — a phase can ship without its bench/snapshot/property-test coverage in the worst case, but should not without its plain `#[test]` coverage. Proposed `[workspace.dependencies]` additions, versions as of this doc's date (pin exact via `cargo add` at implementation time, not hand-typed here):
 
 | Crate | Scope | Added to |
 |---|---|---|

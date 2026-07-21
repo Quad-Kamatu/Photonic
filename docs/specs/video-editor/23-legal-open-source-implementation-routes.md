@@ -168,6 +168,46 @@ Each amendment is independently approvable. Acceptance of S1 moves only D-3; S2 
 
 S1–S5 scope and §4.6 defaults are authorized. D-8 CPU Slice 0, standalone GPU parity, and GPU device/layout safety slices have explicit code authorization and were implemented under the clean-room fence on 2026-07-12. Other item slices still require their named empirical evidence and scoped dispatch record before code or dependency work.
 
+### 4.7 Proposed amendments S13–S14 — **drafted, not accepted**
+
+[ROADMAP §8](ROADMAP.md#8-architecture-decisions-and-defaults) records S13 and S14 as required-but-unproposed, which leaves [26 K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) and [26 K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) permanently parked without a decision ever being taken. The text below is drafted so the choice is explicit. **Neither is accepted; neither authorizes code.** Each follows the S1–S5 pattern: replace a whole non-goal with a narrower one, and accept or reject independently.
+
+#### S13 — local voiceover recording
+
+Replace the non-goal **"Audio recording (import + TTS only in v1)"** with:
+
+> Live capture, broadcast input, video device capture, streaming sources, and multi-input recording remain out of scope. **Recording a single local audio input to a timeline track — voiceover — is in scope**, with explicit device selection, monitoring, and a visible record-armed state.
+
+Scope boundary if accepted: one input device, one target track, recorded to the project's sidecar cache, entering the document as a normal undoable clip insertion. No video capture, no device *management*, no multi-take comping.
+
+Rationale for proposing it: Photonic already ships **TTS** voiceover (`generate_voiceover`), so the timeline already accepts a generated narration clip; recorded narration is the same workflow with a different source, and its absence is conspicuous rather than principled. The non-goal reads as a scoping decision about *capture hardware*, and a single mono input is the smallest possible step into that.
+
+Rationale for rejecting it: it introduces an input device path — permissions, device enumeration, hot-unplug, latency calibration — that the product otherwise does not have, and every one of those is a support burden on three platforms.
+
+Gates if accepted: privacy (recording is local-only, never logged or uploaded, per [ROADMAP §7](ROADMAP.md#7-legal-content-and-product-gates)); an explicit and unmistakable record-armed indicator; crash-safety for in-progress recordings ([37 §2.3](37-robustness.md#23-partial-outputs)'s temp-and-rename applies).
+
+#### S14 — object/region motion tracking
+
+Replace, within the existing stabilization non-goal, the clause **"motion tracking, object tracking"** with:
+
+> Optical-flow stabilization, rolling-shutter correction, and ML horizon detection remain out of scope. **Planar region tracking that produces a keyframe track** — a rectangle or point followed across frames, whose output drives an existing animatable property — is in scope. Gyro-metadata stabilization remains separately scoped by S2.
+
+Scope boundary if accepted: an [32 §2](32-engine-contracts.md#2-analysis-nodes) analysis node emitting a `Transform` keyframe track, consumed through [26 K-B11](26-kdenlive-mlt-parity.md#k-b11--keyframe-interchange-across-effects)'s keyframe interchange. **No new runtime dependency** — OpenCV stays `VALIDATE`-only per §5. Photonic-authored algorithm, clean-room per §3.4.
+
+Rationale for proposing it: tracking is the enabling primitive for blur-a-face, follow-a-subject and screen replacement, all of which are ordinary editorial tasks rather than specialist VFX. It also shares its entire mechanism with D-15 scene detection and D-4 beat detection, so the marginal cost after [32 §2](32-engine-contracts.md#2-analysis-nodes) is the tracker itself.
+
+Rationale for rejecting it: tracking quality is where users compare directly against Mocha and After Effects, and a mediocre tracker is worse than none — it produces work the user must redo by hand after discovering it drifted.
+
+**Additional gate, mandatory if accepted:** an algorithm **patent review** before implementation. §11.1's standing rule applies with full force here — a permissive implementation licence does not clear the underlying technique, and this is a domain with active patents.
+
+#### Disposition
+
+| | S13 | S14 |
+|---|---|---|
+| Status | **Drafted, not proposed for acceptance** | **Drafted, not proposed for acceptance** |
+| Blocks | [26 K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) | [26 K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
+| Recommendation | **Accept.** Small, bounded, and the TTS path already establishes the workflow | **Defer.** Correct in principle, but it should follow [32 §2](32-engine-contracts.md#2-analysis-nodes) shipping with a simpler consumer first, so the analysis-node contract is proven before a hard algorithm is built on it |
+
 ### 4.6 Accepted product defaults
 
 | Decision | Recommended v1 default | Expansion boundary |

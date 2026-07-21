@@ -964,6 +964,11 @@ pub(crate) fn draw_node_canvas(
         Id::new(("photonic_node_canvas", gid)),
         Sense::click_and_drag(),
     );
+    // Clicking the canvas gives it keyboard focus, which is what `handle_keyboard`
+    // gates on (41 §3 R-5: never gate key handling on pointer position).
+    if resp.clicked() || resp.drag_started() {
+        resp.request_focus();
+    }
     let origin = canvas_rect.min;
 
     handle_canvas_input(
@@ -980,7 +985,7 @@ pub(crate) fn draw_node_canvas(
     );
 
     // Keyboard nav (13 §16 / 08 §6.2): Tab cycles, arrows nudge, Delete removes.
-    handle_keyboard(ui, canvas_rect, &graph, gid, doc, vid, &mut pending);
+    handle_keyboard(ui, &resp, &graph, gid, doc, vid, &mut pending);
 
     // ── Paint the canvas ─────────────────────────────────────────────────────
     let painter = ui.painter_at(canvas_rect);
@@ -1367,16 +1372,22 @@ fn node_context_menu(
 
 fn handle_keyboard(
     ui: &Ui,
-    canvas_rect: Rect,
+    canvas_resp: &Response,
     graph: &photonic_core::timeline::NodeGraph,
     gid: GraphId,
     doc: &Document,
     vid: &mut VideoPanelUi,
     pending: &mut Vec<TimelineCmd>,
 ) {
-    // Only when the pointer is over the node canvas, so Tab/arrows/Delete don't
+    // Only when the canvas holds keyboard focus, so Tab/arrows/Delete don't
     // collide with the still-live timeline panel below (04 §5.2 key collisions).
-    if !ui.rect_contains_pointer(canvas_rect) {
+    //
+    // This was previously gated on `rect_contains_pointer`, which made every
+    // keyboard shortcut require the mouse to be hovering the canvas — i.e. the
+    // keyboard path existed but was unreachable without a pointer. 41 §3 R-5
+    // forbids gating key handling on pointer position; focus is the correct
+    // gate, and the canvas takes focus on click (see the `interact` call site).
+    if !canvas_resp.has_focus() {
         return;
     }
     // Tab cycles selection through nodes ordered by (y, x).

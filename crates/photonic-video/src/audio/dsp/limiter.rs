@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 
 use photonic_core::timeline::{EffectParams, PropValue};
 
+use super::AudioDiscontinuity;
 use super::{db_to_linear, one_pole_coeff, DspUnit};
 use crate::audio::CHANNELS;
 
@@ -127,6 +128,33 @@ impl Limiter {
 }
 
 impl DspUnit for Limiter {
+    fn reset(&mut self, _cause: AudioDiscontinuity) {
+        // Force `ensure_ready` to rebuild on the next block, which re-primes
+        // the delay lines with silence. That preserves the documented
+        // invariant that the first `lookahead_samples` of output after a
+        // (re)start are exactly delayed silence — clearing the deques without
+        // re-priming would shorten the delay and desync this path against
+        // every other one feeding the master bus.
+        self.sample_rate = 0;
+        self.lookahead_samples = 0;
+        self.delay_l.clear();
+        self.delay_r.clear();
+        self.window.clear();
+        self.sample_index = 0;
+        self.smoothed_gain = 1.0;
+    }
+
+    /// The fixed lookahead delay. Reported so the mixer can compensate other
+    /// paths against it (31 §3.1) and so export flushes it (see `tail_samples`).
+    fn latency_samples(&self) -> u32 {
+        self.lookahead_samples as u32
+    }
+
+    /// Output persists for exactly the delay-line length after silence in.
+    fn tail_samples(&self) -> u32 {
+        self.lookahead_samples as u32
+    }
+
     fn process(&mut self, sample_rate: u32, block: &mut [f32], _sidechain: Option<&[f32]>) {
         self.ensure_ready(sample_rate);
         let fs = sample_rate as f64;

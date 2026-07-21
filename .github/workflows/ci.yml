@@ -74,8 +74,12 @@ jobs:
       - name: Build (workspace)
         run: cargo build --workspace --locked
 
-      - name: Test (workspace)
-        run: cargo test --workspace --locked
+      - name: Test (workspace, all features)
+        # --all-features so a test module behind a cargo feature cannot be
+        # silently excluded from CI. The `video-p1-contract` feature stranded
+        # 8 passing contract tests this way; see 29-qa-spec.md and
+        # 40-spec-verification.md §3.6.
+        run: cargo test --workspace --locked --all-features
 
   lint:
     name: Lint (fmt + clippy)

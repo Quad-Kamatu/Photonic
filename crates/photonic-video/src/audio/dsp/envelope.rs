@@ -46,6 +46,13 @@ impl EnvelopeFollower {
         Self::default()
     }
 
+    /// Discard the running mean-square and envelope, so the next `step` starts
+    /// from silence rather than from the level before a seek or a cut.
+    pub fn reset(&mut self) {
+        self.mean_sq = 0.0;
+        self.env = 0.0;
+    }
+
     /// One sample step. `x` is a full-scale linear sample. Returns the
     /// current envelope value (linear, always `>= 0`).
     pub fn step(&mut self, x: f64, coeffs: &EnvelopeCoeffs) -> f64 {

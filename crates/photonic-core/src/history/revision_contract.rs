@@ -1,31 +1,19 @@
-//! FAILING-BY-DESIGN TDD contract tests for the P1 renderer prerequisite:
-//! `docs/specs/video-editor/03-render-color-pipeline.md` §2.1's revision
-//! counter + affected-node tracking.
+//! Contract tests for the renderer prerequisite in
+//! `docs/specs/video-editor/03-render-color-pipeline.md` §2.1: the revision
+//! counter and affected-node tracking.
 //!
-//! **This entire module is gated behind the `video-p1-contract` Cargo
-//! feature, which is off by default.** The API these tests exercise —
-//! `CommandHistory::revision()`, `CommandHistory::changes_since()`,
-//! `Command::affected_nodes()`, and the `ChangeSummary` type — does not exist
-//! in this crate yet (03 §2.1 documents the exact gap against current code).
-//! Writing these tests against real `CommandHistory`/`Command` types means
-//! they cannot compile without that API existing, so `#[ignore]` alone would
-//! not keep `cargo test --workspace` green (ignore skips *running*, not
-//! *compiling*). The feature gate is the mechanism that does: the module is
-//! not even parsed under default features, so `cargo build/test --workspace`
-//! is unaffected by this file's existence.
+//! These began as failing-by-design TDD tests behind a `video-p1-contract`
+//! Cargo feature, because the API they exercise did not exist and a feature
+//! gate — unlike `#[ignore]`, which skips *running* but not *compiling* — was
+//! the only way to keep `cargo test --workspace` green.
 //!
-//! Enabling the feature today is expected to FAIL TO COMPILE — that compile
-//! failure *is* the red phase of TDD for an API that doesn't exist yet:
+//! That API now exists: `CommandHistory::revision()`, `changes_since()`,
+//! `Command::affected_nodes()` and `ChangeSummary` all ship. The module has
+//! therefore graduated to always-on, exactly as its original documentation
+//! committed to. It is now an ordinary `#[cfg(test)]` module and runs under
+//! plain `cargo test --workspace`.
 //!
-//! ```sh
-//! cargo test -p photonic-core --features video-p1-contract
-//! ```
-//!
-//! P1 implementation work (03 §2.1's "Spec position") makes this compile and
-//! pass; the module then graduates to always-on (feature gate removed) as
-//! part of that same change. See `docs/specs/video-editor/14-qa-spec.md` §5.
-
-#![cfg(feature = "video-p1-contract")]
+//! See `docs/specs/video-editor/29-qa-spec.md` §5.
 
 use crate::document::Document;
 use crate::history::{Command, CommandHistory};
