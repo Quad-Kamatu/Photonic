@@ -42,16 +42,72 @@ impl PhotonicRenderer {
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.surface_config);
         }
+        // The MSAA / glow / scene targets are the document-pass sRGB `scene_format`
+        // (03 §4.5.4), never the non-sRGB presentation `surface_format`.
         let (msaa_texture, msaa_view) =
-            create_msaa_texture(&self.device, self.surface_format, width, height);
+            create_msaa_texture(&self.device, self.scene_format, width, height);
         self.msaa_texture = msaa_texture;
         self.msaa_view = msaa_view;
         let (glow_tex_a, glow_tex_a_view, glow_tex_b, glow_tex_b_view) =
-            create_glow_textures(&self.device, self.surface_format, width, height);
+            create_glow_textures(&self.device, self.scene_format, width, height);
         self.glow_tex_a = glow_tex_a;
         self.glow_tex_a_view = glow_tex_a_view;
         self.glow_tex_b = glow_tex_b;
         self.glow_tex_b_view = glow_tex_b_view;
+        let (scene_tex, scene_view) =
+            create_scene_texture(&self.device, self.scene_format, width, height);
+        self.scene_tex = scene_tex;
+        self.scene_view = scene_view;
+    }
+
+    /// Present the offscreen document target (03 §4.5.4, audit A-1) into a
+    /// swapchain frame: a full-screen pass that samples the sRGB
+    /// [`scene_view`](Self::scene_tex) — the sampler hardware-decodes it to linear
+    /// — and writes the sRGB-encoded pixel (explicit `srgb_oetf` in the blit
+    /// shader, since the `surface_format` view is NOT `*Srgb` and so gives no free
+    /// encode) into `target`. The canvas therefore shows exactly what the sRGB
+    /// document pass produced, matching the headless export path by construction.
+    ///
+    /// The document scene is opaque-over-BG, so no unpremultiply is needed here; if
+    /// an `ExportBackground::Transparent` scene ever reaches this present path it
+    /// must unpremultiply before the OETF.
+    pub fn blit_scene_to_surface(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+    ) {
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blit_bg"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blit_scene_to_surface"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // The full-screen quad writes every pixel, so the load is moot.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.blit_pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..6, 0..1);
     }
 
     // ── Frame management ──────────────────────────────────────────────────────
@@ -124,15 +180,19 @@ impl PhotonicRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame_encoder"),
             });
+        // Render the document into the offscreen sRGB scene target (linear-light
+        // blending, matching headless), then present it into the swapchain frame
+        // (03 §4.5.4). egui still paints on top into `handle.view` afterwards.
         self.render_scene(
             &mut encoder,
             &self.msaa_view,
-            &view,
+            &self.scene_view,
             self.width,
             self.height,
             vertices,
             indices,
         );
+        self.blit_scene_to_surface(&mut encoder, &view);
         Ok(Some(FrameHandle {
             surface_texture,
             view,

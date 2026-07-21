@@ -817,6 +817,124 @@ pub fn create_composite_pipeline(
     })
 }
 
+// ─── Scene → surface present (blit) pass (03 §4.5.4, audit A-1) ─────────────────
+
+/// Full-screen present shader for the A-1 blit (03 §4.5.4): samples the sRGB
+/// offscreen scene target (the sampler hardware-decodes it to linear) and writes
+/// the sRGB-encoded pixel into a **non-sRGB** presentation surface — so the
+/// gamma encode is applied *explicitly* here (`srgb_oetf`), because the target
+/// view is not `*Srgb` and gives no free hardware encode. The `srgb_oetf`
+/// function mirrors `crate::color::srgb_oetf` byte-for-byte (breakpoint 0.0031308,
+/// slope 12.92, α 1.055, β 0.055, 1/γ = 1/2.4). Alpha is passed through: the
+/// document scene is opaque-over-BG and premultiplied source-over, so no
+/// unpremultiply is needed on this path.
+pub const BLIT_SHADER: &str = r#"
+@group(0) @binding(0) var t_scene: texture_2d<f32>;
+@group(0) @binding(1) var samp:    sampler;
+
+struct VOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0)       uv:       vec2<f32>,
+}
+
+@vertex
+fn vs_quad(@builtin(vertex_index) vi: u32) -> VOut {
+    var pos = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0,  1.0), vec2<f32>(-1.0, 1.0)
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 0.0)
+    );
+    var out: VOut;
+    out.clip_pos = vec4<f32>(pos[vi], 0.0, 1.0);
+    out.uv       = uvs[vi];
+    return out;
+}
+
+fn srgb_oetf(c: f32) -> f32 {
+    if (c <= 0.0031308) { return 12.92 * c; }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+@fragment
+fn fs_blit(in: VOut) -> @location(0) vec4<f32> {
+    // Hardware sRGB-decode on sample → linear scene colour.
+    let lin = textureSample(t_scene, samp, in.uv);
+    return vec4<f32>(srgb_oetf(lin.r), srgb_oetf(lin.g), srgb_oetf(lin.b), lin.a);
+}
+"#;
+
+/// Bind group layout for the blit pass: scene texture + sampler.
+pub fn create_blit_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("blit_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// The present (blit) pipeline. `output_format` is the non-sRGB presentation
+/// surface format; the shader writes the finished pixel, so no fixed-function
+/// blend and a single sample.
+pub fn create_blit_pipeline(
+    device: &wgpu::Device,
+    output_format: wgpu::TextureFormat,
+    blit_bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("blit_shader"),
+        source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("blit_layout"),
+        bind_group_layouts: &[blit_bgl],
+        push_constant_ranges: &[],
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("blit_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_quad",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_blit",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: output_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 // ─── Asset → working-texture conversion (03 §2.5 Tier B / §4.2) ─────────────────
 
 /// The working-graph texture format: linear-light, premultiplied `Rgba16Float`
@@ -1075,6 +1193,7 @@ mod tests {
             ("fill", FILL_SHADER),
             ("blur", BLUR_SHADER),
             ("composite", COMPOSITE_SHADER),
+            ("blit", BLIT_SHADER),
             ("convert", CONVERT_SHADER),
             ("yuv_convert", crate::video::YUV_CONVERT_SHADER),
             ("present", crate::video::PRESENT_SHADER),

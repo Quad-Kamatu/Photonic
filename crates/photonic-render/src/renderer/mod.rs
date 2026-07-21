@@ -3,8 +3,9 @@ use crate::{
     headless::ExportBackground,
     pipeline::{
         blend_mode_index, coalesce_segments, create_blur_bgl, create_blur_pipeline,
-        create_blur_pipeline_with_blend, create_camera_bind_group_layout, create_composite_bgl,
-        create_composite_pipeline, create_fill_pipeline, create_fill_pipeline_with_blend,
+        create_blit_bgl, create_blit_pipeline, create_blur_pipeline_with_blend,
+        create_camera_bind_group_layout, create_composite_bgl, create_composite_pipeline,
+        create_fill_pipeline, create_fill_pipeline_with_blend,
         draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform,
         CompositeParams, DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
@@ -158,6 +159,23 @@ pub struct PhotonicRenderer {
 
     pub(crate) msaa_texture: wgpu::Texture,
     pub(crate) msaa_view: wgpu::TextureView,
+
+    /// The offscreen document target (03 §4.5.4, audit A-1). The document
+    /// fill/blend/composite pass resolves here at [`scene_format`](Self::scene_format)
+    /// (`Rgba8UnormSrgb`), so on-canvas blending runs in linear light exactly as
+    /// the headless export path does — never in the swapchain's non-sRGB
+    /// presentation format. `begin_frame` then blits this into the surface view
+    /// (see [`blit_scene_to_surface`](Self::blit_scene_to_surface)). Sized to the
+    /// surface, recreated in `resize` alongside the MSAA/glow targets.
+    pub(crate) scene_tex: wgpu::Texture,
+    pub(crate) scene_view: wgpu::TextureView,
+    /// Full-screen present pipeline that samples [`scene_view`](Self::scene_tex)
+    /// (hardware sRGB-decode on sample) and writes the sRGB-encoded pixel into the
+    /// non-sRGB `surface_format` view — the A-1 blit (03 §4.5.4). Built against
+    /// `surface_format` (the presentation format), not `scene_format`.
+    pub(crate) blit_pipeline: wgpu::RenderPipeline,
+    pub(crate) blit_bgl: wgpu::BindGroupLayout,
+    pub(crate) blit_sampler: wgpu::Sampler,
 
     pub view: CanvasView,
     document: Arc<Mutex<Document>>,
@@ -605,8 +623,14 @@ impl PhotonicRenderer {
             });
         }
 
+        // The document fill/blend/composite pass renders in the sRGB scene format
+        // (03 §4.5.4, audit A-1), independent of the non-sRGB presentation
+        // `surface_format`, so fixed-function + shader blending run in linear light
+        // and the canvas matches the headless export path by construction.
+        let scene_format = crate::pipeline::SCENE_FORMAT;
+
         let fill_pipeline =
-            create_fill_pipeline(&device, surface_format, &camera_bgl, MSAA_SAMPLES);
+            create_fill_pipeline(&device, scene_format, &camera_bgl, MSAA_SAMPLES);
         // One pipeline variant per separable blend mode, sharing the fill shader.
         let blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)> = SEPARABLE_BLEND_MODES
             .iter()
@@ -616,7 +640,7 @@ impl PhotonicRenderer {
                         mode,
                         create_fill_pipeline_with_blend(
                             &device,
-                            surface_format,
+                            scene_format,
                             &camera_bgl,
                             MSAA_SAMPLES,
                             blend,
@@ -625,15 +649,20 @@ impl PhotonicRenderer {
                 })
             })
             .collect();
-        let (msaa_texture, msaa_view) = create_msaa_texture(&device, surface_format, width, height);
+        let (msaa_texture, msaa_view) = create_msaa_texture(&device, scene_format, width, height);
 
         let blur_bgl = create_blur_bgl(&device);
-        let fill_pipeline_1spp = create_fill_pipeline(&device, surface_format, &camera_bgl, 1);
-        let blur_pipeline_h = create_blur_pipeline(&device, surface_format, &blur_bgl, false);
+        let fill_pipeline_1spp = create_fill_pipeline(&device, scene_format, &camera_bgl, 1);
+        let blur_pipeline_h = create_blur_pipeline(&device, scene_format, &blur_bgl, false);
+        // The gaussian-glow present pass (glow_renderer.rs Pass C) blends its blur
+        // directly into the swapchain frame, so this ONE pipeline must target the
+        // non-sRGB `surface_format`; every other document-pass resource is
+        // `scene_format`. (Its input glow texture is `scene_format`; sampling
+        // hardware-decodes it, so the additive glow blend still reads linear.)
         let blur_pipeline_v = create_blur_pipeline(&device, surface_format, &blur_bgl, true);
         let blur_pipeline_alpha = create_blur_pipeline_with_blend(
             &device,
-            surface_format,
+            scene_format,
             &blur_bgl,
             BlurBlend::StraightAlpha,
         );
@@ -646,11 +675,24 @@ impl PhotonicRenderer {
             ..Default::default()
         });
         let (glow_tex_a, glow_tex_a_view, glow_tex_b, glow_tex_b_view) =
-            create_glow_textures(&device, surface_format, width, height);
+            create_glow_textures(&device, scene_format, width, height);
+
+        // Offscreen document target + present (blit) pipeline (03 §4.5.4).
+        let (scene_tex, scene_view) = create_scene_texture(&device, scene_format, width, height);
+        let blit_bgl = create_blit_bgl(&device);
+        let blit_pipeline = create_blit_pipeline(&device, surface_format, &blit_bgl);
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         // Per-layer compositing (#226): shader + a filtering sampler.
         let composite_bgl = create_composite_bgl(&device);
-        let composite_pipeline = create_composite_pipeline(&device, surface_format, &composite_bgl);
+        let composite_pipeline = create_composite_pipeline(&device, scene_format, &composite_bgl);
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -676,11 +718,13 @@ impl PhotonicRenderer {
         // to the sRGB render target instead of linearizing them (its default
         // `Accurate` mode). This makes interactive text colour match the vector fill
         // pipeline, which passes sRGB through unmodified (see pipeline.rs `fs_main`).
+        // The capture-path text pass paints into the sRGB scene target (capture.rs),
+        // so the atlas must match `scene_format`, not the presentation surface.
         let mut text_atlas = TextAtlas::with_color_mode(
             &device,
             &queue,
             &text_glyph_cache,
-            surface_format,
+            scene_format,
             glyphon::ColorMode::Web,
         );
         let text_renderer = TextRenderer::new(
@@ -712,13 +756,18 @@ impl PhotonicRenderer {
             queue,
             surface_config,
             surface_format,
-            scene_format: crate::pipeline::SCENE_FORMAT,
+            scene_format,
             fill_pipeline,
             blend_pipelines,
             camera_buffer,
             camera_bind_group,
             msaa_texture,
             msaa_view,
+            scene_tex,
+            scene_view,
+            blit_pipeline,
+            blit_bgl,
+            blit_sampler,
             view,
             document,
             history,
@@ -2287,6 +2336,35 @@ pub(crate) fn create_msaa_texture(
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    (texture, view)
+}
+
+/// The offscreen document target (03 §4.5.4). Single-sample sRGB `scene_format`,
+/// usable as a render-pass resolve target, a sampled source (for the blit) and a
+/// readback source.
+pub(crate) fn create_scene_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene_texture"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
