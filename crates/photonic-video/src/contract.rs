@@ -9,15 +9,61 @@
 
 // ── Relocated to photonic_core::timeline (canonical home) ───────────────────
 pub use photonic_core::timeline::{
-    AssetId, EffectKind, FrameRate, Tick, VectorRef, VectorStateKey, TICKS_PER_SECOND,
+    AssetId, EffectKind, FrameRate, PropPath, PropValue, Tick, VectorRef, VectorStateKey,
+    TICKS_PER_SECOND,
 };
+use photonic_core::Color;
 
 /// Keyframe-resolved effect parameters (02 §2: "the IR carries resolved params;
-/// the evaluator is time-ignorant"). Payload shape is finalized with the P2
-/// `prop_registry`; opaque at stub stage.
+/// the evaluator is time-ignorant"). Every animatable knob of an `Effect` op is
+/// evaluated at compile time (`graph::compile`) into this ordered bag; the
+/// evaluator reads it as a static payload.
+///
+/// Backed by an ordered `Vec` of `(path, value)` pairs — never a `HashMap` —
+/// mirroring the authoring [`EffectParams`](photonic_core::timeline::EffectParams)
+/// rule (`effect_kind.rs`): a stable order is load-bearing for the content hash
+/// (`graph::compile::hash_op`) and hence for `NodeCache` correctness (SS-3). The
+/// compiler emits entries in `prop_registry` order, so two resolves of the same
+/// effect are byte-identical.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ResolvedParams {
-    _pinned_in_p2: (),
+    pub entries: Vec<(PropPath, PropValue)>,
+}
+
+impl ResolvedParams {
+    /// The resolved value for `path`, if present.
+    pub fn get(&self, path: &str) -> Option<&PropValue> {
+        self.entries
+            .iter()
+            .find(|(p, _)| p.as_str() == path)
+            .map(|(_, v)| v)
+    }
+
+    /// The resolved `f32` at `path` (a `Float` value narrowed to `f32`), or
+    /// `default` when the path is absent / not a float.
+    pub fn f32_or(&self, path: &str, default: f32) -> f32 {
+        match self.get(path) {
+            Some(PropValue::Float(v)) => *v as f32,
+            _ => default,
+        }
+    }
+
+    /// The resolved [`Color`] at `path` (authoring sRGB straight-alpha), or
+    /// `default` when the path is absent / not a color.
+    pub fn color_or(&self, path: &str, default: Color) -> Color {
+        match self.get(path) {
+            Some(PropValue::Color(c)) => *c,
+            _ => default,
+        }
+    }
+
+    /// The resolved `bool` at `path`, or `default` when absent / not a bool.
+    pub fn bool_or(&self, path: &str, default: bool) -> bool {
+        match self.get(path) {
+            Some(PropValue::Bool(b)) => *b,
+            _ => default,
+        }
+    }
 }
 
 /// Keyframe-resolved grade operator (07 §2's `ResolvedGradeOp`, the IR-side

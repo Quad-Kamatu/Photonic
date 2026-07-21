@@ -125,10 +125,11 @@ pub struct AssetReadiness {
     pub proxy_ready: bool,
 }
 
-/// An export request (02 §7). Carried by [`EngineCmd::Export`], which is a
-/// declared **NotImplemented stub in P3** — headless export goes through
-/// [`crate::export::render_loop::export_frames`] directly until the engine
-/// wires the job queue.
+/// An export request (02 §7). Carried by [`EngineCmd::Export`]: the engine
+/// spawns a dedicated worker thread that runs
+/// [`crate::export::job::run_export_job`] over a frozen snapshot and publishes
+/// progress on [`EngineStatus::export`]. The MCP `export_sequence` tool funnels
+/// through the same relocated fn, so there is one render/encode path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportJob {
     pub sequence: SequenceId,
@@ -137,6 +138,22 @@ pub struct ExportJob {
     pub output: PathBuf,
     /// `None` = the sequence's work range / full extent.
     pub range: Option<(Tick, Tick)>,
+}
+
+/// Live export progress the GUI polls off [`EngineStatus`] (02 §7). Published
+/// wait-free by the engine thread from a background export worker's
+/// `ExportEvent` stream; `done` flips true on completion/cancel/failure, and
+/// `error` carries the message on failure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportProgressSnapshot {
+    /// Monotonic per-session export counter (distinguishes successive exports).
+    pub job: u64,
+    pub frame: u64,
+    pub total: u64,
+    pub fps: f32,
+    pub eta: Duration,
+    pub done: bool,
+    pub error: Option<String>,
 }
 
 /// GUI/MCP → engine commands (02 §1).
@@ -169,8 +186,12 @@ pub enum EngineCmd {
     /// cache + decode sources) — the hash→asset index for targeted eviction
     /// is the proxy/relink story's seam.
     InvalidateRange(SequenceId, Tick, Tick),
-    /// **NotImplemented stub in P3** — surfaces on [`EngineStatus::last_error`].
+    /// Start a headless export on a dedicated worker thread; progress is
+    /// published on [`EngineStatus::export`]. A new `Export` (or
+    /// [`EngineCmd::CancelExport`]) poisons any in-flight one.
     Export(Box<ExportJob>),
+    /// Cancel the in-flight export (if any). The worker stops between frames.
+    CancelExport,
     /// **NotImplemented stub in P3** — surfaces on [`EngineStatus::last_error`].
     Probe(AssetId),
     /// Stop the engine thread. [`EngineSession`] sends this on drop/shutdown.
@@ -222,6 +243,10 @@ pub struct EngineStatus {
     /// True while an exact-frame eval is outstanding after retarget/seek and
     /// no new frame was published this tick (GUI may keep last/poster).
     pub buffering: bool,
+    /// Live progress of the in-flight (or most recent) export (02 §7). `None`
+    /// until the session's first `EngineCmd::Export`. The GUI export dialog
+    /// polls this wait-free.
+    pub export: Option<ExportProgressSnapshot>,
 }
 
 impl Default for EngineStatus {
@@ -241,6 +266,7 @@ impl Default for EngineStatus {
             preview_target: PreviewTarget::default(),
             preview_quality: PreviewQuality::Draft,
             buffering: false,
+            export: None,
         }
     }
 }
@@ -428,6 +454,14 @@ struct EngineThread {
     cmd_batch: Vec<EngineCmd>,
     /// Skip redundant status Arc allocations when nothing visible changed.
     last_status_sig: u64,
+    /// Live export progress written by the background export worker, read into
+    /// [`EngineStatus::export`] each publish (02 §7). Wait-free both sides.
+    export_progress: Arc<ArcSwapOption<ExportProgressSnapshot>>,
+    /// Cancel flag of the in-flight export worker (if any). A new export or an
+    /// [`EngineCmd::CancelExport`] poisons it; shutdown poisons it too.
+    export_cancel: Option<Arc<AtomicBool>>,
+    /// Monotonic per-session export counter, stamped onto each snapshot.
+    export_job_counter: u64,
 }
 
 impl EngineThread {
@@ -467,6 +501,9 @@ impl EngineThread {
             evaluation_misses: 0,
             cmd_batch: Vec::with_capacity(32),
             last_status_sig: 0,
+            export_progress: Arc::new(ArcSwapOption::from(None)),
+            export_cancel: None,
+            export_job_counter: 0,
         }
     }
 
@@ -513,6 +550,11 @@ impl EngineThread {
 
             // 4. Publish status (wait-free for the reader).
             self.publish_status();
+        }
+        // Poison any in-flight export so its worker stops between frames rather
+        // than outliving the engine thread (the worker owns its own session).
+        if let Some(cancel) = self.export_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
         }
         self.stop_playing();
     }
@@ -639,12 +681,11 @@ impl EngineThread {
                 }
                 self.controller.request_present();
             }
-            EngineCmd::Export(job) => {
-                self.fail(format!(
-                    "EngineCmd::Export not implemented in P3 (sequence {}); use \
-                     export::render_loop::export_frames directly",
-                    job.sequence
-                ));
+            EngineCmd::Export(job) => self.start_export(*job),
+            EngineCmd::CancelExport => {
+                if let Some(cancel) = &self.export_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
             }
             EngineCmd::Probe(asset) => {
                 self.fail(format!(
@@ -660,6 +701,88 @@ impl EngineThread {
     fn fail(&mut self, msg: String) {
         tracing::warn!(target: "photonic_video::session", "{msg}");
         self.last_error = Some(msg);
+    }
+
+    /// Spawn a dedicated export worker (02 §7). The worker runs
+    /// [`crate::export::job::run_export_job`] over the current frozen snapshot
+    /// on its own thread + own headless session, publishing progress into
+    /// `export_progress` (which `publish_status` mirrors onto
+    /// [`EngineStatus::export`]). A prior in-flight export is poisoned first.
+    fn start_export(&mut self, job: ExportJob) {
+        // Poison any in-flight export so two never race the same output.
+        if let Some(prev) = self.export_cancel.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
+        let Some(project) = self.snapshot.clone() else {
+            self.fail(format!(
+                "export requested for sequence {} but no timeline snapshot is loaded yet",
+                job.sequence
+            ));
+            return;
+        };
+        let Some(tools) = self.tools.clone() else {
+            self.fail("export requested but ffmpeg/ffprobe were not located".into());
+            return;
+        };
+        let gpu = self.evaluator.gpu().clone();
+        self.export_job_counter += 1;
+        let job_num = self.export_job_counter;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.export_cancel = Some(Arc::clone(&cancel));
+        let progress = Arc::clone(&self.export_progress);
+        // Seed a 0/0 running snapshot so the GUI shows the export immediately.
+        progress.store(Some(Arc::new(ExportProgressSnapshot {
+            job: job_num,
+            frame: 0,
+            total: 0,
+            fps: 0.0,
+            eta: Duration::ZERO,
+            done: false,
+            error: None,
+        })));
+
+        std::thread::Builder::new()
+            .name("photonic-video-export".into())
+            .spawn(move || {
+                let prog = Arc::clone(&progress);
+                let on_event = |event: crate::export::render_loop::ExportEvent| {
+                    if let crate::export::render_loop::ExportEvent::Progress(p) = event {
+                        prog.store(Some(Arc::new(ExportProgressSnapshot {
+                            job: job_num,
+                            frame: p.frame,
+                            total: p.total,
+                            fps: p.fps,
+                            eta: p.eta,
+                            done: false,
+                            error: None,
+                        })));
+                    }
+                };
+                let result = crate::export::job::run_export_job(
+                    gpu, project, &job, &tools, &cancel, on_event,
+                );
+                // Final snapshot: carry the last frame/total, flip done, and
+                // attach any error.
+                let (frame, total) = progress
+                    .load_full()
+                    .map(|s| (s.frame, s.total))
+                    .unwrap_or((0, 0));
+                let error = match &result {
+                    Ok(()) => None,
+                    Err(e) => Some(e.to_string()),
+                };
+                progress.store(Some(Arc::new(ExportProgressSnapshot {
+                    job: job_num,
+                    frame,
+                    total,
+                    fps: 0.0,
+                    eta: Duration::ZERO,
+                    done: true,
+                    error,
+                })));
+            })
+            .expect("spawn photonic-video export worker");
     }
 
     /// Re-snapshot the timeline when the history revision moved. `try_lock`
@@ -894,6 +1017,7 @@ impl EngineThread {
             .snapshot
             .as_ref()
             .and_then(|p| self.effective_sequence(p));
+        let export = self.export_progress.load_full();
         // Cheap signature: skip Arc allocation when the GUI-visible fields are
         // unchanged (idle paused loops were allocating status every 100 ms).
         let sig = {
@@ -917,6 +1041,17 @@ impl EngineThread {
                     PreviewQuality::Draft => 0,
                     PreviewQuality::Full => 1,
                 });
+            // Fold export progress so a background worker's advance still
+            // republishes status even when every interactive field is idle.
+            if let Some(e) = export.as_ref() {
+                h = h.wrapping_mul(0x9E37_79B9).wrapping_add(e.job);
+                h = h.wrapping_mul(0x9E37_79B9).wrapping_add(e.frame);
+                h = h.wrapping_mul(0x9E37_79B9).wrapping_add(e.total);
+                h = h.wrapping_mul(0x9E37_79B9).wrapping_add(e.done as u64);
+                h = h
+                    .wrapping_mul(0x9E37_79B9)
+                    .wrapping_add(e.error.is_some() as u64);
+            }
             h
         };
         if sig == self.last_status_sig && self.last_error.is_none() {
@@ -940,6 +1075,7 @@ impl EngineThread {
             preview_target: self.preview_target.clone(),
             preview_quality: self.preview_quality,
             buffering: self.buffering,
+            export: export.as_ref().map(|e| (**e).clone()),
         }));
     }
 }

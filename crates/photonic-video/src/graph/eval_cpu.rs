@@ -138,10 +138,50 @@ fn eval_op(
             Some(input) => ops::transform2d(input, *mat, *sampling),
             None => Image::new(cw, ch),
         },
-        // Real kernel: Invert (08 §3). Other effect kinds stay passthrough until
-        // their `ResolvedParams` payload finalizes (P5/P7).
-        IrOp::Effect { kind, .. } => match kind {
+        // Real kernels: Invert / LumaKey / ChromaKey / MaskShapeGen (08 §3), each
+        // reading its keyframe-resolved `ResolvedParams` (K-0.2). Blur / Sharpen /
+        // Glow remain passthrough markers here (their kernels are pending); an
+        // unknown/forward-compat kind also passes through (39 §2.2).
+        IrOp::Effect { kind, params } => match kind {
             EffectKind::Invert => ops::invert(&in0()),
+            EffectKind::LumaKey => {
+                let img = in0();
+                ops::luma_key(
+                    &img,
+                    params.f32_or("params.threshold", 0.0),
+                    params.f32_or("params.softness", 0.0),
+                    params.bool_or("params.invert", false),
+                )
+            }
+            EffectKind::ChromaKey => {
+                let img = in0();
+                let key = params.color_or("params.key_color", photonic_core::Color::BLACK);
+                ops::chroma_key(
+                    &img,
+                    [
+                        ops::srgb_to_linear(key.r),
+                        ops::srgb_to_linear(key.g),
+                        ops::srgb_to_linear(key.b),
+                    ],
+                    params.f32_or("params.tolerance", 0.0),
+                    params.f32_or("params.edge_softness", 0.0),
+                    params.f32_or("params.spill_suppress", 0.0),
+                )
+            }
+            EffectKind::MaskShapeGen => ops::mask_shape(
+                cw,
+                ch,
+                [
+                    params.f32_or("params.center_x", 0.5),
+                    params.f32_or("params.center_y", 0.5),
+                ],
+                [
+                    params.f32_or("params.size_x", 0.5),
+                    params.f32_or("params.size_y", 0.5),
+                ],
+                params.f32_or("params.rotation", 0.0),
+                params.f32_or("params.feather", 0.0),
+            ),
             _ => in0(),
         },
         // Real kernel: the resolved grade stack (07 §3), the GPU-parity golden.

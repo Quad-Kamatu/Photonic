@@ -10,8 +10,13 @@
 //!   Windows/non-unix temp f32le file).
 //! - [`render_loop`] — the engine-independent `export_frames` shell (02 §7)
 //!   that the P3 evaluator feeds.
+//! - [`job`] — the single engine-backed export path (02 §7, 10 §6): resolves a
+//!   `session::ExportJob` against a frozen project and drives a dedicated
+//!   headless session through `render_loop::export_frames`. Both the GUI
+//!   (`EngineCmd::Export`) and MCP `export_sequence` funnel through it.
 
 pub mod convert;
 pub mod encoder;
+pub mod job;
 pub mod presets;
 pub mod render_loop;

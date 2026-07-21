@@ -36,9 +36,9 @@ use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
     self, AnchorSpace, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack,
     CaptionWord, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp,
-    GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort,
-    KaraokeMode, LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
-    TextClipContent, TimelineProject, TransitionKind,
+    EffectParams, GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams,
+    GraphOp, InPort, KaraokeMode, LutInterp, NodeGraph, PropPath, PropSet, PropTargetKind, PropValue,
+    Sequence, SequenceFormat, SequenceId, TextClipContent, TimelineProject, TransitionKind,
 };
 use photonic_core::Color;
 use photonic_render::caption::CaptionWordRun;
@@ -834,15 +834,14 @@ fn apply_stack(
         if !fx.enabled {
             continue;
         }
-        // `Invert` is a real pass in the evaluator (08 §3); the other effect
-        // kinds still emit a marker node (correct arity + ordering + content-hash
-        // identity) that the evaluator passes through until their `ResolvedParams`
-        // payload shape finalizes (P5/P7). The op discriminant + kind participate
-        // in the content hash so distinct effects never collide.
+        // Keyframe-resolve the effect's params at the scope's `dt` (K-0.2). The op
+        // discriminant, kind, AND resolved params all participate in the content
+        // hash (`hash_op`), so two clips differing only in e.g. Blur radius are
+        // distinct cache identities — never a colliding NodeCache entry.
         cur = b.push(
             IrOp::Effect {
                 kind: fx.kind,
-                params: ResolvedParams::default(),
+                params: resolve_effect_params(fx.kind, &fx.params.base, &fx.params, dt),
             },
             vec![(cur, OutPort::default())],
         );
@@ -1490,10 +1489,11 @@ fn lower_node_uncached(
         | GraphOp::Invert
         | GraphOp::MaskShape { .. } => {
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
+            let kind = graph_op_effect_kind(&node.op);
             b.push(
                 IrOp::Effect {
-                    kind: graph_op_effect_kind(&node.op),
-                    params: ResolvedParams::default(),
+                    kind,
+                    params: resolve_effect_params(kind, &node.params.base.0, &node.params, tick),
                 },
                 vec![(input, OutPort::default())],
             )
@@ -1887,6 +1887,37 @@ fn eval_node_color(
     }
 }
 
+/// Keyframe-resolve an effect's params into the ordered [`ResolvedParams`] bag
+/// the IR carries (02 §2). The registry block for `kind` (`prop_registry`) is
+/// the canonical, deterministic order: every registered path is emitted, its
+/// value taken from the authored `base` (falling back to the neutral seed
+/// default when the base omits it), then evaluated against any animated lane at
+/// clip-relative `dt`. The registry-driven order is what makes two resolves of
+/// the same effect byte-identical, which `hash_op` relies on for cache identity.
+///
+/// Works for both effect-param carriers: a clip [`ClipEffect`]'s
+/// `AnimProps<EffectParams>` (pass `&fx.params.base`) and a graph node's
+/// `AnimProps<GraphNodeParams>` (pass `&node.params.base.0`). `Invert` has an
+/// empty registry block, so this yields an empty bag for it.
+fn resolve_effect_params<T: PropSet>(
+    kind: EffectKind,
+    base: &EffectParams,
+    anim: &AnimProps<T>,
+    dt: Tick,
+) -> ResolvedParams {
+    let seeded = EffectParams::seed(PropTargetKind::Effect(kind));
+    let mut entries = Vec::with_capacity(seeded.entries.len());
+    for (path, seed_default) in &seeded.entries {
+        let base_val = base.get(path.as_str()).copied().unwrap_or(*seed_default);
+        let value = match anim.track(path) {
+            Some(track) => timeline::eval(track, &base_val, dt),
+            None => base_val,
+        };
+        entries.push((path.clone(), value));
+    }
+    ResolvedParams { entries }
+}
+
 // ── Transforms & color ────────────────────────────────────────────────────────
 
 /// Build a 3×3 affine from an evaluated [`ClipTransform`]. Center-offset anchors
@@ -2065,9 +2096,10 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             }
             h.update(&[*sampling as u8]);
         }
-        IrOp::Effect { kind, params: _ } => {
+        IrOp::Effect { kind, params } => {
             h.update(&[5]);
             h.update(&[effect_kind_tag(*kind)]);
+            hash_resolved_params(h, params);
         }
         IrOp::Grade { ops } => {
             h.update(&[6]);
@@ -2122,6 +2154,46 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[15]);
             h.update(&w.to_le_bytes());
             h.update(&gh.to_le_bytes());
+        }
+    }
+}
+
+/// Hash a resolved effect-param bag (K-0.2) into the content hash, in order:
+/// each `(path, value)` pair contributes its path bytes and value bits. Ordered
+/// iteration over the `Vec` (never a map) makes the digest deterministic, so an
+/// `Effect` op's cache identity tracks its actual resolved params — two Blur
+/// radii are distinct `NodeCache` entries, never a wrong-pixels collision.
+/// Deterministic: only resolved bytes/bits, no pointer/time state.
+fn hash_resolved_params(h: &mut xxhash_rust::xxh3::Xxh3, params: &ResolvedParams) {
+    let f64b = |h: &mut xxhash_rust::xxh3::Xxh3, v: f64| h.update(&v.to_bits().to_le_bytes());
+    h.update(&(params.entries.len() as u32).to_le_bytes());
+    for (path, value) in &params.entries {
+        h.update(&(path.as_str().len() as u32).to_le_bytes());
+        h.update(path.as_str().as_bytes());
+        match value {
+            PropValue::Float(v) => {
+                h.update(&[0]);
+                f64b(h, *v);
+            }
+            PropValue::Vec2(v) => {
+                h.update(&[1]);
+                f64b(h, v[0]);
+                f64b(h, v[1]);
+            }
+            PropValue::Color(c) => {
+                h.update(&[2]);
+                for ch in [c.r, c.g, c.b, c.a] {
+                    h.update(&ch.to_bits().to_le_bytes());
+                }
+            }
+            PropValue::Bool(b) => {
+                h.update(&[3]);
+                h.update(&[*b as u8]);
+            }
+            PropValue::Enum(e) => {
+                h.update(&[4]);
+                h.update(&e.to_le_bytes());
+            }
         }
     }
 }
@@ -2566,6 +2638,45 @@ mod tests {
             .nodes
             .iter()
             .any(|n| matches!(n.op, IrOp::Merge { .. })));
+    }
+
+    /// K-0.2 Step A: the resolved effect params are folded into the content
+    /// hash, so two clips that differ ONLY in a Blur radius compile to distinct
+    /// `Effect` cache identities. Without this, the two radii would collide in
+    /// `NodeCache` and Step B's real Blur kernel would sample the wrong cached
+    /// pixels. Also asserts determinism (the same radius hashes stably).
+    #[test]
+    fn blur_radius_participates_in_content_hash() {
+        fn effect_hash_for_radius(radius: f64) -> u128 {
+            let (mut project, seq_id) = base_project();
+            let tk = add_video_track(&mut project, seq_id);
+            let mut clip = solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0);
+            let mut eff = photonic_core::timeline::ClipEffect::new(EffectKind::Blur);
+            eff.params.base.set("params.radius", PropValue::Float(radius));
+            clip.effects.push(eff);
+            project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+                .clips
+                .push(clip);
+            let out = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
+            out.graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.op, IrOp::Effect { .. }))
+                .expect("a Blur Effect node is present")
+                .content_hash
+                .0
+        }
+        let h10 = effect_hash_for_radius(10.0);
+        let h50 = effect_hash_for_radius(50.0);
+        assert_ne!(
+            h10, h50,
+            "two Blur clips differing only in radius must not share a content hash"
+        );
+        assert_eq!(
+            h10,
+            effect_hash_for_radius(10.0),
+            "the same radius must hash deterministically"
+        );
     }
 
     #[test]

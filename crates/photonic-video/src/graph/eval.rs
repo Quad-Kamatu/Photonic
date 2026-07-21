@@ -554,8 +554,11 @@ impl Evaluator {
                     );
                 }
             }
-            // Real effect kernel: Invert (08 §3). Other kinds fall through to the
-            // blit passthrough below until their `ResolvedParams` payload lands.
+            // Real effect kernels: Invert / LumaKey / ChromaKey / MaskShapeGen
+            // (08 §3), each reading its keyframe-resolved params (K-0.2), the WGSL
+            // twins of the `ops::*` kernels the CPU reference runs. Blur/Sharpen/
+            // Glow and unknown/forward-compat kinds fall through to the blit
+            // passthrough below.
             IrOp::Effect {
                 kind: EffectKind::Invert,
                 ..
@@ -563,6 +566,61 @@ impl Evaluator {
                 Some(src) => self.passes.invert(&self.gpu, &src.texture, target),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
+            IrOp::Effect {
+                kind: EffectKind::LumaKey,
+                params,
+            } => match inputs.first() {
+                Some(src) => self.passes.luma_key(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.threshold", 0.0),
+                    params.f32_or("params.softness", 0.0),
+                    params.bool_or("params.invert", false),
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Effect {
+                kind: EffectKind::ChromaKey,
+                params,
+            } => match inputs.first() {
+                Some(src) => {
+                    let key = params.color_or("params.key_color", photonic_core::Color::BLACK);
+                    self.passes.chroma_key(
+                        &self.gpu,
+                        &src.texture,
+                        target,
+                        [
+                            crate::graph::ops::srgb_to_linear(key.r),
+                            crate::graph::ops::srgb_to_linear(key.g),
+                            crate::graph::ops::srgb_to_linear(key.b),
+                        ],
+                        params.f32_or("params.tolerance", 0.0),
+                        params.f32_or("params.edge_softness", 0.0),
+                        params.f32_or("params.spill_suppress", 0.0),
+                    );
+                }
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Effect {
+                kind: EffectKind::MaskShapeGen,
+                params,
+            } => self.passes.mask_shape(
+                &self.gpu,
+                target,
+                [
+                    params.f32_or("params.center_x", 0.5),
+                    params.f32_or("params.center_y", 0.5),
+                ],
+                [
+                    params.f32_or("params.size_x", 0.5),
+                    params.f32_or("params.size_y", 0.5),
+                ],
+                params.f32_or("params.rotation", 0.0),
+                params.f32_or("params.feather", 0.0),
+                logical_w,
+                logical_h,
+            ),
             IrOp::Transform2D { mat, sampling } => match inputs.first() {
                 Some(src) => self.passes.transform(
                     &self.gpu,
@@ -643,6 +701,14 @@ struct Passes {
     transform_bgl: wgpu::BindGroupLayout,
     /// `Effect{Invert}` (08 §3): shares the blit bind-group layout (tex + sampler).
     invert_pipeline: wgpu::RenderPipeline,
+    /// `Effect{LumaKey}`/`Effect{ChromaKey}` (08 §3): a filter BGL (tex + sampler
+    /// + a params uniform), the WGSL twins of `ops::luma_key`/`ops::chroma_key`.
+    filter_bgl: wgpu::BindGroupLayout,
+    luma_key_pipeline: wgpu::RenderPipeline,
+    chroma_key_pipeline: wgpu::RenderPipeline,
+    /// `Effect{MaskShapeGen}` (08 §3): a 0-input generator, uniform-only BGL.
+    mask_bgl: wgpu::BindGroupLayout,
+    mask_shape_pipeline: wgpu::RenderPipeline,
     merge_pipeline: wgpu::RenderPipeline,
     merge_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -717,6 +783,46 @@ impl Passes {
         );
         let invert_pipeline = make_pipeline(device, &blit_bgl, &invert_src, "fs");
 
+        // Filter BGL (tex + sampler + params uniform) — shared by LumaKey/ChromaKey.
+        let filter_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("filter_bgl"),
+            entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
+        });
+
+        // LumaKey (08 §3): scale α by a luma-driven keep factor. `u = [threshold,
+        // hi, invert, pad]` (hi = threshold + max(softness, eps), floored in Rust so
+        // the GPU and CPU smoothstep bands match). WGSL twin of `ops::luma_key`.
+        let luma_key_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct LK {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: LK;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var straight = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ straight = c.rgb / c.a; }}\n  let luma = 0.2126 * straight.r + 0.7152 * straight.g + 0.0722 * straight.b;\n  var keep = smoothstep(u.p.x, u.p.y, luma);\n  if (u.p.z > 0.5) {{ keep = 1.0 - keep; }}\n  return c * keep;\n}}\n"
+        );
+        let luma_key_pipeline = make_pipeline(device, &filter_bgl, &luma_key_src, "fs");
+
+        // ChromaKey (08 §3): key out colours near `key`, feather the matte edge,
+        // suppress spill on the dominant key channel. `key = [r,g,b,tolerance]`,
+        // `aux = [hi, spill, dom, pad]`. WGSL twin of `ops::chroma_key`.
+        let chroma_key_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct CK {{ key: vec4<f32>, aux: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: CK;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var straight = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ straight = c.rgb / c.a; }}\n  let dist = length(straight - u.key.xyz);\n  let keep = smoothstep(u.key.w, u.aux.x, dist);\n  var col = straight;\n  let spill = u.aux.y;\n  let dom = i32(u.aux.z + 0.5);\n  if (dom == 0) {{ let m = 0.5 * (col.g + col.b); if (col.r > m) {{ col.r = col.r + (m - col.r) * spill; }} }}\n  else if (dom == 1) {{ let m = 0.5 * (col.r + col.b); if (col.g > m) {{ col.g = col.g + (m - col.g) * spill; }} }}\n  else {{ let m = 0.5 * (col.r + col.g); if (col.b > m) {{ col.b = col.b + (m - col.b) * spill; }} }}\n  let a = c.a * keep;\n  return vec4<f32>(col * a, a);\n}}\n"
+        );
+        let chroma_key_pipeline = make_pipeline(device, &filter_bgl, &chroma_key_src, "fs");
+
+        // MaskShapeGen (08 §3): a uniform-only ellipse-matte generator (no input).
+        // `center = [cx, cy, sx, sy]`, `aux = [cos(-rot), sin(-rot), inner, pad]`
+        // (inner = 1 − max(feather, eps)). WGSL twin of `ops::mask_shape`; uv is
+        // the top-left-origin canvas coordinate (matches the CPU pixel-center uv).
+        let mask_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mask_bgl"),
+            entries: &[uniform_entry(0)],
+        });
+        // Working textures are pool-bucketed (dims rounded up to 64), so the
+        // logical canvas occupies the top-left region. A generator must derive its
+        // uv from `@builtin(position)` and the LOGICAL dims (`dims.xy`) — exactly
+        // as the transform pass does — not from the quad's bucket-spanning uv, or
+        // the ellipse would be placed against the 64px bucket, not the canvas.
+        let mask_shape_src = format!(
+            "{QUAD_VS}\nstruct MS {{ center: vec4<f32>, aux: vec4<f32>, dims: vec4<f32> }}\n@group(0) @binding(0) var<uniform> u: MS;\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let uv = vec2<f32>(pos.x / u.dims.x, pos.y / u.dims.y);\n  let d = uv - u.center.xy;\n  let rd = vec2<f32>(d.x * u.aux.x - d.y * u.aux.y, d.x * u.aux.y + d.y * u.aux.x);\n  var ex = 1e18; var ey = 1e18;\n  if (abs(u.center.z) > 1e-6) {{ ex = rd.x / u.center.z; }}\n  if (abs(u.center.w) > 1e-6) {{ ey = rd.y / u.center.w; }}\n  let r = sqrt(ex * ex + ey * ey);\n  let a = 1.0 - smoothstep(u.aux.z, 1.0, r);\n  return vec4<f32>(a, a, a, a);\n}}\n"
+        );
+        let mask_shape_pipeline = make_pipeline(device, &mask_bgl, &mask_shape_src, "fs");
+
         // Merge: premultiplied `over`, all 26 blend modes (K-0.3a, 03 §2.4).
         let merge_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("merge_bgl"),
@@ -738,6 +844,11 @@ impl Passes {
             transform_pipeline,
             transform_bgl,
             invert_pipeline,
+            filter_bgl,
+            luma_key_pipeline,
+            chroma_key_pipeline,
+            mask_bgl,
+            mask_shape_pipeline,
             merge_pipeline,
             merge_bgl,
             sampler,
@@ -865,6 +976,144 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.invert_pipeline, &bind, target);
+    }
+
+    /// `Effect{LumaKey}` pass — tex + sampler + a `[threshold, hi, invert, pad]`
+    /// uniform. `hi` is pre-floored in Rust so the shader's smoothstep band and
+    /// `ops::luma_key`'s agree exactly (parity).
+    fn luma_key(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        threshold: f32,
+        softness: f32,
+        invert: bool,
+    ) {
+        let hi = threshold + softness.max(crate::graph::ops::KEY_BAND_EPS);
+        let uniform = [threshold, hi, if invert { 1.0 } else { 0.0 }, 0.0];
+        self.run_filter(gpu, &self.luma_key_pipeline, src, target, &uniform);
+    }
+
+    /// `Effect{ChromaKey}` pass — tex + sampler + a `[key.rgb, tolerance | hi,
+    /// spill, dom, pad]` uniform. `key` is the sRGB→linear key colour, `dom` the
+    /// dominant key channel; both are computed in Rust so the GPU matches
+    /// `ops::chroma_key` exactly.
+    fn chroma_key(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        key_linear: [f32; 3],
+        tolerance: f32,
+        edge_softness: f32,
+        spill_suppress: f32,
+    ) {
+        let hi = tolerance + edge_softness.max(crate::graph::ops::KEY_BAND_EPS);
+        let dom = if key_linear[0] >= key_linear[1] && key_linear[0] >= key_linear[2] {
+            0.0
+        } else if key_linear[1] >= key_linear[2] {
+            1.0
+        } else {
+            2.0
+        };
+        let uniform = [
+            key_linear[0],
+            key_linear[1],
+            key_linear[2],
+            tolerance,
+            hi,
+            spill_suppress,
+            dom,
+            0.0,
+        ];
+        self.run_filter(gpu, &self.chroma_key_pipeline, src, target, &uniform);
+    }
+
+    /// Shared driver for the tex+sampler+uniform filter passes (LumaKey/ChromaKey).
+    fn run_filter(
+        &self,
+        gpu: &GpuContext,
+        pipeline: &wgpu::RenderPipeline,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        uniform: &[f32],
+    ) {
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("filter_uniform"),
+                contents: bytemuck::cast_slice(uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("filter_bg"),
+            layout: &self.filter_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, pipeline, &bind, target);
+    }
+
+    /// `Effect{MaskShapeGen}` pass — a uniform-only ellipse-matte generator (no
+    /// input texture), the WGSL twin of `ops::mask_shape`.
+    #[allow(clippy::too_many_arguments)]
+    fn mask_shape(
+        &self,
+        gpu: &GpuContext,
+        target: &wgpu::Texture,
+        center: [f32; 2],
+        size: [f32; 2],
+        rotation: f32,
+        feather: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let (cos_r, sin_r) = ((-rotation).cos(), (-rotation).sin());
+        let inner = 1.0 - feather.clamp(0.0, 1.0).max(crate::graph::ops::KEY_BAND_EPS);
+        let uniform = [
+            center[0],
+            center[1],
+            size[0],
+            size[1],
+            cos_r,
+            sin_r,
+            inner,
+            0.0,
+            logical_w as f32,
+            logical_h as f32,
+            0.0,
+            0.0,
+        ];
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mask_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mask_bg"),
+            layout: &self.mask_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf.as_entire_binding(),
+            }],
+        });
+        self.run(gpu, &self.mask_shape_pipeline, &bind, target);
     }
 
     fn merge(
@@ -1655,6 +1904,112 @@ mod tests {
                 a: 1.0,
             },
             |clip| clip.effects.push(ClipEffect::new(EffectKind::Invert)),
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// Build a clip effect of `kind` with the given `(path, PropValue)` params set
+    /// on its base, for the per-effect parity tests (K-0.2 Step B).
+    fn effect_with(
+        kind: photonic_core::timeline::EffectKind,
+        params: &[(&str, photonic_core::timeline::PropValue)],
+    ) -> photonic_core::timeline::ClipEffect {
+        let mut eff = photonic_core::timeline::ClipEffect::new(kind);
+        for (path, value) in params {
+            eff.params.base.set(*path, value.clone());
+        }
+        eff
+    }
+
+    /// GPU/CPU parity for `Effect{LumaKey}` (08 §3): the shader's α-keep smoothstep
+    /// must match `ops::luma_key`. Threshold/softness sit so the solid's luma lands
+    /// mid-band (a fractional keep, exercising the interpolation, not a 0/1 step).
+    #[test]
+    fn luma_key_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{EffectKind, PropValue};
+        let compiled = solid_project_graph(
+            Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            },
+            |clip| {
+                clip.effects.push(effect_with(
+                    EffectKind::LumaKey,
+                    &[
+                        ("params.threshold", PropValue::Float(0.15)),
+                        ("params.softness", PropValue::Float(0.2)),
+                        ("params.invert", PropValue::Bool(false)),
+                    ],
+                ))
+            },
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{ChromaKey}` (08 §3): keep-smoothstep + dominant-
+    /// channel spill suppression. The solid is greenish and the key is green, so
+    /// the colour distance lands in the feather band and the spill branch fires.
+    #[test]
+    fn chroma_key_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{EffectKind, PropValue};
+        let compiled = solid_project_graph(
+            Color {
+                r: 0.2,
+                g: 0.7,
+                b: 0.2,
+                a: 1.0,
+            },
+            |clip| {
+                clip.effects.push(effect_with(
+                    EffectKind::ChromaKey,
+                    &[
+                        (
+                            "params.key_color",
+                            PropValue::Color(Color {
+                                r: 0.0,
+                                g: 1.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                        ),
+                        ("params.tolerance", PropValue::Float(0.3)),
+                        ("params.edge_softness", PropValue::Float(0.4)),
+                        ("params.spill_suppress", PropValue::Float(0.5)),
+                    ],
+                ))
+            },
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{MaskShapeGen}` (08 §3): a 0-input ellipse-matte
+    /// generator. A centered feathered ellipse over the 8×8 canvas exercises the
+    /// interior (α=1), exterior (α=0), and the feathered edge band.
+    #[test]
+    fn mask_shape_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{EffectKind, PropValue};
+        let compiled = solid_project_graph(
+            Color {
+                r: 0.4,
+                g: 0.3,
+                b: 0.6,
+                a: 1.0,
+            },
+            |clip| {
+                clip.effects.push(effect_with(
+                    EffectKind::MaskShapeGen,
+                    &[
+                        ("params.center_x", PropValue::Float(0.5)),
+                        ("params.center_y", PropValue::Float(0.5)),
+                        ("params.size_x", PropValue::Float(0.5)),
+                        ("params.size_y", PropValue::Float(0.5)),
+                        ("params.rotation", PropValue::Float(0.0)),
+                        ("params.feather", PropValue::Float(0.2)),
+                    ],
+                ))
+            },
         );
         assert_graph_gpu_matches_cpu(&compiled, 1e-3);
     }

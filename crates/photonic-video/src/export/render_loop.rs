@@ -69,6 +69,15 @@ pub enum ExportError {
         want_w: u32,
         want_h: u32,
     },
+    /// The abstract preset could not be resolved against the sequence (bad
+    /// sequence/format, empty range, upscaling refusal, or an invalid preset).
+    /// Raised by [`super::job::resolve_export_job`].
+    #[error("{0}")]
+    Resolve(String),
+    /// A frame was not produced within the per-frame deadline (02 §7): the run
+    /// is poisoned rather than substituting content.
+    #[error("render timeout: {0}")]
+    RenderTimeout(String),
 }
 
 /// Everything resolved from an [`ExportPreset`]'s abstract `ResolutionSpec`/

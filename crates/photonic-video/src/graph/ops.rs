@@ -224,6 +224,162 @@ pub fn invert(input: &Image) -> Image {
     out
 }
 
+/// Rec.709 luma of a straight (unpremultiplied) linear RGB triple — the same
+/// weights the GPU key/grade shaders use (`grade_gpu::luma709`), so the CPU and
+/// GPU key passes agree on brightness.
+#[inline]
+pub fn luma709(rgb: [f32; 3]) -> f32 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+}
+
+/// sRGB EOTF (gamma → scene-linear), the standard breakpoint form. An authoring
+/// `Color` param (key colour, tint) is sRGB display-domain; the working space is
+/// scene-linear Rec.709 (D-09), so a key/tint colour converts on the way in.
+/// Shared so the CPU kernels here and the GPU uniforms (`eval.rs`) start from the
+/// identical linear key value (a prerequisite for GPU/CPU parity).
+#[inline]
+pub fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// A well-defined `smoothstep` (Hermite) matching WGSL's `smoothstep`: the band
+/// width is floored at a tiny epsilon so `edge0 == edge1` (a hard key with zero
+/// softness) degrades to a near-step instead of dividing by zero — the CPU and
+/// GPU must floor identically or a zero-softness key would diverge.
+#[inline]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The smallest key/feather band width (see [`smoothstep`]); a zero-width band
+/// becomes this so the edge is a near-hard step, never a divide-by-zero. Shared
+/// with the GPU twins (`eval.rs`) so both floor the band identically.
+pub(crate) const KEY_BAND_EPS: f32 = 1e-4;
+
+/// `Effect{LumaKey}` (08 §3): scale each pixel's alpha by a luma-driven keep
+/// factor. `keep = smoothstep(threshold, threshold + softness, luma)` over the
+/// straight linear Rec.709 luma; `invert` flips it (key the brights instead of
+/// the darks). Because storage is premultiplied, scaling alpha by `keep` scales
+/// the whole `[r,g,b,a]` pixel by `keep` (straight colour is unchanged). The
+/// WGSL twin is `eval::Passes::luma_key`.
+pub fn luma_key(input: &Image, threshold: f32, softness: f32, invert: bool) -> Image {
+    let hi = threshold + softness.max(KEY_BAND_EPS);
+    let mut out = Image::new(input.width, input.height);
+    for (o, p) in out.pixels.iter_mut().zip(input.pixels.iter()) {
+        let straight = unpremultiply(*p).unwrap_or([0.0; 3]);
+        let mut keep = smoothstep(threshold, hi, luma709(straight));
+        if invert {
+            keep = 1.0 - keep;
+        }
+        *o = [p[0] * keep, p[1] * keep, p[2] * keep, p[3] * keep];
+    }
+    out
+}
+
+/// `Effect{ChromaKey}` (08 §3): key out pixels near `key_linear` (straight linear
+/// Rec.709). `keep = smoothstep(tolerance, tolerance + edge_softness, dist)` on
+/// the Euclidean colour distance, so pixels within `tolerance` drop out and the
+/// `edge_softness` band feathers the matte edge. `spill_suppress` desaturates the
+/// key's dominant channel toward the mean of the other two (classic green-spill
+/// removal) by that fraction, on the kept straight colour, before re-premultiply.
+/// The WGSL twin is `eval::Passes::chroma_key`.
+pub fn chroma_key(
+    input: &Image,
+    key_linear: [f32; 3],
+    tolerance: f32,
+    edge_softness: f32,
+    spill_suppress: f32,
+) -> Image {
+    let hi = tolerance + edge_softness.max(KEY_BAND_EPS);
+    // Dominant key channel (argmax) — the spill channel. Ties resolve to the
+    // lowest index deterministically on both CPU and GPU (identical key values).
+    let dom = if key_linear[0] >= key_linear[1] && key_linear[0] >= key_linear[2] {
+        0
+    } else if key_linear[1] >= key_linear[2] {
+        1
+    } else {
+        2
+    };
+    let mut out = Image::new(input.width, input.height);
+    for (o, p) in out.pixels.iter_mut().zip(input.pixels.iter()) {
+        let straight = unpremultiply(*p).unwrap_or([0.0; 3]);
+        let d = [
+            straight[0] - key_linear[0],
+            straight[1] - key_linear[1],
+            straight[2] - key_linear[2],
+        ];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let keep = smoothstep(tolerance, hi, dist);
+        // Spill suppression on the dominant key channel.
+        let mut c = straight;
+        let others = ((dom + 1) % 3, (dom + 2) % 3);
+        let mean = 0.5 * (c[others.0] + c[others.1]);
+        if c[dom] > mean {
+            c[dom] += (mean - c[dom]) * spill_suppress;
+        }
+        let a = p[3] * keep;
+        *o = [c[0] * a, c[1] * a, c[2] * a, a];
+    }
+    out
+}
+
+/// `Effect{MaskShapeGen}` (08 §3): a 0-input generator emitting an ellipse matte
+/// (premultiplied white inside, transparent outside, `feather`ed edge). `center`
+/// and `size` are canvas-normalized (size is the ellipse's half-axes as a
+/// fraction of width/height); `rotation` is radians; `feather` is the inner edge
+/// band as a fraction of the radius. This is the ellipse form; the graph node's
+/// `MaskShapeKind` (rect vs. ellipse) is not yet carried in `ResolvedParams`, so
+/// every mask-shape node renders as an ellipse for now. WGSL twin:
+/// `eval::Passes::mask_shape`.
+pub fn mask_shape(
+    width: u32,
+    height: u32,
+    center: [f32; 2],
+    size: [f32; 2],
+    rotation: f32,
+    feather: f32,
+) -> Image {
+    let (width, height) = (width.max(1), height.max(1));
+    let mut out = Image::new(width, height);
+    let (cos_r, sin_r) = ((-rotation).cos(), (-rotation).sin());
+    let inner = 1.0 - feather.clamp(0.0, 1.0).max(KEY_BAND_EPS);
+    for y in 0..height {
+        for x in 0..width {
+            let uv = [
+                (x as f32 + 0.5) / width as f32,
+                (y as f32 + 0.5) / height as f32,
+            ];
+            let d = [uv[0] - center[0], uv[1] - center[1]];
+            // Rotate the offset into the ellipse's local frame (by −rotation).
+            let rd = [
+                d[0] * cos_r - d[1] * sin_r,
+                d[0] * sin_r + d[1] * cos_r,
+            ];
+            let e = [
+                if size[0].abs() > ALPHA_EPS {
+                    rd[0] / size[0]
+                } else {
+                    f32::INFINITY
+                },
+                if size[1].abs() > ALPHA_EPS {
+                    rd[1] / size[1]
+                } else {
+                    f32::INFINITY
+                },
+            ];
+            let r = (e[0] * e[0] + e[1] * e[1]).sqrt();
+            let a = 1.0 - smoothstep(inner, 1.0, r);
+            out.set(x, y, [a, a, a, a]);
+        }
+    }
+    out
+}
+
 /// `Merge`: composite `top` over `bottom` with global `opacity`, under `mode`
 /// (02 §2 `Merge`). Premultiplied linear source-over with a blend function
 /// (W3C compositing model); `Normal` reduces to plain `over`. Blend math reuses
@@ -566,6 +722,75 @@ mod tests {
             merge_pixel(red, [0.0; 4], BlendMode::Normal, 1.0),
             premult(1.0, 0.0, 0.0, 1.0)
         );
+    }
+
+    #[test]
+    fn luma_key_drops_darks_and_keeps_brights() {
+        // Bright opaque white (luma 1) with threshold 0.5 → fully kept.
+        let bright = solid(2, 2, LinearColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+        let kept = luma_key(&bright, 0.5, 0.1, false);
+        for p in &kept.pixels {
+            assert!((p[3] - 1.0).abs() < 1e-6, "bright kept, a={}", p[3]);
+        }
+        // Dark opaque (luma 0) → keyed out (alpha 0, premult rgb 0 too).
+        let dark = solid(2, 2, LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+        let dropped = luma_key(&dark, 0.5, 0.1, false);
+        for p in &dropped.pixels {
+            assert!(p[3].abs() < 1e-6, "dark dropped, a={}", p[3]);
+        }
+        // Invert flips it: the bright pixel is now the one keyed out.
+        let inv = luma_key(&bright, 0.5, 0.1, true);
+        for p in &inv.pixels {
+            assert!(p[3].abs() < 1e-6, "invert drops brights, a={}", p[3]);
+        }
+    }
+
+    #[test]
+    fn chroma_key_drops_the_key_colour_and_keeps_far_colours() {
+        // Key on pure green (already linear here). A green pixel → keyed out.
+        let key = [0.0, 1.0, 0.0];
+        let green = solid(2, 2, LinearColor { r: 0.0, g: 1.0, b: 0.0, a: 1.0 });
+        let dropped = chroma_key(&green, key, 0.2, 0.1, 0.0);
+        for p in &dropped.pixels {
+            assert!(p[3].abs() < 1e-6, "green keyed out, a={}", p[3]);
+        }
+        // A red pixel is far from green → kept (alpha unchanged).
+        let red = solid(2, 2, LinearColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+        let kept = chroma_key(&red, key, 0.2, 0.1, 0.0);
+        for p in &kept.pixels {
+            assert!((p[3] - 1.0).abs() < 1e-6, "red kept, a={}", p[3]);
+        }
+    }
+
+    #[test]
+    fn chroma_key_spill_suppress_desaturates_dominant_channel() {
+        // A greenish pixel (green dominant) kept but with heavy spill suppression
+        // pulls green down toward the mean of red/blue.
+        let key = [0.0, 1.0, 0.0];
+        let spilled = solid(1, 1, LinearColor { r: 0.2, g: 0.8, b: 0.2, a: 1.0 });
+        // Low tolerance: the colour distance to green sits outside the key radius,
+        // so the pixel is KEPT — letting the spill-suppression result be observed.
+        let out = chroma_key(&spilled, key, 0.1, 0.05, 1.0);
+        let p = out.pixels[0];
+        // a≈1, so straight ≈ premult. Green should have dropped to ≈ mean(0.2,0.2)=0.2.
+        assert!((p[3] - 1.0).abs() < 1e-4, "kept, a={}", p[3]);
+        assert!((p[1] - 0.2).abs() < 1e-3, "green suppressed to mean, g={}", p[1]);
+        assert!((p[0] - 0.2).abs() < 1e-3, "red untouched, r={}", p[0]);
+    }
+
+    #[test]
+    fn mask_shape_is_opaque_inside_and_transparent_outside() {
+        // A centered ellipse covering ~half the frame: the center is opaque, the
+        // far corner is outside → transparent.
+        let m = mask_shape(32, 32, [0.5, 0.5], [0.3, 0.3], 0.0, 0.05);
+        let center = m.pixel(16, 16);
+        assert!((center[3] - 1.0).abs() < 1e-4, "center opaque, a={}", center[3]);
+        let corner = m.pixel(0, 0);
+        assert!(corner[3].abs() < 1e-4, "corner transparent, a={}", corner[3]);
+        // Premultiplied white inside: rgb == alpha.
+        for c in 0..3 {
+            assert!((center[c] - center[3]).abs() < 1e-6, "premult white ch{c}");
+        }
     }
 
     #[test]

@@ -3971,6 +3971,7 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
     let Some(project) = state.document.lock().await.timeline.clone() else {
         return ToolResult::error("no timeline project");
     };
+    let project = std::sync::Arc::new(project);
     let Some(seq) = project.sequences.get(&seq_id) else {
         return ToolResult::error(format!("sequence {seq_id} not found"));
     };
@@ -3987,19 +3988,10 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
         .format_index
         .unwrap_or(seq.active_format)
         .min(seq.formats.len().saturating_sub(1));
-    let (fw, fh) = (
-        seq.formats[format_index].width.max(1),
-        seq.formats[format_index].height.max(1),
-    );
-    let content_end = seq
-        .video_tracks
-        .iter()
-        .chain(seq.audio_tracks.iter())
-        .flat_map(|t| t.clips.iter())
-        .map(|c| c.end())
-        .max()
-        .unwrap_or(Tick(0));
-    let (start, end) = match &args.range {
+    // Explicit range (if any) resolves to concrete ticks here (needs the seq
+    // rate for tc/seconds); `None` defers to the sequence work-range/extent
+    // inside `resolve_export_job`.
+    let range = match &args.range {
         Some(r) => {
             let s = match resolve_tick(
                 r.start_ticks,
@@ -4019,16 +4011,10 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
                 Ok(t) => t,
                 Err(e) => return e,
             };
-            (s, e2)
+            Some((s, e2))
         }
-        None => seq.work_range.unwrap_or((Tick(0), content_end)),
+        None => None,
     };
-    if end <= start {
-        return err_code(
-            "TickOutOfRange",
-            "export range is empty — sequence has no content and no explicit range was given",
-        );
-    }
 
     let preset_name = args
         .preset
@@ -4060,42 +4046,28 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
             preset.frame_rate = export_presets::FrameRatePolicy::Explicit(fr);
         }
     }
-    let out_rate = match preset.frame_rate {
-        export_presets::FrameRatePolicy::Explicit(fr) => fr,
-        export_presets::FrameRatePolicy::MatchSequence => seq_rate,
-    };
-    let (out_w, out_h) = match preset.resolution {
-        export_presets::ResolutionSpec::SourceFormat => (fw, fh),
-        export_presets::ResolutionSpec::Explicit { w, h } => (w.max(1), h.max(1)),
-        export_presets::ResolutionSpec::Scale(s) => (
-            ((fw as f32 * s).round() as u32).max(1),
-            ((fh as f32 * s).round() as u32).max(1),
-        ),
-    };
-    if out_w > fw || out_h > fh {
-        return err_code(
-            "NotSupportedV1",
-            format!(
-                "export upscaling ({out_w}x{out_h} from a {fw}x{fh} format) is not supported \
-                 in P3 — the engine evaluates at format size and downscales only"
-            ),
-        );
-    }
-    // Sequence-audio muxing is the linked-audio story's seam: render
-    // video-only regardless of the preset's audio spec.
-    let audio_skipped = preset.audio.take().is_some();
-    if let Err(e) = export_presets::validate(&preset) {
-        return ToolResult::error(format!("preset invalid after overrides: {e}"));
-    }
-    let tpf_out = out_rate.ticks_per_frame().0.max(1);
-    let total_frames = ((end.0 - start.0 + tpf_out - 1) / tpf_out).max(1) as u64;
-    let out_path = std::path::PathBuf::from(&args.out_path);
+    // Sequence-audio muxing is the linked-audio story's seam (the resolver
+    // strips audio for the video-only P3 render); report it either way.
+    let audio_skipped = preset.audio.is_some();
 
-    // Frozen shadow project with the export format forced active.
-    let mut frozen = project;
-    if let Some(s) = frozen.sequences.get_mut(&seq_id) {
-        s.active_format = format_index;
-    }
+    // Build the abstract job and resolve it through the ONE export path so the
+    // synchronous response numbers match what the worker will render exactly.
+    let job = photonic_video::ExportJob {
+        sequence: seq_id,
+        format_index,
+        preset,
+        output: std::path::PathBuf::from(&args.out_path),
+        range,
+    };
+    let resolved =
+        match photonic_video::export::job::resolve_export_job(&project, &job) {
+            Ok(r) => r,
+            Err(e) => return err_code("ExportResolveFailed", e.to_string()),
+        };
+    let out_path = job.output.clone();
+    let (out_w, out_h) = resolved.out_size;
+    let total_frames = resolved.total_frames;
+
     let gpu = bridge.engine().gpu().clone();
     let (job_id, cancel) = state
         .video_jobs
@@ -4105,14 +4077,8 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
     let jobs = std::sync::Arc::clone(&state.video_jobs);
     let params = ExportJobParams {
         gpu,
-        frozen,
-        seq_id,
-        start,
-        seq_rate,
-        out_rate,
-        format_size: (fw, fh),
-        out_size: (out_w, out_h),
-        preset,
+        project: std::sync::Arc::clone(&project),
+        job,
         out_path: out_path.clone(),
         total_frames,
         tools,
@@ -4139,23 +4105,18 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
 
 struct ExportJobParams {
     gpu: photonic_video::GpuContext,
-    frozen: TimelineProject,
-    seq_id: SequenceId,
-    start: Tick,
-    seq_rate: FrameRate,
-    out_rate: FrameRate,
-    format_size: (u32, u32),
-    out_size: (u32, u32),
-    preset: export_presets::ExportPreset,
+    project: std::sync::Arc<TimelineProject>,
+    job: photonic_video::ExportJob,
     out_path: std::path::PathBuf,
     total_frames: u64,
     tools: ffmpeg_locate::FfmpegTools,
 }
 
-/// Export worker (10 §6): a **dedicated** `EngineSession` over the frozen
-/// snapshot (isolated from the interactive session, so concurrent playback/
-/// render tool calls can't disturb the export's seek-then-wait loop), feeding
-/// `export::render_loop::export_frames` one readback frame per output tick.
+/// Export worker (10 §6): a thin adapter over the single relocated export path
+/// [`photonic_video::export::job::run_export_job`] — it maps that fn's
+/// `ExportEvent` stream and terminal `Result` onto the MCP job registry. The
+/// render/encode logic (dedicated session, seek-then-wait, downscale, encoder)
+/// all lives in `photonic-video` so the GUI and MCP share one code path.
 fn run_export_job(
     jobs: std::sync::Arc<StdMutex<crate::handlers::video_jobs::JobRegistry>>,
     job_id: crate::handlers::video_jobs::JobId,
@@ -4170,89 +4131,6 @@ fn run_export_job(
             message: "starting engine session".into(),
         },
     );
-    let engine = photonic_video::VideoEngine::new(p.gpu.clone());
-    let shadow_doc = {
-        let mut d = photonic_core::Document::new("export-shadow", 1.0, 1.0);
-        d.timeline = Some(p.frozen);
-        std::sync::Arc::new(StdMutex::new(d))
-    };
-    let shadow_history = std::sync::Arc::new(StdMutex::new(
-        photonic_core::history::CommandHistory::new(1),
-    ));
-    let session = engine.open_session(shadow_doc, shadow_history);
-    session.send(EngineCmd::SetActiveSequence(p.seq_id));
-    // Export is always full quality (02 §7: identical headless path).
-    session.send(EngineCmd::SetProxyMode(ProxyMode::ForceOriginal));
-
-    let resolved = render_loop::ResolvedExport {
-        width: p.out_size.0,
-        height: p.out_size.1,
-        frame_rate: p.out_rate,
-        audio: None,
-        out_path: p.out_path.clone(),
-        colorimetry: photonic_render::color::Colorimetry::BT709_LIMITED,
-    };
-    let (fw, fh) = p.format_size;
-    let (ow, oh) = p.out_size;
-    let tpf_out = p.out_rate.ticks_per_frame().0.max(1);
-    let mut prev = session.latest_frame();
-    let mut frame_fail: Option<String> = None;
-    let cancel_inner = std::sync::Arc::clone(&cancel);
-    let frame_source = |i: u64| -> render_loop::Frame {
-        // Output tick → nearest sequence frame (05 §6.2 retiming: the engine
-        // presents exact sequence-grid ticks, so snap the output-grid tick).
-        let t = Tick(p.start.0 + i as i64 * tpf_out);
-        let snapped = p.seq_rate.frame_start(p.seq_rate.frame_at(t));
-        session.send(EngineCmd::Seek(snapped));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let frame = loop {
-            if let Some(f) = session.latest_frame() {
-                let fresh = prev
-                    .as_ref()
-                    .map(|q| !std::sync::Arc::ptr_eq(q, &f))
-                    .unwrap_or(true);
-                if fresh && f.time == snapped && f.sequence == p.seq_id {
-                    break Some(f);
-                }
-            }
-            if Instant::now() >= deadline {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        match frame {
-            Some(f) => {
-                prev = Some(std::sync::Arc::clone(&f));
-                // Logical region only (bucket-padded texture, see render_frame_at).
-                let px = read_texture_rgba16f(&p.gpu, &f.texture, fw, fh);
-                let px = if (ow, oh) == (fw, fh) {
-                    px
-                } else {
-                    box_downscale(&px, fw, fh, ow, oh)
-                };
-                render_loop::Frame {
-                    width: ow,
-                    height: oh,
-                    rgba_premult: px.iter().flat_map(|q| q.iter().copied()).collect(),
-                }
-            }
-            None => {
-                // Poison the run: flag the failure, cancel between frames
-                // (export_frames checks the flag before the next frame), and
-                // hand back a black filler so the closure contract holds.
-                frame_fail = Some(format!(
-                    "frame {i} (tick {}) was not produced within 30s",
-                    snapped.0
-                ));
-                cancel_inner.store(true, Ordering::Relaxed);
-                render_loop::Frame {
-                    width: ow,
-                    height: oh,
-                    rgba_premult: vec![0.0; (ow * oh * 4) as usize],
-                }
-            }
-        }
-    };
     let jobs_ev = std::sync::Arc::clone(&jobs);
     let on_event = |event: render_loop::ExportEvent| {
         if let render_loop::ExportEvent::Progress(pr) = event {
@@ -4276,19 +4154,16 @@ fn run_export_job(
             );
         }
     };
-    let result = render_loop::export_frames(
+    let result = photonic_video::export::job::run_export_job(
+        p.gpu,
+        std::sync::Arc::clone(&p.project),
+        &p.job,
         &p.tools,
-        &p.preset,
-        &resolved,
-        p.total_frames,
-        frame_source,
-        None,
         &cancel,
         on_event,
     );
-    session.shutdown();
-    match (result, frame_fail) {
-        (_, Some(msg)) => set_job_status(
+    match result {
+        Err(render_loop::ExportError::RenderTimeout(msg)) => set_job_status(
             &jobs,
             job_id,
             JobStatus::Failed {
@@ -4296,7 +4171,7 @@ fn run_export_job(
                 message: msg,
             },
         ),
-        (Err(e), None) => set_job_status(
+        Err(e) => set_job_status(
             &jobs,
             job_id,
             JobStatus::Failed {
@@ -4304,7 +4179,7 @@ fn run_export_job(
                 message: e.to_string(),
             },
         ),
-        (Ok(()), None) => {
+        Ok(()) => {
             if cancel.load(Ordering::Relaxed) {
                 set_job_status(&jobs, job_id, JobStatus::Cancelled);
             } else {
