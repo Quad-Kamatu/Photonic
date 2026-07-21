@@ -2,13 +2,15 @@
 
 use super::audio::{MasterBus, TrackAudio};
 use super::captions::CaptionTrack;
-use super::clip::Clip;
+use super::clip::{Clip, ClipEffect};
+use super::grade::Grade;
 use super::graph::NodeGraph;
 use super::ids::{
     ClipId, CueId, GraphId, GroupId, MarkerCategoryId, MarkerId, SequenceId, TrackId,
 };
 use super::media::MediaPool;
 use super::time::{FrameRate, Tick};
+use crate::layer::BlendMode;
 use crate::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -145,6 +147,15 @@ pub struct Sequence {
     pub groups: HashMap<GroupId, GroupNode>,
     #[serde(default)]
     pub audio_master: MasterBus,
+    /// Master effect stack (35 §2): applied to the composited accumulator after
+    /// the Adjustment stack and before the caption overlay. Empty = neutral, so
+    /// a v4 sequence (no key) composites identically (§2.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub master_effects: Vec<ClipEffect>,
+    /// Master grade (35 §2): applied to the accumulator after `master_effects`.
+    /// `None` = neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_grade: Option<Grade>,
     /// In/out for preview + export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_range: Option<(Tick, Tick)>,
@@ -165,6 +176,8 @@ impl Sequence {
             markers: Vec::new(),
             groups: HashMap::new(),
             audio_master: MasterBus::new(),
+            master_effects: Vec::new(),
+            master_grade: None,
             work_range: None,
         }
     }
@@ -572,10 +585,31 @@ pub struct Track {
     /// UI-only but persisted (like existing panel prefs).
     #[serde(default = "default_track_height")]
     pub height_px: f32,
+    /// Track-level effect stack (35 §2): applied to this track's own composited
+    /// content before it merges into the accumulator — never to the accumulator
+    /// itself. Empty = neutral (§2.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<ClipEffect>,
+    /// Track-level grade (35 §2): applied to this track's own content after
+    /// `effects`. `None` = neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<Grade>,
+    /// How this track composites into the accumulator (35 §2; closes 26 K-A9).
+    /// Defaults to [`BlendMode::Normal`] — the identity merge.
+    #[serde(default)]
+    pub blend: BlendMode,
+    /// Track composite opacity in `[0, 1]` (35 §2; closes 26 K-A9). 1.0 = opaque
+    /// (the identity for `Merge`).
+    #[serde(default = "default_track_opacity")]
+    pub opacity: f32,
 }
 
 fn default_track_height() -> f32 {
     64.0
+}
+
+fn default_track_opacity() -> f32 {
+    1.0
 }
 
 impl Track {
@@ -594,6 +628,10 @@ impl Track {
                 None
             },
             height_px: default_track_height(),
+            effects: Vec::new(),
+            grade: None,
+            blend: BlendMode::default(),
+            opacity: default_track_opacity(),
         }
     }
 
@@ -898,6 +936,45 @@ mod tests {
     fn content_end_is_max_clip_end() {
         let s = seq_with(vid_track_with(vec![(0, 100), (100, 50)]));
         assert_eq!(s.content_end(), Tick(150));
+    }
+
+    // ── Effect scopes (35 §2) ────────────────────────────────────────────
+
+    #[test]
+    fn track_new_scope_fields_default_to_neutral_and_are_absent_from_json() {
+        // Additive discipline (§2.6): the new scope fields default to the
+        // identity composite and are omitted from JSON when neutral, so a v4
+        // track stays byte-shape-identical.
+        let t = Track::new(TrackKind::Video, "V1");
+        assert!(t.effects.is_empty());
+        assert!(t.grade.is_none());
+        assert_eq!(t.blend, BlendMode::Normal);
+        assert_eq!(t.opacity, 1.0);
+        // The empty stacks are omitted (skip_serializing_if). `blend`/`opacity`
+        // are always-present live fields (26 K-A9), so they are NOT skipped —
+        // only their values must be neutral, asserted above.
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("effects"));
+        assert!(!json.contains("grade"));
+        // The Sequence master scope defaults are likewise absent.
+        let s = Sequence::new("seq", FrameRate::FPS_30, 1920, 1080);
+        assert!(s.master_effects.is_empty());
+        assert!(s.master_grade.is_none());
+        let sjson = serde_json::to_string(&s).unwrap();
+        assert!(!sjson.contains("master_effects"));
+        assert!(!sjson.contains("master_grade"));
+    }
+
+    #[test]
+    fn v4_track_json_without_scope_fields_loads_with_normal_blend_and_opacity_one() {
+        // A pre-scope (v4) serialized track carries none of the new keys; it
+        // must load with the neutral composite so its output is unchanged.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"V1","kind":"video"}"#;
+        let t: Track = serde_json::from_str(json).unwrap();
+        assert!(t.effects.is_empty());
+        assert!(t.grade.is_none());
+        assert_eq!(t.blend, BlendMode::Normal);
+        assert_eq!(t.opacity, 1.0);
     }
 
     #[test]

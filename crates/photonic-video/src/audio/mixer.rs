@@ -18,11 +18,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use photonic_core::timeline::{
-    self, AnimProps, AudioFade, ChannelMap, ClipAudio, ClipAudioParams, FadeShape, MasterBus,
-    MasterBusParams, PropPath, PropSet, PropValue, Tick, TrackAudio, TrackAudioParams, TrackId,
-    TICKS_PER_SECOND,
+    self, AnimProps, AudioFade, AudioFxKind, AudioFxUnit, ChannelMap, ClipAudio, ClipAudioParams,
+    EffectParams, FadeShape, MasterBus, MasterBusParams, PropPath, PropSet, PropValue, Tick,
+    TrackAudio, TrackAudioParams, TrackId, TICKS_PER_SECOND,
 };
 
+use super::dsp::{AudioDiscontinuity, DspUnit, FxUnit};
 use super::{BLOCK_FRAMES, CHANNELS};
 
 /// The mixer's contract with decoded audio: the seam decode implements (real
@@ -285,6 +286,251 @@ pub fn eval_master_bus_params(anim: &AnimProps<MasterBusParams>, t: Tick) -> Mas
     }
 }
 
+/// Evaluate an [`AnimProps<EffectParams>`] to a flat, block-resolved bag at
+/// sequence tick `t` — the audio-fx analogue of [`eval_track_audio_params`].
+/// Each animated lane is resolved once per block (never per sample, 09 §5),
+/// falling back to the base value for a static/orphaned lane.
+fn eval_effect_params(anim: &AnimProps<EffectParams>, t: Tick) -> EffectParams {
+    if anim.is_static() {
+        return anim.base.clone();
+    }
+    let mut out = anim.base.clone();
+    for (path, value) in out.entries.iter_mut() {
+        if let Some(track) = anim.track(path) {
+            *value = timeline::eval(track, value, t);
+        }
+    }
+    out
+}
+
+/// 31 §4.1 default declick window (samples) — the minimum tail length the
+/// mixer caches per track so the next segment's head has material to splice
+/// against, independent of any downstream `tail_samples`.
+pub const DECLICK_WINDOW_SAMPLES: usize = 1000;
+/// 31 §4.1 default declick threshold (dB, 0..30). Carried here for step-8's
+/// declick maths; the per-clip/project serde surface (§4.3, §10) lands then.
+pub const DECLICK_THRESHOLD_DB: f32 = 2.0;
+
+/// The previous segment's tail handed to the next segment's head (31 §4.2, §8
+/// step 4). `tail[c]` is `max(DECLICK_WINDOW_SAMPLES, largest downstream
+/// tail_samples)` samples of the **pre-fx** track bus, oldest→newest (so the
+/// splice point — the newest sample — is last). Only the graph-shape plumbing
+/// is delivered here; the declick algorithm that consumes this is step 8.
+pub struct SegmentBoundary {
+    pub track: TrackId,
+    pub at: Tick,
+    pub tail: [Vec<f32>; CHANNELS],
+}
+
+/// A mixer-level discontinuity (31 §2.1). Carries the `TrackId`/`Tick` that
+/// decide *which* units reset — the payload the payload-free
+/// [`AudioDiscontinuity`] doc says belongs at the mixer, keeping `dsp/` free
+/// of `Tick`. Applied by the feeder **between** `render_block` calls, never
+/// mid-block, so [`Mixer::render_block`]'s wall-clock-free / bit-identical
+/// guarantee (a deterministic function of the call sequence) is preserved.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MixerDiscontinuity {
+    /// The playhead jumped — everything resets (31 §2.3).
+    Seek { to: Tick },
+    /// A clip boundary was crossed on `track`. Per 31 §2.3, this resets **only**
+    /// that track's chain; the master chain is deliberately NOT reset (a master
+    /// compressor must not pump at every cut).
+    ClipBoundary { track: TrackId, at: Tick },
+    /// The fx chain was edited. `track: None` targets the master chain.
+    GraphChanged {
+        track: Option<TrackId>,
+        from_index: usize,
+    },
+    /// Sample rate / channel count changed — resets everything and recomputes
+    /// rate-dependent coefficients.
+    Reconfigure,
+}
+
+/// The mixer's live instantiation of one `fx_chain` (31 §8 step 2): the
+/// concrete [`FxUnit`]s plus the kind sequence they were built from. That kind
+/// sequence is the chain's identity — an [`AudioFxUnit`] has **no stable id**
+/// (photonic-core `timeline::audio`), so a reorder is indistinguishable from a
+/// rebuild, which is exactly why 31 §2.3 makes `GraphChanged` reset the changed
+/// unit *and everything downstream of it*.
+#[derive(Default)]
+struct FxChainState {
+    units: Vec<FxUnit>,
+    kinds: Vec<AudioFxKind>,
+    /// Test observability (31 §8 step 2 test b): how many times `sync` has
+    /// rebuilt, so an unchanged chain can be asserted to allocate zero times.
+    rebuild_count: u64,
+}
+
+impl FxChainState {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Rebuild `units` iff the kind sequence differs from `spec`. Returns
+    /// `Some(first_changed_index)` when the shape changed, else `None`.
+    ///
+    /// The untouched common prefix keeps its live state; only from the first
+    /// divergence onward is rebuilt (fresh units start clean, already
+    /// satisfying `GraphChanged` for the rebuilt tail — the caller's explicit
+    /// `reset_from` is then idempotent on them). Allocates only on an actual
+    /// shape change, so the steady-state path is allocation-free.
+    fn sync(&mut self, spec: &[AudioFxUnit]) -> Option<usize> {
+        let diverge = self
+            .kinds
+            .iter()
+            .zip(spec.iter())
+            .position(|(k, u)| *k != u.kind);
+        let first_changed = match diverge {
+            Some(i) => i,
+            None if self.kinds.len() == spec.len() => return None,
+            None => self.kinds.len().min(spec.len()),
+        };
+        self.units.truncate(first_changed);
+        for u in &spec[first_changed..] {
+            self.units.push(FxUnit::new(u.kind));
+        }
+        self.kinds = spec.iter().map(|u| u.kind).collect();
+        self.rebuild_count += 1;
+        Some(first_changed)
+    }
+
+    /// Per-block: evaluate each enabled unit's `AnimProps` at `t` and push the
+    /// resolved params in. Disabled units are left untouched.
+    fn set_block_params(&mut self, spec: &[AudioFxUnit], t: Tick) {
+        for (unit, s) in self.units.iter_mut().zip(spec) {
+            if !s.enabled {
+                continue;
+            }
+            let p = eval_effect_params(&s.params, t);
+            unit.set_params_from(&p);
+        }
+    }
+
+    /// Process the block through every enabled, known unit in order. Disabled
+    /// and forward-compat (`Unknown`) units are skipped (rendered inert),
+    /// keeping their slot so re-enabling does not shift indices.
+    fn process_block(&mut self, spec: &[AudioFxUnit], sample_rate: u32, block: &mut [f32]) {
+        for (unit, s) in self.units.iter_mut().zip(spec) {
+            if !s.enabled || s.kind.is_unknown() {
+                continue;
+            }
+            unit.process(sample_rate, block, None);
+        }
+    }
+
+    /// Σ latency over enabled units only (31 §3.1). Disabled units contribute
+    /// zero but keep their slot. Consumed by the per-track delay-compensation
+    /// and playhead-derivation of 31 §3 (a follow-on); exercised now by the
+    /// step-2 tests.
+    #[allow(dead_code)]
+    fn latency_samples(&self, spec: &[AudioFxUnit]) -> u32 {
+        self.units
+            .iter()
+            .zip(spec)
+            .filter(|(_, s)| s.enabled)
+            .map(|(u, _)| u.latency_samples())
+            .sum()
+    }
+
+    /// Σ tail over enabled units only (31 §3.3, §4.2).
+    fn tail_samples(&self, spec: &[AudioFxUnit]) -> u32 {
+        self.units
+            .iter()
+            .zip(spec)
+            .filter(|(_, s)| s.enabled)
+            .map(|(u, _)| u.tail_samples())
+            .sum()
+    }
+
+    /// Reset every unit from `index` onward (31 §2.3's downstream rule).
+    fn reset_from(&mut self, index: usize, cause: AudioDiscontinuity) {
+        for u in self.units.iter_mut().skip(index) {
+            u.reset(cause);
+        }
+    }
+}
+
+/// A per-track ring of the **pre-fx** track bus (31 §8 step 4). Long enough to
+/// hand the previous segment's tail to the next segment's head:
+/// `len = max(DECLICK_WINDOW_SAMPLES, downstream tail_samples)`. Written every
+/// block (a boundary can land on any block); de-interleaved into per-channel
+/// `Vec`s only when a boundary is consumed, so the steady-state path allocates
+/// nothing.
+struct TailBuf {
+    len: usize,
+    ch: [Vec<f32>; CHANNELS],
+    pos: usize,
+    filled: usize,
+    pending: Option<Tick>,
+}
+
+impl TailBuf {
+    fn new(len: usize) -> Self {
+        let len = len.max(1);
+        TailBuf {
+            len,
+            ch: std::array::from_fn(|_| vec![0.0; len]),
+            pos: 0,
+            filled: 0,
+            pending: None,
+        }
+    }
+
+    /// Re-length the ring (re-primed with silence). Called only when the
+    /// downstream tail length actually changes — never on the steady-state
+    /// path.
+    fn resize(&mut self, len: usize) {
+        let len = len.max(1);
+        self.len = len;
+        for c in &mut self.ch {
+            c.clear();
+            c.resize(len, 0.0);
+        }
+        self.pos = 0;
+        self.filled = 0;
+        self.pending = None;
+    }
+
+    /// Push one interleaved block (`frames * CHANNELS`) into the ring.
+    fn write_block(&mut self, block: &[f32]) {
+        let frames = block.len() / CHANNELS;
+        for f in 0..frames {
+            for c in 0..CHANNELS {
+                self.ch[c][self.pos] = block[f * CHANNELS + c];
+            }
+            self.pos = (self.pos + 1) % self.len;
+            if self.filled < self.len {
+                self.filled += 1;
+            }
+        }
+    }
+
+    /// Chronological (oldest→newest) per-channel copy, front-padded with
+    /// silence until the ring has filled — so the newest sample (the splice
+    /// point 31 §4 repairs) is always last.
+    fn snapshot(&self) -> [Vec<f32>; CHANNELS] {
+        std::array::from_fn(|c| {
+            let mut out = vec![0.0f32; self.len];
+            let start = (self.pos + self.len - self.filled) % self.len;
+            for i in 0..self.filled {
+                out[self.len - self.filled + i] = self.ch[c][(start + i) % self.len];
+            }
+            out
+        })
+    }
+
+    /// Zero the ring, preserving its length (Seek/Reconfigure re-prime,
+    /// 31 §2.3).
+    fn clear_silence(&mut self) {
+        for c in &mut self.ch {
+            c.iter_mut().for_each(|s| *s = 0.0);
+        }
+        self.pos = 0;
+        self.filled = 0;
+        self.pending = None;
+    }
+}
+
 struct TrackSmoothState {
     volume_db: Smoother,
     pan: Smoother,
@@ -302,6 +548,11 @@ pub struct Mixer {
     track_post_fader_meters: HashMap<TrackId, Arc<StereoMeter>>,
     master_post_fx_meter: Arc<StereoMeter>,
     output_meter: Arc<StereoMeter>,
+    // Instantiated fx chains (31 §8 step 2), synced from the model each block.
+    track_fx: HashMap<TrackId, FxChainState>,
+    master_fx: FxChainState,
+    // Per-track segment-boundary tail rings (31 §8 step 4).
+    tail_cache: HashMap<TrackId, TailBuf>,
     // Reused per-block scratch (avoids per-block allocation on the mixer-
     // worker hot path; not itself RT-required off the cpal callback thread,
     // but there is no reason to allocate every block either).
@@ -326,6 +577,9 @@ impl Mixer {
             track_post_fader_meters: HashMap::new(),
             master_post_fx_meter: Arc::new(StereoMeter::default()),
             output_meter: Arc::new(StereoMeter::default()),
+            track_fx: HashMap::new(),
+            master_fx: FxChainState::new(),
+            tail_cache: HashMap::new(),
             track_bus_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
             master_bus_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
             clip_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
@@ -343,6 +597,89 @@ impl Mixer {
     pub fn reset(&mut self) {
         self.track_smooth.clear();
         self.master_smooth = None;
+        // Drop instantiated fx chains and tail rings too: stale `TrackId`s from
+        // a prior document would otherwise carry live DSP/tail state into an
+        // unrelated one. Chains rebuild from the model on the next block.
+        self.track_fx.clear();
+        self.master_fx = FxChainState::new();
+        self.tail_cache.clear();
+    }
+
+    /// Apply a mixer-level discontinuity (31 §2.1/§2.3). MUST be called by the
+    /// feeder **between** [`render_block`](Self::render_block) calls (never
+    /// mid-block); a discontinuity is thus a deterministic function of the call
+    /// sequence, and `render_block`'s wall-clock-free guarantee is preserved.
+    ///
+    /// The §2.3 policy mapping IS the deliverable:
+    /// - `Seek` / `Reconfigure` reset **every** track chain and the master
+    ///   chain from unit 0, clear the gain/pan smoothers, and re-prime the tail
+    ///   rings with silence. `Reconfigure` additionally recomputes the
+    ///   rate-dependent `gain_pan_coeff`.
+    /// - `ClipBoundary { track }` resets **only** that track's chain; the master
+    ///   chain is deliberately left running (a master compressor must not pump
+    ///   at every cut — the single most important assertion in 31 §9 item 5).
+    /// - `GraphChanged { track, from_index }` resets that chain from
+    ///   `from_index`, then the whole master chain (downstream of every track);
+    ///   `track: None` resets only the master chain from `from_index`.
+    pub fn notify_discontinuity(&mut self, ev: MixerDiscontinuity) {
+        match ev {
+            MixerDiscontinuity::Seek { .. } => self.reset_all(AudioDiscontinuity::Seek),
+            MixerDiscontinuity::Reconfigure => {
+                self.reset_all(AudioDiscontinuity::Reconfigure);
+                self.gain_pan_coeff = one_pole_coeff(GAIN_PAN_TAU_MS, self.sample_rate as f64);
+            }
+            MixerDiscontinuity::ClipBoundary { track, .. } => {
+                if let Some(fx) = self.track_fx.get_mut(&track) {
+                    fx.reset_from(0, AudioDiscontinuity::ClipBoundary);
+                }
+                // Master chain intentionally NOT reset (31 §2.3).
+            }
+            MixerDiscontinuity::GraphChanged { track, from_index } => match track {
+                Some(t) => {
+                    if let Some(fx) = self.track_fx.get_mut(&t) {
+                        fx.reset_from(from_index, AudioDiscontinuity::GraphChanged);
+                    }
+                    self.master_fx.reset_from(0, AudioDiscontinuity::GraphChanged);
+                }
+                None => self
+                    .master_fx
+                    .reset_from(from_index, AudioDiscontinuity::GraphChanged),
+            },
+        }
+    }
+
+    /// Reset every chain wholesale plus the smoothers and tail rings — the
+    /// shared body of `Seek`/`Reconfigure`.
+    fn reset_all(&mut self, cause: AudioDiscontinuity) {
+        for fx in self.track_fx.values_mut() {
+            fx.reset_from(0, cause);
+        }
+        self.master_fx.reset_from(0, cause);
+        self.track_smooth.clear();
+        self.master_smooth = None;
+        for buf in self.tail_cache.values_mut() {
+            buf.clear_silence();
+        }
+    }
+
+    /// Consume the tail captured for `track` at its last segment boundary
+    /// (31 §8 step 4). Returns `None` if no boundary is pending; a given
+    /// boundary is handed out exactly once.
+    pub fn take_segment_boundary(&mut self, track: TrackId) -> Option<SegmentBoundary> {
+        let buf = self.tail_cache.get_mut(&track)?;
+        let at = buf.pending.take()?;
+        Some(SegmentBoundary {
+            track,
+            at,
+            tail: buf.snapshot(),
+        })
+    }
+
+    /// Drop the cached tail ring for `track` — call on any edit affecting the
+    /// track (31 §4.2 "invalidated on edit"). It re-allocates on the next
+    /// block.
+    pub fn invalidate_tail(&mut self, track: TrackId) {
+        self.tail_cache.remove(&track);
     }
 
     /// Lazily-created meter handle: after `fx_chain` (currently a P3 no-op,
@@ -415,8 +752,13 @@ impl Mixer {
         );
 
         let coeff = self.gain_pan_coeff;
+        let sr = self.sample_rate;
         let tick_per_sample = TICKS_PER_SECOND / self.sample_rate.max(1) as i64;
         let any_solo = tracks.iter().any(|t| t.audio.solo);
+        // A track fx-graph change resets the master chain wholesale (master is
+        // downstream of every track, 31 §2.3); collected here, applied once
+        // after the track loop.
+        let mut master_needs_reset = false;
 
         self.master_bus_scratch.fill(0.0);
 
@@ -432,8 +774,52 @@ impl Mixer {
                 );
             }
 
-            // Tap: post-fx (fx_chain inert in P3, see module doc — this is
-            // simply the track bus sum).
+            // ── 31 §8 step 4: capture the pre-fx track bus into the tail ring
+            //    (written every block; a boundary can land on any block). The
+            //    capture point is deliberately here — after clip rendering,
+            //    before the fx chain — so the declick (step 8) repairs the
+            //    *source* splice, not the processed signal. Ring length is
+            //    max(DECLICK_WINDOW_SAMPLES, downstream tail_samples) (§4.2). ──
+            let downstream_tail = self
+                .track_fx
+                .get(&track.id)
+                .map_or(0, |fx| fx.tail_samples(&track.audio.fx_chain))
+                + self.master_fx.tail_samples(&master.fx_chain);
+            let tail_len = DECLICK_WINDOW_SAMPLES.max(downstream_tail as usize);
+            let buf = self
+                .tail_cache
+                .entry(track.id)
+                .or_insert_with(|| TailBuf::new(tail_len));
+            if buf.len != tail_len {
+                buf.resize(tail_len);
+            }
+            buf.write_block(&self.track_bus_scratch);
+            // A clip ending within this block is a segment boundary on this
+            // track: mark the tail pending so a feeder can hand it to the next
+            // segment's head (31 §4.2). Auto-detected from `ClipVoice::remaining`.
+            let block_ticks = BLOCK_FRAMES as i64 * tick_per_sample;
+            if track.clips.iter().any(|c| c.remaining.0 <= block_ticks) {
+                buf.pending = Some(block_start_tick);
+            }
+
+            // ── 31 §8 step 2: sync this track's fx chain to the model, then
+            //    process it in place. A shape change resets from the first
+            //    changed index (GraphChanged) and forces a wholesale master
+            //    reset. `sync` allocates only when the shape actually changes,
+            //    so the steady-state path stays allocation-free. ──
+            let fx = self
+                .track_fx
+                .entry(track.id)
+                .or_insert_with(FxChainState::new);
+            if let Some(i) = fx.sync(&track.audio.fx_chain) {
+                fx.reset_from(i, AudioDiscontinuity::GraphChanged);
+                master_needs_reset = true;
+            }
+            fx.set_block_params(&track.audio.fx_chain, block_start_tick);
+            fx.process_block(&track.audio.fx_chain, sr, &mut self.track_bus_scratch);
+
+            // Tap: post-fx (09 §4 tap table "Track post-fx"), now genuinely
+            // after the fx chain (31 §8 step 2).
             self.track_post_fx_meter(track.id)
                 .update(&self.track_bus_scratch);
 
@@ -475,7 +861,22 @@ impl Mixer {
             }
         }
 
-        // Tap: master post-fx (fx_chain inert in P3 — master bus sum).
+        // ── 31 §8 step 2: master fx chain. Sync it, apply any graph-change
+        //    reset (its own edit, plus the wholesale reset any track graph
+        //    change forces since master is downstream of every track), then
+        //    process the summed master bus. ──
+        if let Some(i) = self.master_fx.sync(&master.fx_chain) {
+            self.master_fx.reset_from(i, AudioDiscontinuity::GraphChanged);
+        }
+        if master_needs_reset {
+            self.master_fx.reset_from(0, AudioDiscontinuity::GraphChanged);
+        }
+        self.master_fx
+            .set_block_params(&master.fx_chain, block_start_tick);
+        self.master_fx
+            .process_block(&master.fx_chain, sr, &mut self.master_bus_scratch);
+
+        // Tap: master post-fx (09 §4 tap table), now after the master fx chain.
         self.master_post_fx_meter.update(&self.master_bus_scratch);
 
         let master_params = eval_master_bus_params(&master.params, block_start_tick);
@@ -927,5 +1328,301 @@ mod tests {
         let mut mb = MasterBus::new();
         mb.fx_chain.clear();
         mb
+    }
+
+    // ── 31 §8 step 2: instantiated fx chains ────────────────────────────
+
+    /// (a) `sync` rebuilds only from the first divergence and reports that
+    /// index; an unchanged chain does not rebuild.
+    #[test]
+    fn fx_chain_sync_rebuilds_from_first_change() {
+        let mut state = FxChainState::new();
+
+        let spec1 = vec![AudioFxUnit::new(AudioFxKind::Gate)];
+        assert_eq!(state.sync(&spec1), Some(0), "empty -> [Gate] builds at 0");
+        assert_eq!(state.rebuild_count, 1);
+
+        assert_eq!(state.sync(&spec1), None, "identical chain -> no rebuild");
+        assert_eq!(state.rebuild_count, 1);
+
+        let spec2 = vec![
+            AudioFxUnit::new(AudioFxKind::Gate),
+            AudioFxUnit::new(AudioFxKind::Compressor),
+        ];
+        assert_eq!(state.sync(&spec2), Some(1), "append -> first change at 1");
+        assert_eq!(state.units.len(), 2);
+        assert_eq!(state.units[0].kind(), AudioFxKind::Gate, "prefix preserved");
+        assert_eq!(state.units[1].kind(), AudioFxKind::Compressor);
+    }
+
+    /// (a, via render_block) a track whose `fx_chain` gains a unit between two
+    /// `render_block` calls rebuilds.
+    #[test]
+    fn render_block_rebuilds_track_fx_on_chain_change() {
+        let mut mixer = Mixer::new(SR);
+        let master = master_bus_no_limiter();
+        let id = track_id(1);
+        let clip_audio = ClipAudio::new();
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+
+        let mut audio1 = TrackAudio::new();
+        audio1.fx_chain = vec![AudioFxUnit::new(AudioFxKind::Gate)];
+        let mut src = StepSource {
+            channels: 2,
+            sample_rate: SR,
+            value: 0.1,
+        };
+        let mut tracks = vec![TrackVoice {
+            id,
+            audio: &audio1,
+            clips: vec![silent_clip_voice(&clip_audio, &mut src)],
+        }];
+        mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+        assert_eq!(mixer.track_fx[&id].rebuild_count, 1);
+
+        let mut audio2 = TrackAudio::new();
+        audio2.fx_chain = vec![
+            AudioFxUnit::new(AudioFxKind::Gate),
+            AudioFxUnit::new(AudioFxKind::Compressor),
+        ];
+        let mut src2 = StepSource {
+            channels: 2,
+            sample_rate: SR,
+            value: 0.1,
+        };
+        let mut tracks2 = vec![TrackVoice {
+            id,
+            audio: &audio2,
+            clips: vec![silent_clip_voice(&clip_audio, &mut src2)],
+        }];
+        mixer.render_block(Tick(0), &mut tracks2, &master, &mut out);
+        assert_eq!(mixer.track_fx[&id].rebuild_count, 2, "chain change -> rebuild");
+        assert_eq!(mixer.track_fx[&id].units.len(), 2);
+    }
+
+    /// (b) an unchanged chain across 100 blocks performs zero rebuilds beyond
+    /// the initial build.
+    #[test]
+    fn unchanged_chain_performs_zero_rebuilds() {
+        let mut mixer = Mixer::new(SR);
+        let master = master_bus_no_limiter();
+        let id = track_id(1);
+        let mut audio = TrackAudio::new();
+        audio.fx_chain = vec![
+            AudioFxUnit::new(AudioFxKind::Gate),
+            AudioFxUnit::new(AudioFxKind::Compressor),
+        ];
+        let clip_audio = ClipAudio::new();
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        for _ in 0..100 {
+            let mut src = StepSource {
+                channels: 2,
+                sample_rate: SR,
+                value: 0.1,
+            };
+            let mut tracks = vec![TrackVoice {
+                id,
+                audio: &audio,
+                clips: vec![silent_clip_voice(&clip_audio, &mut src)],
+            }];
+            mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+        }
+        assert_eq!(
+            mixer.track_fx[&id].rebuild_count, 1,
+            "one build, no per-block rebuilds"
+        );
+    }
+
+    /// (c) a disabled unit contributes 0 to `latency_samples` but keeps its
+    /// slot index (and its state) across the enable-flag flip.
+    #[test]
+    fn disabled_unit_contributes_zero_latency_but_keeps_slot() {
+        let mut state = FxChainState::new();
+        let spec_both = vec![
+            AudioFxUnit::new(AudioFxKind::Limiter),
+            AudioFxUnit::new(AudioFxKind::Limiter),
+        ];
+        state.sync(&spec_both);
+        let mut block = vec![0.1f32; BLOCK_FRAMES * CHANNELS];
+        state.process_block(&spec_both, SR, &mut block);
+        let l = state.units[1].latency_samples();
+        assert!(l > 0, "limiter reports lookahead after a block");
+        assert_eq!(state.latency_samples(&spec_both), 2 * l);
+
+        // Disabling is not a kind change: no rebuild, slot + state preserved,
+        // but the unit drops out of the latency sum.
+        let mut spec_dis = spec_both.clone();
+        spec_dis[1].enabled = false;
+        assert_eq!(state.sync(&spec_dis), None, "enable flip is not a rebuild");
+        assert_eq!(state.units.len(), 2, "disabled unit keeps its slot");
+        assert!(state.units[1].latency_samples() > 0, "state preserved");
+        assert_eq!(
+            state.latency_samples(&spec_dis),
+            l,
+            "disabled unit adds 0 to the latency sum"
+        );
+    }
+
+    // ── 31 §8 step 4: segment-boundary tail plumbing ────────────────────
+
+    fn ending_clip_voice<'a>(
+        audio: &'a ClipAudio,
+        source: &'a mut dyn PcmSource,
+    ) -> ClipVoice<'a> {
+        let tick_per_sample = TICKS_PER_SECOND / SR as i64;
+        ClipVoice {
+            audio,
+            elapsed: Tick(0),
+            // Ends within this block -> the mixer marks a boundary.
+            remaining: Tick(BLOCK_FRAMES as i64 * tick_per_sample),
+            source,
+        }
+    }
+
+    /// (a) the captured tail's newest samples equal the (pre-fx) clip output;
+    /// (b) a second take for the same boundary returns `None`.
+    #[test]
+    fn segment_boundary_tail_matches_clip_and_consumes_once() {
+        let mut mixer = Mixer::new(SR);
+        let master = master_bus_no_limiter();
+        let id = track_id(1);
+        let audio = TrackAudio::new();
+        let clip_audio = ClipAudio::new();
+        let mut src = StepSource {
+            channels: 2,
+            sample_rate: SR,
+            value: 0.5,
+        };
+        let mut tracks = vec![TrackVoice {
+            id,
+            audio: &audio,
+            clips: vec![ending_clip_voice(&clip_audio, &mut src)],
+        }];
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+
+        let boundary = mixer
+            .take_segment_boundary(id)
+            .expect("a clip ended this block -> boundary pending");
+        assert_eq!(boundary.track, id);
+        for c in 0..CHANNELS {
+            let tail = &boundary.tail[c];
+            assert_eq!(tail.len(), DECLICK_WINDOW_SAMPLES);
+            // Unity clip gain, no fades: the pre-fx track bus is a constant 0.5.
+            // The newest written samples sit at the end of the chronological
+            // snapshot.
+            for &s in &tail[tail.len() - 256..] {
+                assert!((s - 0.5).abs() < 1e-6, "newest tail sample {s} != 0.5");
+            }
+        }
+
+        assert!(
+            mixer.take_segment_boundary(id).is_none(),
+            "a boundary is handed out exactly once"
+        );
+    }
+
+    /// (c) `invalidate_tail` drops the cached tail.
+    #[test]
+    fn invalidate_tail_drops_pending_boundary() {
+        let mut mixer = Mixer::new(SR);
+        let master = master_bus_no_limiter();
+        let id = track_id(1);
+        let audio = TrackAudio::new();
+        let clip_audio = ClipAudio::new();
+        let mut src = StepSource {
+            channels: 2,
+            sample_rate: SR,
+            value: 0.5,
+        };
+        let mut tracks = vec![TrackVoice {
+            id,
+            audio: &audio,
+            clips: vec![ending_clip_voice(&clip_audio, &mut src)],
+        }];
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+
+        mixer.invalidate_tail(id);
+        assert!(
+            mixer.take_segment_boundary(id).is_none(),
+            "invalidated tail yields no boundary"
+        );
+    }
+
+    /// (d) adding a Limiter to the master chain grows `tail_len` to at least
+    /// its `tail_samples()`.
+    #[test]
+    fn master_limiter_grows_tail_len_frames() {
+        let mut mixer = Mixer::new(SR);
+        let master = MasterBus::new(); // seeded with the default Limiter
+        let id = track_id(1);
+        let audio = TrackAudio::new();
+        let clip_audio = ClipAudio::new();
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        // Block 1 primes the limiter (tail_samples 0 -> lookahead); a later
+        // block sees the grown downstream tail.
+        for _ in 0..3 {
+            let mut src = StepSource {
+                channels: 2,
+                sample_rate: SR,
+                value: 0.1,
+            };
+            let mut tracks = vec![TrackVoice {
+                id,
+                audio: &audio,
+                clips: vec![silent_clip_voice(&clip_audio, &mut src)],
+            }];
+            mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+        }
+        let limiter_tail = mixer.master_fx.tail_samples(&master.fx_chain);
+        assert!(limiter_tail > 0, "primed master limiter reports a tail");
+        let ring_len = mixer.tail_cache[&id].len;
+        assert!(
+            ring_len >= limiter_tail as usize,
+            "ring ({ring_len}) covers downstream tail ({limiter_tail})"
+        );
+        assert_eq!(
+            ring_len,
+            DECLICK_WINDOW_SAMPLES.max(limiter_tail as usize),
+            "ring is max(declick window, downstream tail)"
+        );
+    }
+
+    /// (e) `Seek` leaves the tail buffer length unchanged but silent.
+    #[test]
+    fn seek_reprimes_tail_ring_but_keeps_length() {
+        let mut mixer = Mixer::new(SR);
+        let master = master_bus_no_limiter();
+        let id = track_id(1);
+        let audio = TrackAudio::new();
+        let clip_audio = ClipAudio::new();
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        for _ in 0..3 {
+            let mut src = StepSource {
+                channels: 2,
+                sample_rate: SR,
+                value: 0.5,
+            };
+            let mut tracks = vec![TrackVoice {
+                id,
+                audio: &audio,
+                clips: vec![silent_clip_voice(&clip_audio, &mut src)],
+            }];
+            mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+        }
+        let len_before = mixer.tail_cache[&id].len;
+        assert!(len_before > 0);
+
+        mixer.notify_discontinuity(MixerDiscontinuity::Seek { to: Tick(0) });
+
+        let buf = &mixer.tail_cache[&id];
+        assert_eq!(buf.len, len_before, "length preserved across Seek");
+        for c in 0..CHANNELS {
+            assert!(
+                buf.ch[c].iter().all(|&s| s == 0.0),
+                "ring re-primed with silence"
+            );
+        }
     }
 }

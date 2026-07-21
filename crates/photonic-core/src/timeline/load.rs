@@ -28,10 +28,13 @@
 //! rather than the generic bound — that is where the real registry blocks live.
 
 use super::anim::PropertyTrack;
-use super::clip::ClipSource;
-use super::grade::GradeOpParams;
+use super::clip::{ClipEffect, ClipSource};
+use super::grade::{Grade, GradeOpParams};
 use super::graph::GraphOp;
-use super::ids::{ClipId, GradeOpId, GraphId, GraphNodeId, SequenceId, TrackId};
+use super::ids::{
+    ClipId, GradeOpId, GraphId, GraphNodeId, GroupId, MarkerCategoryId, MarkerId, SequenceId,
+    TrackId,
+};
 use super::prop_registry::{self, PropTargetKind};
 use super::sequence::{TimelineProject, ValidationError};
 
@@ -102,6 +105,24 @@ fn flag_tracks(tracks: &mut [PropertyTrack], kind: PropTargetKind) {
     }
 }
 
+/// Flag orphaned lanes across an effect stack plus an optional grade — the walk
+/// shared by every effect scope (35 §2): clip, track, sequence-master and asset.
+/// An inert effect (unknown manifest id) is skipped so its preserved params stay
+/// byte-identical on re-serialization (§2.6), exactly as the clip loop requires.
+fn flag_effect_stack(effects: &mut [ClipEffect], grade: Option<&mut Grade>) {
+    for effect in effects {
+        if effect.inert {
+            continue;
+        }
+        flag_tracks(&mut effect.params.tracks, PropTargetKind::Effect(effect.kind));
+    }
+    if let Some(grade) = grade {
+        for op in &mut grade.ops {
+            flag_tracks(&mut op.params.tracks, PropTargetKind::GradeOp(op.kind));
+        }
+    }
+}
+
 /// Run the load-time passes over a freshly deserialized project: flag orphaned
 /// property tracks (repair), reject any corrupt known variant serde swallowed
 /// into the `Unknown` fallback (39 §2.2 rule 4), scan for preserved unknown enum
@@ -118,13 +139,104 @@ pub fn finalize_load(project: &mut TimelineProject) -> Result<LoadReport, LoadEr
     // tag is a KNOWN catalog tag is corrupt data (a malformed known variant that
     // serde swallowed), not a forward-compat variant — reject it (39 §2.2 rule 4).
     reject_corrupt_known_variants(project)?;
+    // Repair degenerate groups BEFORE validation (35 §3). Empty and
+    // singleton-`Normal` groups are self-repairing, and rejecting a whole
+    // project over one degenerate group would be hostile — so they are dissolved
+    // here (and reported, not silently swallowed) rather than left for
+    // `validate` to reject. Cycles and unknown group refs are NOT repaired:
+    // closing them needs an editorial decision the loader cannot make, so they
+    // stay load-rejections via `validate` below (the same argument the module
+    // doc makes for overlapping clips). Sequences are visited in id-sorted order
+    // for a deterministic report.
+    let mut dissolved_groups: Vec<(SequenceId, GroupId)> = Vec::new();
+    let mut seq_ids: Vec<SequenceId> = project.sequences.keys().copied().collect();
+    seq_ids.sort();
+    for seq_id in &seq_ids {
+        let seq = project
+            .sequences
+            .get_mut(seq_id)
+            .expect("id came from keys()");
+        for gid in seq.dissolve_degenerate_groups() {
+            dissolved_groups.push((*seq_id, gid));
+        }
+    }
     let report = LoadReport {
         unknown_variants: collect_unknown_variants(project),
+        dissolved_groups,
+        // A marker whose category is missing renders neutral and is flagged; it
+        // is NEVER silently remapped (35 §1.3), so this only reports.
+        dangling_categories: dangling_marker_categories(project),
     };
     for seq in project.sequences.values() {
         seq.validate()?;
     }
+    // TODO(39 §2.4): surface `report.dissolved_groups` and
+    // `report.dangling_categories` on 36's diagnostic channel
+    // (`Project::ValidationFailed` / `Project::UnknownVariantPreserved`). Until
+    // that taxonomy lands, the returned `LoadReport` is the interim carrier.
     Ok(report)
+}
+
+/// Which marker collection a [`dangling_marker_categories`] finding came from
+/// (35 §1.3). Scope is implied by location: [`Sequence::markers`] vs a clip's
+/// [`markers`](super::clip::Clip).
+///
+/// [`Sequence::markers`]: super::sequence::Sequence
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkerScope {
+    /// A sequence-level marker.
+    Sequence(SequenceId),
+    /// A clip-level marker.
+    Clip {
+        sequence: SequenceId,
+        track: TrackId,
+        clip: ClipId,
+    },
+}
+
+/// Every marker whose `category` names a [`MarkerCategory`] absent from
+/// `project.marker_categories` (35 §1.3). Such a marker renders with a neutral
+/// fallback and is flagged in the panel; it is NEVER silently remapped, so this
+/// only *reports* — it does not mutate. Sequences are visited in id-sorted order
+/// so the result is deterministic.
+///
+/// [`MarkerCategory`]: super::sequence::MarkerCategory
+pub fn dangling_marker_categories(
+    project: &TimelineProject,
+) -> Vec<(MarkerScope, MarkerId, MarkerCategoryId)> {
+    let mut out = Vec::new();
+    let mut seq_ids: Vec<SequenceId> = project.sequences.keys().copied().collect();
+    seq_ids.sort();
+    for seq_id in seq_ids {
+        let seq = &project.sequences[&seq_id];
+        for marker in &seq.markers {
+            if let Some(cat) = marker.category {
+                if project.marker_category(cat).is_none() {
+                    out.push((MarkerScope::Sequence(seq_id), marker.id, cat));
+                }
+            }
+        }
+        for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+            for clip in &track.clips {
+                for marker in &clip.markers {
+                    if let Some(cat) = marker.category {
+                        if project.marker_category(cat).is_none() {
+                            out.push((
+                                MarkerScope::Clip {
+                                    sequence: seq_id,
+                                    track: track.id,
+                                    clip: clip.id,
+                                },
+                                marker.id,
+                                cat,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // ── Corrupt-known-variant guard (39 §2.2 rule 4) ─────────────────────────────
@@ -245,26 +357,11 @@ pub fn flag_orphaned_property_tracks(project: &mut TimelineProject) {
                     flag_tracks(&mut unit.params.tracks, PropTargetKind::AudioFx(unit.kind));
                 }
             }
+            // Track-level effect/grade scope (35 §2).
+            flag_effect_stack(&mut track.effects, track.grade.as_mut());
             for clip in &mut track.clips {
                 flag_tracks(&mut clip.transform.tracks, PropTargetKind::ClipTransform);
-                for effect in &mut clip.effects {
-                    // An inert effect (unknown manifest id) has no registry block
-                    // to resolve against; flagging every track orphaned would
-                    // perturb the byte-identical round trip §2.6 requires, so its
-                    // tracks are left exactly as loaded.
-                    if effect.inert {
-                        continue;
-                    }
-                    flag_tracks(
-                        &mut effect.params.tracks,
-                        PropTargetKind::Effect(effect.kind),
-                    );
-                }
-                if let Some(grade) = clip.grade.as_mut() {
-                    for op in &mut grade.ops {
-                        flag_tracks(&mut op.params.tracks, PropTargetKind::GradeOp(op.kind));
-                    }
-                }
+                flag_effect_stack(&mut clip.effects, clip.grade.as_mut());
                 if let Some(audio) = clip.audio.as_mut() {
                     flag_tracks(&mut audio.params.tracks, PropTargetKind::ClipAudioParams);
                 }
@@ -278,6 +375,13 @@ pub fn flag_orphaned_property_tracks(project: &mut TimelineProject) {
         for unit in &mut seq.audio_master.fx_chain {
             flag_tracks(&mut unit.params.tracks, PropTargetKind::AudioFx(unit.kind));
         }
+        // Sequence-master effect/grade scope (35 §2).
+        flag_effect_stack(&mut seq.master_effects, seq.master_grade.as_mut());
+    }
+    // Asset-level effect/grade scope (35 §2): walked once per asset, outside the
+    // per-sequence loop.
+    for asset in project.media.assets.values_mut() {
+        flag_effect_stack(&mut asset.effects, asset.grade.as_mut());
     }
     // Graph-node params resolve leniently (`PropTargetKind::GraphNode` accepts
     // any path), so they are never orphaned — no pass needed for `project.graphs`.
@@ -398,6 +502,15 @@ pub struct UnknownVariant {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadReport {
     pub unknown_variants: Vec<UnknownVariant>,
+    /// Degenerate groups (empty / singleton-`Normal`) dissolved during load
+    /// (35 §3), reported rather than silently swallowed. Each pair names the
+    /// sequence the group lived in and the dissolved [`GroupId`].
+    pub dissolved_groups: Vec<(SequenceId, GroupId)>,
+    /// Markers whose `category` referenced a [`MarkerCategory`] absent from the
+    /// project (35 §1.3): flagged for the panel, never remapped.
+    ///
+    /// [`MarkerCategory`]: super::sequence::MarkerCategory
+    pub dangling_categories: Vec<(MarkerScope, MarkerId, MarkerCategoryId)>,
 }
 
 /// Accumulates unknown-variant findings, deduping by `(enum_name, tag)` while
@@ -771,5 +884,169 @@ mod unknown_scan_tests {
         assert!(!KNOWN_CLIP_SOURCE_TAGS.contains(&"holo_gen"));
         assert!(!KNOWN_GRAPH_OP_TAGS.contains(&"caustics"));
         assert!(!KNOWN_GRADE_PARAM_TAGS.contains(&"bloom"));
+    }
+}
+
+#[cfg(test)]
+mod load_repair_tests {
+    use super::*;
+    use crate::timeline::anim::{PropPath, PropertyTrack};
+    use crate::timeline::{
+        AssetKind, Clip, ClipEffect, ClipId, ClipSource, EffectKind, FrameRate, GroupKind,
+        GroupNode, Marker, MarkerCategoryId, MediaAsset, Sequence, Tick, TimelineProject, Track,
+        TrackKind,
+    };
+
+    /// A one-video-track sequence holding a single adjustment clip; returns the
+    /// sequence and that clip's id.
+    fn seq_with_one_clip() -> (Sequence, ClipId) {
+        let mut t = Track::new(TrackKind::Video, "V1");
+        let c = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+        let cid = c.id;
+        t.clips.push(c);
+        let mut s = Sequence::new("seq", FrameRate::FPS_30, 1920, 1080);
+        s.video_tracks.push(t);
+        (s, cid)
+    }
+
+    /// An effect carrying one lane whose path cannot resolve for any scope.
+    fn blur_with_unknown_lane(path: &str) -> ClipEffect {
+        let mut eff = ClipEffect::new(EffectKind::Blur);
+        eff.params.tracks.push(PropertyTrack::new(PropPath::new(path)));
+        eff
+    }
+
+    // ── Task 1: orphan flagging reaches the new scopes (35 §2) ────────────
+
+    #[test]
+    fn orphaned_paths_are_flagged_at_track_master_and_asset_scope() {
+        let mut project = TimelineProject::new();
+        let (mut seq, _) = seq_with_one_clip();
+        seq.video_tracks[0]
+            .effects
+            .push(blur_with_unknown_lane("params.nope_track"));
+        seq.master_effects
+            .push(blur_with_unknown_lane("params.nope_master"));
+        project.insert_sequence(seq);
+
+        let mut asset = MediaAsset::from_file(AssetKind::Video, "/tmp/a.mp4");
+        asset.effects.push(blur_with_unknown_lane("params.nope_asset"));
+        project.media.insert(asset);
+
+        flag_orphaned_property_tracks(&mut project);
+
+        let seq = project.sequences.values().next().unwrap();
+        assert!(
+            seq.video_tracks[0].effects[0].params.tracks[0].orphaned,
+            "track-scope effect lane must be flagged orphaned"
+        );
+        assert!(
+            seq.master_effects[0].params.tracks[0].orphaned,
+            "master-scope effect lane must be flagged orphaned"
+        );
+        let asset = project.media.assets.values().next().unwrap();
+        assert!(
+            asset.effects[0].params.tracks[0].orphaned,
+            "asset-scope effect lane must be flagged orphaned"
+        );
+    }
+
+    // ── Task 3: load-time group repair + dangling-category flagging (35 §3/§1.3) ─
+
+    #[test]
+    fn load_dissolves_an_empty_group_and_reports_it() {
+        let (mut seq, _) = seq_with_one_clip();
+        let g = GroupNode::new(GroupKind::Normal);
+        let gid = g.id;
+        let sid = seq.id;
+        seq.groups.insert(gid, g); // no members, no children → degenerate
+        let mut project = TimelineProject::new();
+        project.insert_sequence(seq);
+
+        let report = finalize_load(&mut project).expect("an empty group is repaired, not rejected");
+        assert!(
+            report.dissolved_groups.contains(&(sid, gid)),
+            "the dissolved empty group must be reported, not silently swallowed"
+        );
+        assert!(
+            !project.sequences[&sid].groups.contains_key(&gid),
+            "the degenerate group must be gone after load"
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_group_cycle() {
+        let (mut seq, cid) = seq_with_one_clip();
+        // A second clip so neither group is a singleton `Normal` (which would be
+        // dissolved instead of surfacing the cycle).
+        let c2 = Clip::new(ClipSource::Adjustment, Tick(100), Tick(100));
+        seq.video_tracks[0].clips.push(c2);
+        let mut a = GroupNode::new(GroupKind::Normal);
+        let mut b = GroupNode::new(GroupKind::Normal);
+        let (aid, bid) = (a.id, b.id);
+        a.parent = Some(bid);
+        b.parent = Some(aid); // a → b → a
+        seq.groups.insert(aid, a);
+        seq.groups.insert(bid, b);
+        for c in &mut seq.video_tracks[0].clips {
+            c.group = if c.id == cid { Some(aid) } else { Some(bid) };
+        }
+        let mut project = TimelineProject::new();
+        project.insert_sequence(seq);
+
+        let err = finalize_load(&mut project).expect_err("a group cycle must be rejected at load");
+        assert!(matches!(
+            err,
+            LoadError::Validation(ValidationError::GroupCycle { .. })
+        ));
+    }
+
+    #[test]
+    fn load_rejects_an_unknown_group_ref() {
+        let (mut seq, cid) = seq_with_one_clip();
+        seq.video_tracks[0]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == cid)
+            .unwrap()
+            .group = Some(GroupId::new()); // names a group absent from the sequence
+        let mut project = TimelineProject::new();
+        project.insert_sequence(seq);
+
+        let err =
+            finalize_load(&mut project).expect_err("an unknown group ref must be rejected at load");
+        assert!(matches!(
+            err,
+            LoadError::Validation(ValidationError::UnknownGroup { .. })
+        ));
+    }
+
+    #[test]
+    fn load_flags_a_dangling_marker_category_without_remapping_it() {
+        let (mut seq, _) = seq_with_one_clip();
+        let missing = MarkerCategoryId::new();
+        let mut m = Marker::new(Tick(10), "m");
+        m.category = Some(missing);
+        let mid = m.id;
+        seq.markers.push(m);
+        let sid = seq.id;
+        let mut project = TimelineProject::new();
+        // Deliberately leave `project.marker_categories` empty so `missing` dangles.
+        project.insert_sequence(seq);
+
+        let report =
+            finalize_load(&mut project).expect("a dangling category is flagged, not fatal");
+        assert!(
+            report
+                .dangling_categories
+                .contains(&(MarkerScope::Sequence(sid), mid, missing)),
+            "the dangling category must be reported at its marker"
+        );
+        // Never silently remapped or cleared (35 §1.3).
+        assert_eq!(
+            project.sequences[&sid].markers[0].category,
+            Some(missing),
+            "the marker's category must be left untouched"
+        );
     }
 }

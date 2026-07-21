@@ -8,6 +8,7 @@
 //! cleanly after the model grows, and lets slightly-newer documents load
 //! leniently (unknown fields dropped) within a compatibility window.
 
+use crate::timeline::GroupId;
 use serde_json::Value;
 
 /// How many versions ahead of the current one a file may be and still load
@@ -55,7 +56,12 @@ pub trait FormatMigration: Send + Sync {
 
 /// The ordered migration chain. Each entry upgrades version N → N+1.
 pub fn migrations() -> Vec<Box<dyn FormatMigration>> {
-    vec![Box::new(V1ToV2), Box::new(V2ToV3), Box::new(V3ToV4)]
+    vec![
+        Box::new(V1ToV2),
+        Box::new(V2ToV3),
+        Box::new(V3ToV4),
+        Box::new(V4ToV5),
+    ]
 }
 
 /// v1 → v2: the `Raster` node kind was added. The change is purely additive —
@@ -145,6 +151,141 @@ impl FormatMigration for V3ToV4 {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+/// v4 → v5: the §35 scope / marker / group model, folded together with the six
+/// sibling changes that share this format step (01 §9.1's nine-change
+/// inventory). All but one are pure serde-default additions — markers gain
+/// `duration`/`category`/`anchor`; tracks, sequence masters and media assets
+/// gain effect+grade scopes; `MarkerCategory` gains a glyph; `ClipEffect` gains
+/// `id`/`version`; captions and clip-audio gain fields; and the
+/// unknown-preserving enum variants (39 §2.2) land — so their helpers are
+/// no-ops: serde supplies the defaults on load, and the effect-identity backfill
+/// happens in `finalize_load`, not here. The single tree-walking change is the
+/// deprecated `link_group` → [`GroupKind::AvLink`](crate::timeline::GroupKind)
+/// projection (35 §3).
+///
+/// The migration is deliberately ONE struct whose `migrate()` fans out to one
+/// private helper per owning section, so the v5 version number means "all nine
+/// changes"; a v5 file is readable across every section rather than only §35.
+struct V4ToV5;
+
+impl V4ToV5 {
+    /// 39 §2.2 (lands FIRST, per 01 §9.1's non-negotiable ordering): the
+    /// unknown-preserving variants (`MarkerAnchor::Unknown`, `GroupKind::Unknown`
+    /// and the payload-carrying `*::Unknown` arms) exist in the type system from
+    /// birth, so there is nothing to rewrite in the tree.
+    fn migrate_unknown_variants(_value: &mut Value) {}
+
+    /// 35 §1/§2: markers gain `duration`/`category`/`anchor`; tracks, sequence
+    /// masters and assets gain effect+grade scopes. All additive (§1.6, §2.6) —
+    /// serde defaults supply them.
+    fn migrate_scopes_and_markers(_value: &mut Value) {}
+
+    /// 41 §7: `MarkerCategory.glyph`. Additive (defaults to `Diamond`).
+    fn migrate_marker_glyph(_value: &mut Value) {}
+
+    /// 30 §10: `ClipEffect.id`/`.version`. Additive — an absent id is backfilled
+    /// from `kind` in `finalize_load`, not in the JSON tree.
+    fn migrate_effect_identity(_value: &mut Value) {}
+
+    /// 42: `CaptionTrack.language` / `CaptionStyle.direction`. Additive.
+    fn migrate_caption_fields(_value: &mut Value) {}
+
+    /// 31 §7: `ClipAudio.stream` / `.offset`. Additive.
+    fn migrate_clip_audio_fields(_value: &mut Value) {}
+
+    /// 39 §1.6: `Track.height_px` moves to the UI sidecar. A stray in-tree
+    /// `height_px` is an unknown field serde drops on load, so no rewrite is
+    /// required at the JSON level here.
+    fn migrate_height_sidecar(_value: &mut Value) {}
+
+    /// 35 §3: project the deprecated per-clip `link_group` into a
+    /// `GroupKind::AvLink` group tree — the only tree-walking change in v4 → v5.
+    /// Each distinct `link_group` value in a sequence becomes one AvLink
+    /// [`GroupNode`](crate::timeline::GroupNode) that its member clips point at
+    /// via `group`; the original `link_group` is retained (deprecated for one
+    /// format version). A singleton AvLink group is legal (an A/V pair mid-edit),
+    /// so the projection never needs to prune.
+    fn migrate_link_groups(value: &mut Value) {
+        let Some(sequences) = value
+            .as_object_mut()
+            .and_then(|root| root.get_mut("timeline"))
+            .and_then(Value::as_object_mut)
+            .and_then(|timeline| timeline.get_mut("sequences"))
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+
+        for sequence in sequences.values_mut().filter_map(Value::as_object_mut) {
+            // Pass 1: assign a fresh AvLink GroupId to each distinct link_group,
+            // and bind each carrying clip to it.
+            let mut remap: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for track_key in ["video_tracks", "audio_tracks"] {
+                let Some(tracks) = sequence.get_mut(track_key).and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                for clip in tracks
+                    .iter_mut()
+                    .filter_map(Value::as_object_mut)
+                    .filter_map(|track| track.get_mut("clips"))
+                    .filter_map(Value::as_array_mut)
+                    .flatten()
+                    .filter_map(Value::as_object_mut)
+                {
+                    let Some(link_group) = clip.get("link_group").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let link_group = link_group.to_owned();
+                    let gid = remap
+                        .entry(link_group)
+                        .or_insert_with(|| GroupId::new().to_string())
+                        .clone();
+                    // A clip already carrying an explicit `group` keeps it (v4 has
+                    // none, but be defensive); otherwise bind it to its AvLink group.
+                    clip.entry("group").or_insert_with(|| Value::from(gid));
+                }
+            }
+            if remap.is_empty() {
+                continue;
+            }
+            // Pass 2: materialise the AvLink GroupNodes into `sequence.groups`.
+            let groups = sequence
+                .entry("groups")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Some(groups) = groups.as_object_mut() {
+                for gid in remap.values() {
+                    let mut node = serde_json::Map::new();
+                    node.insert("id".into(), Value::from(gid.clone()));
+                    node.insert("kind".into(), Value::from("av_link"));
+                    groups.insert(gid.clone(), Value::Object(node));
+                }
+            }
+        }
+    }
+}
+
+impl FormatMigration for V4ToV5 {
+    fn from_version(&self) -> u32 {
+        4
+    }
+    fn to_version(&self) -> u32 {
+        5
+    }
+    fn migrate(&self, value: &mut Value) -> Result<(), String> {
+        // 39 §2.2's unknown-preserving variants land first (01 §9.1 ordering).
+        Self::migrate_unknown_variants(value);
+        Self::migrate_scopes_and_markers(value);
+        Self::migrate_marker_glyph(value);
+        Self::migrate_effect_identity(value);
+        Self::migrate_caption_fields(value);
+        Self::migrate_clip_audio_fields(value);
+        Self::migrate_height_sidecar(value);
+        Self::migrate_link_groups(value);
         Ok(())
     }
 }
@@ -336,5 +477,81 @@ mod tests {
     fn current_chain_is_a_noop_for_v1() {
         let mut v = json!({ "format_version": 1 });
         assert_eq!(run_migrations(&mut v, 1).unwrap(), 1);
+    }
+
+    // ── v4 → v5 (spec 35 + the 01 §9.1 sibling changes) ──────────────────
+
+    #[test]
+    fn v4_to_v5_is_a_noop_for_a_document_with_no_timeline() {
+        // Mirrors `current_chain_is_a_noop_for_v1`: a document with no timeline
+        // (all v5 changes are additive there) survives the step unchanged bar the
+        // version stamp.
+        let mut v = json!({ "format_version": 4 });
+        assert_eq!(run_migrations(&mut v, 5).unwrap(), 5);
+        assert_eq!(v["format_version"], 5);
+        // No spurious timeline is fabricated.
+        assert!(v.get("timeline").is_none());
+    }
+
+    #[test]
+    fn v4_to_v5_stamps_the_version() {
+        let mut v = json!({
+            "format_version": 4,
+            "timeline": { "sequences": {} }
+        });
+        assert_eq!(run_migrations(&mut v, 5).unwrap(), 5);
+        assert_eq!(v["format_version"], 5);
+    }
+
+    #[test]
+    fn v4_to_v5_projects_link_group_into_one_shared_avlink_group() {
+        // Two clips (one video, one audio) sharing a link_group become one
+        // AvLink group both point at (35 §3).
+        let mut v = json!({
+            "format_version": 4,
+            "timeline": { "sequences": {
+                "s": {
+                    "video_tracks": [{ "clips": [{ "link_group": "lg-1" }] }],
+                    "audio_tracks": [{ "clips": [{ "link_group": "lg-1" }] }]
+                }
+            }}
+        });
+        assert_eq!(run_migrations(&mut v, 5).unwrap(), 5);
+
+        let seq = &v["timeline"]["sequences"]["s"];
+        let vgroup = seq["video_tracks"][0]["clips"][0]["group"].as_str().unwrap();
+        let agroup = seq["audio_tracks"][0]["clips"][0]["group"].as_str().unwrap();
+        assert_eq!(vgroup, agroup, "both clips must bind to the same AvLink group");
+
+        let groups = seq["groups"].as_object().unwrap();
+        assert_eq!(groups.len(), 1, "one distinct link_group → one group node");
+        let node = &groups[vgroup];
+        assert_eq!(node["kind"], "av_link");
+        assert_eq!(node["id"].as_str().unwrap(), vgroup);
+        // The deprecated link_group is retained for one format version.
+        assert_eq!(seq["video_tracks"][0]["clips"][0]["link_group"], "lg-1");
+    }
+
+    #[test]
+    fn v4_to_v5_distinct_link_groups_get_distinct_avlink_groups() {
+        let mut v = json!({
+            "format_version": 4,
+            "timeline": { "sequences": { "s": {
+                "video_tracks": [{ "clips": [
+                    { "link_group": "a" },
+                    { "link_group": "b" },
+                    { }
+                ] }]
+            }}}
+        });
+        assert_eq!(run_migrations(&mut v, 5).unwrap(), 5);
+
+        let seq = &v["timeline"]["sequences"]["s"];
+        let g0 = seq["video_tracks"][0]["clips"][0]["group"].as_str().unwrap();
+        let g1 = seq["video_tracks"][0]["clips"][1]["group"].as_str().unwrap();
+        assert_ne!(g0, g1, "distinct link_groups must not collapse into one group");
+        // A clip with no link_group is left ungrouped.
+        assert!(seq["video_tracks"][0]["clips"][2].get("group").is_none());
+        assert_eq!(seq["groups"].as_object().unwrap().len(), 2);
     }
 }

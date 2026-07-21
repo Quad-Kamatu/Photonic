@@ -7,6 +7,8 @@
 //! home for `VectorRef`/`VectorStateKey` (relocated from `photonic-video`'s
 //! `contract.rs`, which now re-exports them).
 
+use super::clip::ClipEffect;
+use super::grade::Grade;
 use super::ids::{AssetId, BinId};
 use super::time::{FrameRate, Tick};
 use crate::node::NodeId;
@@ -55,6 +57,14 @@ pub struct MediaAsset {
     /// Additive field: v3 files written before bins load with this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin: Option<BinId>,
+    /// Asset-level effect stack (35 §2): applied in the asset's source colour
+    /// space beneath every clip that references it. Empty = neutral (§2.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<ClipEffect>,
+    /// Asset-level grade (35 §2): applied after `effects`, still in source space.
+    /// `None` = neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<Grade>,
 }
 
 impl MediaAsset {
@@ -67,6 +77,8 @@ impl MediaAsset {
             proxy: None,
             content_hash: None,
             bin: None,
+            effects: Vec::new(),
+            grade: None,
         }
     }
 
@@ -271,6 +283,22 @@ mod tests {
         let j = serde_json::to_string(&pool).unwrap();
         let back: MediaPool = serde_json::from_str(&j).unwrap();
         assert_eq!(pool, back);
+    }
+
+    #[test]
+    fn asset_effects_absent_from_json_when_empty() {
+        // Additive discipline (35 §2 / §2.6): an asset with no effect/grade scope
+        // omits both keys, so pre-scope media loads shape-identical.
+        let a = MediaAsset::from_file(AssetKind::Video, "/tmp/clip.mp4");
+        assert!(a.effects.is_empty());
+        assert!(a.grade.is_none());
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(!json.contains("effects"));
+        assert!(!json.contains("grade"));
+        // A pre-scope asset JSON (no keys) still loads with neutral defaults.
+        let back: MediaAsset = serde_json::from_str(&json).unwrap();
+        assert!(back.effects.is_empty());
+        assert!(back.grade.is_none());
     }
 
     #[test]

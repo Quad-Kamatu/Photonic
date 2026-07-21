@@ -37,6 +37,8 @@ pub mod gate;
 pub mod limiter;
 pub mod loudness;
 
+use photonic_core::timeline::{AudioFxKind, EffectParams};
+
 pub use compressor::CompressorParams;
 pub use eq::{EqParams, PeakBand, ShelfBand};
 pub use gate::GateParams;
@@ -119,6 +121,110 @@ pub enum AudioDiscontinuity {
     GraphChanged,
     /// Sample rate or channel count changed.
     Reconfigure,
+}
+
+/// A concrete, allocation-free wrapper over the four processing units — the
+/// bridge between the model's [`AudioFxKind`] and a live [`DspUnit`] (31 §8
+/// step 1). The mixer's fx chain is a `Vec<FxUnit>`, rendered every block, so
+/// this is a plain enum (not `Box<dyn DspUnit>`): no per-unit heap indirection
+/// on the hot path, matching `mixer.rs`'s existing "no per-block allocation"
+/// discipline.
+///
+/// `dsp/` thereby depends on `photonic_core::timeline::{AudioFxKind,
+/// EffectParams}`, but the module's stated "no `Tick`/`AnimProps`" boundary
+/// still holds: `EffectParams` is the already-block-evaluated flat bag (each
+/// submodule already imports it for `from_effect_params`), and `AnimProps`
+/// evaluation to that bag stays in the mixer.
+pub enum FxUnit {
+    Eq(eq::Eq),
+    Compressor(compressor::Compressor),
+    Gate(gate::Gate),
+    Limiter(limiter::Limiter),
+}
+
+impl FxUnit {
+    /// Instantiate the concrete unit for `kind` with its own default params.
+    ///
+    /// A forward-compat [`AudioFxKind::Unknown`] (39 §2.2) has no known unit;
+    /// it falls back to a default [`eq::Eq`], which — with every band at
+    /// `gain_db == 0` — is a genuine pass-through and reports zero
+    /// latency/tail, so an unknown unit renders inert. The mixer skips
+    /// unknown-kind slots for processing regardless (see
+    /// `mixer::FxChainState::process_block`), and caches the true spec kind
+    /// separately for identity comparison, so [`FxUnit::kind`]'s inability to
+    /// round-trip an unknown never matters there.
+    pub fn new(kind: AudioFxKind) -> Self {
+        match kind {
+            AudioFxKind::Eq => FxUnit::Eq(eq::Eq::new()),
+            AudioFxKind::Compressor => FxUnit::Compressor(compressor::Compressor::new()),
+            AudioFxKind::Gate => FxUnit::Gate(gate::Gate::new()),
+            AudioFxKind::Limiter => FxUnit::Limiter(limiter::Limiter::new()),
+            _ => FxUnit::Eq(eq::Eq::new()),
+        }
+    }
+
+    /// The concrete kind this unit realizes. Meaningful for units built from a
+    /// known kind (the only case the mixer relies on).
+    pub fn kind(&self) -> AudioFxKind {
+        match self {
+            FxUnit::Eq(_) => AudioFxKind::Eq,
+            FxUnit::Compressor(_) => AudioFxKind::Compressor,
+            FxUnit::Gate(_) => AudioFxKind::Gate,
+            FxUnit::Limiter(_) => AudioFxKind::Limiter,
+        }
+    }
+
+    /// Push a block-resolved param bag into the inner unit. Dispatches to the
+    /// matching `*Params::from_effect_params` then the inner `set_params` —
+    /// touches params only, never signal state (the inverse of the `reset`
+    /// contract: reset clears state and keeps params, this sets params and
+    /// keeps state).
+    pub fn set_params_from(&mut self, p: &EffectParams) {
+        match self {
+            FxUnit::Eq(u) => u.set_params(EqParams::from_effect_params(p)),
+            FxUnit::Compressor(u) => u.set_params(CompressorParams::from_effect_params(p)),
+            FxUnit::Gate(u) => u.set_params(GateParams::from_effect_params(p)),
+            FxUnit::Limiter(u) => u.set_params(LimiterParams::from_effect_params(p)),
+        }
+    }
+}
+
+impl DspUnit for FxUnit {
+    fn process(&mut self, sample_rate: u32, block: &mut [f32], sidechain: Option<&[f32]>) {
+        match self {
+            FxUnit::Eq(u) => u.process(sample_rate, block, sidechain),
+            FxUnit::Compressor(u) => u.process(sample_rate, block, sidechain),
+            FxUnit::Gate(u) => u.process(sample_rate, block, sidechain),
+            FxUnit::Limiter(u) => u.process(sample_rate, block, sidechain),
+        }
+    }
+
+    fn reset(&mut self, cause: AudioDiscontinuity) {
+        match self {
+            FxUnit::Eq(u) => u.reset(cause),
+            FxUnit::Compressor(u) => u.reset(cause),
+            FxUnit::Gate(u) => u.reset(cause),
+            FxUnit::Limiter(u) => u.reset(cause),
+        }
+    }
+
+    fn latency_samples(&self) -> u32 {
+        match self {
+            FxUnit::Eq(u) => u.latency_samples(),
+            FxUnit::Compressor(u) => u.latency_samples(),
+            FxUnit::Gate(u) => u.latency_samples(),
+            FxUnit::Limiter(u) => u.latency_samples(),
+        }
+    }
+
+    fn tail_samples(&self) -> u32 {
+        match self {
+            FxUnit::Eq(u) => u.tail_samples(),
+            FxUnit::Compressor(u) => u.tail_samples(),
+            FxUnit::Gate(u) => u.tail_samples(),
+            FxUnit::Limiter(u) => u.tail_samples(),
+        }
+    }
 }
 
 /// Per-sample one-pole coefficient for a time constant `tau_ms` at `fs` Hz —
@@ -269,6 +375,71 @@ mod determinism_tests {
             u
         });
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod factory_tests {
+    //! 31 §8 step 1 — the kind→unit factory and param binding.
+    use super::*;
+    use crate::audio::CHANNELS;
+    use photonic_core::timeline::AudioFxUnit;
+
+    const KINDS: [AudioFxKind; 4] = [
+        AudioFxKind::Eq,
+        AudioFxKind::Compressor,
+        AudioFxKind::Gate,
+        AudioFxKind::Limiter,
+    ];
+
+    #[test]
+    fn new_reports_its_kind() {
+        for k in KINDS {
+            assert_eq!(FxUnit::new(k).kind(), k, "FxUnit::new({k:?}).kind()");
+        }
+    }
+
+    /// `set_params_from` on the wrapper must be identical to calling the inner
+    /// `*Params::from_effect_params` directly on the model's default bag.
+    #[test]
+    fn set_params_from_matches_direct_conversion() {
+        for k in KINDS {
+            let base = AudioFxUnit::new(k).params.base;
+            let mut fx = FxUnit::new(k);
+            fx.set_params_from(&base);
+            match (&fx, k) {
+                (FxUnit::Eq(u), AudioFxKind::Eq) => {
+                    assert_eq!(*u.params(), EqParams::from_effect_params(&base));
+                }
+                (FxUnit::Compressor(u), AudioFxKind::Compressor) => {
+                    assert_eq!(*u.params(), CompressorParams::from_effect_params(&base));
+                }
+                (FxUnit::Gate(u), AudioFxKind::Gate) => {
+                    assert_eq!(*u.params(), GateParams::from_effect_params(&base));
+                }
+                (FxUnit::Limiter(u), AudioFxKind::Limiter) => {
+                    assert_eq!(*u.params(), LimiterParams::from_effect_params(&base));
+                }
+                _ => panic!("FxUnit variant does not match kind {k:?}"),
+            }
+        }
+    }
+
+    /// `latency_samples` forwards to the inner unit: the limiter reports its
+    /// lookahead once it has processed a block, the others always zero.
+    #[test]
+    fn forwards_latency_samples() {
+        for k in KINDS {
+            let mut fx = FxUnit::new(k);
+            let mut block = vec![0.1f32; 512 * CHANNELS];
+            fx.process(48_000, &mut block, None);
+            let lat = fx.latency_samples();
+            if k == AudioFxKind::Limiter {
+                assert!(lat > 0, "limiter should report lookahead latency, got {lat}");
+            } else {
+                assert_eq!(lat, 0, "{k:?} should report zero latency, got {lat}");
+            }
+        }
     }
 }
 
