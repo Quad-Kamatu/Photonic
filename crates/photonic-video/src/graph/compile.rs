@@ -13,11 +13,17 @@
 //!
 //! The numbered steps below mirror 02 §2 exactly:
 //! 1. per enabled video track, find the clip covering `t`;
-//! 2. per clip build the chain source → Transform2D → effects → grade;
+//! 2. per clip build the chain source → **asset effects/grade** → Transform2D →
+//!    clip effects → clip grade (the four effect scopes, 35 §2, all share the one
+//!    "effects beneath grade" ordering rule in [`apply_stack`]);
 //! 3. per-clip composition splices the clip's **source op only** (02 §2 step 3 /
 //!    08 §4), the still-applied Transform2D/effects/grade chain riding on top;
-//! 4. fold tracks with `Merge`, Adjustment clips re-rooting the stack below;
-//! 5. `CaptionOverlay` from enabled caption tracks covering `t`;
+//! 4. fold tracks with `Merge` — each track's own content passes through its
+//!    **track effects/grade** and merges at the track's `blend`/`opacity` (35 §2);
+//!    Adjustment clips re-root the stack below;
+//! 5. the **master effects/grade** (35 §2.4(d)) run on the folded program, then
+//!    `CaptionOverlay` from enabled caption tracks covering `t` (captions ride
+//!    above the master grade, in final display colour);
 //! 6. splice the project graph (08 §5) between the fold result and `Output`;
 //! 7. `TimeOffset` expansion by re-lowering the upstream subgraph at `t−offset`
 //!    (dedup-by-hash keeps it bounded; soft cap 4 distinct offsets);
@@ -29,7 +35,7 @@ use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
     self, AnchorSpace, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack,
-    CaptionWord, Clip, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp,
+    CaptionWord, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, EffectKind, Grade, GradeOp,
     GradeOpKind, GradeOpParams, GraphId, GraphNode, GraphNodeId, GraphNodeParams, GraphOp, InPort,
     KaraokeMode, LutInterp, NodeGraph, PropPath, PropValue, Sequence, SequenceFormat, SequenceId,
     TextClipContent, TimelineProject, TransitionKind,
@@ -205,6 +211,15 @@ pub fn compile(
         &mut cycle,
     );
 
+    // Master scope (35 §2.4(d)): the master effects/grade run on the folded
+    // program BEFORE `CaptionOverlay` (captions are authored in final display
+    // colour and must not be re-graded) and before the project graph (which stays
+    // the final-look surface). Master keyframes are sequence-relative, so evaluate
+    // the stack at `tick`, not any clip-relative offset.
+    // TODO(30 §2.3): gate on the master stack's Applicability once a manifest type exists.
+    let program = program
+        .map(|p| apply_stack(&mut b, &seq.master_effects, seq.master_grade.as_ref(), p, tick));
+
     // Step 5: caption overlay (enabled caption tracks with a cue covering t).
     let program = splice_captions(&mut b, seq, format, tick, program);
 
@@ -355,12 +370,14 @@ fn fold_sequence(
             continue; // step 8: disabled clip is a dead branch.
         }
 
-        // Adjustment clips (step 4): re-root the composite below through the
-        // clip's effect/grade chain rather than contributing a source.
+        // Adjustment clips (step 4 / 35 §2.4(b)): re-root the composite below
+        // through the clip's OWN effect/grade stack rather than contributing a
+        // source. The adjustment has no own content, so the track stack does NOT
+        // apply here — the clip stack acts on the already-merged accumulator.
         if matches!(clip.source, ClipSource::Adjustment) {
             if let Some(below) = acc {
                 let dt = tick - clip.start;
-                acc = Some(apply_effect_grade_chain(b, clip, below, dt));
+                acc = Some(apply_stack(b, &clip.effects, clip.grade.as_ref(), below, dt));
             }
             continue;
         }
@@ -382,7 +399,12 @@ fn fold_sequence(
                 quality,
                 cycle,
             ) {
-                acc = Some(fold_over(b, acc, node, 1.0));
+                // Track scope (35 §2.4(a)): the track effects/grade act on this
+                // track's OWN content (the transition image, opacity 1) before it
+                // merges — never on the accumulator. Sequence-relative keyframes.
+                // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
+                let node = apply_stack(b, &track.effects, track.grade.as_ref(), node, tick);
+                acc = Some(fold_over(b, acc, node, track.opacity, track.blend));
                 continue;
             }
             // Partner unavailable (disabled / opacity-0 / Adjustment): fall
@@ -402,7 +424,12 @@ fn fold_sequence(
         ) else {
             continue; // step 8: invisible / opacity-0 clip folded away.
         };
-        acc = Some(fold_over(b, acc, image, opacity));
+        // Track scope (35 §2.4(a)): the track effects/grade act on this track's
+        // OWN composited content before it merges into the accumulator — never on
+        // the accumulator itself. Track keyframes are sequence-relative (`tick`).
+        // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
+        let image = apply_stack(b, &track.effects, track.grade.as_ref(), image, tick);
+        acc = Some(fold_over(b, acc, image, opacity * track.opacity, track.blend));
     }
     acc
 }
@@ -663,11 +690,20 @@ fn ease(curve: EaseCurve, t: f32) -> f32 {
     }
 }
 
-/// Composite `top` over `acc` with `opacity` (premultiplied `over`). A single
-/// fully-opaque track needs no `Merge` (keeps the bare-clip graph minimal).
-fn fold_over(b: &mut Builder, acc: Option<IrNodeId>, top: IrNodeId, opacity: f32) -> IrNodeId {
+/// Composite `top` over `acc` at `opacity` in blend `mode` (premultiplied) —
+/// the track-fold merge (35 §2). `mode`/`opacity` are the track's `blend`/
+/// (`clip_opacity × track.opacity`). A single bottom track needs no `Merge` only
+/// when it is a plain fully-opaque `Normal` merge (any non-Normal blend or reduced
+/// opacity must still emit the node so it reaches the accumulator's colour).
+fn fold_over(
+    b: &mut Builder,
+    acc: Option<IrNodeId>,
+    top: IrNodeId,
+    opacity: f32,
+    mode: BlendMode,
+) -> IrNodeId {
     match acc {
-        None if opacity >= 1.0 => top,
+        None if mode == BlendMode::Normal && opacity >= 1.0 => top,
         None => {
             let transparent = b.push(
                 IrOp::SolidColor {
@@ -681,18 +717,12 @@ fn fold_over(b: &mut Builder, acc: Option<IrNodeId>, top: IrNodeId, opacity: f32
                 vec![],
             );
             b.push(
-                IrOp::Merge {
-                    mode: BlendMode::Normal,
-                    opacity,
-                },
+                IrOp::Merge { mode, opacity },
                 vec![(top, OutPort::default()), (transparent, OutPort::default())],
             )
         }
         Some(bottom) => b.push(
-            IrOp::Merge {
-                mode: BlendMode::Normal,
-                opacity,
-            },
+            IrOp::Merge { mode, opacity },
             vec![(top, OutPort::default()), (bottom, OutPort::default())],
         ),
     }
@@ -753,6 +783,17 @@ fn build_clip_chain(
         ),
     };
 
+    // Asset scope (35 §2.4(c)): the referenced material's own effects/grade — a
+    // per-camera LUT / lens correction — apply in SOURCE space, before the clip's
+    // `Transform2D`, and sit BENEATH the clip's own stack so a clip-level grade can
+    // correct an asset-level one. Keyframes share the clip-relative `dt` domain.
+    // Only `Asset`/`Vector` clips reference an asset; others have no asset stack.
+    // TODO(30 §2.3): gate on the asset stack's Applicability once a manifest type exists.
+    let source = match clip.source.asset().and_then(|a| project.media.assets.get(&a)) {
+        Some(asset) => apply_stack(b, &asset.effects, asset.grade.as_ref(), source, dt),
+        None => source,
+    };
+
     // Remainder of step 2's chain, applied on top of the source/composition.
     let mut cur = source;
     cur = b.push(
@@ -762,16 +803,34 @@ fn build_clip_chain(
         },
         vec![(cur, OutPort::default())],
     );
-    cur = apply_effect_grade_chain(b, clip, cur, dt);
+    // Clip scope (35 §2.4): the clip's own effects/grade, clip-relative keyframes.
+    // TODO(30 §2.3): gate on the clip stack's Applicability once a manifest type exists.
+    cur = apply_stack(b, &clip.effects, clip.grade.as_ref(), cur, dt);
     Some((cur, opacity))
 }
 
-/// Append the clip's enabled effect stack then its grade (if any) onto `input`.
-/// Shared by the normal chain (step 2) and Adjustment re-rooting (step 4). `dt`
-/// is clip-relative time (01 §6) — the domain the effect/grade keyframes live in.
-fn apply_effect_grade_chain(b: &mut Builder, clip: &Clip, input: IrNodeId, dt: Tick) -> IrNodeId {
+/// Append an enabled effect stack then a grade (if any) onto `input`, in the one
+/// normative scope order (02 §2 steps 1–7 / §2.3, restated by 35 §2): every
+/// enabled effect in author order, then the grade on top. This is the SINGLE place
+/// the "effects beneath grade" rule lives — it is called at all four effect scopes
+/// (asset, clip, track, master, 35 §2.4) so the ordering can never drift between
+/// them.
+///
+/// `dt` is the keyframe-evaluation domain for the scope being applied, and it is
+/// NOT the same at every scope: the clip and asset stacks are **clip-relative**
+/// (`dt = tick − clip.start`, 01 §6), while the track and master stacks are
+/// **sequence-relative** (`dt = tick`). Passing the wrong domain mis-times every
+/// keyframe on the stack with no error and no visible warning — get it right at
+/// the call site.
+fn apply_stack(
+    b: &mut Builder,
+    effects: &[ClipEffect],
+    grade: Option<&Grade>,
+    input: IrNodeId,
+    dt: Tick,
+) -> IrNodeId {
     let mut cur = input;
-    for fx in &clip.effects {
+    for fx in effects {
         if !fx.enabled {
             continue;
         }
@@ -788,7 +847,7 @@ fn apply_effect_grade_chain(b: &mut Builder, clip: &Clip, input: IrNodeId, dt: T
             vec![(cur, OutPort::default())],
         );
     }
-    if let Some(grade) = &clip.grade {
+    if let Some(grade) = grade {
         cur = apply_grade(b, grade, cur, dt);
     }
     cur

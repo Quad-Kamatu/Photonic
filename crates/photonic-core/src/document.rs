@@ -107,7 +107,14 @@ impl Guide {
 /// - v3 → v4: clip anchors gained an explicit coordinate space. The migration
 ///   tags existing base and per-format reframe transforms as absolute without
 ///   changing their stored values.
-pub const CURRENT_FORMAT_VERSION: u32 = 4;
+/// - v4 → v5: the §35 scope / marker / group model (folded with the 01 §9.1
+///   sibling changes). Tracks, sequence masters and media assets gain
+///   effect+grade scopes; markers gain duration/category/anchor; `ClipEffect`
+///   gains `id`/`version`; the unknown-preserving enum variants land. All
+///   additive (serde defaults) except the deprecated `link_group` →
+///   `GroupKind::AvLink` projection. The compiler now applies the effect scopes
+///   in normative order (02 §2 / 35 §2.4).
+pub const CURRENT_FORMAT_VERSION: u32 = 5;
 
 fn default_format_version() -> u32 {
     CURRENT_FORMAT_VERSION

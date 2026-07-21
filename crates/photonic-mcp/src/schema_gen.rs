@@ -5,6 +5,16 @@ use serde_json::{json, Value};
 /// Public so tooling (e.g. the `dump_tools` binary that regenerates
 /// `docs/mcp-api.md`) can read the canonical schema without standing up a server.
 pub fn tool_list() -> Value {
+    // Effect kinds sourced from the effect manifest catalogue (spec 30 §2.7) so
+    // the MCP doc-drift gate covers the catalogue: adding a manifest changes this
+    // enum, which changes docs/mcp-api.md, which the gate diffs. Only manifests
+    // that project to a legacy `EffectKind` variant (the shape `add_effect`
+    // accepts) are listed, in the catalogue's stable id-sorted order.
+    let effect_kind_enum: Vec<Value> = photonic_core::timeline::manifests()
+        .iter()
+        .filter_map(|m| m.id.legacy_kind())
+        .map(|k| serde_json::to_value(k).expect("EffectKind serializes to a string tag"))
+        .collect();
     json!([
         {
             "name": "create_shape",
@@ -5472,7 +5482,7 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "clip_id": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["blur","sharpen","glow","chroma_key","luma_key","invert","mask_shape_gen"] },
+                    "kind": { "type": "string", "enum": effect_kind_enum },
                     "index": { "type": "integer" }
                 },
                 "required": ["clip_id","kind"]
@@ -5512,7 +5522,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "list_effect_kinds",
-            "description": "Registry introspection: every EffectKind plus its animatable PropPath/value-kind/range table — lets an agent discover params without guessing.",
+            "description": "Registry introspection sourced from the effect manifest catalogue (spec 30 §2.7). Returns `effect_kinds`: one entry per manifest with `id`, `version`, `name`, `category`, `arity`, the legacy `kind` tag, and a `params` table (each `{path, kind, default, range, animatable, ui, group, display}`) — lets an agent discover effects and their param ranges without guessing.",
             "inputSchema": { "type": "object", "properties": {} }
         },
 

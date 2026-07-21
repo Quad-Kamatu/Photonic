@@ -38,7 +38,7 @@ const UNKNOWN_GRADE: &str = "bloom";
 const UNKNOWN_AUDIOFX: &str = "exciter";
 const UNKNOWN_GRAPHOP: &str = "caustics";
 
-/// A valid `format_version` = 4 document with one video clip (source + effect +
+/// A valid current-`format_version` document with one video clip (source + effect +
 /// transition + grade op), one audio track with a track-fx unit, and a project
 /// graph with one node — every discriminant a KNOWN variant.
 fn base_doc() -> Document {

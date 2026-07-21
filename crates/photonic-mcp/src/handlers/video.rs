@@ -2032,6 +2032,57 @@ pub async fn reorder_effects(state: &AppState, args: ReorderEffectsArgs) -> Tool
     }
 }
 
+/// Snake-case label for a [`ParamKind`], used in refusal messages.
+fn param_kind_label(kind: photonic_core::timeline::ParamKind) -> &'static str {
+    use photonic_core::timeline::ParamKind;
+    match kind {
+        ParamKind::Float => "float",
+        ParamKind::Vec2 => "vec2",
+        ParamKind::Color => "color",
+        ParamKind::Bool => "bool",
+        ParamKind::Enum(_) => "enum",
+        ParamKind::Path => "path",
+    }
+}
+
+/// True when `value`'s discriminant is the one a [`ParamKind`] accepts. `Path`
+/// has no [`PropValue`](photonic_core::timeline::PropValue) counterpart, so it is
+/// never satisfiable (no v1 effect declares a `Path` param).
+fn param_kind_accepts(
+    kind: photonic_core::timeline::ParamKind,
+    value: &photonic_core::timeline::PropValue,
+) -> bool {
+    use photonic_core::timeline::{ParamKind, PropValue};
+    matches!(
+        (kind, value),
+        (ParamKind::Float, PropValue::Float(_))
+            | (ParamKind::Vec2, PropValue::Vec2(_))
+            | (ParamKind::Color, PropValue::Color(_))
+            | (ParamKind::Bool, PropValue::Bool(_))
+            | (ParamKind::Enum(_), PropValue::Enum(_))
+    )
+}
+
+/// Project one [`ParamSpec`](photonic_core::timeline::ParamSpec) to the JSON
+/// shape `list_effect_kinds` emits.
+fn param_spec_json(p: &photonic_core::timeline::ParamSpec) -> serde_json::Value {
+    json!({
+        "path": p.path,
+        "kind": param_kind_label(p.kind),
+        "default": p.default,
+        "range": p.range,
+        "animatable": p.animatable,
+        "ui": format!("{:?}", p.ui),
+        "group": p.group,
+        "display": {
+            "factor": p.display.factor,
+            "offset": p.display.offset,
+            "suffix": p.display.suffix,
+            "decimals": p.display.decimals,
+        },
+    })
+}
+
 pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> ToolResult {
     tracing::debug!(
         "tool: set_effect_param {} [{}]",
@@ -2059,6 +2110,49 @@ pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> Too
             _ => return ToolResult::error("path \"enabled\" requires a bool value"),
         }
     } else {
+        // Manifest-driven validation (spec 30 §2.7): resolve the effect's
+        // manifest, look up the `ParamSpec` by path, and refuse — never clamp —
+        // on unknown path, value-kind mismatch, or an out-of-range value. A
+        // freshly-added effect carries `EffectId::EMPTY` until save, so fall back
+        // to its kind's stable id; an inert / unknown-id effect has no manifest
+        // and refuses every param write.
+        use photonic_core::timeline::effect_manifest;
+        let effect_id = if effect.id.is_empty() {
+            effect.kind.effect_id()
+        } else {
+            effect.id.clone()
+        };
+        let Some(manifest) = effect_manifest::manifest(effect_id.clone()) else {
+            return ToolResult::error(format!(
+                "effect id {:?} has no manifest in this build; param writes are refused",
+                effect_id.as_str()
+            ));
+        };
+        let Some(spec) = manifest.params.iter().find(|p| p.path == args.path) else {
+            return ToolResult::error(format!(
+                "unknown param path {:?} for effect {:?}",
+                args.path,
+                effect_id.as_str()
+            ));
+        };
+        if !param_kind_accepts(spec.kind, &args.value) {
+            return ToolResult::error(format!(
+                "param {:?} expects a {} value, got {:?}",
+                args.path,
+                param_kind_label(spec.kind),
+                args.value.kind()
+            ));
+        }
+        if let (Some((lo, hi)), photonic_core::timeline::PropValue::Float(v)) =
+            (spec.range, args.value)
+        {
+            if !(lo..=hi).contains(&v) {
+                return ToolResult::error(format!(
+                    "param {:?} value {v} is outside range {lo}..={hi} (refused, not clamped)",
+                    args.path
+                ));
+            }
+        }
         effect.params.base.set(args.path.as_str(), args.value);
     }
     match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
@@ -2072,27 +2166,29 @@ pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> Too
 
 pub async fn list_effect_kinds(_state: &AppState, _args: ListEffectKindsArgs) -> ToolResult {
     tracing::debug!("tool: list_effect_kinds");
-    use photonic_core::timeline::{prop_registry, EffectKind};
-    let kinds = [
-        EffectKind::Blur,
-        EffectKind::Sharpen,
-        EffectKind::Glow,
-        EffectKind::ChromaKey,
-        EffectKind::LumaKey,
-        EffectKind::Invert,
-        EffectKind::MaskShapeGen,
-    ];
-    let out: Vec<_> = kinds
+    // Registry introspection driven entirely by the effect manifest catalogue
+    // (spec 30 §2.7) — no second hand-maintained copy of the effect list. Each
+    // entry carries the manifest's identity plus its full per-param spec so an
+    // agent can discover params (and their ranges) without guessing.
+    use photonic_core::timeline::effect_manifest;
+    let out: Vec<_> = effect_manifest::manifests()
         .iter()
-        .map(|k| {
-            let entries: Vec<_> = prop_registry::entries(k.target_kind())
-                .iter()
-                .map(|e| json!({ "path": e.path, "value_kind": format!("{:?}", e.kind), "range": e.range }))
-                .collect();
-            json!({ "kind": k, "params": entries })
+        .map(|m| {
+            let params: Vec<_> = m.params.iter().map(param_spec_json).collect();
+            json!({
+                // Legacy EffectKind tag, retained one format version for existing
+                // consumers; `null` for a non-legacy (future) manifest.
+                "kind": m.id.legacy_kind(),
+                "id": m.id.as_str(),
+                "version": m.version,
+                "name": m.name,
+                "category": format!("{:?}", m.category),
+                "arity": m.arity,
+                "params": params,
+            })
         })
         .collect();
-    ToolResult::text(format!("{} effect kind(s)", out.len()))
+    ToolResult::text(format!("{} effect(s)", out.len()))
         .with_data(json!({ "effect_kinds": out }))
 }
 
@@ -7555,6 +7651,91 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(kinds.len(), 7);
+    }
+
+    /// Set up a clip carrying a single Gaussian-blur effect at index 0.
+    async fn clip_with_blur(state: &AppState) -> Value {
+        let (_, track_id) = create_seq_and_track(state, "video").await;
+        let clip_id = insert_solid_clip(state, &track_id, 0, 1000).await;
+        let r = call(
+            state,
+            "add_effect",
+            json!({ "clip_id": clip_id, "kind": "blur" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_effect(blur): {r:?}");
+        clip_id
+    }
+
+    #[tokio::test]
+    async fn set_effect_param_refuses_unknown_path() {
+        let state = test_state();
+        let clip_id = clip_with_blur(&state).await;
+        let r = call(
+            &state,
+            "set_effect_param",
+            json!({
+                "clip_id": clip_id, "effect_index": 0, "path": "params.does_not_exist",
+                "value": {"t": "float", "v": 1.0}
+            }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "unknown path must be refused: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn set_effect_param_refuses_out_of_range() {
+        let state = test_state();
+        let clip_id = clip_with_blur(&state).await;
+        // blur.gaussian params.radius range is 0..500; 9999 is out of range and
+        // must be refused (never clamped).
+        let r = call(
+            &state,
+            "set_effect_param",
+            json!({
+                "clip_id": clip_id, "effect_index": 0, "path": "params.radius",
+                "value": {"t": "float", "v": 9999.0}
+            }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "out-of-range must be refused: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn set_effect_param_refuses_kind_mismatch() {
+        let state = test_state();
+        let clip_id = clip_with_blur(&state).await;
+        // params.radius is a Float param; a Bool value is a kind mismatch.
+        let r = call(
+            &state,
+            "set_effect_param",
+            json!({
+                "clip_id": clip_id, "effect_index": 0, "path": "params.radius",
+                "value": {"t": "bool", "v": true}
+            }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "kind mismatch must be refused: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn list_effect_kinds_covers_every_manifest() {
+        let state = test_state();
+        let r = call(&state, "list_effect_kinds", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "list_effect_kinds: {r:?}");
+        let kinds = data(&r)["effect_kinds"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let manifests = photonic_core::timeline::manifests();
+        assert_eq!(
+            kinds.len(),
+            manifests.len(),
+            "list_effect_kinds count must match manifests()"
+        );
+        let got_ids: Vec<&str> = kinds.iter().map(|k| k["id"].as_str().unwrap()).collect();
+        let want_ids: Vec<&str> = manifests.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(got_ids, want_ids, "ids (and order) must match manifests()");
     }
 
     // ── Tool family: keyframes ─────────────────────────────────────────────

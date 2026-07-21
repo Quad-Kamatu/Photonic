@@ -1487,9 +1487,9 @@ fn v2_document_loads_as_current_without_timeline() {
 
     // Migrate forward to the current version and deserialize.
     let out = run_migrations(&mut value, photonic_core::document::CURRENT_FORMAT_VERSION).unwrap();
-    assert_eq!(out, 4, "v2 must migrate through v3 to v4");
+    assert_eq!(out, 5, "v2 must migrate through v3/v4 to v5");
     let doc: Document = serde_json::from_value(value).unwrap();
-    assert_eq!(doc.format_version, 4);
+    assert_eq!(doc.format_version, 5);
     assert!(doc.timeline.is_none(), "v2 file must load with no timeline");
     assert_eq!(doc.name, "legacy");
 }

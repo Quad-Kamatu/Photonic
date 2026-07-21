@@ -140,7 +140,7 @@ Push (or insert at `index`) an effect onto a clip's effect stack, seeded with th
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `clip_id` | string | yes |  |
-| `kind` | enum (`blur`, `sharpen`, `glow`, `chroma_key`, `luma_key`, `invert`, `mask_shape_gen`) | yes |  |
+| `kind` | enum (`blur`, `invert`, `chroma_key`, `luma_key`, `sharpen`, `glow`, `mask_shape_gen`) | yes |  |
 | `index` | integer | no |  |
 
 ## `add_export_profile`
@@ -2591,7 +2591,7 @@ _No parameters._
 
 ## `list_effect_kinds`
 
-Registry introspection: every EffectKind plus its animatable PropPath/value-kind/range table — lets an agent discover params without guessing.
+Registry introspection sourced from the effect manifest catalogue (spec 30 §2.7). Returns `effect_kinds`: one entry per manifest with `id`, `version`, `name`, `category`, `arity`, the legacy `kind` tag, and a `params` table (each `{path, kind, default, range, animatable, ui, group, display}`) — lets an agent discover effects and their param ranges without guessing.
 
 _No parameters._
 
