@@ -167,6 +167,11 @@ impl EngineBridge {
         self.session.status()
     }
 
+    /// Shared wgpu device for background export workers (K-F1 render queue).
+    pub fn gpu(&self) -> &photonic_video::GpuContext {
+        self.engine.gpu()
+    }
+
     /// The engine's real master-bus output level (NLE-parity Gap G-4: the
     /// slim stereo peak+RMS meter beside the program monitor,
     /// `app/monitor.rs::draw_master_meter`). Linear peak/RMS amplitude per

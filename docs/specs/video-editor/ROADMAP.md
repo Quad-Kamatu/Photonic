@@ -36,7 +36,8 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
 | **K-B16** raster bridge (slice) | 🟡 partial | `bf1d89b` | CPU bridge for 6 raster kernels (box/emboss/edges/high-pass/median/unsharp); manifests registered; GPU WGSL twins remain |
-| **K-F1** render queue | ✅ done | `bf1d89b` | `export::RenderQueue` multi-job FIFO with frozen snapshots + multi-segment enqueue (K-F2 foundation) |
+| **K-F1** render queue | ✅ done | `bf1d89b`+*(this commit)* | `export::RenderQueue` multi-job FIFO; GUI export dialog enqueues multi-format/marker jobs |
+| **K-F2** marker multi-export | ✅ done | *(this commit)* | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 
 **Not yet started:** K-B16 GPU ports for bridged kernels; K-F2/3/4/5 full UI; 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`).
 
@@ -131,7 +132,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
 | K-E | partial | Histogram/waveform/parade/vectorscope already ship with CPU references. Open: I/Q lines, 75% box, YUV/YPbPr switch, component + Rec.601/709 selection, audio spectrum, per-clip scope tap, monitor grids, extract-frame | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
-| K-F | partial | **K-F1 queue core done** (`RenderQueue` + multi-segment enqueue). Remaining: GUI queue panel, K-F2 marker multi-export UI, K-F3–F5 options/hardware | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
+| K-F | partial | **K-F1/F2 done** (queue + multi-format/marker multi-export from dialog). Remaining: queue inspector panel, K-F3–F5 options/hardware | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
 | K-G | open | Project profiles, project notes, layout presets, templates, **undo-history surface** over the existing branch/checkpoint tree, **interlaced-source support (K-G6) — currently a silent wrong-output path** | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |
 | E-1 | open | Source-range declaration in the node contract; **precedes** G-11's rubber-band depth | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |

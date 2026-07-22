@@ -897,6 +897,8 @@ pub struct PhotonicApp {
     /// shared wgpu device exists. `None` = engine-less host (tests, no GPU):
     /// the monitor/transport fall back to the placeholder wall-clock paths.
     pub engine: Option<engine::EngineBridge>,
+    /// K-F1 multi-job export queue (multi-format + marker multi-export).
+    pub(crate) render_queue: photonic_video::export::RenderQueue,
     /// Media pool drawer state + background import channel (05 §2).
     pub(crate) media_pool_ui: panels::media_pool::MediaPoolUi,
     /// Session clip-thumbnail + waveform caches feeding the timeline lane
@@ -1593,6 +1595,8 @@ impl Default for PhotonicApp {
             show_video_shortcut_sheet: false,
             initial_mode_checked: false,
             engine: None,
+            /// K-F1 shared multi-job export queue (marker multi-export / multi-format).
+            render_queue: photonic_video::export::RenderQueue::new(),
             media_pool_ui: panels::media_pool::MediaPoolUi::default(),
             timeline_media: None,
             selected_grade_op: None,
@@ -3850,13 +3854,38 @@ impl PhotonicApp {
                 // `self.engine` right after for the real `EngineCmd::Export`
                 // send is a plain sequential borrow, not a conflict.
                 let mut vid = self.video_panel_ui();
-                let job =
+                let jobs =
                     panels::video::export_dialog::draw_export_dialog(ctx, &mut vid, doc, history);
-                if let Some(job) = job {
-                    if let Some(bridge) = self.engine.as_ref() {
-                        bridge
-                            .session()
-                            .send(photonic_video::EngineCmd::Export(Box::new(job)));
+                if !jobs.is_empty() {
+                    if jobs.len() == 1 {
+                        // Single job: the existing engine export path (progress
+                        // on EngineStatus.export).
+                        if let Some(bridge) = self.engine.as_ref() {
+                            bridge.session().send(photonic_video::EngineCmd::Export(
+                                Box::new(jobs.into_iter().next().unwrap()),
+                            ));
+                        }
+                    } else if let Some(bridge) = self.engine.as_ref() {
+                        // Multi-format / marker multi-export (K-F1/F2): freeze
+                        // the project and drain via the shared render queue.
+                        if let Ok(tools) = photonic_video::media::ffmpeg_locate::locate() {
+                            self.render_queue
+                                .ensure_worker(bridge.gpu().clone(), tools);
+                            if let Some(project) = doc.timeline.clone() {
+                                for job in jobs {
+                                    let label = job
+                                        .output
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "export".into());
+                                    let _ = self.render_queue.enqueue(
+                                        label,
+                                        project.clone(),
+                                        job,
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }

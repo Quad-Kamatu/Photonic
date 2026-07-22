@@ -76,6 +76,8 @@ struct DialogState {
     entire_sequence: bool,
     range_start_s: f64,
     range_end_s: f64,
+    /// K-F2: one export job per ranged sequence marker (duration > 0).
+    export_per_marker: bool,
     save_as_name: String,
     job: Option<JobState>,
 }
@@ -249,6 +251,7 @@ impl DialogState {
             entire_sequence: false,
             range_start_s,
             range_end_s,
+            export_per_marker: false,
             save_as_name: String::new(),
             job: None,
         }
@@ -343,17 +346,17 @@ fn rate_label(r: FrameRate) -> String {
 
 /// Floating video export dialog, shown while
 /// [`VideoPanelUi::export_dialog_open`] is set. Its own window close button
-/// clears that flag. Returns a real, validated [`ExportJob`] the moment the
-/// user commits "Export" (the caller sends it to the engine).
+/// clears that flag. Returns one or more validated [`ExportJob`]s the moment
+/// the user commits "Export" (single → engine; multi → [`RenderQueue`]).
 pub(crate) fn draw_export_dialog(
     ctx: &egui::Context,
     vid: &mut VideoPanelUi,
     doc: &mut Document,
     history: &mut CommandHistory,
-) -> Option<ExportJob> {
+) -> Vec<ExportJob> {
     let Some(project) = doc.timeline.as_ref() else {
         *vid.export_dialog_open = false;
-        return None;
+        return Vec::new();
     };
     let seq_id = project.active_sequence;
     let id = state_id();
@@ -361,7 +364,7 @@ pub(crate) fn draw_export_dialog(
         .data(|d| d.get_temp::<DialogState>(id))
         .unwrap_or_else(|| DialogState::seeded(doc, seq_id, vid.last_export_preset));
 
-    let mut launch: Option<ExportJob> = None;
+    let mut launch: Vec<ExportJob> = Vec::new();
     let mut open = *vid.export_dialog_open;
     egui::Window::new("Export")
         .id(egui::Id::new("video_export_dialog_window"))
@@ -385,6 +388,14 @@ pub(crate) fn draw_export_dialog(
             ui.separator();
             draw_format_checklist(ui, doc, seq_id, &mut state);
             draw_range(ui, doc, history, seq_id, &mut state);
+            ui.checkbox(
+                &mut state.export_per_marker,
+                "Export each ranged marker as a separate file (K-F2)",
+            )
+            .on_hover_text(
+                "When checked, every marker with duration > 0 becomes its own \
+                 export job (per selected format). Uses the shared render queue.",
+            );
             draw_estimate(ui, doc, seq_id, &state);
             let offline = preflight_offline_assets(doc, seq_id);
             if !offline.is_empty() {
@@ -399,10 +410,11 @@ pub(crate) fn draw_export_dialog(
                     .add_enabled(can_export, egui::Button::new("Export"))
                     .clicked()
                 {
-                    if let Some(job) = build_export_job(doc, seq_id, &state) {
+                    let jobs = build_export_jobs(doc, seq_id, &state);
+                    if let Some(first) = jobs.first() {
                         *vid.last_export_preset = state.preset.name.clone();
                         state.job = Some(JobState::Submitted {
-                            output: job.output.clone(),
+                            output: first.output.clone(),
                         });
                         // Clear any prior export's terminal snapshot so the
                         // progress view doesn't flash a stale "complete" before
@@ -410,7 +422,7 @@ pub(crate) fn draw_export_dialog(
                         ctx.data_mut(|d| {
                             d.insert_temp(export_status_id(), Option::<ExportProgressSnapshot>::None)
                         });
-                        launch = Some(job);
+                        launch = jobs;
                     }
                 }
                 if !can_export {
@@ -1079,34 +1091,101 @@ fn draw_preflight_banner(ui: &mut egui::Ui, offline: &[String]) {
         });
 }
 
-fn build_export_job(doc: &Document, seq_id: SequenceId, state: &DialogState) -> Option<ExportJob> {
-    let project = doc.timeline.as_ref()?;
-    let seq = project.sequences.get(&seq_id)?;
-    let range = if state.entire_sequence {
+/// Build one job per selected format × (range OR each ranged marker) (K-F1/F2).
+fn build_export_jobs(doc: &Document, seq_id: SequenceId, state: &DialogState) -> Vec<ExportJob> {
+    let Some(project) = doc.timeline.as_ref() else {
+        return Vec::new();
+    };
+    let Some(seq) = project.sequences.get(&seq_id) else {
+        return Vec::new();
+    };
+    let format_indices: Vec<usize> = state
+        .formats_checked
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| c.then_some(i))
+        .collect();
+    let format_indices = if format_indices.is_empty() {
+        vec![seq.active_format]
+    } else {
+        format_indices
+    };
+
+    // Ranges: either the dialog range, or one per ranged sequence marker (K-F2).
+    let ranges: Vec<(String, Option<(Tick, Tick)>)> = if state.export_per_marker {
+        let mut segs: Vec<_> = seq
+            .markers
+            .iter()
+            .filter(|m| m.duration.0 > 0)
+            .map(|m| {
+                let safe = m
+                    .name
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect::<String>();
+                (safe, Some((m.at, m.end())))
+            })
+            .collect();
+        if segs.is_empty() {
+            // No ranged markers — fall back to the dialog range so Export
+            // still does something useful.
+            segs.push(("full".into(), dialog_range(state)));
+        }
+        segs
+    } else {
+        vec![("export".into(), dialog_range(state))]
+    };
+
+    let mut jobs = Vec::new();
+    for &format_index in &format_indices {
+        let fmt_tag = seq
+            .formats
+            .get(format_index)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| format!("f{format_index}"));
+        for (seg_tag, range) in &ranges {
+            let base = format!(
+                "{}_{}_{seg_tag}",
+                seq.name.replace(' ', "_"),
+                fmt_tag.replace(' ', "_")
+            );
+            jobs.push(ExportJob {
+                sequence: seq_id,
+                format_index,
+                preset: state.preset.clone(),
+                output: default_output_path_tagged(&state.preset, &base),
+                range: *range,
+            });
+        }
+    }
+    jobs
+}
+
+fn dialog_range(state: &DialogState) -> Option<(Tick, Tick)> {
+    if state.entire_sequence {
         None
     } else {
         Some((
             Tick((state.range_start_s * TICKS_PER_SECOND as f64) as i64),
             Tick((state.range_end_s * TICKS_PER_SECOND as f64) as i64),
         ))
+    }
+}
+
+fn default_output_path_tagged(preset: &ExportPreset, base: &str) -> std::path::PathBuf {
+    let ext = match preset.container {
+        Container::Mp4 => "mp4",
+        Container::Mov => "mov",
+        Container::WebM => "webm",
+        Container::Mkv => "mkv",
+        Container::Gif => "gif",
+        Container::ImageSequence => "%05d.png",
+        Container::Apng => "apng.png",
     };
-    let format_index = state
-        .formats_checked
-        .iter()
-        .position(|&c| c)
-        .unwrap_or(seq.active_format);
-    Some(ExportJob {
-        sequence: seq_id,
-        format_index,
-        preset: state.preset.clone(),
-        // 05 §3.8's own worked flow assumes a chosen output path; a real file
-        // dialog belongs at the launch site (matches every other export path
-        // in this codebase, `app/mod.rs`'s `run_file_dialog` off the egui
-        // frame thread) — deferred to the caller alongside the engine send,
-        // kept out of this pure job-builder so it stays unit-testable.
-        output: default_output_path(&state.preset, &seq.name),
-        range,
-    })
+    std::env::temp_dir().join(format!(
+        "{base}_{}.{ext}",
+        preset.name.replace(' ', "_")
+    ))
 }
 
 fn default_output_path(preset: &ExportPreset, seq_name: &str) -> std::path::PathBuf {
@@ -1143,6 +1222,64 @@ mod tests {
         ));
         assert!(!alpha_allowed(Container::Mp4, Some(VideoCodec::H264)));
         assert!(!alpha_allowed(Container::WebM, None));
+    }
+
+    #[test]
+    fn build_export_jobs_emits_one_per_checked_format() {
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut project = photonic_core::timeline::TimelineProject::new();
+        let mut seq = photonic_core::timeline::Sequence::new(
+            "Seq",
+            FrameRate::FPS_30,
+            1920,
+            1080,
+        );
+        // Second format so multi-format has something to expand.
+        seq.formats
+            .push(photonic_core::timeline::SequenceFormat::new("9:16", 1080, 1920));
+        let seq_id = seq.id;
+        project.insert_sequence(seq);
+        doc.timeline = Some(project);
+
+        let mut state = DialogState::seeded(&doc, Some(seq_id), "Web H.264");
+        state.formats_checked = vec![true, true];
+        state.entire_sequence = true;
+        state.export_per_marker = false;
+        let jobs = build_export_jobs(&doc, seq_id, &state);
+        assert_eq!(jobs.len(), 2, "one job per checked format");
+        assert_ne!(jobs[0].format_index, jobs[1].format_index);
+    }
+
+    #[test]
+    fn build_export_jobs_marker_mode_fans_out_ranged_markers() {
+        use photonic_core::timeline::Marker;
+        let mut doc = Document::new("t", 100.0, 100.0);
+        let mut project = photonic_core::timeline::TimelineProject::new();
+        let mut seq = photonic_core::timeline::Sequence::new(
+            "Seq",
+            FrameRate::FPS_30,
+            640,
+            360,
+        );
+        let mut m1 = Marker::new(Tick(0), "Intro");
+        m1.duration = Tick(TICKS_PER_SECOND as i64);
+        let mut m2 = Marker::new(Tick(TICKS_PER_SECOND as i64 * 2), "Outro");
+        m2.duration = Tick(TICKS_PER_SECOND as i64);
+        // Point marker (duration 0) must be skipped.
+        seq.markers
+            .push(Marker::new(Tick(TICKS_PER_SECOND as i64), "Point"));
+        seq.markers.push(m1);
+        seq.markers.push(m2);
+        let seq_id = seq.id;
+        project.insert_sequence(seq);
+        doc.timeline = Some(project);
+
+        let mut state = DialogState::seeded(&doc, Some(seq_id), "Web H.264");
+        state.formats_checked = vec![true];
+        state.export_per_marker = true;
+        let jobs = build_export_jobs(&doc, seq_id, &state);
+        assert_eq!(jobs.len(), 2, "two ranged markers → two jobs");
+        assert!(jobs.iter().all(|j| j.range.is_some()));
     }
 
     #[test]
