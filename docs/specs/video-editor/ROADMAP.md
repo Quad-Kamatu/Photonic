@@ -36,8 +36,8 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
 | **K-B16** raster bridge (slice) | 🟡 partial | `bf1d89b` | CPU bridge for 6 raster kernels (box/emboss/edges/high-pass/median/unsharp); manifests registered; GPU WGSL twins remain |
-| **K-F1** render queue | ✅ done | `bf1d89b`+*(this commit)* | `export::RenderQueue` multi-job FIFO; GUI export dialog enqueues multi-format/marker jobs |
-| **K-F2** marker multi-export | ✅ done | *(this commit)* | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
+| **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978` | `export::RenderQueue` multi-job FIFO; GUI export dialog enqueues multi-format/marker jobs |
+| **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 
 **Not yet started:** K-B16 GPU ports for bridged kernels; K-F2/3/4/5 full UI; 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`).
 
