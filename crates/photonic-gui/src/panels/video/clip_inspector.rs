@@ -700,16 +700,28 @@ pub(crate) fn clip_has_effects(clip: &Clip) -> bool {
     !clip.effects.is_empty()
 }
 
-fn effect_label(kind: EffectKind) -> &'static str {
-    match kind {
-        EffectKind::Blur => "Blur",
-        EffectKind::Sharpen => "Sharpen",
-        EffectKind::Glow => "Glow",
-        EffectKind::ChromaKey => "Chroma Key",
-        EffectKind::LumaKey => "Luma Key",
-        EffectKind::Invert => "Invert",
-        EffectKind::MaskShapeGen => "Mask Shape",
-        _ => "Effect",
+/// Display name for a stacked effect — prefer the live manifest name so
+/// K-B16 catalogue entries (and any future id) show correctly; fall back to
+/// the seven v1 kind labels, then a generic "Effect".
+fn effect_label(effect: &photonic_core::timeline::ClipEffect) -> String {
+    use photonic_core::timeline::manifest;
+    if !effect.id.is_empty() {
+        if let Some(m) = manifest(effect.id.clone()) {
+            return m.name.to_string();
+        }
+        // Unknown / future id: surface the id rather than a blank "Effect".
+        return effect.id.as_str().to_string();
+    }
+    match effect.kind {
+        EffectKind::Blur => "Blur".into(),
+        EffectKind::Sharpen => "Sharpen".into(),
+        EffectKind::Glow => "Glow".into(),
+        EffectKind::ChromaKey => "Chroma Key".into(),
+        EffectKind::LumaKey => "Luma Key".into(),
+        EffectKind::Invert => "Invert".into(),
+        EffectKind::MaskShapeGen => "Mask Shape".into(),
+        EffectKind::Unknown(tag) => tag.as_str().to_string(),
+        _ => "Effect".into(),
     }
 }
 
@@ -736,10 +748,11 @@ fn draw_effects_section(
                             new_clip.effects[i].enabled = enabled;
                             set_clip_discrete(project, seq, track, new_clip, action);
                         }
+                        let name = effect_label(effect);
                         let label = if enabled {
-                            RichText::new(effect_label(effect.kind))
+                            RichText::new(name)
                         } else {
-                            RichText::new(effect_label(effect.kind)).color(MUTED)
+                            RichText::new(name).color(MUTED)
                         };
                         ui.label(label);
                         // Keyboard-reachable reorder fallback (13 §16 finding
@@ -822,15 +835,22 @@ fn draw_effects_section(
                         .rect_stroke(drop_rect, 3.0, egui::Stroke::new(1.5, ACCENT));
                     if ui.input(|i| i.pointer.any_released()) {
                         egui::DragAndDrop::clear_payload(ui.ctx());
-                        if let Ok(cmd) = ops::add_effect(
-                            project,
-                            seq,
-                            track,
-                            clip.id,
-                            photonic_core::timeline::ClipEffect::new(payload.kind),
-                            None,
-                        ) {
-                            *action = Some(PanelAction::ClipEditDiscrete(cmd));
+                        let effect = photonic_core::timeline::ClipEffect::from_manifest(
+                            payload.id.clone(),
+                        )
+                        .or_else(|| {
+                            // Fallback for a payload whose id this build no longer
+                            // knows (shouldn't happen for MANIFESTS-driven drags).
+                            payload.id.legacy_kind().map(
+                                photonic_core::timeline::ClipEffect::new,
+                            )
+                        });
+                        if let Some(effect) = effect {
+                            if let Ok(cmd) =
+                                ops::add_effect(project, seq, track, clip.id, effect, None)
+                            {
+                                *action = Some(PanelAction::ClipEditDiscrete(cmd));
+                            }
                         }
                     }
                 }

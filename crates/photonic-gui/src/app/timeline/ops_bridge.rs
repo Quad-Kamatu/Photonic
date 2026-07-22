@@ -94,6 +94,63 @@ pub(crate) const ASPECT_PRESETS: &[(&str, u32, u32)] = &[
     ("21:9", 2560, 1080),
 ];
 
+// ── Sequence tabs (17 G-17) ─────────────────────────────────────────────────
+
+/// Create a new empty sequence, pin it in `open_tabs`, and activate it (G-17 +).
+pub fn create_sequence_tab(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    frame_rate: FrameRate,
+    width: u32,
+    height: u32,
+    open_tabs: &mut Vec<SequenceId>,
+) {
+    let Some(project) = doc.timeline.as_ref() else {
+        return;
+    };
+    let n = project.sequences.len() + 1;
+    let name = format!("Sequence {n}");
+    let seq = Sequence::new(name, frame_rate, width, height);
+    let id = seq.id;
+    commit(history, doc, ops::add_sequence(seq));
+    // Activate the new sequence.
+    if let Some(project) = doc.timeline.as_ref() {
+        let cmd = ops::set_active_sequence(project, Some(id));
+        commit(history, doc, cmd);
+    }
+    if !open_tabs.contains(&id) {
+        open_tabs.push(id);
+    }
+}
+
+/// Duplicate a sequence into a new tab and activate the copy (G-17 context menu).
+pub fn duplicate_sequence_tab(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    id: SequenceId,
+    open_tabs: &mut Vec<SequenceId>,
+) {
+    let Some(project) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Ok(cmd) = ops::duplicate_sequence(project, id) else {
+        return;
+    };
+    // Peek the new id from the command payload before commit.
+    let new_id = match &cmd {
+        TimelineCmd::AddSequence { sequence, .. } => sequence.id,
+        _ => return,
+    };
+    commit(history, doc, cmd);
+    if let Some(project) = doc.timeline.as_ref() {
+        let activate = ops::set_active_sequence(project, Some(new_id));
+        commit(history, doc, activate);
+    }
+    if !open_tabs.contains(&new_id) {
+        open_tabs.push(new_id);
+    }
+}
+
 // ── Project / sequence / track lifecycle ────────────────────────────────────
 
 /// Guarantee a project *and* at least one sequence exist, returning the active

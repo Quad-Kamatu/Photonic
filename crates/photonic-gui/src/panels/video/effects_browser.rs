@@ -1,6 +1,11 @@
 //! `DrawerGroup::Effects` panel (04 §4.1) — the effect browser/catalog with
 //! drag-to-apply onto the selected clip. Interior owned by 08-fusion-node-flows.md.
 //!
+//! The catalogue is driven by [`MANIFESTS`] (30 / K-B16) rather than a hard-coded
+//! `EffectKind` subset so every bridged effect is one double-click / drag away
+//! from a clip. Application uses [`ClipEffect::from_manifest`] so params seed
+//! from the manifest defaults (not the legacy neutral seed alone).
+//!
 //! Two application paths (13 §6.3), both real (no stub): drag a row onto the
 //! Clip Inspector's effects-stack drop target (`clip_inspector.rs`, consuming
 //! [`EffectDrag`] exactly like the media-pool → timeline `AssetDrag` idiom),
@@ -14,7 +19,9 @@
 use crate::panels::PanelAction;
 use crate::panels::PropPanelCtx;
 use egui::{Color32, RichText, Ui};
-use photonic_core::timeline::{ops, ClipEffect, EffectKind};
+use photonic_core::timeline::{
+    ops, ClipEffect, EffectCategory, EffectId, EffectKind, EffectManifest, MANIFESTS,
+};
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
 const SECTION: Color32 = Color32::from_rgb(0x50, 0x50, 0x6E); // section-header dim-muted
@@ -22,58 +29,35 @@ const SECTION: Color32 = Color32::from_rgb(0x50, 0x50, 0x6E); // section-header 
 /// Drag payload for an effects-browser row → drop target (consumed today by
 /// `clip_inspector.rs`'s effects-stack section; a future timeline-lane drop
 /// target would consume the same payload type).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct EffectDrag {
-    pub(crate) kind: EffectKind,
+    pub(crate) id: EffectId,
 }
 
-struct CatalogEntry {
-    kind: EffectKind,
-    name: &'static str,
-    description: &'static str,
+/// Category display order (palette sections).
+const CATEGORY_ORDER: &[EffectCategory] = &[
+    EffectCategory::Blur,
+    EffectCategory::Sharpen,
+    EffectCategory::Color,
+    EffectCategory::Stylize,
+    EffectCategory::Key,
+    EffectCategory::Geo,
+    EffectCategory::Noise,
+    EffectCategory::Util,
+];
+
+fn category_title(cat: EffectCategory) -> &'static str {
+    match cat {
+        EffectCategory::Blur => "BLUR",
+        EffectCategory::Sharpen => "SHARPEN",
+        EffectCategory::Color => "COLOR",
+        EffectCategory::Stylize => "STYLIZE",
+        EffectCategory::Key => "KEYS",
+        EffectCategory::Geo => "GEOMETRY",
+        EffectCategory::Noise => "NOISE",
+        EffectCategory::Util => "UTIL / GENERATORS",
+    }
 }
-
-const FILTERS: &[CatalogEntry] = &[
-    CatalogEntry {
-        kind: EffectKind::Blur,
-        name: "Blur",
-        description: "Gaussian blur — softens detail by a pixel radius.",
-    },
-    CatalogEntry {
-        kind: EffectKind::Sharpen,
-        name: "Sharpen",
-        description: "Unsharp-mask style edge enhancement.",
-    },
-    CatalogEntry {
-        kind: EffectKind::Glow,
-        name: "Glow",
-        description: "Bloom highlights above a brightness threshold.",
-    },
-    CatalogEntry {
-        kind: EffectKind::Invert,
-        name: "Invert",
-        description: "Inverts color channels.",
-    },
-];
-
-const KEYS: &[CatalogEntry] = &[
-    CatalogEntry {
-        kind: EffectKind::ChromaKey,
-        name: "Chroma Key",
-        description: "Keys out a chosen color (green/blue screen).",
-    },
-    CatalogEntry {
-        kind: EffectKind::LumaKey,
-        name: "Luma Key",
-        description: "Keys out a luminance range.",
-    },
-];
-
-const GENERATORS: &[CatalogEntry] = &[CatalogEntry {
-    kind: EffectKind::MaskShapeGen,
-    name: "Mask Shape",
-    description: "Generates an ellipse/rectangle power-window mask.",
-}];
 
 /// Left-rail Effects Browser drawer.
 pub(crate) fn draw_effects_browser(ui: &mut Ui, ctx: &mut PropPanelCtx) {
@@ -90,48 +74,30 @@ pub(crate) fn draw_effects_browser(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         );
     }
 
+    ui.label(
+        RichText::new(format!("{} effects", MANIFESTS.len()))
+            .small()
+            .color(MUTED),
+    );
+
     let mut action: Option<PanelAction> = None;
-    draw_family(
-        ui,
-        ctx,
-        project,
-        &selection,
-        "FILTERS",
-        FILTERS,
-        &mut action,
-    );
-    draw_family(ui, ctx, project, &selection, "KEYS", KEYS, &mut action);
-    draw_family(
-        ui,
-        ctx,
-        project,
-        &selection,
-        "GENERATORS",
-        GENERATORS,
-        &mut action,
-    );
+    for &cat in CATEGORY_ORDER {
+        let entries: Vec<&EffectManifest> = MANIFESTS
+            .iter()
+            .filter(|m| m.category == cat)
+            .filter(|m| ctx.matches(m.name) || ctx.matches(m.id.as_str()))
+            .collect();
+        if entries.is_empty() {
+            continue;
+        }
+        section_header(ui, category_title(cat));
+        for m in entries {
+            draw_row(ui, project, &selection, m, &mut action);
+        }
+    }
 
     if action.is_some() {
         ctx.action = action;
-    }
-}
-
-fn draw_family(
-    ui: &mut Ui,
-    ctx: &PropPanelCtx,
-    project: &photonic_core::timeline::TimelineProject,
-    selection: &[photonic_core::timeline::ClipId],
-    title: &str,
-    entries: &[CatalogEntry],
-    action: &mut Option<PanelAction>,
-) {
-    let visible: Vec<&CatalogEntry> = entries.iter().filter(|e| ctx.matches(e.name)).collect();
-    if visible.is_empty() {
-        return;
-    }
-    section_header(ui, title);
-    for entry in visible {
-        draw_row(ui, project, selection, entry, action);
     }
 }
 
@@ -147,34 +113,41 @@ fn draw_row(
     ui: &mut Ui,
     project: &photonic_core::timeline::TimelineProject,
     selection: &[photonic_core::timeline::ClipId],
-    entry: &CatalogEntry,
+    m: &EffectManifest,
     action: &mut Option<PanelAction>,
 ) {
     let disabled = selection.is_empty();
-    let drag_id = ui.id().with(("effect_drag", entry.kind));
-    let label = format!("{}  {}", effect_glyph(entry.kind), entry.name);
+    let drag_id = ui.id().with(("effect_drag", m.id.as_str()));
+    let glyph = effect_glyph(m);
+    let label = format!("{glyph}  {}", m.name);
+    let drag_payload = EffectDrag { id: m.id.clone() };
     let inner = ui
-        .dnd_drag_source(drag_id, EffectDrag { kind: entry.kind }, |ui| {
+        .dnd_drag_source(drag_id, drag_payload, |ui| {
             ui.add_enabled(!disabled, egui::SelectableLabel::new(false, label))
         })
         .inner;
     let hover_text = if disabled {
         format!(
-            "{} — select a clip first (drag onto the Clip Inspector's Effects \
+            "{} ({}) — select a clip first (drag onto the Clip Inspector's Effects \
              section, or double-click once a clip is selected)",
-            entry.description
+            m.name,
+            m.id.as_str()
         )
     } else {
         format!(
-            "{} — drag onto the Clip Inspector's Effects section, or \
+            "{} ({}) — drag onto the Clip Inspector's Effects section, or \
              double-click to apply to the current selection",
-            entry.description
+            m.name,
+            m.id.as_str()
         )
     };
     let inner = inner.on_hover_text(hover_text);
     // Double-click-to-apply (13 §6.3/§6.6): the load-bearing no-drag path,
     // applying to every selected clip as one undo step.
     if !disabled && inner.double_clicked() {
+        let Some(effect_seed) = ClipEffect::from_manifest(m.id.clone()) else {
+            return;
+        };
         let mut cmds = Vec::new();
         for &clip_id in selection {
             if let Some((seq_id, track_id)) = locate(project, clip_id) {
@@ -183,7 +156,7 @@ fn draw_row(
                     seq_id,
                     track_id,
                     clip_id,
-                    ClipEffect::new(entry.kind),
+                    effect_seed.clone(),
                     None,
                 ) {
                     cmds.push(cmd);
@@ -196,16 +169,30 @@ fn draw_row(
     }
 }
 
-fn effect_glyph(kind: EffectKind) -> &'static str {
-    match kind {
-        EffectKind::Blur => "\u{25CF}",         // ● generic filter dot
-        EffectKind::Sharpen => "\u{25C6}",      // ♦
-        EffectKind::Glow => "\u{2726}",         // ✦
-        EffectKind::ChromaKey => "\u{25D1}",    // ◑ key
-        EffectKind::LumaKey => "\u{25D0}",      // ◐ key
-        EffectKind::Invert => "\u{25D3}",       // ◓
-        EffectKind::MaskShapeGen => "\u{25A1}", // □ mask
-        _ => "\u{25CF}",
+fn effect_glyph(m: &EffectManifest) -> &'static str {
+    // Prefer legacy glyphs when the id maps to a v1 EffectKind; otherwise
+    // category-based dots so the palette stays scannable.
+    if let Some(kind) = m.id.legacy_kind() {
+        return match kind {
+            EffectKind::Blur => "\u{25CF}",         // ●
+            EffectKind::Sharpen => "\u{25C6}",      // ♦
+            EffectKind::Glow => "\u{2726}",         // ✦
+            EffectKind::ChromaKey => "\u{25D1}",    // ◑
+            EffectKind::LumaKey => "\u{25D0}",      // ◐
+            EffectKind::Invert => "\u{25D3}",       // ◓
+            EffectKind::MaskShapeGen => "\u{25A1}", // □
+            _ => "\u{25CF}",
+        };
+    }
+    match m.category {
+        EffectCategory::Blur => "\u{25CF}",
+        EffectCategory::Sharpen => "\u{25C6}",
+        EffectCategory::Color => "\u{25D3}",
+        EffectCategory::Stylize => "\u{2726}",
+        EffectCategory::Key => "\u{25D1}",
+        EffectCategory::Geo => "\u{25B3}",
+        EffectCategory::Noise => "\u{2591}",
+        EffectCategory::Util => "\u{25A1}",
     }
 }
 
@@ -229,4 +216,32 @@ fn locate(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalogue_covers_every_manifest_category() {
+        for m in MANIFESTS {
+            assert!(
+                CATEGORY_ORDER.contains(&m.category),
+                "manifest {} category {:?} missing from CATEGORY_ORDER",
+                m.id.as_str(),
+                m.category
+            );
+        }
+    }
+
+    #[test]
+    fn from_manifest_seeds_all_catalogue_entries() {
+        for m in MANIFESTS {
+            let fx = ClipEffect::from_manifest(m.id.clone())
+                .unwrap_or_else(|| panic!("from_manifest failed for {}", m.id.as_str()));
+            assert_eq!(fx.id, m.id);
+            assert!(!fx.inert);
+            assert!(fx.enabled);
+        }
+    }
 }

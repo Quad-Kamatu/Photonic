@@ -377,3 +377,180 @@ fn ui_cut_ahead_before_edit_boundary() {
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].asset, a2);
 }
+
+// ── 6. Effects browser catalogue → clip (K-B16 UI surface) ──────────────────
+
+/// Double-click path: `ClipEffect::from_manifest` + `ops::add_effect` — the same
+/// stack the Effects browser uses for every MANIFESTS entry (not just the 7
+/// legacy EffectKind variants).
+#[test]
+fn ui_effects_browser_applies_manifest_to_clip() {
+    use photonic_core::timeline::{Clip, ClipEffect, EffectId, MANIFESTS};
+
+    let mut doc = Document::new("fx", 1920.0, 1080.0);
+    let mut history = CommandHistory::new(64);
+    let mut project = TimelineProject::new();
+    let mut seq = Sequence::new("Main", FrameRate::FPS_30, 320, 180);
+    let seq_id = seq.id;
+    let mut track = Track::new(TrackKind::Video, "V1");
+    let track_id = track.id;
+    let clip = Clip::new(
+        ClipSource::Asset {
+            asset: photonic_core::timeline::AssetId::new(),
+        },
+        Tick::ZERO,
+        Tick(1_000_000),
+    );
+    let clip_id = clip.id;
+    track.clips.push(clip);
+    seq.video_tracks.push(track);
+    project.sequences.insert(seq_id, seq);
+    project.active_sequence = Some(seq_id);
+    project.sequence_order.push(seq_id);
+    doc.timeline = Some(project);
+
+    // Apply a non-legacy bridged id (box blur) and a classic (gaussian).
+    let ids = [
+        EffectId::new_static("blur.box"),
+        EffectId::new_static("color.curves"),
+        EffectId::new_static("geo.ripple"),
+        EffectId::new_static("stylize.glow"),
+    ];
+    for id in &ids {
+        assert!(
+            MANIFESTS.iter().any(|m| m.id == *id),
+            "catalogue missing {}",
+            id.as_str()
+        );
+        let effect = ClipEffect::from_manifest(id.clone()).expect("from_manifest");
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd = ops::add_effect(project, seq_id, track_id, clip_id, effect, None)
+            .expect("add_effect");
+        history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    }
+
+    let project = doc.timeline.as_ref().unwrap();
+    let clip = project
+        .sequences
+        .get(&seq_id)
+        .unwrap()
+        .video_tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .unwrap();
+    assert_eq!(clip.effects.len(), 4);
+    assert_eq!(clip.effects[0].id.as_str(), "blur.box");
+    assert_eq!(clip.effects[1].id.as_str(), "color.curves");
+    assert_eq!(clip.effects[2].id.as_str(), "geo.ripple");
+    assert_eq!(clip.effects[3].id.as_str(), "stylize.glow");
+    // from_manifest seeds id + version from the catalogue.
+    assert_eq!(clip.effects[0].version, 1);
+    assert!(!clip.effects[0].inert);
+}
+
+// ── 7. Sequence tabs create / duplicate (G-17) ──────────────────────────────
+
+#[test]
+fn ui_sequence_tabs_create_and_duplicate() {
+    use photonic_gui::app::timeline::ops_bridge;
+
+    let mut doc = Document::new("tabs", 1920.0, 1080.0);
+    let mut history = CommandHistory::new(64);
+    let mut project = TimelineProject::new();
+    let seq = Sequence::new("Main", FrameRate::FPS_30, 1920, 1080);
+    let main_id = seq.id;
+    project.sequences.insert(main_id, seq);
+    project.active_sequence = Some(main_id);
+    project.sequence_order.push(main_id);
+    doc.timeline = Some(project);
+
+    let mut open_tabs = vec![main_id];
+    ops_bridge::create_sequence_tab(
+        &mut doc,
+        &mut history,
+        FrameRate::FPS_30,
+        1920,
+        1080,
+        &mut open_tabs,
+    );
+    assert_eq!(open_tabs.len(), 2);
+    let second = *open_tabs.last().unwrap();
+    assert_ne!(second, main_id);
+    assert_eq!(
+        doc.timeline.as_ref().unwrap().active_sequence,
+        Some(second)
+    );
+    assert_eq!(doc.timeline.as_ref().unwrap().sequences.len(), 2);
+
+    ops_bridge::duplicate_sequence_tab(&mut doc, &mut history, main_id, &mut open_tabs);
+    assert_eq!(open_tabs.len(), 3);
+    assert_eq!(doc.timeline.as_ref().unwrap().sequences.len(), 3);
+    let active = doc.timeline.as_ref().unwrap().active_sequence.unwrap();
+    let name = &doc.timeline.as_ref().unwrap().sequences[&active].name;
+    assert!(
+        name.contains("copy") || name != "Main",
+        "duplicate should rename: {name}"
+    );
+}
+
+// ── 8. Media pool interlaced probe surface (K-G6 UI) ────────────────────────
+
+#[test]
+fn ui_media_pool_interlaced_probe_summary() {
+    use photonic_core::timeline::{
+        AssetSource, MediaAsset, MediaProbe, ProbedColor, ScanType, VideoStreamInfo,
+    };
+    use photonic_gui::panels::media_pool::probe_summary;
+
+    let mut asset = MediaAsset::new(
+        AssetKind::Video,
+        AssetSource::File {
+            path: PathBuf::from("/tmp/i.mov"),
+            rel_path: None,
+        },
+    );
+    asset.probe = Some(MediaProbe {
+        duration: Tick(30_000_000),
+        video: Some(VideoStreamInfo {
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate::FPS_30,
+            pixel_aspect: 1.0,
+            color: ProbedColor::default(),
+            keyframe_index_cached: false,
+            scan: ScanType::InterlacedBottomFirst,
+        }),
+        audio: None,
+        container: "mov".into(),
+        codec: "dvvideo".into(),
+    });
+    let s = probe_summary(&asset);
+    assert!(s.contains("interlaced (BFF)"), "got: {s}");
+    assert!(s.contains("1920x1080"));
+}
+
+// ── 9. Catalogue size pin (K-B16 UI browser consumes MANIFESTS) ─────────────
+
+#[test]
+fn ui_effects_catalogue_has_bridged_surface() {
+    use photonic_core::timeline::MANIFESTS;
+    // Effects browser iterates MANIFESTS; pin the floor so a catalogue regression
+    // fails the UI path suite, not only core unit tests.
+    assert!(
+        MANIFESTS.len() >= 38,
+        "effects browser catalogue expected ≥38 ids, got {}",
+        MANIFESTS.len()
+    );
+    // At least one entry per category family the browser sections on.
+    use photonic_core::timeline::EffectCategory::*;
+    for cat in [Blur, Sharpen, Color, Stylize, Key, Geo, Util] {
+        assert!(
+            MANIFESTS.iter().any(|m| m.category == cat),
+            "missing category {cat:?}"
+        );
+    }
+}

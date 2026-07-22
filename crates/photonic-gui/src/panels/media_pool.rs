@@ -524,6 +524,17 @@ pub fn probe_summary(asset: &MediaAsset) -> String {
         let fps = v.frame_rate.num as f64 / v.frame_rate.den.max(1) as f64;
         parts.push(format!("{}x{}", v.width, v.height));
         parts.push(format!("{fps:.3}fps").replace(".000fps", "fps"));
+        // K-G6: surface interlaced scan so the pool shows what probe found.
+        match v.scan {
+            photonic_core::timeline::ScanType::InterlacedTopFirst => {
+                parts.push("interlaced (TFF)".into());
+            }
+            photonic_core::timeline::ScanType::InterlacedBottomFirst => {
+                parts.push("interlaced (BFF)".into());
+            }
+            photonic_core::timeline::ScanType::Progressive
+            | photonic_core::timeline::ScanType::Unknown => {}
+        }
     }
     if let Some(a) = &probe.audio {
         parts.push(format!("{}ch {}Hz", a.channels, a.sample_rate));
@@ -940,6 +951,26 @@ fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, used: bool) {
                 .color(egui::Color32::from_rgb(235, 100, 90)),
         );
     }
+    // K-G6: interlaced badge + triage consequence on hover (detection is live;
+    // deinterlace node is still open — badge makes the risk visible now).
+    if let Some(v) = asset.probe.as_ref().and_then(|p| p.video.as_ref()) {
+        if v.scan.is_interlaced() {
+            let order = match v.scan {
+                photonic_core::timeline::ScanType::InterlacedTopFirst => "top-field first",
+                photonic_core::timeline::ScanType::InterlacedBottomFirst => "bottom-field first",
+                _ => "interlaced",
+            };
+            let consequence = photonic_video::media::probe::interlaced_consequence(v.scan)
+                .unwrap_or("Interlaced media may comb on progressive timelines.");
+            ui.label(
+                egui::RichText::new("INTERLACED")
+                    .small()
+                    .strong()
+                    .color(egui::Color32::from_rgb(235, 180, 90)),
+            )
+            .on_hover_text(format!("{order}: {consequence}"));
+        }
+    }
     if let Some(proxy) = &asset.proxy {
         use photonic_core::timeline::ProxyStatus;
         let (txt, color) = match proxy.status {
@@ -1003,6 +1034,49 @@ mod tests {
         );
         // Negative (corrupt) durations clamp rather than underflow.
         assert_eq!(format_duration(Tick(-5)), "0:00.0");
+    }
+
+    #[test]
+    fn probe_summary_surfaces_interlaced_scan() {
+        use photonic_core::timeline::{
+            FrameRate, MediaProbe, ProbedColor, ScanType, VideoStreamInfo,
+        };
+        let mut asset = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: PathBuf::from("/tmp/interlaced.mov"),
+                rel_path: None,
+            },
+        );
+        asset.probe = Some(MediaProbe {
+            duration: Tick(TICKS_PER_SECOND),
+            video: Some(VideoStreamInfo {
+                width: 720,
+                height: 480,
+                frame_rate: FrameRate::new(30, 1),
+                pixel_aspect: 1.0,
+                color: ProbedColor::default(),
+                keyframe_index_cached: false,
+                scan: ScanType::InterlacedTopFirst,
+            }),
+            audio: None,
+            container: "mov".into(),
+            codec: "prores".into(),
+        });
+        let s = probe_summary(&asset);
+        assert!(
+            s.contains("interlaced (TFF)"),
+            "probe_summary should surface K-G6 scan type: {s}"
+        );
+        assert!(v_scan_is_interlaced(&asset));
+    }
+
+    fn v_scan_is_interlaced(asset: &MediaAsset) -> bool {
+        asset
+            .probe
+            .as_ref()
+            .and_then(|p| p.video.as_ref())
+            .is_some_and(|v| v.scan.is_interlaced())
     }
 
     #[test]

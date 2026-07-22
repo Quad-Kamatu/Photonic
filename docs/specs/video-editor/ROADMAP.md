@@ -38,7 +38,9 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-B16** raster bridge | ✅ done (catalogue) | `7a7f38d`+`73e6a66` | **38 bridged ids** with manifests + Linear/Transfer operand spaces; multi-point curves (5 knots + contrast); GPU for surface/lens/smart_sharpen + prior twins. Residual polish only: richer curves UI widgets in inspector, exact bilateral/disc parity goldens |
 | **E-1** source-range contract | ✅ done | `dd7ef59` | `graph::source_range` — `FrameRange`, per-op identity default, graph union, soft cap (16); TimeOffset still compile-expanded |
 | **E-4** threading capability | ✅ done | `dd7ef59` | `ir::Threading` + `threading_for_op` (Any / PerInstance / Serial; undeclared → Serial) |
-| **K-G6** interlaced detection | 🟡 partial | `dd7ef59` | `ScanType` on `VideoStreamInfo` + `ProbeDetails`; ffprobe `field_order` parse; probe warn + triage consequence string. Deinterlace node still open |
+| **K-G6** interlaced detection | 🟡 partial | `dd7ef59`+`3878e2c` | `ScanType` on `VideoStreamInfo` + `ProbeDetails`; ffprobe `field_order` parse; probe warn + triage consequence; **media-pool INTERLACED badge + probe_summary TFF/BFF**. Deinterlace node still open |
+| **Effects browser ↔ MANIFESTS** | ✅ done | `3878e2c` | Effects drawer driven by full `MANIFESTS` catalogue (K-B16 ids), grouped by `EffectCategory`; drag/double-click uses `ClipEffect::from_manifest`; inspector labels resolve via manifest name |
+| **G-17** sequence tabs | ✅ done (shell) | `3878e2c` | Timeline header tab strip: open/activate/close tabs, `+` create, context Duplicate/Rename; nested breadcrumb pop; `ops_bridge` create/duplicate helpers |
 | **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
 | **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 | **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
@@ -97,7 +99,7 @@ Status semantics:
 | G-14 | partial | Select-forward and display options | [19 §13](19-editing-velocity-shot-management.md#13-g-14--track-select-forward-and-display-menu) |
 | G-15 | partial | G-15A attach + detach (GUI/MCP); G-15B toggle; G-15C on-import L7 + policy checkbox; **batch attach-by-name / external camera proxies (`.lrv`/`.lrf`, see 26 K-C3)**; full ingest modal/thresholds still open | [19 §14](19-editing-velocity-shot-management.md#14-g-15--proxy-workflow-polish), [24](24-preview-media-load.md) |
 | G-16 | partial | Nest/open/breadcrumb GUI; MCP | [20 §7](20-pro-workflows.md#7-g-16--nested-sequence-ui) |
-| G-17 | open | Multiple-open sequence tabs | [20 §8](20-pro-workflows.md#8-g-17--sequence-tabs-and-multiple-open-sequences) |
+| G-17 | partial | Tab strip in timeline header (activate/close/create/duplicate/rename); multi-doc tab persistence still open | [20 §8](20-pro-workflows.md#8-g-17--sequence-tabs-and-multiple-open-sequences) |
 | G-18 | open | Transcript projection and ripple edits | [20 §9](20-pro-workflows.md#9-g-18--text-based-transcript-editing) |
 | G-19 | open | Dedicated two-up Trim Mode | [20 §10](20-pro-workflows.md#10-g-19--dedicated-trim-mode) |
 | G-20 | legal-or-fixture-blocked | S4 accepted; synthetic/owned sync corpus and decoder budget | [20 §11](20-pro-workflows.md#11-g-20--multicam) |
@@ -141,7 +143,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
 | K-E | partial | Histogram/waveform/parade/vectorscope already ship with CPU references. Open: I/Q lines, 75% box, YUV/YPbPr switch, component + Rec.601/709 selection, audio spectrum, per-clip scope tap, monitor grids, extract-frame | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
 | K-F | partial | **K-F1–F5 done** for the export/render band (queue + inspector, multi-format/marker, job options, HW preflight). Remaining polish: sleep-inhibit, add-to-bin, burn-in overlay, 2-pass, K-F7 one-eval-many-outputs | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
-| K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection landed** (`ScanType` + probe warn); deinterlace source-range node still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
+| K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection + pool badge landed**; deinterlace source-range node still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |
 | E-1 | partial | `source_range_for_op` / `graph_source_range` identity defaults + soft cap; prefetch not yet driven by the union; temporal nodes (deinterlace) will extend arms | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |
 | E-2 | open | Analysis-as-node; unblocks K-B10, D-15, K-D1/G-20 sync, D-4, loudness-on-export, live meters | [32 §2](32-engine-contracts.md#2-analysis-nodes), [31 §5](31-audio-architecture.md#5-pull-based-analysis) |

@@ -55,6 +55,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const TOOLBAR_H: f32 = 24.0;
+/// Sequence tab strip height above the mini-toolbar (17 G-17).
+const SEQ_TABS_H: f32 = 24.0;
 /// Navigator / horizontal-scrollbar strip height at the panel bottom (spec 17 G8).
 const NAV_H: f32 = 12.0;
 const DRAG_ID: &str = "timeline_drag_state";
@@ -175,7 +177,34 @@ impl PhotonicApp {
         }
 
         let full = ui.max_rect();
-        let toolbar_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), TOOLBAR_H));
+        // Sequence tabs (17 G-17) sit above the zoom/snap mini-toolbar.
+        let tabs_rect =
+            egui::Rect::from_min_size(full.min, egui::vec2(full.width(), SEQ_TABS_H));
+        {
+            let mut open_tabs = std::mem::take(&mut self.open_sequence_tabs);
+            let mut breadcrumbs = std::mem::take(&mut self.nested_sequence_breadcrumbs);
+            crate::panels::video::seq_tabs::draw_seq_tabs(
+                ui,
+                tabs_rect,
+                doc,
+                history,
+                &mut open_tabs,
+                &mut breadcrumbs,
+            );
+            self.open_sequence_tabs = open_tabs;
+            self.nested_sequence_breadcrumbs = breadcrumbs;
+        }
+        // Active sequence may have changed via tab click — re-resolve.
+        let seq_id = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.active_sequence)
+            .unwrap_or(seq_id);
+
+        let toolbar_rect = egui::Rect::from_min_size(
+            egui::pos2(full.left(), tabs_rect.bottom()),
+            egui::vec2(full.width(), TOOLBAR_H),
+        );
         draw_mini_toolbar(ui, toolbar_rect, doc, seq_id, &mut view, &mut snap);
 
         let below_full =
