@@ -33,10 +33,10 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **28 §9** MCP transport hardening | ✅ done | `a05ec8e` | bearer token, no permissive CORS |
 | **29 QA-1** acceptance-story harness | 🟡 scaffold | `a05ec8e` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
-| **G-4** master meter publish | ✅ done | *(this commit)* | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
-| **31 §3** latency compensation | ✅ done | *(this commit)* | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
-| **K-B16** raster bridge (slice) | 🟡 partial | *(this commit)* | CPU bridge for 6 raster kernels (box/emboss/edges/high-pass/median/unsharp); manifests registered; GPU WGSL twins remain |
-| **K-F1** render queue | ✅ done | *(this commit)* | `export::RenderQueue` multi-job FIFO with frozen snapshots + multi-segment enqueue (K-F2 foundation) |
+| **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
+| **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
+| **K-B16** raster bridge (slice) | 🟡 partial | `bf1d89b` | CPU bridge for 6 raster kernels (box/emboss/edges/high-pass/median/unsharp); manifests registered; GPU WGSL twins remain |
+| **K-F1** render queue | ✅ done | `bf1d89b` | `export::RenderQueue` multi-job FIFO with frozen snapshots + multi-segment enqueue (K-F2 foundation) |
 
 **Not yet started:** K-B16 GPU ports for bridged kernels; K-F2/3/4/5 full UI; 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`).
 
