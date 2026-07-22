@@ -215,6 +215,10 @@ fn eval_op(
         IrOp::MatteExtract { .. } => in0(),   // P8 U²-Net inference
         IrOp::ChannelSplit { .. } => in0(),
         IrOp::ChannelCombine => in0(),
+        IrOp::Deinterlace {
+            method,
+            field_order,
+        } => ops::deinterlace(&in0(), *method, *field_order),
         IrOp::TextGen { .. } => Image::new(cw, ch), // GPU-only glyph composite (see header); CPU emits transparent
         IrOp::Merge { mode, opacity } => match (inputs.first(), inputs.get(1)) {
             (Some(top), Some(bottom)) => ops::merge(top, bottom, *mode, *opacity),

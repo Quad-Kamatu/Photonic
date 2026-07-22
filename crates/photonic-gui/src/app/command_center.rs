@@ -236,6 +236,8 @@ impl PhotonicApp {
             "video.overwrite_edit" => self.timeline_overwrite_edit(doc, history),
             "video.lift_edit" => self.timeline_lift_edit(doc, history),
             "video.extract_edit" => self.timeline_extract_edit(doc, history),
+            "video.extract_frame" => self.extract_program_frame(doc, false),
+            "video.extract_frame_to_bin" => self.extract_program_frame(doc, true),
             "video.toggle_razor" => self.timeline_toggle_razor(),
             "video.toggle_snap" => self.timeline_toggle_snap(),
             "video.zoom_in" => self.timeline_zoom_in(),
@@ -1079,6 +1081,76 @@ impl PhotonicApp {
             return;
         };
         ops_bridge::add_marker(doc, history, seq_id, self.playhead, "Marker");
+    }
+
+    /// K-E4: grab the latest program-monitor frame as a full-quality PNG.
+    /// When `to_bin` is true, also import the still into the media pool.
+    pub(crate) fn extract_program_frame(&mut self, doc: &mut Document, to_bin: bool) {
+        use photonic_core::timeline::{AssetKind, AssetSource, MediaAsset};
+        use photonic_video::export::{
+            default_extract_path, flatten_pixels, write_frame_png,
+        };
+        use photonic_video::graph::eval::read_texture_rgba16f;
+
+        let Some(bridge) = self.engine.as_ref() else {
+            self.set_import_status("Extract frame: engine offline".into());
+            return;
+        };
+        let Some(frame) = bridge.session.latest_frame() else {
+            self.set_import_status("Extract frame: no program frame yet".into());
+            return;
+        };
+        let (w, h) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| {
+                let id = p.active_sequence?;
+                let s = p.sequences.get(&id)?;
+                let f = s.formats.get(s.active_format)?;
+                Some((f.width.max(1), f.height.max(1)))
+            })
+            .unwrap_or((frame.texture.width().max(1), frame.texture.height().max(1)));
+        // Read only the logical format size (pool textures are 64px-padded).
+        let pixels = read_texture_rgba16f(bridge.gpu(), &frame.texture, w, h);
+        if pixels.is_empty() {
+            self.set_import_status("Extract frame: readback empty".into());
+            return;
+        }
+        let flat = flatten_pixels(&pixels);
+        let seq_name = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| {
+                let id = p.active_sequence?;
+                p.sequences.get(&id).map(|s| s.name.clone())
+            })
+            .unwrap_or_else(|| "sequence".into());
+        let path = default_extract_path(self.current_file.as_deref(), &seq_name, frame.time.0);
+        match write_frame_png(&flat, w, h, &path) {
+            Ok(path) => {
+                let msg = format!("Extracted frame → {}", path.display());
+                if to_bin {
+                    if let Some(project) = doc.timeline.as_mut() {
+                        let asset = MediaAsset::new(
+                            AssetKind::Image,
+                            AssetSource::File {
+                                path: path.clone(),
+                                rel_path: None,
+                            },
+                        );
+                        let id = asset.id;
+                        project.media.insert(asset);
+                        self.set_import_status(format!("{msg} (added to pool as image)"));
+                        let _ = id;
+                    } else {
+                        self.set_import_status(msg);
+                    }
+                } else {
+                    self.set_import_status(msg);
+                }
+            }
+            Err(e) => self.set_import_status(format!("Extract frame failed: {e}")),
+        }
     }
 
     // ── 3/4-point source editing (spec 16) ───────────────────────────────────

@@ -16,13 +16,18 @@
 //!   (`EngineCmd::Export`) and MCP `export_sequence` funnel through it.
 //! - [`offline_audio`] — K-0.7 offline sequence mix + loudness (09 §7, 31 §6).
 //! - [`job_queue`] — K-F1 shared multi-job render queue (GUI + MCP).
+//! - [`extract_frame`] — K-E4 program-monitor still → PNG (full quality colour path).
 
 pub mod convert;
 pub mod encoder;
+pub mod extract_frame;
 pub mod job;
 pub mod job_queue;
 pub mod offline_audio;
 pub mod presets;
 pub mod render_loop;
 
+pub use extract_frame::{
+    default_extract_path, flatten_pixels, write_frame_png, ExtractFrameError,
+};
 pub use job_queue::{QueueJobId, QueueJobStatus, QueuedExport, RenderQueue};

@@ -486,6 +486,16 @@ pub static REGISTRY: &[CommandDef] = &[
         default: Some(KeyBinding::plain(Key::Quote)),
     },
     CommandDef {
+        id: "video.extract_frame",
+        label: "Extract Frame to File",
+        default: Some(KeyBinding::ctrl_shift(Key::E)),
+    },
+    CommandDef {
+        id: "video.extract_frame_to_bin",
+        label: "Extract Frame to Media Pool",
+        default: None,
+    },
+    CommandDef {
         id: "video.toggle_razor",
         label: "Razor Tool (blade)",
         default: Some(KeyBinding::plain(Key::C)),

@@ -91,6 +91,28 @@ pub enum Channel {
     A,
 }
 
+/// Field order for interlaced sources (K-G6 / 32 §6).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum FieldOrder {
+    #[default]
+    TopFirst,
+    BottomFirst,
+}
+
+/// Deinterlace algorithm (K-G6). Spatial methods need only the current frame;
+/// source-range still declares `[out−1, out+1]` so temporal methods can land
+/// without another contract change (E-1).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum DeinterlaceMethod {
+    /// Keep one field, double lines (fast, soft vertical).
+    OneField,
+    /// Average even/odd lines (cheap comb reduction).
+    #[default]
+    LinearBlend,
+    /// Spatial edge-adaptive interpolate (YADIF-style spatial half).
+    YadifSpatial,
+}
+
 /// Per-node threading capability (E-4 / 32 §3).
 ///
 /// Declared so the scheduler can parallelise safely as CPU-side work multiplies.
@@ -133,6 +155,9 @@ pub fn threading_for_op(op: &IrOp) -> Threading {
 
         // Matte inference is a sequential CPU worker op.
         IrOp::MatteExtract { .. } => Threading::Serial,
+
+        // Temporal / field-order aware — must not run out of order.
+        IrOp::Deinterlace { .. } => Threading::Serial,
     }
 }
 
@@ -243,6 +268,14 @@ pub enum IrOp {
     },
     /// 3-4 Mask inputs → Image.
     ChannelCombine,
+    /// Deinterlace (K-G6): convert interlaced fields to progressive. Unary
+    /// input (current frame). Declares source-range `[out−1, out+1]` so
+    /// temporal algorithms can wire neighbouring fields later (E-1). Not an
+    /// effect — lives on the IR contract because it needs temporal access.
+    Deinterlace {
+        method: DeinterlaceMethod,
+        field_order: FieldOrder,
+    },
     Output {
         w: u32,
         h: u32,
@@ -300,6 +333,13 @@ mod tests {
                 asset: AssetId::new(),
             }),
             Threading::PerInstance
+        );
+        assert_eq!(
+            threading_for_op(&IrOp::Deinterlace {
+                method: DeinterlaceMethod::LinearBlend,
+                field_order: FieldOrder::TopFirst,
+            }),
+            Threading::Serial
         );
     }
 

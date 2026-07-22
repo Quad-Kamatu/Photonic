@@ -8,9 +8,11 @@
 //! - [`eval`] — the wgpu evaluator (02 §2 evaluation).
 //! - [`raster_bridge`] — K-B16 CPU bridge from `photonic_core::raster` kernels.
 //! - [`source_range`] — E-1 temporal source-range contract (32 §1).
+//! - [`analysis`] — E-2 analysis-as-node foundation (32 §2).
 
 pub mod ir;
 
+pub mod analysis;
 pub mod cache;
 pub mod compile;
 pub mod eval;

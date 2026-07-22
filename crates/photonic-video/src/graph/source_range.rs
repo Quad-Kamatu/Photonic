@@ -78,13 +78,14 @@ pub const SOURCE_RANGE_SOFT_CAP: u64 = 16;
 /// - Future: deinterlace → `[out−1, out+1]`, motion blur → shutter window.
 pub fn source_range_for_op(op: &IrOp, out: Tick) -> FrameRange {
     match op {
-        // Present-day IR has no runtime temporal consumers: TimeOffset is
-        // expanded at compile time into separate subgraphs. Default identity
-        // is correct for every current variant.
-        //
-        // When deinterlace / optical-flow / echo nodes land, add arms here
-        // that return non-identity ranges; the soft-cap check below still
-        // applies.
+        // K-G6 deinterlace: neighbouring fields for temporal methods (32 §1).
+        // Spatial methods still declare the full range so prefetch warms the
+        // window and a future temporal path needs no contract change.
+        IrOp::Deinterlace { .. } => {
+            FrameRange::span(Tick(out.0.saturating_sub(1)), Tick(out.0.saturating_add(1)))
+        }
+
+        // Present-day pure ops and compile-expanded TimeOffset: identity.
         IrOp::DecodeVideo { .. }
         | IrOp::DecodeStill { .. }
         | IrOp::RasterVector { .. }
@@ -190,5 +191,21 @@ mod tests {
         assert_eq!(SOURCE_RANGE_SOFT_CAP, 16);
         assert!(!exceeds_soft_cap(FrameRange::span(Tick(0), Tick(15))));
         assert!(exceeds_soft_cap(FrameRange::span(Tick(0), Tick(16))));
+    }
+
+    #[test]
+    fn deinterlace_declares_neighbour_fields() {
+        use crate::graph::ir::{DeinterlaceMethod, FieldOrder};
+        let out = Tick(100);
+        let r = source_range_for_op(
+            &IrOp::Deinterlace {
+                method: DeinterlaceMethod::LinearBlend,
+                field_order: FieldOrder::TopFirst,
+            },
+            out,
+        );
+        assert_eq!(r.first, Tick(99));
+        assert_eq!(r.last, Tick(101));
+        assert_eq!(r.tick_count(), 3);
     }
 }

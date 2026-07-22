@@ -1622,6 +1622,8 @@ impl PhotonicApp {
             "video.overwrite_edit",
             "video.lift_edit",
             "video.extract_edit",
+            "video.extract_frame",
+            "video.extract_frame_to_bin",
             "video.toggle_razor",
             "video.toggle_snap",
             "video.zoom_in",

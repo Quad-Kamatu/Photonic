@@ -9,47 +9,50 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 
 | Area | Status | Commit | Notes |
 |---|---|---|---|
-| **03 §4.5.3** grade operand space (A-3) | ✅ done | `a05ec8e` | grade ops run straight-alpha (unpremult→op→repremult); shared `ALPHA_EPS` with GPU shader |
-| **03 §4.5.4** live canvas linear (A-1) | ✅ done | `5a62494` | document renders to offscreen sRGB target, blitted into egui; canvas blends in linear like headless. *Follow-up:* CPU compositor isolated-layer path is P7-deferred (§4.3) |
-| **26 §8 K-0.1** export wiring | ✅ done | `fca5eda` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
-| **26 §8 K-0.2** render passthrough effects | ✅ done | `fca5eda`+`5a83c50` | all 6 declared effects render: Luma/Chroma/Mask + Blur/Sharpen/Glow; shared separable Gaussian (`ops::blur` + dual-pass GPU `textureLoad`); CPU/GPU parity |
-| **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `9b2ec60` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
-| **26 §8 K-0.4** Wipe/Push passes | ✅ done | `ca6538b` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
-| **26 §8 K-0.5** `lut_provider` threading | ✅ done | `ca6538b` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
-| **26 §8 K-0.6** audio FX chain + mixer + meter | ✅ done | `367511d`+`bf1d89b` | mixer owns track/master fx, discontinuity policy, declick tail; G-4 meter publish + 31 §3 latency compensation closed |
-| **26 §8 K-0.7** export audio mux + loudness | ✅ done | `d9f1826` | offline `Mixer::render_block` mix for export range; mux via existing encoder audio sidecar; two-pass `LoudnessTarget` constant gain with true-peak ceiling |
-| **26 §8 K-0.8** `EngineCmd::Probe` | ✅ done | `d9f1826` | probe file → `set_asset_meta` + content hash; invalidate decode source |
-| **26 §8 K-0.9** `sync_lock` propagation | ✅ done | `ca6538b` | `expand_sync_lock_ripple` in core; insert/extract/ripple_delete/ripple_trim all expand; GUI + MCP ride the same batch |
-| **30** effect manifest (E-3/X-4) | ✅ done | `48fb5da`,`49bd585` | schema + 7 authored manifests + `EffectKind`↔`EffectId` bridge + migration/inert-unknown; MCP `list_effect_kinds`/`set_effect_param` generated with range refusal. *Remaining:* full raster bridge catalogue (K-B16 beyond the 6-kernel slice) |
-| **31 §2/§3** DSP reset/latency contracts (E-10) | ✅ done | `1ccbeea` | mandatory `reset(AudioDiscontinuity)` + latency/tail across all units |
-| **35** markers, effect scopes, groups | ✅ done | `9b2ec60`,`367511d`,`49bd585` | marker categories/anchors, clip markers, group tree; Track/master/asset effect scopes applied in compile; V4→V5 migration; version bumped |
-| **36** error model (taxonomy) | ✅ done | `a05ec8e` | `core::diag` taxonomy + catalogue tests. *Remaining:* wire `EngineStatus.last_error` → `Diagnostic` |
-| **37** robustness | ✅ done | `a05ec8e` | capability floor, gpu_state, atomic_write, child reaping, scale targets, CI split |
-| **38** sequence semantics | ✅ done | `435a3a6`+`ca6538b` | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup; LoadNotice + transition-out-at-cut validation/migration |
-| **39 §2.2** unknown-preserving variants | ✅ done | `a05ec8e` | forward-compat inert round-trip |
-| **40 §7** spec verification infra | ✅ done | `a05ec8e` | `tools/spec-extract`, drift + acceptance-index scripts |
-| **41** accessibility | ✅ done | `1ccbeea`,`a05ec8e` | curve-editor/node-editor focus fixes, keyboard-gate + contrast lints |
-| **42 §10** localization (text metrics) | ✅ done | `a05ec8e` | `core::text_metrics` Unicode cell measurement + caption wiring |
-| **28 §9** MCP transport hardening | ✅ done | `a05ec8e` | bearer token, no permissive CORS |
-| **29 QA-1** acceptance-story harness | 🟡 scaffold | `a05ec8e` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
-| **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
-| **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
-| **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
-| **K-B16** raster bridge | ✅ done (catalogue) | `7a7f38d`+`73e6a66` | **38 bridged ids** with manifests + Linear/Transfer operand spaces; multi-point curves (5 knots + contrast); GPU for surface/lens/smart_sharpen + prior twins. Residual polish only: richer curves UI widgets in inspector, exact bilateral/disc parity goldens |
-| **E-1** source-range contract | ✅ done | `dd7ef59` | `graph::source_range` — `FrameRange`, per-op identity default, graph union, soft cap (16); TimeOffset still compile-expanded |
-| **E-4** threading capability | ✅ done | `dd7ef59` | `ir::Threading` + `threading_for_op` (Any / PerInstance / Serial; undeclared → Serial) |
-| **K-G6** interlaced detection | 🟡 partial | `dd7ef59`+`85b0cea` | `ScanType` on `VideoStreamInfo` + `ProbeDetails`; ffprobe `field_order` parse; probe warn + triage consequence; **media-pool INTERLACED badge + probe_summary TFF/BFF**. Deinterlace node still open |
-| **Effects browser ↔ MANIFESTS** | ✅ done | `85b0cea` | Effects drawer driven by full `MANIFESTS` catalogue (K-B16 ids), grouped by `EffectCategory`; drag/double-click uses `ClipEffect::from_manifest`; inspector labels resolve via manifest name |
-| **G-17** sequence tabs | ✅ done (shell) | `85b0cea` | Timeline header tab strip: open/activate/close tabs, `+` create, context Duplicate/Rename; nested breadcrumb pop; `ops_bridge` create/duplicate helpers |
-| **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
-| **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
-| **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
-| **K-F4** job options | ✅ done | `f867e95` | `RenderJobOptions` (proxies, preview res, encoder speed, raw args) on `ExportJob`; dialog collapsible |
-| **K-F5** hardware encoders | ✅ done | `f867e95` | probe NVENC/VAAPI/VideoToolbox/QSV; prefer-HW fail-closed; detection report + raw-args hatch |
-| **32 §4** playback policy | ✅ done | `f867e95` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
-| **32 §7** scale-invariance guard | ✅ done | `f867e95` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
+| **03 §4.5.3** grade operand space (A-3) | ✅ done | `dc9faee` | grade ops run straight-alpha (unpremult→op→repremult); shared `ALPHA_EPS` with GPU shader |
+| **03 §4.5.4** live canvas linear (A-1) | ✅ done | `dc9faee` | document renders to offscreen sRGB target, blitted into egui; canvas blends in linear like headless. *Follow-up:* CPU compositor isolated-layer path is P7-deferred (§4.3) |
+| **26 §8 K-0.1** export wiring | ✅ done | `dc9faee` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
+| **26 §8 K-0.2** render passthrough effects | ✅ done | `dc9faee`+`dc9faee` | all 6 declared effects render: Luma/Chroma/Mask + Blur/Sharpen/Glow; shared separable Gaussian (`ops::blur` + dual-pass GPU `textureLoad`); CPU/GPU parity |
+| **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `dc9faee` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
+| **26 §8 K-0.4** Wipe/Push passes | ✅ done | `dc9faee` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
+| **26 §8 K-0.5** `lut_provider` threading | ✅ done | `dc9faee` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
+| **26 §8 K-0.6** audio FX chain + mixer + meter | ✅ done | `dc9faee`+`dc9faee` | mixer owns track/master fx, discontinuity policy, declick tail; G-4 meter publish + 31 §3 latency compensation closed |
+| **26 §8 K-0.7** export audio mux + loudness | ✅ done | `dc9faee` | offline `Mixer::render_block` mix for export range; mux via existing encoder audio sidecar; two-pass `LoudnessTarget` constant gain with true-peak ceiling |
+| **26 §8 K-0.8** `EngineCmd::Probe` | ✅ done | `dc9faee` | probe file → `set_asset_meta` + content hash; invalidate decode source |
+| **26 §8 K-0.9** `sync_lock` propagation | ✅ done | `dc9faee` | `expand_sync_lock_ripple` in core; insert/extract/ripple_delete/ripple_trim all expand; GUI + MCP ride the same batch |
+| **30** effect manifest (E-3/X-4) | ✅ done | `dc9faee`,`dc9faee` | schema + 7 authored manifests + `EffectKind`↔`EffectId` bridge + migration/inert-unknown; MCP `list_effect_kinds`/`set_effect_param` generated with range refusal. *Remaining:* full raster bridge catalogue (K-B16 beyond the 6-kernel slice) |
+| **31 §2/§3** DSP reset/latency contracts (E-10) | ✅ done | `dc9faee` | mandatory `reset(AudioDiscontinuity)` + latency/tail across all units |
+| **35** markers, effect scopes, groups | ✅ done | `dc9faee`,`dc9faee`,`dc9faee` | marker categories/anchors, clip markers, group tree; Track/master/asset effect scopes applied in compile; V4→V5 migration; version bumped |
+| **36** error model (taxonomy) | ✅ done | `dc9faee` | `core::diag` taxonomy + catalogue tests. *Remaining:* wire `EngineStatus.last_error` → `Diagnostic` |
+| **37** robustness | ✅ done | `dc9faee` | capability floor, gpu_state, atomic_write, child reaping, scale targets, CI split |
+| **38** sequence semantics | ✅ done | `dc9faee`+`dc9faee` | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup; LoadNotice + transition-out-at-cut validation/migration |
+| **39 §2.2** unknown-preserving variants | ✅ done | `dc9faee` | forward-compat inert round-trip |
+| **40 §7** spec verification infra | ✅ done | `dc9faee` | `tools/spec-extract`, drift + acceptance-index scripts |
+| **41** accessibility | ✅ done | `dc9faee`,`dc9faee` | curve-editor/node-editor focus fixes, keyboard-gate + contrast lints |
+| **42 §10** localization (text metrics) | ✅ done | `dc9faee` | `core::text_metrics` Unicode cell measurement + caption wiring |
+| **28 §9** MCP transport hardening | ✅ done | `dc9faee` | bearer token, no permissive CORS |
+| **29 QA-1** acceptance-story harness | 🟡 scaffold | `dc9faee` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
+| **GUI** export progress + diag surface | ✅ done | `dc9faee` | live progress/cancel dialog; diagnostic badge view-model |
+| **G-4** master meter publish | ✅ done | `dc9faee` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
+| **31 §3** latency compensation | ✅ done | `dc9faee` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
+| **K-B16** raster bridge | ✅ done (catalogue) | `dc9faee`+`dc9faee` | **38 bridged ids** with manifests + Linear/Transfer operand spaces; multi-point curves (5 knots + contrast); GPU for surface/lens/smart_sharpen + prior twins. Residual polish only: richer curves UI widgets in inspector, exact bilateral/disc parity goldens |
+| **E-1** source-range contract | ✅ done | `dc9faee` | `graph::source_range` — `FrameRange`, per-op identity default, graph union, soft cap (16); TimeOffset still compile-expanded |
+| **E-4** threading capability | ✅ done | `dc9faee` | `ir::Threading` + `threading_for_op` (Any / PerInstance / Serial; undeclared → Serial) |
+| **K-G6** interlaced detection | ✅ done | `dc9faee`+`dc9faee`+`dc9faee` | `ScanType` + probe + pool badge; **deinterlace IR node auto-inserted** for interlaced assets |
+| **Effects browser ↔ MANIFESTS** | ✅ done | `dc9faee` | Effects drawer driven by full `MANIFESTS` catalogue (K-B16 ids), grouped by `EffectCategory`; drag/double-click uses `ClipEffect::from_manifest`; inspector labels resolve via manifest name |
+| **G-17** sequence tabs | ✅ done (shell) | `dc9faee` | Timeline header tab strip: open/activate/close tabs, `+` create, context Duplicate/Rename; nested breadcrumb pop; `ops_bridge` create/duplicate helpers |
+| **K-F1** render queue | ✅ done | `dc9faee`+`dc9faee`+`dc9faee` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
+| **K-F2** marker multi-export | ✅ done | `dc9faee` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
+| **K-F3** multi-format render | ✅ done | `dc9faee` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
+| **K-F4** job options | ✅ done | `dc9faee` | `RenderJobOptions` (proxies, preview res, encoder speed, raw args) on `ExportJob`; dialog collapsible |
+| **K-F5** hardware encoders | ✅ done | `dc9faee` | probe NVENC/VAAPI/VideoToolbox/QSV; prefer-HW fail-closed; detection report + raw-args hatch |
+| **32 §4** playback policy | ✅ done | `dc9faee` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
+| **32 §7** scale-invariance guard | ✅ done | `dc9faee` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
+| **K-G6** deinterlace node | ✅ done | `dc9faee` | `IrOp::Deinterlace` (OneField / LinearBlend / YadifSpatial); CPU kernels; source-range `[out−1,out+1]`; Serial threading; auto-insert after `DecodeVideo` when probe is interlaced. GPU blit until WGSL twin lands |
+| **E-2** analysis foundation | ✅ done (substrate) | `dc9faee` | `graph::analysis` — typed `AnalysisResult` (Histogram/Levels), content-hash cache, pull-based pure functions. Consumers (scopes/scene/loudness) wire next |
+| **K-E4** extract frame | ✅ done | `dc9faee` | `export::extract_frame` PNG path (export colour convert); GUI `video.extract_frame` / `…_to_bin` (Ctrl+Shift+E) via program-monitor readback |
 
-**Not yet started (next bands):** K-A/K-C/K-D/K-E residual bands; E-2 analysis nodes; K-G6 deinterlace node (detection landed); legal-or-fixture-blocked G/D items.
+**Not yet started (next bands):** K-A/K-C/K-D residual bands; E-2 consumers; K-G6 GPU deinterlace WGSL; legal-or-fixture-blocked G/D items.
 
 ## 1. Authority and precedence
 
@@ -141,12 +144,12 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-D | partial | `AudioStreamInfo`/`ChannelMap` probed; mixer and DSP written but unbound. Open: per-stream/per-channel handling, stems export, **boundary declick (K-D5)** | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
-| K-E | partial | Histogram/waveform/parade/vectorscope already ship with CPU references. Open: I/Q lines, 75% box, YUV/YPbPr switch, component + Rec.601/709 selection, audio spectrum, per-clip scope tap, monitor grids, extract-frame | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
+| K-E | partial | Histogram/waveform/parade/vectorscope ship; **extract-frame done**. Open: I/Q lines, 75% box, YUV/YPbPr, audio spectrum, per-clip tap, grids | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
 | K-F | partial | **K-F1–F5 done** for the export/render band (queue + inspector, multi-format/marker, job options, HW preflight). Remaining polish: sleep-inhibit, add-to-bin, burn-in overlay, 2-pass, K-F7 one-eval-many-outputs | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
-| K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection + pool badge landed**; deinterlace source-range node still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
+| K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection + deinterlace node landed**; profiles/notes/templates still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |
 | E-1 | partial | `source_range_for_op` / `graph_source_range` identity defaults + soft cap; prefetch not yet driven by the union; temporal nodes (deinterlace) will extend arms | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |
-| E-2 | open | Analysis-as-node; unblocks K-B10, D-15, K-D1/G-20 sync, D-4, loudness-on-export, live meters | [32 §2](32-engine-contracts.md#2-analysis-nodes), [31 §5](31-audio-architecture.md#5-pull-based-analysis) |
+| E-2 | partial | Analysis substrate (`AnalysisResult`, cache, histogram/levels); consumers still open | [32 §2](32-engine-contracts.md#2-analysis-nodes), [31 §5](31-audio-architecture.md#5-pull-based-analysis) |
 | E-3 | partial | Manifest table + migration live (38 catalogue ids); kernel binding still video-side by id | [30 §2](30-effect-catalogue.md#2-the-manifest) |
 | E-4 | done | `threading_for_op` declared for every current `IrOp` | [32 §3](32-engine-contracts.md#3-threading-capability) |
 | E-5 | partial | Policy constants land in `playback::policy`; soak coverage still open | [32 §4](32-engine-contracts.md#4-playback-policy) |

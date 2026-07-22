@@ -52,8 +52,8 @@ use photonic_core::timeline::{
     CaptionWord, Clip, ClipEffect, ClipId, ClipSource, ClipTransform, EaseCurve, EffectKind,
     FrameRate, Grade, GradeOp, EffectParams, GradeOpKind, GradeOpParams, GraphId, GraphNode,
     GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode, LutInterp, NodeGraph, PropPath,
-    PropSet, PropTargetKind, PropValue, Ratio, Sequence, SequenceFormat, SequenceId, SpeedMap,
-    TextClipContent, TimelineProject, TransitionKind,
+    PropSet, PropTargetKind, PropValue, Ratio, ScanType, Sequence, SequenceFormat, SequenceId,
+    SpeedMap, TextClipContent, TimelineProject, TransitionKind,
 };
 use photonic_core::Color;
 use photonic_render::caption::CaptionWordRun;
@@ -63,9 +63,29 @@ use crate::contract::{
     VectorRef, VectorStateKey, TICKS_PER_SECOND,
 };
 use crate::graph::ir::{
-    Channel, ContentHash, FitMode, FrameGraph, IrNode, IrNodeId, IrOp, LinearColor, OutPort,
-    Sampling, TextureDesc, WipeDirection,
+    Channel, ContentHash, DeinterlaceMethod, FieldOrder, FitMode, FrameGraph, IrNode, IrNodeId,
+    IrOp, LinearColor, OutPort, Sampling, TextureDesc, WipeDirection,
 };
+
+/// K-G6: if the asset's probe reports interlaced, return the default
+/// deinterlace method + field order for auto-insertion after `DecodeVideo`.
+fn deinterlace_for_asset(
+    project: &TimelineProject,
+    asset: AssetId,
+) -> Option<(DeinterlaceMethod, FieldOrder)> {
+    let a = project.media.assets.get(&asset)?;
+    let v = a.probe.as_ref()?.video.as_ref()?;
+    if !v.scan.is_interlaced() {
+        return None;
+    }
+    let order = match v.scan {
+        ScanType::InterlacedBottomFirst => FieldOrder::BottomFirst,
+        _ => FieldOrder::TopFirst,
+    };
+    // Default algorithm: linear blend — cheap, always available, good enough
+    // for preview; Yadif spatial is selectable later via clip policy.
+    Some((DeinterlaceMethod::LinearBlend, order))
+}
 
 /// Preview vs full-resolution compile flags (02 §2's "quality flags"). `proxy`
 /// selects proxy media where available (session state, `SetProxyMode`).
@@ -1287,15 +1307,28 @@ fn build_clip_source(
             }
             match kind {
                 AssetKind::Image => b.push(IrOp::DecodeStill { asset: *asset }, vec![]),
-                AssetKind::Video | AssetKind::Audio | AssetKind::VectorDoc | AssetKind::Lut3d => b
-                    .push(
+                AssetKind::Video | AssetKind::Audio | AssetKind::VectorDoc | AssetKind::Lut3d => {
+                    let decode = b.push(
                         IrOp::DecodeVideo {
                             asset: *asset,
                             src_time,
                             proxy: quality.proxy,
                         },
                         vec![],
-                    ),
+                    );
+                    // K-G6: auto-insert deinterlace when probe reports interlaced.
+                    if let Some((method, order)) = deinterlace_for_asset(project, *asset) {
+                        b.push(
+                            IrOp::Deinterlace {
+                                method,
+                                field_order: order,
+                            },
+                            vec![(decode, Default::default())],
+                        )
+                    } else {
+                        decode
+                    }
+                }
             }
         }
         ClipSource::Vector { asset } => {
@@ -2643,6 +2676,14 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[15]);
             h.update(&w.to_le_bytes());
             h.update(&gh.to_le_bytes());
+        }
+        IrOp::Deinterlace {
+            method,
+            field_order,
+        } => {
+            h.update(&[18]);
+            h.update(&[*method as u8]);
+            h.update(&[*field_order as u8]);
         }
     }
 }
@@ -4005,6 +4046,7 @@ mod tests {
             IrOp::TextGen { .. } => "TextGen",
             IrOp::ChannelSplit { .. } => "ChannelSplit",
             IrOp::ChannelCombine => "ChannelCombine",
+            IrOp::Deinterlace { .. } => "Deinterlace",
             IrOp::Output { .. } => "Output",
         }
     }

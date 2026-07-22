@@ -36,7 +36,9 @@ use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::raster::blend::blend_rgb;
 
-use crate::graph::ir::{FitMode, LinearColor, Sampling, WipeDirection};
+use crate::graph::ir::{
+    DeinterlaceMethod, FieldOrder, FitMode, LinearColor, Sampling, WipeDirection,
+};
 
 /// An f32 premultiplied linear-Rec.709 RGBA image — the CPU reference working
 /// buffer. Row-major, `pixels.len() == width * height`.
@@ -230,6 +232,111 @@ pub fn invert(input: &Image) -> Image {
 #[inline]
 pub fn luma709(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+}
+
+// ── K-G6 deinterlace ─────────────────────────────────────────────────────────
+
+/// Deinterlace `input` to progressive (K-G6). Operates on the current frame
+/// only (spatial methods). Field order selects which field is kept for
+/// [`DeinterlaceMethod::OneField`].
+pub fn deinterlace(input: &Image, method: DeinterlaceMethod, field_order: FieldOrder) -> Image {
+    match method {
+        DeinterlaceMethod::OneField => deinterlace_one_field(input, field_order),
+        DeinterlaceMethod::LinearBlend => deinterlace_linear_blend(input),
+        DeinterlaceMethod::YadifSpatial => deinterlace_yadif_spatial(input, field_order),
+    }
+}
+
+/// Keep the dominant field; replace the other field's lines by averaging
+/// neighbours (soft vertical double).
+fn deinterlace_one_field(input: &Image, field_order: FieldOrder) -> Image {
+    let keep_even = matches!(field_order, FieldOrder::TopFirst);
+    let mut out = input.clone();
+    let h = input.height as i32;
+    let w = input.width;
+    for y in 0..h {
+        let is_even = y % 2 == 0;
+        if is_even == keep_even {
+            continue;
+        }
+        let y_prev = (y - 1).clamp(0, h - 1) as u32;
+        let y_next = (y + 1).clamp(0, h - 1) as u32;
+        for x in 0..w {
+            let a = input.pixel(x, y_prev);
+            let b = input.pixel(x, y_next);
+            out.set(x, y as u32, [
+                (a[0] + b[0]) * 0.5,
+                (a[1] + b[1]) * 0.5,
+                (a[2] + b[2]) * 0.5,
+                (a[3] + b[3]) * 0.5,
+            ]);
+        }
+    }
+    out
+}
+
+/// Average each line with its vertical neighbours (cheap comb reduction).
+fn deinterlace_linear_blend(input: &Image) -> Image {
+    let mut out = Image::new(input.width, input.height);
+    let h = input.height as i32;
+    for y in 0..h {
+        let y0 = (y - 1).clamp(0, h - 1) as u32;
+        let y1 = y as u32;
+        let y2 = (y + 1).clamp(0, h - 1) as u32;
+        for x in 0..input.width {
+            let a = input.pixel(x, y0);
+            let b = input.pixel(x, y1);
+            let c = input.pixel(x, y2);
+            out.set(x, y1, [
+                (a[0] + b[0] * 2.0 + c[0]) * 0.25,
+                (a[1] + b[1] * 2.0 + c[1]) * 0.25,
+                (a[2] + b[2] * 2.0 + c[2]) * 0.25,
+                (a[3] + b[3] * 2.0 + c[3]) * 0.25,
+            ]);
+        }
+    }
+    out
+}
+
+/// Spatial edge-adaptive interpolate for the "missing" field (YADIF spatial
+/// half). Keeps the dominant field, interpolates the other with a simple
+/// edge-directed vertical predictor.
+fn deinterlace_yadif_spatial(input: &Image, field_order: FieldOrder) -> Image {
+    let keep_even = matches!(field_order, FieldOrder::TopFirst);
+    let mut out = input.clone();
+    let h = input.height as i32;
+    let w = input.width as i32;
+    for y in 0..h {
+        let is_even = y % 2 == 0;
+        if is_even == keep_even {
+            continue;
+        }
+        let yp = (y - 1).clamp(0, h - 1);
+        let yn = (y + 1).clamp(0, h - 1);
+        for x in 0..w {
+            let xl = (x - 1).clamp(0, w - 1);
+            let xr = (x + 1).clamp(0, w - 1);
+            // Vertical predictor from prev/next field lines.
+            let mut px = [0.0f32; 4];
+            for c in 0..4 {
+                let above = input.pixel(x as u32, yp as u32)[c];
+                let below = input.pixel(x as u32, yn as u32)[c];
+                let diag_a = (input.pixel(xl as u32, yp as u32)[c]
+                    + input.pixel(xr as u32, yn as u32)[c])
+                    * 0.5;
+                let diag_b = (input.pixel(xr as u32, yp as u32)[c]
+                    + input.pixel(xl as u32, yn as u32)[c])
+                    * 0.5;
+                let vert = (above + below) * 0.5;
+                // Pick the median of the three predictors (spatial edge adapt).
+                let mut preds = [vert, diag_a, diag_b];
+                preds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                px[c] = preds[1];
+            }
+            out.set(x as u32, y as u32, px);
+        }
+    }
+    out
 }
 
 // ── Shared blur primitive (K-0.2) ────────────────────────────────────────────
@@ -1209,5 +1316,47 @@ mod tests {
         let out = push(&incoming, &outgoing, WipeDirection::LeftToRight, 0.5);
         assert_eq!(out.pixel(0, 0), [1.0, 0.0, 0.0, 1.0], "left edge is incoming");
         assert_eq!(out.pixel(7, 0), [0.0, 0.0, 1.0, 1.0], "right edge is outgoing");
+    }
+}
+
+#[cfg(test)]
+mod deinterlace_tests {
+    use super::*;
+    use crate::graph::ir::{DeinterlaceMethod, FieldOrder};
+
+    /// Build a 4×4 comb pattern: even rows white, odd rows black.
+    fn comb_frame() -> Image {
+        let mut img = Image::new(4, 4);
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let v = if y % 2 == 0 {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.0, 0.0, 0.0, 1.0]
+                };
+                img.set(x, y, v);
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn linear_blend_softens_comb() {
+        let src = comb_frame();
+        let out = deinterlace(&src, DeinterlaceMethod::LinearBlend, FieldOrder::TopFirst);
+        // Middle of an odd row should no longer be pure black.
+        let mid = out.pixel(2, 1);
+        assert!(mid[0] > 0.1, "blend should lift odd-row black: {mid:?}");
+        assert!(mid[0] < 0.95, "blend should not be pure white: {mid:?}");
+    }
+
+    #[test]
+    fn one_field_keeps_even_rows() {
+        let src = comb_frame();
+        let out = deinterlace(&src, DeinterlaceMethod::OneField, FieldOrder::TopFirst);
+        assert_eq!(out.pixel(1, 0), [1.0, 1.0, 1.0, 1.0]);
+        // Odd row reconstructed from even neighbours → white.
+        let o = out.pixel(1, 1);
+        assert!((o[0] - 1.0).abs() < 1e-5, "odd row should match field: {o:?}");
     }
 }
