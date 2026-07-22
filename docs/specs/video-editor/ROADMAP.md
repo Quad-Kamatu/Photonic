@@ -55,10 +55,10 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-G6** GPU deinterlace | ✅ done | `5626717` | WGSL twin of spatial methods (OneField / LinearBlend / YadifSpatial) on `IrOp::Deinterlace` — preview no longer blit-combs |
 | **K-E1** vectorscope guides | ✅ done | `5626717` | I/Q lines + 75%/100% boxes + labels on scopes panel vectorscope overlay |
 | **K-C2** usage count | ✅ done (slice) | `5626717` | derived clip-reference count on media pool (`×N` / ON TL badge); tags/ratings still open |
-| **K-C2** ratings + filter | ✅ done | `2d87bf7` | `MediaAsset.rating` 1–5 + free-form tags field; undoable `SetAssetRating`; pool filter (unused / min ★) + context-menu rate |
-| **K-C5** remove unused | ✅ done (slice) | `6026b5b` | `ops::unused_assets` / `remove_unused_assets`; media-pool **Remove unused (N)** toolbar button (undo batch) |
-| **K-E3** composition grids | ✅ done (slice) | `6026b5b` | Monitor toolbar cycles thirds / golden / off over program picture |
-| **K-E1** histogram channels | ✅ done (slice) | `6026b5b` | Y/R/G/B component toggles on scopes histogram |
+| **K-C2** ratings + filter | ✅ done | `0f8b6b9` | `MediaAsset.rating` 1–5 + free-form tags field; undoable `SetAssetRating`; pool filter (unused / min ★) + context-menu rate |
+| **K-C5** remove unused | ✅ done (slice) | `0f8b6b9` | `ops::unused_assets` / `remove_unused_assets`; media-pool **Remove unused (N)** toolbar button (undo batch) |
+| **K-E3** composition grids | ✅ done (slice) | `0f8b6b9` | Monitor toolbar cycles thirds / golden / off over program picture |
+| **K-E1** histogram channels | ✅ done (slice) | `0f8b6b9` | Y/R/G/B component toggles on scopes histogram |
 
 **Not yet started (next bands):** K-A residual; K-C full tags registry/archive/relink polish; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
 
