@@ -778,6 +778,52 @@ impl Evaluator {
                 }
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
+            // K-B16: bridged raster ids lower as Unknown(tag). GPU reuses the
+            // existing separable blur/sharpen passes for the two that map cleanly;
+            // other bridge ids still blit (CPU is the oracle until WGSL ports).
+            IrOp::Effect {
+                kind: EffectKind::Unknown(tag),
+                params,
+            } => match (tag.as_str(), inputs.first()) {
+                ("blur.box", Some(src)) => self.passes.gaussian_blur(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.radius", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("sharpen.unsharp_raster", Some(src)) => self.passes.sharpen(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 1.0),
+                    params.f32_or("params.radius", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("filter.high_pass", Some(src)) => {
+                    // Approximate high-pass as source − blur (linear premult).
+                    let blurred = self.passes.temp_texture(&self.gpu, target);
+                    self.passes.gaussian_blur(
+                        &self.gpu,
+                        &src.texture,
+                        &blurred,
+                        params.f32_or("params.radius", 2.0),
+                        logical_w,
+                        logical_h,
+                    );
+                    self.gpu.device().poll(wgpu::Maintain::Wait);
+                    self.passes.high_pass_combine(
+                        &self.gpu,
+                        &src.texture,
+                        &blurred,
+                        target,
+                    );
+                }
+                (_, Some(src)) => self.passes.blit(&self.gpu, &src.texture, target),
+                (_, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             IrOp::Effect {
                 kind: EffectKind::MaskShapeGen,
                 params,
@@ -890,6 +936,8 @@ struct Passes {
     /// Unsharp combine (K-0.2): two textures (src, blurred) + amount uniform.
     sharpen_bgl: wgpu::BindGroupLayout,
     sharpen_pipeline: wgpu::RenderPipeline,
+    /// High-pass combine (K-B16): `src - blurred` on RGB (reuses sharpen BGL).
+    high_pass_pipeline: wgpu::RenderPipeline,
     /// Glow extract (K-0.2): keep pixels whose straight luma ≥ threshold.
     glow_extract_pipeline: wgpu::RenderPipeline,
     /// Glow composite (K-0.2): screen-add tinted glow over source.
@@ -1035,6 +1083,12 @@ impl Passes {
         );
         let sharpen_pipeline = make_pipeline(device, &sharpen_bgl, &sharpen_src, "fs");
 
+        // High-pass: src − blurred on RGB, keep src alpha (K-B16).
+        let high_pass_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t_src: texture_2d<f32>;\n@group(0) @binding(1) var t_blur: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct S {{ amount: vec4<f32> }}\n@group(0) @binding(3) var<uniform> u: S;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let src = textureSample(t_src, s, i.uv);\n  let bl = textureSample(t_blur, s, i.uv);\n  return vec4<f32>(src.rgb - bl.rgb, src.a);\n}}\n"
+        );
+        let high_pass_pipeline = make_pipeline(device, &sharpen_bgl, &high_pass_src, "fs");
+
         // Glow extract: zero out pixels whose straight luma is below threshold.
         // Reuses filter_bgl (tex + sampler + params).
         let glow_extract_src = format!(
@@ -1113,6 +1167,7 @@ impl Passes {
             blur_pipeline,
             sharpen_bgl,
             sharpen_pipeline,
+            high_pass_pipeline,
             glow_extract_pipeline,
             glow_comp_bgl,
             glow_comp_pipeline,
@@ -1252,6 +1307,10 @@ impl Passes {
 
     /// Scratch texture matching `like`'s size for multi-pass effects (blur H/V).
     fn temp_like(gpu: &GpuContext, like: &wgpu::Texture) -> wgpu::Texture {
+        Self::alloc_temp(gpu, like)
+    }
+
+    fn alloc_temp(gpu: &GpuContext, like: &wgpu::Texture) -> wgpu::Texture {
         gpu.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("eval_temp"),
             size: like.size(),
@@ -1264,6 +1323,59 @@ impl Passes {
                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         })
+    }
+
+    fn temp_texture(&self, gpu: &GpuContext, like: &wgpu::Texture) -> wgpu::Texture {
+        Self::alloc_temp(gpu, like)
+    }
+
+    /// High-pass combine: `src - blurred` on RGB, keep src alpha (K-B16).
+    fn high_pass_combine(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        blurred: &wgpu::Texture,
+        target: &wgpu::Texture,
+    ) {
+        let sv = src.create_view(&Default::default());
+        let bv = blurred.create_view(&Default::default());
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("high_pass_bg"),
+            layout: &self.sharpen_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&bv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: gpu
+                        .device()
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("high_pass_u"),
+                            // amount = -1 ⇒ src + (-1)*(src-blur) wait — we want src-blur.
+                            // sharpen is src + amount*(src-blur). amount=1 ⇒ 2src-blur.
+                            // So use a dedicated small shader via amount=-0 and...
+                            // Use amount=1 on (src, 2*blur-src)? Simpler: pass amount
+                            // as a special: we'll use amount = -1 with inverted meaning
+                            // in a one-off uniform: store 1.0 and use high_pass_pipeline.
+                            contents: bytemuck::cast_slice(&[1.0f32, 0.0, 0.0, 0.0]),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        })
+                        .as_entire_binding(),
+                },
+            ],
+        });
+        // Reuse sharpen BGL layout but high_pass_pipeline: out = src - blur.
+        self.run(gpu, &self.high_pass_pipeline, &bind, target);
     }
 
     /// One axis of the separable Gaussian (`horizontal` = H pass).
