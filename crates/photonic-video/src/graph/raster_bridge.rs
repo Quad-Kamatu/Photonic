@@ -244,13 +244,26 @@ fn dispatch(id: &str, raster: &mut RasterImage, params: &ResolvedParams) -> Opti
         "color.invert_raster" => invert(raster, None),
         "color.clarity" => clarity(raster, f("params.amount", 0.0), None),
         "color.curves" => {
-            // Contrast-style RGB curve: three knots pivot at midtone.
-            // Full multi-point authoring stays on the grade stack; this is the
-            // raster catalogue entry for a simple transfer curve (30 §5.1).
+            // Up to 5 authored knots (p0..p4). Non-zero contrast overrides p2.y
+            // as a midtone pivot (authoring convenience).
             let contrast = f("params.contrast", 0.0).clamp(-1.0, 1.0);
-            let mid = (0.5 + contrast * 0.25).clamp(0.05, 0.95);
-            let rgb = [(0.0, 0.0), (0.5, mid), (1.0, 1.0)];
-            curves(raster, &rgb, &[], &[], &[], None);
+            let mut pts = vec![
+                (f("params.p0x", 0.0), f("params.p0y", 0.0)),
+                (f("params.p1x", 0.25), f("params.p1y", 0.25)),
+                (f("params.p2x", 0.5), f("params.p2y", 0.5)),
+                (f("params.p3x", 0.75), f("params.p3y", 0.75)),
+                (f("params.p4x", 1.0), f("params.p4y", 1.0)),
+            ];
+            if contrast.abs() > 1e-6 {
+                pts[2].1 = (0.5 + contrast * 0.25).clamp(0.05, 0.95);
+            }
+            // Drop duplicate x's after sort (curves() also sanitizes).
+            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+            if pts.len() < 2 {
+                pts = vec![(0.0, 0.0), (1.0, 1.0)];
+            }
+            curves(raster, &pts, &[], &[], &[], None);
         }
         "color.photo_filter" => {
             photo_filter(
@@ -660,6 +673,54 @@ mod tests {
             "contrast curve should lift mid: {:?}",
             out.pixel(0, 0)
         );
+    }
+
+    #[test]
+    fn curves_multipoint_identity_at_default_knots() {
+        let img = solid(
+            4,
+            4,
+            LinearColor {
+                r: 0.3,
+                g: 0.5,
+                b: 0.7,
+                a: 1.0,
+            },
+        );
+        // Explicit identity knots, contrast 0.
+        let params = ResolvedParams {
+            entries: vec![
+                (
+                    photonic_core::timeline::PropPath::new("params.contrast"),
+                    photonic_core::timeline::PropValue::Float(0.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.p0x"),
+                    photonic_core::timeline::PropValue::Float(0.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.p0y"),
+                    photonic_core::timeline::PropValue::Float(0.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.p4x"),
+                    photonic_core::timeline::PropValue::Float(1.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.p4y"),
+                    photonic_core::timeline::PropValue::Float(1.0),
+                ),
+            ],
+        };
+        let out = apply("color.curves", &img, &params).expect("bridged");
+        for (a, b) in img.pixels.iter().zip(out.pixels.iter()) {
+            for c in 0..3 {
+                assert!(
+                    (a[c] - b[c]).abs() < 0.04,
+                    "identity curves channel {c}: {a:?} vs {b:?}"
+                );
+            }
+        }
     }
 
     #[test]

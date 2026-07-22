@@ -403,8 +403,21 @@ const VIGNETTE_PARAMS: &[ParamSpec] = &[
 const CA_PARAMS: &[ParamSpec] =
     &[pf_def("params.amount", 2.0, Some((-64.0, 64.0)), UiHint::Slider)];
 const CLARITY_PARAMS: &[ParamSpec] = &[pf("params.amount", Some((-1.0, 1.0)), UiHint::Slider)];
-const CURVES_PARAMS: &[ParamSpec] =
-    &[pf("params.contrast", Some((-1.0, 1.0)), UiHint::Slider)];
+/// Multi-point RGB curve: up to 5 knots (x,y in 0..1) plus optional contrast
+/// pivot. Identity defaults; non-zero contrast overrides the middle knot.
+const CURVES_PARAMS: &[ParamSpec] = &[
+    pf("params.contrast", Some((-1.0, 1.0)), UiHint::Slider),
+    pf("params.p0x", Some((0.0, 1.0)), UiHint::Slider),
+    pf("params.p0y", Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p1x", 0.25, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p1y", 0.25, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p2x", 0.5, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p2y", 0.5, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p3x", 0.75, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p3y", 0.75, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p4x", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.p4y", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+];
 const PHOTO_FILTER_PARAMS: &[ParamSpec] = &[
     pf_def("params.r", 1.0, Some((0.0, 1.0)), UiHint::Slider),
     pf_def("params.g", 0.5, Some((0.0, 1.0)), UiHint::Slider),

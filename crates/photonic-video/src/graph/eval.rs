@@ -930,11 +930,51 @@ impl Evaluator {
                         params.f32_or("params.bb", 1.0),
                     ],
                 ),
-                ("color.curves", Some(src)) => self.passes.curves_contrast(
+                ("color.curves", Some(src)) => {
+                    let contrast = params.f32_or("params.contrast", 0.0);
+                    let mut knots = [
+                        [
+                            params.f32_or("params.p0x", 0.0),
+                            params.f32_or("params.p0y", 0.0),
+                        ],
+                        [
+                            params.f32_or("params.p1x", 0.25),
+                            params.f32_or("params.p1y", 0.25),
+                        ],
+                        [
+                            params.f32_or("params.p2x", 0.5),
+                            params.f32_or("params.p2y", 0.5),
+                        ],
+                        [
+                            params.f32_or("params.p3x", 0.75),
+                            params.f32_or("params.p3y", 0.75),
+                        ],
+                        [
+                            params.f32_or("params.p4x", 1.0),
+                            params.f32_or("params.p4y", 1.0),
+                        ],
+                    ];
+                    if contrast.abs() > 1e-6 {
+                        knots[2][1] = (0.5 + contrast.clamp(-1.0, 1.0) * 0.25).clamp(0.05, 0.95);
+                    }
+                    self.passes.curves_lut(&self.gpu, &src.texture, target, &knots);
+                }
+                ("blur.surface", Some(src)) => self.passes.surface_blur(
                     &self.gpu,
                     &src.texture,
                     target,
-                    params.f32_or("params.contrast", 0.0),
+                    params.f32_or("params.radius", 2.0),
+                    params.f32_or("params.threshold", 0.25),
+                    logical_w,
+                    logical_h,
+                ),
+                ("blur.lens", Some(src)) => self.passes.lens_blur(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.radius", 4.0),
+                    logical_w,
+                    logical_h,
                 ),
                 ("color.black_and_white", Some(src)) => self.passes.black_and_white(
                     &self.gpu,
@@ -946,12 +986,13 @@ impl Evaluator {
                         params.f32_or("params.wb", 0.114),
                     ],
                 ),
-                ("sharpen.smart", Some(src)) => self.passes.sharpen(
+                ("sharpen.smart", Some(src)) => self.passes.smart_sharpen(
                     &self.gpu,
                     &src.texture,
                     target,
                     params.f32_or("params.amount", 1.0),
                     params.f32_or("params.radius", 1.0),
+                    params.f32_or("params.threshold", 0.0),
                     logical_w,
                     logical_h,
                 ),
@@ -1181,8 +1222,11 @@ struct Passes {
     hue_sat_pipeline: wgpu::RenderPipeline,
     vibrance_pipeline: wgpu::RenderPipeline,
     channel_mixer_pipeline: wgpu::RenderPipeline,
-    curves_contrast_pipeline: wgpu::RenderPipeline,
+    curves_lut_pipeline: wgpu::RenderPipeline,
     black_and_white_pipeline: wgpu::RenderPipeline,
+    surface_blur_pipeline: wgpu::RenderPipeline,
+    lens_blur_pipeline: wgpu::RenderPipeline,
+    smart_sharpen_pipeline: wgpu::RenderPipeline,
     pinch_pipeline: wgpu::RenderPipeline,
     ripple_pipeline: wgpu::RenderPipeline,
     perspective_pipeline: wgpu::RenderPipeline,
@@ -1423,11 +1467,30 @@ impl Passes {
         );
         let channel_mixer_pipeline = make_pipeline(device, &filter_bgl, &channel_mixer_src, "fs");
 
-        // Curves contrast: pivot midtone by contrast amount.
-        let curves_contrast_src = format!(
-            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let mid = clamp(0.5 + clamp(u.p.x, -1.0, 1.0) * 0.25, 0.05, 0.95);\n  // Piecewise linear through (0,0),(0.5,mid),(1,1).\n  var outc = vec3<f32>(0.0);\n  for (var k = 0; k < 3; k++) {{\n    let x = clamp(rgb[k], 0.0, 1.0);\n    if (x <= 0.5) {{ outc[k] = x * (mid / 0.5); }} else {{ outc[k] = mid + (x - 0.5) * ((1.0 - mid) / 0.5); }}\n  }}\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        // Multi-point RGB curve: 5 knots packed as p0=[x0,y0,x1,y1], p1=[x2,y2,x3,y3], p2=[x4,y4,0,0]
+        let curves_lut_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\nfn eval_curve(x_in: f32) -> f32 {{\n  var xs = array<f32, 5>(u.p0.x, u.p0.z, u.p1.x, u.p1.z, u.p2.x);\n  var ys = array<f32, 5>(u.p0.y, u.p0.w, u.p1.y, u.p1.w, u.p2.y);\n  let x = clamp(x_in, 0.0, 1.0);\n  // Piecewise linear through sorted knots (caller sorts).\n  if (x <= xs[0]) {{ return ys[0]; }}\n  for (var i = 0; i < 4; i++) {{\n    if (x <= xs[i + 1]) {{\n      let span = max(xs[i + 1] - xs[i], 1e-6);\n      let t = (x - xs[i]) / span;\n      return mix(ys[i], ys[i + 1], t);\n    }}\n  }}\n  return ys[4];\n}}\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let outc = vec3<f32>(eval_curve(rgb.r), eval_curve(rgb.g), eval_curve(rgb.b));\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
         );
-        let curves_contrast_pipeline = make_pipeline(device, &filter_bgl, &curves_contrast_src, "fs");
+        let curves_lut_pipeline = make_pipeline(device, &filter_bgl, &curves_lut_src, "fs");
+
+        // Surface (bilateral-ish) blur: info = [radius, threshold, lw, lh]
+        let surface_blur_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let r = min(i32(p.info.x + 0.5), 8);\n  let thr = max(p.info.y, 1e-4);\n  let x = i32(pos.x); let y = i32(pos.y);\n  let center = at(x, y);\n  if (r < 1) {{ return center; }}\n  var acc = vec4<f32>(0.0);\n  var wsum = 0.0;\n  for (var j = -r; j <= r; j++) {{\n    for (var i = -r; i <= r; i++) {{\n      let s = at(x + i, y + j);\n      let d = length(s.rgb - center.rgb);\n      let wr = exp(-d * d / (2.0 * thr * thr));\n      let ws = exp(-f32(i * i + j * j) / (2.0 * f32(r * r)));\n      let w = wr * ws;\n      acc += s * w;\n      wsum += w;\n    }}\n  }}\n  return acc / max(wsum, 1e-6);\n}}\n"
+        );
+        let surface_blur_pipeline = make_pipeline(device, &blur_bgl, &surface_blur_src, "fs");
+
+        // Lens (disc) blur: info = [radius, 0, lw, lh]
+        let lens_blur_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let radius = clamp(p.info.x, 0.0, 12.0);\n  let x = i32(pos.x); let y = i32(pos.y);\n  if (radius < 0.5) {{ return at(x, y); }}\n  let r = i32(ceil(radius));\n  let r2 = radius * radius;\n  var acc = vec4<f32>(0.0);\n  var n = 0.0;\n  for (var j = -r; j <= r; j++) {{\n    for (var i = -r; i <= r; i++) {{\n      if (f32(i * i + j * j) <= r2) {{\n        acc += at(x + i, y + j);\n        n += 1.0;\n      }}\n    }}\n  }}\n  return acc / max(n, 1.0);\n}}\n"
+        );
+        let lens_blur_pipeline = make_pipeline(device, &blur_bgl, &lens_blur_src, "fs");
+
+        // Smart sharpen combine: src + amount * edge * (src - blur), edge gated by threshold.
+        // tex0=src, tex1=blur, uniform amount=[amount, threshold, 0, 0]
+        let smart_sharpen_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t_src: texture_2d<f32>;\n@group(0) @binding(1) var t_blur: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct S {{ amount: vec4<f32> }}\n@group(0) @binding(3) var<uniform> u: S;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let src = textureSample(t_src, s, i.uv);\n  let bl = textureSample(t_blur, s, i.uv);\n  let diff = src - bl;\n  let mag = length(diff.rgb);\n  let thr = u.amount.y / 255.0;\n  var edge = 0.0;\n  if (mag > thr) {{ edge = clamp((mag - thr) / (32.0 / 255.0), 0.0, 1.0); }}\n  return src + u.amount.x * edge * diff;\n}}\n"
+        );
+        let smart_sharpen_pipeline = make_pipeline(device, &sharpen_bgl, &smart_sharpen_src, "fs");
 
         let black_and_white_src = format!(
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  var w = u.p.xyz;\n  let sum = w.x + w.y + w.z;\n  if (abs(sum) < 1e-6) {{ w = vec3<f32>(0.333333, 0.333333, 0.333333); }} else {{ w = w / sum; }}\n  let g = clamp(dot(rgb, w), 0.0, 1.0);\n  return vec4<f32>(g * c.a, g * c.a, g * c.a, c.a);\n}}\n"
@@ -1590,8 +1653,11 @@ impl Passes {
             hue_sat_pipeline,
             vibrance_pipeline,
             channel_mixer_pipeline,
-            curves_contrast_pipeline,
+            curves_lut_pipeline,
             black_and_white_pipeline,
+            surface_blur_pipeline,
+            lens_blur_pipeline,
+            smart_sharpen_pipeline,
             pinch_pipeline,
             ripple_pipeline,
             perspective_pipeline,
@@ -2029,25 +2095,159 @@ impl Passes {
         self.run_filter(gpu, &self.channel_mixer_pipeline, src, target, &uniform);
     }
 
-    fn curves_contrast(
+    /// Multi-point RGB curve through up to 5 knots (piecewise linear).
+    fn curves_lut(
         &self,
         gpu: &GpuContext,
         src: &wgpu::Texture,
         target: &wgpu::Texture,
-        contrast: f32,
+        knots: &[[f32; 2]; 5],
     ) {
-        let c = if contrast.is_finite() {
-            contrast.clamp(-1.0, 1.0)
+        // Sort by x.
+        let mut pts = *knots;
+        pts.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+        // Ensure endpoints span 0..1.
+        pts[0][0] = pts[0][0].clamp(0.0, 1.0);
+        pts[4][0] = pts[4][0].clamp(0.0, 1.0);
+        let uniform = [
+            pts[0][0],
+            pts[0][1],
+            pts[1][0],
+            pts[1][1],
+            pts[2][0],
+            pts[2][1],
+            pts[3][0],
+            pts[3][1],
+            pts[4][0],
+            pts[4][1],
+            0.0,
+            0.0,
+        ];
+        self.run_filter(gpu, &self.curves_lut_pipeline, src, target, &uniform);
+    }
+
+    fn surface_blur(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        radius: f32,
+        threshold: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let r = if radius.is_finite() {
+            radius.max(0.0).min(8.0)
         } else {
             0.0
         };
-        self.run_filter(
-            gpu,
-            &self.curves_contrast_pipeline,
-            src,
-            target,
-            &[c, 0.0, 0.0, 0.0],
-        );
+        let thr = if threshold.is_finite() {
+            threshold.clamp(0.0, 1.0).max(1e-4)
+        } else {
+            0.25
+        };
+        let uniform = [r, thr, logical_w as f32, logical_h as f32];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("surface_blur_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("surface_blur_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.surface_blur_pipeline, &bind, target);
+    }
+
+    fn lens_blur(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        radius: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let r = if radius.is_finite() {
+            radius.max(0.0).min(12.0)
+        } else {
+            0.0
+        };
+        self.neighbourhood(gpu, &self.lens_blur_pipeline, src, target, r, logical_w, logical_h);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn smart_sharpen(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amount: f32,
+        radius: f32,
+        threshold: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let amount = if amount.is_finite() { amount.max(0.0) } else { 0.0 };
+        if amount == 0.0 {
+            self.blit(gpu, src, target);
+            return;
+        }
+        let radius = if radius.is_finite() { radius.max(0.0) } else { 1.0 };
+        let threshold = if threshold.is_finite() {
+            threshold.clamp(0.0, 255.0)
+        } else {
+            0.0
+        };
+        let blurred = Self::temp_like(gpu, target);
+        self.gaussian_blur(gpu, src, &blurred, radius, logical_w, logical_h);
+        gpu.device().poll(wgpu::Maintain::Wait);
+        let sv = src.create_view(&Default::default());
+        let bv = blurred.create_view(&Default::default());
+        let uniform = [amount, threshold, 0.0, 0.0];
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("smart_sharpen_u"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("smart_sharpen_bg"),
+            layout: &self.sharpen_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&bv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.smart_sharpen_pipeline, &bind, target);
     }
 
     fn black_and_white(
