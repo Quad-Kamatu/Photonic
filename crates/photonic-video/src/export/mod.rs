@@ -14,9 +14,11 @@
 //!   `session::ExportJob` against a frozen project and drives a dedicated
 //!   headless session through `render_loop::export_frames`. Both the GUI
 //!   (`EngineCmd::Export`) and MCP `export_sequence` funnel through it.
+//! - [`offline_audio`] — K-0.7 offline sequence mix + loudness (09 §7, 31 §6).
 
 pub mod convert;
 pub mod encoder;
 pub mod job;
+pub mod offline_audio;
 pub mod presets;
 pub mod render_loop;

@@ -17,6 +17,8 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **26 §8 K-0.4** Wipe/Push passes | ✅ done | `ca6538b` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
 | **26 §8 K-0.5** `lut_provider` threading | ✅ done | `ca6538b` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
 | **26 §8 K-0.6** audio FX chain + mixer + meter | ✅ done | `367511d` | mixer owns track/master fx, discontinuity policy, declick tail. *Remaining:* G-4 master-meter GUI publish; 31 §3 latency compensation |
+| **26 §8 K-0.7** export audio mux + loudness | ✅ done | *(this commit)* | offline `Mixer::render_block` mix for export range; mux via existing encoder audio sidecar; two-pass `LoudnessTarget` constant gain with true-peak ceiling |
+| **26 §8 K-0.8** `EngineCmd::Probe` | ✅ done | *(this commit)* | probe file → `set_asset_meta` + content hash; invalidate decode source |
 | **26 §8 K-0.9** `sync_lock` propagation | ✅ done | `ca6538b` | `expand_sync_lock_ripple` in core; insert/extract/ripple_delete/ripple_trim all expand; GUI + MCP ride the same batch |
 | **30** effect manifest (E-3/X-4) | ✅ done | `48fb5da`,`49bd585` | schema + 7 authored manifests + `EffectKind`↔`EffectId` bridge + migration/inert-unknown; MCP `list_effect_kinds`/`set_effect_param` generated with range refusal. *Remaining:* full raster bridge (K-B16, 61 kernels) |
 | **31 §2/§3** DSP reset/latency contracts (E-10) | ✅ done | `1ccbeea` | mandatory `reset(AudioDiscontinuity)` + latency/tail across all units |
@@ -32,7 +34,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **29 QA-1** acceptance-story harness | 🟡 scaffold | `a05ec8e` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
 
-**Not yet started:** K-0.7 (export-audio mux + loudness), K-0.8 (`Probe` wiring), 30 full raster bridge (K-B16), 31 §3 latency compensation, 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`). G-4 master-meter GUI publish remains under K-0.6 residual.
+**Not yet started:** 30 full raster bridge (K-B16), 31 §3 latency compensation, 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`). G-4 master-meter GUI publish remains under K-0.6 residual.
 
 ## 1. Authority and precedence
 

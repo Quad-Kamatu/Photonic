@@ -22,6 +22,8 @@ use photonic_core::timeline::{FrameRate, SequenceId, Tick, TimelineProject};
 use photonic_core::Document;
 use photonic_render::color::Colorimetry;
 
+use super::encoder::AudioStreamSpec;
+use super::offline_audio::{self, DEFAULT_EXPORT_SAMPLE_RATE};
 use super::presets::{self, ExportPreset, FrameRatePolicy, ResolutionSpec};
 use super::render_loop::{self, ExportError, ExportEvent, Frame, ResolvedExport};
 use crate::graph::eval::{read_texture_rgba16f, GpuContext};
@@ -30,9 +32,8 @@ use crate::session::{EngineCmd, ExportJob, ProxyMode, VideoEngine};
 
 /// Everything an [`ExportJob`]'s abstract preset resolves to against a concrete
 /// sequence (05 §3.2/§3.3): concrete output/format sizes, the output frame
-/// rate, the exact work range, the frame count, and the audio-stripped preset
-/// (P3 renders video-only regardless of the preset's audio spec — sequence
-/// muxing is the linked-audio story's seam).
+/// rate, the exact work range, the frame count, and the (unmodified) preset —
+/// audio is kept when the preset requests it (K-0.7).
 #[derive(Clone, Debug)]
 pub struct ResolvedExportJob {
     pub format_index: usize,
@@ -45,7 +46,7 @@ pub struct ResolvedExportJob {
     pub start: Tick,
     pub end: Tick,
     pub total_frames: u64,
-    /// The preset after override-resolution, with audio stripped (video-only).
+    /// The preset after resolution overrides. Audio is preserved (K-0.7).
     pub preset: ExportPreset,
     pub out_path: PathBuf,
 }
@@ -112,10 +113,9 @@ pub fn resolve_export_job(
         )));
     }
 
-    // Video-only render (linked-audio muxing is a documented seam): strip the
-    // preset's audio spec before it reaches the encoder.
-    let mut preset = job.preset.clone();
-    preset.audio = None;
+    // Keep the preset's audio spec (K-0.7): offline mix + mux lands in
+    // `run_export_job`. Validation still rejects alpha-incompatible containers etc.
+    let preset = job.preset.clone();
     presets::validate(&preset)
         .map_err(|e| ExportError::Resolve(format!("preset invalid after overrides: {e}")))?;
 
@@ -177,11 +177,39 @@ pub fn run_export_job(
     // Export is always full quality (02 §7: identical headless path).
     session.send(EngineCmd::SetProxyMode(ProxyMode::ForceOriginal));
 
+    // Offline mix for the export range (K-0.7). Silence when tools are missing
+    // still yields a length-correct PCM buffer so containers with an audio slot
+    // get a valid silent track rather than a broken mux.
+    let (audio_spec, audio_samples) = if r.preset.audio.is_some() {
+        let sample_rate = if project.settings.audio_sample_rate > 0 {
+            project.settings.audio_sample_rate
+        } else {
+            DEFAULT_EXPORT_SAMPLE_RATE
+        };
+        let pcm = offline_audio::render_export_audio(
+            &project,
+            job.sequence,
+            r.start,
+            r.end,
+            Some(tools),
+            r.preset.loudness_target.as_ref(),
+        )?;
+        (
+            Some(AudioStreamSpec {
+                sample_rate,
+                channels: 2,
+            }),
+            Some(pcm),
+        )
+    } else {
+        (None, None)
+    };
+
     let resolved = ResolvedExport {
         width: r.out_size.0,
         height: r.out_size.1,
         frame_rate: r.out_rate,
-        audio: None,
+        audio: audio_spec,
         out_path: r.out_path.clone(),
         colorimetry: Colorimetry::BT709_LIMITED,
     };
@@ -255,7 +283,7 @@ pub fn run_export_job(
         &resolved,
         r.total_frames,
         frame_source,
-        None,
+        audio_samples,
         cancel,
         on_event,
     );

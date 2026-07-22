@@ -4051,9 +4051,9 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
             preset.frame_rate = export_presets::FrameRatePolicy::Explicit(fr);
         }
     }
-    // Sequence-audio muxing is the linked-audio story's seam (the resolver
-    // strips audio for the video-only P3 render); report it either way.
-    let audio_skipped = preset.audio.is_some();
+    // K-0.7: sequence audio is mixed offline and muxed when the preset has an
+    // audio slot (previously stripped for a video-only P3 export).
+    let audio_requested = preset.audio.is_some();
 
     // Build the abstract job and resolve it through the ONE export path so the
     // synchronous response numbers match what the worker will render exactly.
@@ -4100,8 +4100,8 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
         "width": out_w,
         "height": out_h,
         "preset": preset_name,
-        "audio": if audio_skipped {
-            "skipped — sequence-audio muxing lands with the linked-audio story (video-only export in P3)"
+        "audio": if audio_requested {
+            "muxed — offline sequence mix (K-0.7)"
         } else {
             "none in preset"
         },

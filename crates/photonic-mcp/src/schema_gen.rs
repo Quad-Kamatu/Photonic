@@ -5852,7 +5852,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_sequence",
-            "description": "Start an export job (02 §7; async — poll get_job_status, cancellable between frames). Renders the timeline as snapshotted at call time through a dedicated engine session and encodes via the ffmpeg sidecar. Range defaults to the sequence work range, else [0, content end). VIDEO-ONLY in this build: the preset's audio spec is skipped (sequence-audio muxing is the linked-audio story). Upscaling beyond the format size returns NotSupportedV1.",
+            "description": "Start an export job (02 §7; async — poll get_job_status, cancellable between frames). Renders the timeline as snapshotted at call time through a dedicated engine session and encodes via the ffmpeg sidecar. Range defaults to the sequence work range, else [0, content end). When the preset has an audio slot, sequence audio is mixed offline and muxed (K-0.7), with optional LoudnessTarget gain. Upscaling beyond the format size returns NotSupportedV1.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

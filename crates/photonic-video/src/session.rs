@@ -59,7 +59,7 @@ use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
 use crate::graph::ir::IrOp;
 use crate::media::ffmpeg_locate::{locate, FfmpegTools};
 use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
-use crate::media::probe::{probe_details, ProbeDetails};
+use crate::media::probe::{content_hash, probe_details, ProbeDetails};
 use crate::playback::prefetch::{
     cut_ahead_targets, lru_eviction_victims, CUT_AHEAD_LEAD_FRAMES, MAX_LIVE_SOURCES,
 };
@@ -193,7 +193,9 @@ pub enum EngineCmd {
     Export(Box<ExportJob>),
     /// Cancel the in-flight export (if any). The worker stops between frames.
     CancelExport,
-    /// **NotImplemented stub in P3** — surfaces on [`EngineStatus::last_error`].
+    /// Probe an asset's media file (K-0.8 / 24): runs `ffprobe`, writes
+    /// [`MediaProbe`] + content hash onto the asset via `set_asset_meta`, and
+    /// invalidates any open decode source so the next present re-opens it.
     Probe(AssetId),
     /// Stop the engine thread. [`EngineSession`] sends this on drop/shutdown.
     Shutdown,
@@ -767,12 +769,7 @@ impl EngineThread {
                     cancel.store(true, Ordering::Relaxed);
                 }
             }
-            EngineCmd::Probe(asset) => {
-                self.fail(format!(
-                    "EngineCmd::Probe not implemented in P3 (asset {asset}); use \
-                     media::probe::probe_details directly"
-                ));
-            }
+            EngineCmd::Probe(asset) => self.probe_asset(asset),
             EngineCmd::Shutdown => return false,
         }
         true
@@ -781,6 +778,85 @@ impl EngineThread {
     fn fail(&mut self, msg: String) {
         tracing::warn!(target: "photonic_video::session", "{msg}");
         self.last_error = Some(msg);
+    }
+
+    /// K-0.8: run `ffprobe` on `asset`'s file, write probe + content hash into
+    /// the document via `set_asset_meta`, and drop any open decode source so the
+    /// next present re-opens against the fresh meta.
+    fn probe_asset(&mut self, asset: AssetId) {
+        let Some(tools) = self.tools.clone() else {
+            self.fail(format!(
+                "EngineCmd::Probe({asset}): ffmpeg/ffprobe tools are not available"
+            ));
+            return;
+        };
+        let Some(project) = self.snapshot.as_ref() else {
+            self.fail(format!(
+                "EngineCmd::Probe({asset}): no timeline snapshot is loaded yet"
+            ));
+            return;
+        };
+        let Some(media_asset) = project.media.assets.get(&asset) else {
+            self.fail(format!("EngineCmd::Probe({asset}): asset not in media pool"));
+            return;
+        };
+        let path = match &media_asset.source {
+            AssetSource::File { path, .. } => path.clone(),
+            other => {
+                self.fail(format!(
+                    "EngineCmd::Probe({asset}): source is not a file ({other:?})"
+                ));
+                return;
+            }
+        };
+        let details = match probe_details(&tools, &path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.fail(format!("EngineCmd::Probe({asset}): {e}"));
+                return;
+            }
+        };
+        let hash = content_hash(&path).ok();
+        // Apply meta on the live document so undo/history and the next snapshot
+        // pick it up (24 L1/L2 ladder). Drop locks before calling `fail`.
+        let apply_err = {
+            let mut doc = self.doc.lock().expect("engine doc lock");
+            let mut history = self.history.lock().expect("engine history lock");
+            match doc.timeline.as_ref() {
+                None => Some("document has no timeline".to_string()),
+                Some(timeline) => {
+                    match photonic_core::timeline::ops::set_asset_meta(
+                        timeline,
+                        asset,
+                        Some(details.probe.clone()),
+                        hash,
+                    ) {
+                        Ok(cmd) => {
+                            history.execute_discrete(
+                                photonic_core::history::Command::Timeline(cmd),
+                                &mut doc,
+                            );
+                            None
+                        }
+                        Err(e) => Some(format!("set_asset_meta: {e}")),
+                    }
+                }
+            }
+        };
+        if let Some(msg) = apply_err {
+            self.fail(format!("EngineCmd::Probe({asset}): {msg}"));
+            return;
+        }
+        // Force decode reopen against the updated meta.
+        let mut ids = HashSet::new();
+        ids.insert(asset);
+        self.media.invalidate_assets(&ids);
+        self.last_error = None;
+        tracing::info!(
+            target: "photonic_video::session",
+            %asset,
+            "EngineCmd::Probe: media meta updated"
+        );
     }
 
     /// Spawn a dedicated export worker (02 §7). The worker runs
