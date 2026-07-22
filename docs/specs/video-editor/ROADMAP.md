@@ -48,13 +48,13 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-F5** hardware encoders | ✅ done | `f867e95` | probe NVENC/VAAPI/VideoToolbox/QSV; prefer-HW fail-closed; detection report + raw-args hatch |
 | **32 §4** playback policy | ✅ done | `f867e95` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
 | **32 §7** scale-invariance guard | ✅ done | `f867e95` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
-| **K-G6** deinterlace node | ✅ done | `466fbeb`+`b88aadd` | `IrOp::Deinterlace` CPU + **GPU WGSL twins**; source-range; auto-insert for interlaced assets |
+| **K-G6** deinterlace node | ✅ done | `466fbeb`+`5626717` | `IrOp::Deinterlace` CPU + **GPU WGSL twins**; source-range; auto-insert for interlaced assets |
 | **E-2** analysis foundation | ✅ done (substrate) | `466fbeb` | `graph::analysis` — typed `AnalysisResult` (Histogram/Levels), content-hash cache, pull-based pure functions. Consumers (scopes/scene/loudness) wire next |
 | **K-E4** extract frame | ✅ done | `466fbeb` | `export::extract_frame` PNG path (export colour convert); GUI `video.extract_frame` / `…_to_bin` (Ctrl+Shift+E) via program-monitor readback |
-| **E-1** prefetch ← source-range | ✅ done | `b88aadd` | `lead_from_source_range` / `combined_prefetch_lead`; session cut-ahead lead = max(cut-ahead, graph window) so deinterlace expands decode warm |
-| **K-G6** GPU deinterlace | ✅ done | `b88aadd` | WGSL twin of spatial methods (OneField / LinearBlend / YadifSpatial) on `IrOp::Deinterlace` — preview no longer blit-combs |
-| **K-E1** vectorscope guides | ✅ done | `b88aadd` | I/Q lines + 75%/100% boxes + labels on scopes panel vectorscope overlay |
-| **K-C2** usage count | ✅ done (slice) | `b88aadd` | derived clip-reference count on media pool (`×N` / ON TL badge); tags/ratings still open |
+| **E-1** prefetch ← source-range | ✅ done | `5626717` | `lead_from_source_range` / `combined_prefetch_lead`; session cut-ahead lead = max(cut-ahead, graph window) so deinterlace expands decode warm |
+| **K-G6** GPU deinterlace | ✅ done | `5626717` | WGSL twin of spatial methods (OneField / LinearBlend / YadifSpatial) on `IrOp::Deinterlace` — preview no longer blit-combs |
+| **K-E1** vectorscope guides | ✅ done | `5626717` | I/Q lines + 75%/100% boxes + labels on scopes panel vectorscope overlay |
+| **K-C2** usage count | ✅ done (slice) | `5626717` | derived clip-reference count on media pool (`×N` / ON TL badge); tags/ratings still open |
 
 **Not yet started (next bands):** K-A residual; K-C tags/ratings/relink/archive; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
 
