@@ -899,6 +899,8 @@ pub struct PhotonicApp {
     pub engine: Option<engine::EngineBridge>,
     /// K-F1 multi-job export queue (multi-format + marker multi-export).
     pub(crate) render_queue: photonic_video::export::RenderQueue,
+    /// Whether the render-queue inspector panel is open (K-F1).
+    pub(crate) render_queue_panel_open: bool,
     /// Media pool drawer state + background import channel (05 §2).
     pub(crate) media_pool_ui: panels::media_pool::MediaPoolUi,
     /// Session clip-thumbnail + waveform caches feeding the timeline lane
@@ -1597,6 +1599,7 @@ impl Default for PhotonicApp {
             engine: None,
             /// K-F1 shared multi-job export queue (marker multi-export / multi-format).
             render_queue: photonic_video::export::RenderQueue::new(),
+            render_queue_panel_open: false,
             media_pool_ui: panels::media_pool::MediaPoolUi::default(),
             timeline_media: None,
             selected_grade_op: None,
@@ -3211,6 +3214,14 @@ impl PhotonicApp {
                     {
                         self.export_dialog_open = !self.export_dialog_open;
                     }
+                    if self.mode == AppMode::Video
+                        && ui
+                            .selectable_label(self.render_queue_panel_open, "Queue")
+                            .on_hover_text("Render queue inspector (K-F1)")
+                            .clicked()
+                    {
+                        self.render_queue_panel_open = !self.render_queue_panel_open;
+                    }
 
                     // Global search (command palette) — tools + actions.
                     ui.separator();
@@ -3884,10 +3895,19 @@ impl PhotonicApp {
                                         job,
                                     );
                                 }
+                                // Surface the queue inspector when multi-job lands.
+                                self.render_queue_panel_open = true;
                             }
                         }
                     }
                 }
+            }
+            if self.render_queue_panel_open {
+                panels::video::render_queue_panel::draw_render_queue_panel(
+                    ctx,
+                    &mut self.render_queue_panel_open,
+                    &self.render_queue,
+                );
             }
         }
 

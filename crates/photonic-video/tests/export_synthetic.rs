@@ -281,6 +281,9 @@ fn try_export(
         audio,
         out_path: out_path.to_path_buf(),
         colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: vec![],
     };
     let cancel = AtomicBool::new(false);
     let mut saw_done = false;

@@ -89,6 +89,15 @@ pub enum EncodeError {
     AudioWriterPanicked,
     #[error("encoder exited with status {status:?}; stderr tail:\n{stderr}")]
     EncoderExited { status: Option<i32>, stderr: String },
+    /// K-F5 fail-closed: hardware preferred but no matching encoder was probed.
+    #[error(
+        "hardware encoder requested for {codec:?} but none was detected in this \
+         ffmpeg build (probed: {probed}). Availability is never inferred (23 §10.3)."
+    )]
+    HardwareUnavailable {
+        codec: VideoCodec,
+        probed: String,
+    },
 }
 
 // ── Encoder capability probing (§3.4/§3.7) ───────────────────────────────────
@@ -155,6 +164,73 @@ impl EncoderCapabilities {
             "librav1e"
         }
     }
+
+    /// Hardware encoder names Photonic recognises (K-F5 / 26 §14).
+    pub const HW_ENCODER_CANDIDATES: &'static [&'static str] = &[
+        "h264_nvenc",
+        "hevc_nvenc",
+        "av1_nvenc",
+        "h264_vaapi",
+        "hevc_vaapi",
+        "av1_vaapi",
+        "h264_videotoolbox",
+        "hevc_videotoolbox",
+        "h264_qsv",
+        "hevc_qsv",
+        "av1_qsv",
+    ];
+
+    /// Probed hardware encoders present in this ffmpeg build (K-F5).
+    /// Availability is never inferred — only names that appear in
+    /// `ffmpeg -encoders` are returned (23 §10.3 fail-closed).
+    pub fn hardware_encoders(&self) -> Vec<&'static str> {
+        Self::HW_ENCODER_CANDIDATES
+            .iter()
+            .copied()
+            .filter(|n| self.has(n))
+            .collect()
+    }
+
+    /// Resolve a hardware encoder for `codec` when `prefer_hardware` is set.
+    /// Returns `None` when no HW twin is probed — callers must fail closed
+    /// rather than silently falling back to software (K-F5).
+    pub fn hardware_for(&self, codec: VideoCodec) -> Option<&'static str> {
+        let candidates: &[&str] = match codec {
+            VideoCodec::H264 => &["h264_nvenc", "h264_vaapi", "h264_videotoolbox", "h264_qsv"],
+            VideoCodec::Av1 => &["av1_nvenc", "av1_vaapi", "av1_qsv"],
+            // VP9/ProRes/GIF/PNG have no HW profiles we advertise.
+            _ => &[],
+        };
+        candidates.iter().copied().find(|n| self.has(n))
+    }
+
+    /// Human-readable detection report for the export dialog (K-F5 honesty).
+    pub fn detection_report(&self) -> String {
+        let hw = self.hardware_encoders();
+        let soft = [
+            ("H.264", self.h264_encoder()),
+            ("AV1", self.av1_encoder()),
+            (
+                "VP9",
+                if self.has("libvpx-vp9") {
+                    "libvpx-vp9"
+                } else {
+                    "(missing)"
+                },
+            ),
+        ];
+        let mut lines = Vec::new();
+        lines.push("Software:".to_string());
+        for (label, name) in soft {
+            lines.push(format!("  {label}: {name}"));
+        }
+        if hw.is_empty() {
+            lines.push("Hardware: (none detected)".into());
+        } else {
+            lines.push(format!("Hardware: {}", hw.join(", ")));
+        }
+        lines.join("\n")
+    }
 }
 
 // ── Plane-shape selection (which convert.rs function to feed) ───────────────
@@ -214,6 +290,12 @@ pub struct EncodeSpec<'a> {
     pub frame_rate: FrameRate,
     pub audio: Option<AudioStreamSpec>,
     pub out_path: PathBuf,
+    /// K-F5: prefer a hardware encoder; fail closed if none is probed.
+    pub prefer_hardware: bool,
+    /// K-F4: optional ffmpeg `-preset` speed string.
+    pub encoder_speed: Option<&'a str>,
+    /// K-F5: free-form extra args appended after codec selection.
+    pub raw_encoder_args: &'a [String],
 }
 
 /// Best-effort CRF→bitrate translation for encoders without true CRF-mode
@@ -237,12 +319,61 @@ fn push_video_codec_args(
     alpha: bool,
     width: u32,
     height: u32,
-) {
+    prefer_hardware: bool,
+    encoder_speed: Option<&str>,
+) -> Result<(), EncodeError> {
+    // K-F5: when hardware is preferred, resolve a probed HW encoder or fail
+    // closed — never silently fall back to software.
+    if prefer_hardware {
+        let Some(hw) = caps.hardware_for(codec) else {
+            let probed = caps.hardware_encoders().join(", ");
+            return Err(EncodeError::HardwareUnavailable {
+                codec,
+                probed: if probed.is_empty() {
+                    "(none)".into()
+                } else {
+                    probed
+                },
+            });
+        };
+        args.extend(["-c:v".into(), hw.into()]);
+        // Hardware encoders take bitrate-style RC more reliably than CRF.
+        match quality {
+            QualityMode::Crf(crf) => {
+                let kbps = crf_to_kbps_heuristic(crf, width, height);
+                args.extend(["-b:v".into(), format!("{kbps}k")]);
+            }
+            QualityMode::Bitrate {
+                target_kbps,
+                max_kbps,
+            } => {
+                args.extend([
+                    "-b:v".into(),
+                    format!("{target_kbps}k"),
+                    "-maxrate".into(),
+                    format!("{max_kbps}k"),
+                ]);
+            }
+            QualityMode::Lossless => {
+                args.extend(["-b:v".into(), "0".into()]);
+            }
+        }
+        if let Some(speed) = encoder_speed {
+            args.extend(["-preset".into(), speed.into()]);
+        }
+        return Ok(());
+    }
+
     match codec {
         VideoCodec::H264 => {
             let enc = caps.h264_encoder();
             args.extend(["-c:v".into(), enc.into()]);
             let is_libx264 = enc == "libx264";
+            if let Some(speed) = encoder_speed {
+                if is_libx264 {
+                    args.extend(["-preset".into(), speed.into()]);
+                }
+            }
             match quality {
                 QualityMode::Crf(crf) if is_libx264 => {
                     args.extend(["-crf".into(), crf.to_string()]);
@@ -276,7 +407,8 @@ fn push_video_codec_args(
             let enc = caps.av1_encoder();
             args.extend(["-c:v".into(), enc.into()]);
             if enc == "libsvtav1" {
-                args.extend(["-preset".into(), "4".into()]); // §3.5: "preset speed 4"
+                let speed = encoder_speed.unwrap_or("4");
+                args.extend(["-preset".into(), speed.into()]); // §3.5: "preset speed 4"
                 let crf = match quality {
                     QualityMode::Crf(v) => v,
                     QualityMode::Bitrate { .. } => {
@@ -294,7 +426,7 @@ fn push_video_codec_args(
                                 format!("{max_kbps}k"),
                             ]);
                         }
-                        return;
+                        return Ok(());
                     }
                     QualityMode::Lossless => 0.0,
                 };
@@ -308,7 +440,7 @@ fn push_video_codec_args(
                     QualityMode::Crf(v) => (v * 4.0).round() as i32,
                     QualityMode::Bitrate { target_kbps, .. } => {
                         args.extend(["-b:v".into(), format!("{target_kbps}k")]);
-                        return;
+                        return Ok(());
                     }
                     QualityMode::Lossless => 0,
                 };
@@ -385,6 +517,7 @@ fn push_video_codec_args(
             args.extend(["-c:v".into(), "apng".into(), "-plays".into(), "0".into()]);
         }
     }
+    Ok(())
 }
 
 fn push_audio_codec_args(args: &mut Vec<String>, audio: &AudioEncodeSpec) {
@@ -418,13 +551,14 @@ fn container_supports_color_tags(container: Container) -> bool {
 
 /// Build the full ffmpeg argument list for one export encode. Pure/testable
 /// without spawning a process — [`EncoderProcess::spawn`] is the only caller
-/// that actually runs it.
+/// that actually runs it. Returns [`EncodeError::HardwareUnavailable`] when
+/// hardware is preferred but not probed (K-F5 fail-closed).
 pub fn build_ffmpeg_args(
     caps: &EncoderCapabilities,
     spec: &EncodeSpec,
     video_pix_fmt: &str,
     audio_fifo: Option<&Path>,
-) -> Vec<String> {
+) -> Result<Vec<String>, EncodeError> {
     let mut args = vec![
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
@@ -487,8 +621,17 @@ pub fn build_ffmpeg_args(
             spec.preset.alpha,
             spec.width,
             spec.height,
-        ),
+            spec.prefer_hardware,
+            spec.encoder_speed,
+        )?,
         None => args.push("-vn".into()),
+    }
+
+    // K-F5 free-form escape hatch — append after codec selection.
+    for raw in spec.raw_encoder_args {
+        if !raw.is_empty() {
+            args.push(raw.clone());
+        }
     }
 
     if has_audio {
@@ -519,7 +662,7 @@ pub fn build_ffmpeg_args(
     }
 
     args.push(spec.out_path.to_string_lossy().into_owned());
-    args
+    Ok(args)
 }
 
 // ── Process management ───────────────────────────────────────────────────────
@@ -651,7 +794,15 @@ impl EncoderProcess {
         };
 
         let audio_path = audio_sidecar.as_ref().map(|s| s.path().to_path_buf());
-        let args = build_ffmpeg_args(caps, spec, video_pix_fmt, audio_path.as_deref());
+        let args = match build_ffmpeg_args(caps, spec, video_pix_fmt, audio_path.as_deref()) {
+            Ok(a) => a,
+            Err(e) => {
+                if let Some(s) = audio_sidecar {
+                    s.cleanup();
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(parent) = spec.out_path.parent() {
             std::fs::create_dir_all(parent).map_err(EncodeError::Io)?;
@@ -836,6 +987,9 @@ mod tests {
                 channels: 2,
             }),
             out_path: PathBuf::from("/tmp/out.mp4"),
+            prefer_hardware: false,
+            encoder_speed: None,
+            raw_encoder_args: &[],
         }
     }
 
@@ -851,6 +1005,49 @@ mod tests {
         assert!(caps.has("libx264"));
         assert!(caps.has("aac"));
         assert!(!caps.has("libopenh264"));
+    }
+
+    #[test]
+    fn hardware_encoders_only_lists_probed_names() {
+        let caps = caps_with(&["libx264", "h264_nvenc", "hevc_vaapi", "not_a_real_hw"]);
+        let hw = caps.hardware_encoders();
+        assert_eq!(hw, vec!["h264_nvenc", "hevc_vaapi"]);
+        assert_eq!(caps.hardware_for(VideoCodec::H264), Some("h264_nvenc"));
+        assert_eq!(caps.hardware_for(VideoCodec::Av1), None);
+        assert_eq!(caps.hardware_for(VideoCodec::Vp9), None);
+    }
+
+    #[test]
+    fn prefer_hardware_fail_closed_when_missing() {
+        let preset = base_preset();
+        let mut s = spec(&preset);
+        s.prefer_hardware = true;
+        let caps = caps_with(&["libx264", "aac"]); // no HW
+        let err = build_ffmpeg_args(&caps, &s, "yuv420p", None).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::HardwareUnavailable { .. }),
+            "expected HardwareUnavailable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn prefer_hardware_selects_nvenc_when_probed() {
+        let preset = base_preset();
+        let mut s = spec(&preset);
+        s.prefer_hardware = true;
+        let caps = caps_with(&["libx264", "h264_nvenc", "aac"]);
+        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None).unwrap();
+        assert!(args.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
+        // Fail-closed path never falls back to software.
+        assert!(!args.windows(2).any(|w| w == ["-c:v", "libx264"]));
+    }
+
+    #[test]
+    fn detection_report_mentions_software_and_hardware() {
+        let caps = caps_with(&["libx264", "libsvtav1", "h264_qsv"]);
+        let report = caps.detection_report();
+        assert!(report.contains("Software:"));
+        assert!(report.contains("h264_qsv"));
     }
 
     #[test]
@@ -933,7 +1130,7 @@ mod tests {
         let preset = base_preset();
         let caps = caps_with(&["libx264", "aac"]);
         let s = spec(&preset);
-        let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(Path::new("/tmp/a.fifo")));
+        let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(Path::new("/tmp/a.fifo"))).unwrap();
         assert!(args.windows(2).any(|w| w == ["-c:v", "libx264"]));
         assert!(args.windows(2).any(|w| w == ["-crf", "20"]));
         assert!(args.iter().any(|a| a == "pipe:0"));
@@ -950,7 +1147,7 @@ mod tests {
         preset.audio = None;
         let s = spec(&preset);
         let caps = caps_with(&["libx264"]);
-        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None);
+        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None).unwrap();
         assert!(args.iter().any(|a| a == "-an"));
         assert!(!args.iter().any(|a| a == "-c:a"));
         assert!(!args.windows(2).any(|w| w == ["-map", "1:a"]));
@@ -962,7 +1159,7 @@ mod tests {
         preset.video = None;
         let s = spec(&preset);
         let caps = caps_with(&["aac"]);
-        let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(Path::new("/tmp/a.fifo")));
+        let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(Path::new("/tmp/a.fifo"))).unwrap();
         assert!(args.iter().any(|a| a == "-vn"));
     }
 
@@ -977,7 +1174,7 @@ mod tests {
         });
         let s = spec(&preset);
         let caps = caps_with(&["libvpx-vp9", "libopus"]);
-        let args = build_ffmpeg_args(&caps, &s, "yuva420p", Some(Path::new("/tmp/a.fifo")));
+        let args = build_ffmpeg_args(&caps, &s, "yuva420p", Some(Path::new("/tmp/a.fifo"))).unwrap();
         assert!(args.windows(2).any(|w| w == ["-c:v", "libvpx-vp9"]));
         assert!(args.windows(2).any(|w| w == ["-auto-alt-ref", "0"]));
         assert!(args.windows(2).any(|w| w == ["-b:v", "0"]));
@@ -994,7 +1191,7 @@ mod tests {
         });
         let s = spec(&preset);
         let caps = caps_with(&[]);
-        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None);
+        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None).unwrap();
         assert!(args.iter().any(|a| a.contains("palettegen")));
         assert!(
             !args.iter().any(|a| a.contains("setparams")),
@@ -1017,7 +1214,7 @@ mod tests {
         });
         let s = spec(&preset);
         let caps = caps_with(&[]);
-        let args = build_ffmpeg_args(&caps, &s, "yuva444p", Some(Path::new("/tmp/a.fifo")));
+        let args = build_ffmpeg_args(&caps, &s, "yuva444p", Some(Path::new("/tmp/a.fifo"))).unwrap();
         assert!(args.windows(2).any(|w| w == ["-c:v", "prores_ks"]));
         assert!(args.windows(2).any(|w| w == ["-profile:v", "4"]));
         assert!(args.windows(2).any(|w| w == ["-c:a", "pcm_s16le"]));
@@ -1032,7 +1229,7 @@ mod tests {
         preset.faststart = false;
         let s = spec(&preset);
         let caps = caps_with(&["libx264"]);
-        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None);
+        let args = build_ffmpeg_args(&caps, &s, "yuv420p", None).unwrap();
         assert!(!args.iter().any(|a| a == "+faststart"));
     }
 
@@ -1047,7 +1244,7 @@ mod tests {
         });
         let s = spec(&preset);
         let caps = caps_with(&["png"]);
-        let args = build_ffmpeg_args(&caps, &s, "rgba", None);
+        let args = build_ffmpeg_args(&caps, &s, "rgba", None).unwrap();
         assert!(!args.iter().any(|a| a.contains("bt709")));
     }
 }

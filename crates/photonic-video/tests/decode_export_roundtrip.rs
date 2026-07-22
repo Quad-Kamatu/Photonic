@@ -228,6 +228,9 @@ fn decoded_media_exports_to_a_well_formed_clip() {
         audio: None,
         out_path: out_path.clone(),
         colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: vec![],
     };
 
     let cancel = AtomicBool::new(false);

@@ -6,11 +6,10 @@
 //! [`RasterImage`] (sRGB8 straight) and dispatches named kernels by
 //! [`EffectId`](photonic_core::timeline::EffectId) string.
 //!
-//! **Scope of this slice:** CPU path only. Bridged effects lower as
-//! `EffectKind::Unknown(tag)` so the existing IR stays stable; the GPU
-//! evaluator still blit-passthroughs unknown kinds until each kernel gets a
-//! WGSL twin. That is intentional — the bridge proves the catalogue grows by
-//! *importing* tested code, not inventing parallel maths.
+//! Bridged effects lower as `EffectKind::Unknown(tag)` so the IR stays stable.
+//! The GPU evaluator has WGSL twins for all six bridged ids (box/unsharp via
+//! blur/sharpen reuse; high-pass combine; emboss / find-edges / median
+//! neighbourhood passes). The CPU path remains the oracle for raster parity.
 
 use photonic_core::raster::filter::{
     box_blur, emboss, find_edges, high_pass, median, unsharp_mask,

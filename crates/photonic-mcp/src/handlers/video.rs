@@ -4063,6 +4063,7 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
         preset,
         output: std::path::PathBuf::from(&args.out_path),
         range,
+        options: Default::default(),
     };
     let resolved =
         match photonic_video::export::job::resolve_export_job(&project, &job) {

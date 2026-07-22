@@ -42,6 +42,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod effects_browser;
 pub(crate) mod export_dialog;
 pub(crate) mod keyframe_editor;
+pub(crate) mod render_queue_panel;
 pub(crate) mod multicam;
 pub(crate) mod node_editor;
 pub(crate) mod seq_tabs;

@@ -147,6 +147,7 @@ impl RenderQueue {
                 preset: preset.clone(),
                 output,
                 range,
+                options: Default::default(),
             };
             ids.push(self.enqueue(label, project.clone(), job)?);
         }
@@ -376,6 +377,7 @@ mod tests {
             preset: video_only_preset(),
             output: PathBuf::from("/tmp/photonic-queue-test.mp4"),
             range: Some((Tick(0), Tick::from_seconds(1))),
+            options: Default::default(),
         };
         let a = q.enqueue("a", project.clone(), job.clone()).unwrap();
         let b = q.enqueue("b", project, job).unwrap();

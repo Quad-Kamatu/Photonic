@@ -778,9 +778,9 @@ impl Evaluator {
                 }
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
-            // K-B16: bridged raster ids lower as Unknown(tag). GPU reuses the
-            // existing separable blur/sharpen passes for the two that map cleanly;
-            // other bridge ids still blit (CPU is the oracle until WGSL ports).
+            // K-B16: bridged raster ids lower as Unknown(tag). GPU ports for the
+            // six bridged kernels (box/unsharp reuse blur/sharpen; high-pass
+            // combine; emboss / find_edges / median have dedicated WGSL twins).
             IrOp::Effect {
                 kind: EffectKind::Unknown(tag),
                 params,
@@ -821,6 +821,28 @@ impl Evaluator {
                         target,
                     );
                 }
+                ("stylize.emboss", Some(src)) => self.passes.emboss(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    logical_w,
+                    logical_h,
+                ),
+                ("stylize.find_edges", Some(src)) => self.passes.find_edges(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    logical_w,
+                    logical_h,
+                ),
+                ("filter.median", Some(src)) => self.passes.median(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.radius", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
                 (_, Some(src)) => self.passes.blit(&self.gpu, &src.texture, target),
                 (_, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
@@ -938,6 +960,11 @@ struct Passes {
     sharpen_pipeline: wgpu::RenderPipeline,
     /// High-pass combine (K-B16): `src - blurred` on RGB (reuses sharpen BGL).
     high_pass_pipeline: wgpu::RenderPipeline,
+    /// Emboss / find-edges / median neighbourhood BGL (tex + logical-dim uniform).
+    /// Reuses the blur BGL layout (textureLoad, no sampler).
+    emboss_pipeline: wgpu::RenderPipeline,
+    find_edges_pipeline: wgpu::RenderPipeline,
+    median_pipeline: wgpu::RenderPipeline,
     /// Glow extract (K-0.2): keep pixels whose straight luma ≥ threshold.
     glow_extract_pipeline: wgpu::RenderPipeline,
     /// Glow composite (K-0.2): screen-add tinted glow over source.
@@ -1089,6 +1116,26 @@ impl Passes {
         );
         let high_pass_pipeline = make_pipeline(device, &sharpen_bgl, &high_pass_src, "fs");
 
+        // Emboss (K-B16): 3×3 directional luma gradient + mid-gray bias.
+        // Uniform `info = [pad, pad, logical_w, logical_h]` (blur BGL layout).
+        let emboss_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\nfn straight_luma(c: vec4<f32>) -> f32 {{\n  var s = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ s = c.rgb / c.a; }}\n  return 0.2126 * s.r + 0.7152 * s.g + 0.0722 * s.b;\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let a = at(x, y).a;\n  var acc = 0.0;\n  // Kernel [[-1,-1,0],[-1,0,1],[0,1,1]] — sum-zero so flat → 0 before bias.\n  acc += straight_luma(at(x-1, y-1)) * -1.0;\n  acc += straight_luma(at(x  , y-1)) * -1.0;\n  acc += straight_luma(at(x-1, y  )) * -1.0;\n  acc += straight_luma(at(x+1, y  )) *  1.0;\n  acc += straight_luma(at(x  , y+1)) *  1.0;\n  acc += straight_luma(at(x+1, y+1)) *  1.0;\n  let g = clamp(acc + 0.5, 0.0, 1.0);\n  return vec4<f32>(g * a, g * a, g * a, a);\n}}\n"
+        );
+        let emboss_pipeline = make_pipeline(device, &blur_bgl, &emboss_src, "fs");
+
+        // Find edges (K-B16): Sobel magnitude on straight luma → gray.
+        let find_edges_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\nfn straight_luma(c: vec4<f32>) -> f32 {{\n  var s = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ s = c.rgb / c.a; }}\n  return 0.2126 * s.r + 0.7152 * s.g + 0.0722 * s.b;\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let a = at(x, y).a;\n  var gx = 0.0; var gy = 0.0;\n  gx += straight_luma(at(x-1, y-1)) * -1.0; gy += straight_luma(at(x-1, y-1)) * -1.0;\n  gy += straight_luma(at(x  , y-1)) * -2.0;\n  gx += straight_luma(at(x+1, y-1)) *  1.0; gy += straight_luma(at(x+1, y-1)) * -1.0;\n  gx += straight_luma(at(x-1, y  )) * -2.0;\n  gx += straight_luma(at(x+1, y  )) *  2.0;\n  gx += straight_luma(at(x-1, y+1)) * -1.0; gy += straight_luma(at(x-1, y+1)) *  1.0;\n  gy += straight_luma(at(x  , y+1)) *  2.0;\n  gx += straight_luma(at(x+1, y+1)) *  1.0; gy += straight_luma(at(x+1, y+1)) *  1.0;\n  let mag = clamp(sqrt(gx * gx + gy * gy), 0.0, 1.0);\n  return vec4<f32>(mag * a, mag * a, mag * a, a);\n}}\n"
+        );
+        let find_edges_pipeline = make_pipeline(device, &blur_bgl, &find_edges_src, "fs");
+
+        // Median (K-B16): per-channel 3×3 median (radius clamped to 1 on GPU).
+        // Bubble-sort 9 samples — fixed window, no dynamic indexing hazards.
+        let median_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\nfn median9(vals: array<f32, 9>) -> f32 {{\n  var v = vals;\n  for (var a = 0u; a < 8u; a++) {{\n    for (var b = 0u; b < 8u - a; b++) {{\n      if (v[b] > v[b + 1u]) {{\n        let tmp = v[b];\n        v[b] = v[b + 1u];\n        v[b + 1u] = tmp;\n      }}\n    }}\n  }}\n  return v[4];\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let r = i32(max(p.info.x, 0.0) + 0.5);\n  if (r < 1) {{ return at(x, y); }}\n  var rr = array<f32, 9>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n  var gg = array<f32, 9>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n  var bb = array<f32, 9>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n  var aa = array<f32, 9>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n  var i = 0u;\n  for (var dy = -1; dy <= 1; dy++) {{\n    for (var dx = -1; dx <= 1; dx++) {{\n      let c = at(x + dx, y + dy);\n      rr[i] = c.r; gg[i] = c.g; bb[i] = c.b; aa[i] = c.a;\n      i = i + 1u;\n    }}\n  }}\n  return vec4<f32>(median9(rr), median9(gg), median9(bb), median9(aa));\n}}\n"
+        );
+        let median_pipeline = make_pipeline(device, &blur_bgl, &median_src, "fs");
+
         // Glow extract: zero out pixels whose straight luma is below threshold.
         // Reuses filter_bgl (tex + sampler + params).
         let glow_extract_src = format!(
@@ -1168,6 +1215,9 @@ impl Passes {
             sharpen_bgl,
             sharpen_pipeline,
             high_pass_pipeline,
+            emboss_pipeline,
+            find_edges_pipeline,
+            median_pipeline,
             glow_extract_pipeline,
             glow_comp_bgl,
             glow_comp_pipeline,
@@ -1327,6 +1377,93 @@ impl Passes {
 
     fn temp_texture(&self, gpu: &GpuContext, like: &wgpu::Texture) -> wgpu::Texture {
         Self::alloc_temp(gpu, like)
+    }
+
+    /// Neighbourhood pass shared by emboss / find_edges / median (blur BGL).
+    fn neighbourhood(
+        &self,
+        gpu: &GpuContext,
+        pipeline: &wgpu::RenderPipeline,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        radius: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let uniform = [radius, 0.0, logical_w as f32, logical_h as f32];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("neighbourhood_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("neighbourhood_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, pipeline, &bind, target);
+    }
+
+    /// K-B16 emboss — 3×3 directional luma gradient + mid-gray bias.
+    fn emboss(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        self.neighbourhood(gpu, &self.emboss_pipeline, src, target, 0.0, logical_w, logical_h);
+    }
+
+    /// K-B16 find-edges — Sobel magnitude on straight luma.
+    fn find_edges(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        self.neighbourhood(
+            gpu,
+            &self.find_edges_pipeline,
+            src,
+            target,
+            0.0,
+            logical_w,
+            logical_h,
+        );
+    }
+
+    /// K-B16 median — per-channel 3×3 median (radius ≥ 1; larger still 3×3).
+    fn median(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        radius: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let r = if radius.is_finite() { radius.max(0.0) } else { 0.0 };
+        if r < 0.5 {
+            self.blit(gpu, src, target);
+            return;
+        }
+        self.neighbourhood(gpu, &self.median_pipeline, src, target, 1.0, logical_w, logical_h);
     }
 
     /// High-pass combine: `src - blurred` on RGB, keep src alpha (K-B16).

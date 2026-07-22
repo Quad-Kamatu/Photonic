@@ -135,6 +135,7 @@ fn engine_cmd_export_renders_solid_colour_sequence() {
         preset: h264_preset(),
         output: out.clone(),
         range: None,
+        options: Default::default(),
     })));
 
     // Poll the wait-free status snapshot to a terminal (done) export state.

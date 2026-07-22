@@ -174,8 +174,23 @@ pub fn run_export_job(
     let session = engine.open_session(shadow_doc, shadow_history);
     let seq_id: SequenceId = job.sequence;
     session.send(EngineCmd::SetActiveSequence(seq_id));
-    // Export is always full quality (02 §7: identical headless path).
-    session.send(EngineCmd::SetProxyMode(ProxyMode::ForceOriginal));
+    // K-F4: job options can request proxies / Draft resolution; default remains
+    // full quality + original media (02 §7 SS-3 determinism path).
+    let proxy = if job.options.use_proxies {
+        ProxyMode::ForceProxy
+    } else {
+        ProxyMode::ForceOriginal
+    };
+    session.send(EngineCmd::SetProxyMode(proxy));
+    if job.options.preview_resolution {
+        session.send(EngineCmd::SetPreviewQuality(
+            crate::session::PreviewQuality::Draft,
+        ));
+    } else {
+        session.send(EngineCmd::SetPreviewQuality(
+            crate::session::PreviewQuality::Full,
+        ));
+    }
 
     // Offline mix for the export range (K-0.7). Silence when tools are missing
     // still yields a length-correct PCM buffer so containers with an audio slot
@@ -212,6 +227,9 @@ pub fn run_export_job(
         audio: audio_spec,
         out_path: r.out_path.clone(),
         colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: job.options.prefer_hardware,
+        encoder_speed: job.options.encoder_speed.clone(),
+        raw_encoder_args: job.options.raw_encoder_args.clone(),
     };
     let (fw, fh) = r.format_size;
     let (ow, oh) = r.out_size;

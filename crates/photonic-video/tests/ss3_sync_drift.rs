@@ -423,6 +423,9 @@ fn ss3_sync_drift_ten_minute_export_under_one_frame() {
         }),
         out_path: out.clone(),
         colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: vec![],
     };
     let cancel = AtomicBool::new(false);
     let mut done = false;

@@ -126,6 +126,25 @@ pub struct AssetReadiness {
     pub proxy_ready: bool,
 }
 
+/// Job-level render options (K-F4 / 26 §14) — how *this* run executes, not
+/// the output format ([`ExportPreset`]). Defaults keep prior behaviour.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RenderJobOptions {
+    /// Use proxies when available (fast verification renders).
+    pub use_proxies: bool,
+    /// Evaluate at Draft long-edge (preview resolution) rather than full format.
+    pub preview_resolution: bool,
+    /// Prefer a hardware encoder when the preset codec has a probed HW twin
+    /// (K-F5). Fail-closed: if preferred HW is missing, export errors rather
+    /// than silently falling back to software.
+    pub prefer_hardware: bool,
+    /// Optional raw `key=value` pairs appended to the encoder invocation
+    /// (Shotcut-style escape hatch, K-F5).
+    pub raw_encoder_args: Vec<String>,
+    /// FFmpeg `-preset` speed string when supported (e.g. `"veryfast"`).
+    pub encoder_speed: Option<String>,
+}
+
 /// An export request (02 §7). Carried by [`EngineCmd::Export`]: the engine
 /// spawns a dedicated worker thread that runs
 /// [`crate::export::job::run_export_job`] over a frozen snapshot and publishes
@@ -139,6 +158,8 @@ pub struct ExportJob {
     pub output: PathBuf,
     /// `None` = the sequence's work range / full extent.
     pub range: Option<(Tick, Tick)>,
+    /// How this render runs (K-F4). Default = full quality, software path.
+    pub options: RenderJobOptions,
 }
 
 /// Live export progress the GUI polls off [`EngineStatus`] (02 §7). Published

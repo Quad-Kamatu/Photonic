@@ -50,5 +50,5 @@ pub use media::thumbnails::{RgbaThumb, ThumbHandle, ThumbnailCache, WaveformCach
 pub use session::{
     coalesce_commands, colorimetry_for_probe, AssetReadiness, EngineCmd, EngineFrame,
     EngineSession, EngineStatus, ExportJob, MasterMeterSnapshot, PreviewQuality, PreviewTarget,
-    ProxyMode, VideoEngine,
+    ProxyMode, RenderJobOptions, VideoEngine,
 };

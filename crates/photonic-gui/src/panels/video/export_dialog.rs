@@ -78,6 +78,12 @@ struct DialogState {
     range_end_s: f64,
     /// K-F2: one export job per ranged sequence marker (duration > 0).
     export_per_marker: bool,
+    /// K-F4 job options (not part of the preset).
+    use_proxies: bool,
+    preview_resolution: bool,
+    prefer_hardware: bool,
+    encoder_speed: Option<String>,
+    raw_encoder_args: String,
     save_as_name: String,
     job: Option<JobState>,
 }
@@ -252,6 +258,11 @@ impl DialogState {
             range_start_s,
             range_end_s,
             export_per_marker: false,
+            use_proxies: false,
+            preview_resolution: false,
+            prefer_hardware: false,
+            encoder_speed: None,
+            raw_encoder_args: String::new(),
             save_as_name: String::new(),
             job: None,
         }
@@ -396,6 +407,7 @@ pub(crate) fn draw_export_dialog(
                 "When checked, every marker with duration > 0 becomes its own \
                  export job (per selected format). Uses the shared render queue.",
             );
+            draw_job_options(ui, &mut state);
             draw_estimate(ui, doc, seq_id, &state);
             let offline = preflight_offline_assets(doc, seq_id);
             if !offline.is_empty() {
@@ -1091,6 +1103,52 @@ fn draw_preflight_banner(ui: &mut egui::Ui, offline: &[String]) {
         });
 }
 
+/// K-F4 job-level options (not preset fields) + K-F5 hardware preference.
+fn draw_job_options(ui: &mut egui::Ui, state: &mut DialogState) {
+    ui.collapsing("Job options (K-F4 / K-F5)", |ui| {
+        ui.checkbox(&mut state.use_proxies, "Use proxies when available")
+            .on_hover_text("Fast verification render via ProxyMode::ForceProxy.");
+        ui.checkbox(
+            &mut state.preview_resolution,
+            "Render at preview (Draft) resolution",
+        )
+        .on_hover_text("Caps the long edge at the Draft preview size.");
+        ui.checkbox(
+            &mut state.prefer_hardware,
+            "Prefer hardware encoder (fail-closed)",
+        )
+        .on_hover_text(
+            "Uses a probed HW encoder (NVENC/VAAPI/VideoToolbox/QSV) when \
+             available for this codec. Errors if none is present — never \
+             silently falls back (K-F5 / 23 §10.3).",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Encoder speed:");
+            let mut speed = state.encoder_speed.clone().unwrap_or_default();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut speed)
+                        .hint_text("e.g. veryfast")
+                        .desired_width(100.0),
+                )
+                .changed()
+            {
+                state.encoder_speed = if speed.trim().is_empty() {
+                    None
+                } else {
+                    Some(speed.trim().to_string())
+                };
+            }
+        });
+        ui.label(RichText::new("Raw encoder args (key=value …)").small().color(MUTED));
+        ui.add(
+            egui::TextEdit::singleline(&mut state.raw_encoder_args)
+                .hint_text("x265-params keyint=60 …")
+                .desired_width(f32::INFINITY),
+        );
+    });
+}
+
 /// Build one job per selected format × (range OR each ranged marker) (K-F1/F2).
 fn build_export_jobs(doc: &Document, seq_id: SequenceId, state: &DialogState) -> Vec<ExportJob> {
     let Some(project) = doc.timeline.as_ref() else {
@@ -1155,6 +1213,17 @@ fn build_export_jobs(doc: &Document, seq_id: SequenceId, state: &DialogState) ->
                 preset: state.preset.clone(),
                 output: default_output_path_tagged(&state.preset, &base),
                 range: *range,
+                options: photonic_video::session::RenderJobOptions {
+                    use_proxies: state.use_proxies,
+                    preview_resolution: state.preview_resolution,
+                    prefer_hardware: state.prefer_hardware,
+                    raw_encoder_args: state
+                        .raw_encoder_args
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect(),
+                    encoder_speed: state.encoder_speed.clone(),
+                },
             });
         }
     }

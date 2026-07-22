@@ -95,6 +95,36 @@ pub struct ResolvedExport {
     /// of the *source's* probed colorimetry (03 §3.5: "re-matrices, does not
     /// just relabel").
     pub colorimetry: Colorimetry,
+    /// K-F5: prefer hardware encoder (fail-closed if unavailable).
+    pub prefer_hardware: bool,
+    /// K-F4: optional ffmpeg `-preset` speed.
+    pub encoder_speed: Option<String>,
+    /// K-F5: free-form encoder args.
+    pub raw_encoder_args: Vec<String>,
+}
+
+impl ResolvedExport {
+    /// Construct with default (software, no extras) job options.
+    pub fn basic(
+        width: u32,
+        height: u32,
+        frame_rate: FrameRate,
+        audio: Option<AudioStreamSpec>,
+        out_path: PathBuf,
+        colorimetry: Colorimetry,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            frame_rate,
+            audio,
+            out_path,
+            colorimetry,
+            prefer_hardware: false,
+            encoder_speed: None,
+            raw_encoder_args: Vec::new(),
+        }
+    }
 }
 
 /// Run one export job to completion (or until `cancel` is set). Spawns the
@@ -126,6 +156,9 @@ pub fn export_frames(
         frame_rate: resolved.frame_rate,
         audio: resolved.audio,
         out_path: resolved.out_path.clone(),
+        prefer_hardware: resolved.prefer_hardware,
+        encoder_speed: resolved.encoder_speed.as_deref(),
+        raw_encoder_args: &resolved.raw_encoder_args,
     };
     let mut proc = EncoderProcess::spawn(tools, &caps, &spec, audio_samples)?;
 
@@ -284,6 +317,9 @@ mod tests {
             }),
             out_path: out_path.clone(),
             colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: vec![],
         };
         let audio = vec![0.0f32; 48_000 / 10 * 2 * 5]; // 5 frames' worth of silence
         let cancel = AtomicBool::new(false);
@@ -333,6 +369,9 @@ mod tests {
             audio: None,
             out_path: out_path.clone(),
             colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: vec![],
         };
         let mut preset = preset;
         preset.audio = None;
@@ -369,6 +408,9 @@ mod tests {
             audio: None,
             out_path: out_path.clone(),
             colorimetry: Colorimetry::BT709_LIMITED,
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: vec![],
         };
         let cancel = AtomicBool::new(false);
 
