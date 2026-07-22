@@ -779,13 +779,13 @@ impl Evaluator {
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
             // K-B16: bridged raster ids lower as Unknown(tag). GPU ports for the
-            // six bridged kernels (box/unsharp reuse blur/sharpen; high-pass
-            // combine; emboss / find_edges / median have dedicated WGSL twins).
+            // Tier-1 neighbourhood/point kernels; remaining bridge ids blit
+            // (CPU is the oracle until their WGSL twins land).
             IrOp::Effect {
                 kind: EffectKind::Unknown(tag),
                 params,
             } => match (tag.as_str(), inputs.first()) {
-                ("blur.box", Some(src)) => self.passes.gaussian_blur(
+                ("blur.box" | "blur.gaussian", Some(src)) => self.passes.gaussian_blur(
                     &self.gpu,
                     &src.texture,
                     target,
@@ -803,7 +803,6 @@ impl Evaluator {
                     logical_h,
                 ),
                 ("filter.high_pass", Some(src)) => {
-                    // Approximate high-pass as source − blur (linear premult).
                     let blurred = self.passes.temp_texture(&self.gpu, target);
                     self.passes.gaussian_blur(
                         &self.gpu,
@@ -840,6 +839,55 @@ impl Evaluator {
                     &src.texture,
                     target,
                     params.f32_or("params.radius", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
+                // Point ops — WGSL twins of Transfer/Linear catalogue kernels.
+                ("color.levels", Some(src)) => self.passes.levels(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    [
+                        params.f32_or("params.in_black", 0.0),
+                        params.f32_or("params.in_white", 1.0),
+                        params.f32_or("params.gamma", 1.0),
+                        params.f32_or("params.out_black", 0.0),
+                        params.f32_or("params.out_white", 1.0),
+                    ],
+                ),
+                ("color.posterize", Some(src)) => self.passes.posterize(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.levels", 4.0),
+                ),
+                ("color.threshold", Some(src)) => self.passes.threshold(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.level", 0.5),
+                ),
+                ("color.desaturate" | "color.invert_raster", Some(src)) => {
+                    if tag.as_str() == "color.invert_raster" {
+                        self.passes.invert(&self.gpu, &src.texture, target);
+                    } else {
+                        self.passes.desaturate(&self.gpu, &src.texture, target);
+                    }
+                }
+                ("stylize.vignette", Some(src)) => self.passes.vignette(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", -0.5),
+                    params.f32_or("params.feather", 0.5),
+                    logical_w,
+                    logical_h,
+                ),
+                ("stylize.mosaic", Some(src)) => self.passes.mosaic(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.block", 8.0),
                     logical_w,
                     logical_h,
                 ),
@@ -965,6 +1013,14 @@ struct Passes {
     emboss_pipeline: wgpu::RenderPipeline,
     find_edges_pipeline: wgpu::RenderPipeline,
     median_pipeline: wgpu::RenderPipeline,
+    /// K-B16 point / stylize twins (levels, posterize, threshold, desaturate,
+    /// vignette, mosaic). Reuse filter_bgl (tex+sampler+uniform) or blur_bgl.
+    levels_pipeline: wgpu::RenderPipeline,
+    posterize_pipeline: wgpu::RenderPipeline,
+    threshold_pipeline: wgpu::RenderPipeline,
+    desaturate_pipeline: wgpu::RenderPipeline,
+    vignette_pipeline: wgpu::RenderPipeline,
+    mosaic_pipeline: wgpu::RenderPipeline,
     /// Glow extract (K-0.2): keep pixels whose straight luma ≥ threshold.
     glow_extract_pipeline: wgpu::RenderPipeline,
     /// Glow composite (K-0.2): screen-add tinted glow over source.
@@ -1136,6 +1192,42 @@ impl Passes {
         );
         let median_pipeline = make_pipeline(device, &blur_bgl, &median_src, "fs");
 
+        // Levels (Transfer): unpremult → encode-approx via straight → levels → premult.
+        // Working buffer is already linear; we apply levels on straight linear
+        // as a transfer-domain approximation matching the CPU Transfer path's
+        // intent (identity at defaults).
+        let levels_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct L {{ p0: vec4<f32>, p1: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: L;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let ib = u.p0.x; let iw = u.p0.y; let gamma = max(u.p0.z, 0.01);\n  let ob = u.p0.w; let ow = u.p1.x;\n  let span = max(iw - ib, 1e-4);\n  var outc = vec3<f32>(0.0);\n  for (var k = 0; k < 3; k++) {{\n    var v = clamp((rgb[k] - ib) / span, 0.0, 1.0);\n    v = pow(v, 1.0 / gamma);\n    outc[k] = clamp(ob + v * (ow - ob), 0.0, 1.0);\n  }}\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        );
+        let levels_pipeline = make_pipeline(device, &filter_bgl, &levels_src, "fs");
+
+        let posterize_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let steps = max(u.p.x - 1.0, 1.0);\n  let outc = round(rgb * steps) / steps;\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        );
+        let posterize_pipeline = make_pipeline(device, &filter_bgl, &posterize_src, "fs");
+
+        let threshold_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let luma = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;\n  let v = select(0.0, 1.0, luma >= u.p.x);\n  return vec4<f32>(v * c.a, v * c.a, v * c.a, c.a);\n}}\n"
+        );
+        let threshold_pipeline = make_pipeline(device, &filter_bgl, &threshold_src, "fs");
+
+        let desaturate_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let mx = max(rgb.r, max(rgb.g, rgb.b));\n  let mn = min(rgb.r, min(rgb.g, rgb.b));\n  let g = 0.5 * (mx + mn);\n  return vec4<f32>(g * c.a, g * c.a, g * c.a, c.a);\n}}\n"
+        );
+        let desaturate_pipeline = make_pipeline(device, &filter_bgl, &desaturate_src, "fs");
+
+        // Vignette: info = [amount, feather, logical_w, logical_h]
+        let vignette_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let c = at(x, y);\n  let cx = (lw - 1.0) * 0.5; let cy = (lh - 1.0) * 0.5;\n  let maxd = max(sqrt(cx * cx + cy * cy), 1e-4);\n  let dx = f32(x) - cx; let dy = f32(y) - cy;\n  let d = sqrt(dx * dx + dy * dy) / maxd;\n  let inner = clamp(1.0 - p.info.y, 0.0, 1.0);\n  let span = max(1.0 - inner, 1e-4);\n  let t = clamp((d - inner) / span, 0.0, 1.0);\n  let vig = t * t * (3.0 - 2.0 * t);\n  let factor = max(1.0 + p.info.x * vig, 0.0);\n  return vec4<f32>(c.rgb * factor, c.a);\n}}\n"
+        );
+        let vignette_pipeline = make_pipeline(device, &blur_bgl, &vignette_src, "fs");
+
+        // Mosaic: info = [block, pad, logical_w, logical_h]
+        let mosaic_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let b = max(i32(p.info.x + 0.5), 1);\n  let x = i32(pos.x); let y = i32(pos.y);\n  let bx = (x / b) * b; let by = (y / b) * b;\n  let x1 = min(bx + b, i32(lw)); let y1 = min(by + b, i32(lh));\n  var acc = vec4<f32>(0.0);\n  var n = 0.0;\n  for (var yy = by; yy < y1; yy++) {{\n    for (var xx = bx; xx < x1; xx++) {{\n      acc += at(xx, yy);\n      n += 1.0;\n    }}\n  }}\n  return acc / max(n, 1.0);\n}}\n"
+        );
+        let mosaic_pipeline = make_pipeline(device, &blur_bgl, &mosaic_src, "fs");
+
         // Glow extract: zero out pixels whose straight luma is below threshold.
         // Reuses filter_bgl (tex + sampler + params).
         let glow_extract_src = format!(
@@ -1218,6 +1310,12 @@ impl Passes {
             emboss_pipeline,
             find_edges_pipeline,
             median_pipeline,
+            levels_pipeline,
+            posterize_pipeline,
+            threshold_pipeline,
+            desaturate_pipeline,
+            vignette_pipeline,
+            mosaic_pipeline,
             glow_extract_pipeline,
             glow_comp_bgl,
             glow_comp_pipeline,
@@ -1464,6 +1562,99 @@ impl Passes {
             return;
         }
         self.neighbourhood(gpu, &self.median_pipeline, src, target, 1.0, logical_w, logical_h);
+    }
+
+    /// Levels — `p = [in_black, in_white, gamma, out_black]` + out_white in p1.x.
+    fn levels(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        p: [f32; 5],
+    ) {
+        let uniform = [p[0], p[1], p[2], p[3], p[4], 0.0, 0.0, 0.0];
+        self.run_filter(gpu, &self.levels_pipeline, src, target, &uniform);
+    }
+
+    fn posterize(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, levels: f32) {
+        let n = if levels.is_finite() {
+            levels.clamp(2.0, 255.0)
+        } else {
+            4.0
+        };
+        self.run_filter(gpu, &self.posterize_pipeline, src, target, &[n, 0.0, 0.0, 0.0]);
+    }
+
+    fn threshold(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, level: f32) {
+        let t = if level.is_finite() {
+            level.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        self.run_filter(gpu, &self.threshold_pipeline, src, target, &[t, 0.0, 0.0, 0.0]);
+    }
+
+    fn desaturate(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture) {
+        self.run_filter(gpu, &self.desaturate_pipeline, src, target, &[0.0; 4]);
+    }
+
+    fn vignette(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amount: f32,
+        feather: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let amount = if amount.is_finite() {
+            amount.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let feather = if feather.is_finite() {
+            feather.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let uniform = [amount, feather, logical_w as f32, logical_h as f32];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vignette_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vignette_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.vignette_pipeline, &bind, target);
+    }
+
+    fn mosaic(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        block: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let b = if block.is_finite() { block.max(1.0) } else { 8.0 };
+        self.neighbourhood(gpu, &self.mosaic_pipeline, src, target, b, logical_w, logical_h);
     }
 
     /// High-pass combine: `src - blurred` on RGB, keep src alpha (K-B16).

@@ -2347,23 +2347,38 @@ fn eval_node_color(
 }
 
 /// Keyframe-resolve an effect's params into the ordered [`ResolvedParams`] bag
-/// the IR carries (02 §2). The registry block for `kind` (`prop_registry`) is
-/// the canonical, deterministic order: every registered path is emitted, its
-/// value taken from the authored `base` (falling back to the neutral seed
-/// default when the base omits it), then evaluated against any animated lane at
-/// clip-relative `dt`. The registry-driven order is what makes two resolves of
-/// the same effect byte-identical, which `hash_op` relies on for cache identity.
+/// the IR carries (02 §2).
 ///
-/// Works for both effect-param carriers: a clip [`ClipEffect`]'s
-/// `AnimProps<EffectParams>` (pass `&fx.params.base`) and a graph node's
-/// `AnimProps<GraphNodeParams>` (pass `&node.params.base.0`). `Invert` has an
-/// empty registry block, so this yields an empty bag for it.
+/// **Prefer the effect manifest** (K-B16 / 30 §2): bridged and catalogue ids
+/// lower as `EffectKind::Unknown(tag)` and have empty `prop_registry` blocks, so
+/// the only authoritative param list is the manifest table. Fall back to the
+/// legacy registry seed for the seven v1 kinds when no manifest is found.
+///
+/// Order is deterministic (manifest / registry order), which `hash_op` relies on
+/// for cache identity.
 fn resolve_effect_params<T: PropSet>(
     kind: EffectKind,
     base: &EffectParams,
     anim: &AnimProps<T>,
     dt: Tick,
 ) -> ResolvedParams {
+    use photonic_core::timeline::effect_manifest;
+
+    let id = kind.effect_id();
+    if let Some(m) = effect_manifest::manifest(id) {
+        let mut entries = Vec::with_capacity(m.params.len());
+        for spec in m.params {
+            let path = PropPath::new(spec.path);
+            let base_val = base.get(spec.path).copied().unwrap_or(spec.default);
+            let value = match anim.track(&path) {
+                Some(track) => timeline::eval(track, &base_val, dt),
+                None => base_val,
+            };
+            entries.push((path, value));
+        }
+        return ResolvedParams { entries };
+    }
+
     let seeded = EffectParams::seed(PropTargetKind::Effect(kind));
     let mut entries = Vec::with_capacity(seeded.entries.len());
     for (path, seed_default) in &seeded.entries {

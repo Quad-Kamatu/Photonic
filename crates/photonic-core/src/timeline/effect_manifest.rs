@@ -256,10 +256,20 @@ pub struct EffectManifest {
 /// [`EffectParams::seed`](super::effect_kind::EffectParams::seed)'s neutral rule
 /// for every v1 effect (all their float ranges contain 0).
 const fn pf(path: &'static str, range: Option<(f64, f64)>, ui: UiHint) -> ParamSpec {
+    pf_def(path, 0.0, range, ui)
+}
+
+/// A float param with an explicit default (e.g. levels in_white = 1.0).
+const fn pf_def(
+    path: &'static str,
+    default: f64,
+    range: Option<(f64, f64)>,
+    ui: UiHint,
+) -> ParamSpec {
     ParamSpec {
         path,
         kind: ParamKind::Float,
-        default: PropValue::Float(0.0),
+        default: PropValue::Float(default),
         range,
         animatable: true,
         display: Display::IDENTITY,
@@ -341,10 +351,71 @@ const MASKSHAPE_PARAMS: &[ParamSpec] = &[
     pf("params.feather", Some((0.0, 1.0)), UiHint::Slider),
 ];
 
+// K-B16 Tier-1 catalogue params
+const MOTION_BLUR_PARAMS: &[ParamSpec] = &[
+    pf("params.angle", Some((0.0, 360.0)), UiHint::Angle),
+    pf_def("params.distance", 8.0, Some((0.0, 500.0)), UiHint::Slider),
+];
+const LEVELS_PARAMS: &[ParamSpec] = &[
+    pf("params.in_black", Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.in_white", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.gamma", 1.0, Some((0.01, 9.99)), UiHint::Slider),
+    pf("params.out_black", Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.out_white", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+];
+const POSTERIZE_PARAMS: &[ParamSpec] =
+    &[pf_def("params.levels", 4.0, Some((2.0, 255.0)), UiHint::Slider)];
+const THRESHOLD_PARAMS: &[ParamSpec] =
+    &[pf_def("params.level", 0.5, Some((0.0, 1.0)), UiHint::Slider)];
+const HUE_SAT_PARAMS: &[ParamSpec] = &[
+    pf("params.hue", Some((-180.0, 180.0)), UiHint::Angle),
+    pf("params.saturation", Some((-1.0, 1.0)), UiHint::Slider),
+    pf("params.lightness", Some((-1.0, 1.0)), UiHint::Slider),
+];
+const VIBRANCE_PARAMS: &[ParamSpec] = &[pf("params.amount", Some((-1.0, 1.0)), UiHint::Slider)];
+const CHANNEL_MIXER_PARAMS: &[ParamSpec] = &[
+    pf_def("params.rr", 1.0, Some((-2.0, 2.0)), UiHint::Slider),
+    pf("params.rg", Some((-2.0, 2.0)), UiHint::Slider),
+    pf("params.rb", Some((-2.0, 2.0)), UiHint::Slider),
+    pf("params.gr", Some((-2.0, 2.0)), UiHint::Slider),
+    pf_def("params.gg", 1.0, Some((-2.0, 2.0)), UiHint::Slider),
+    pf("params.gb", Some((-2.0, 2.0)), UiHint::Slider),
+    pf("params.br", Some((-2.0, 2.0)), UiHint::Slider),
+    pf("params.bg", Some((-2.0, 2.0)), UiHint::Slider),
+    pf_def("params.bb", 1.0, Some((-2.0, 2.0)), UiHint::Slider),
+];
+const BW_PARAMS: &[ParamSpec] = &[
+    pf_def("params.wr", 0.299, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.wg", 0.587, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.wb", 0.114, Some((0.0, 1.0)), UiHint::Slider),
+];
+const MOSAIC_PARAMS: &[ParamSpec] =
+    &[pf_def("params.block", 8.0, Some((1.0, 256.0)), UiHint::Slider)];
+const GRAIN_PARAMS: &[ParamSpec] = &[
+    pf_def("params.amount", 0.1, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.monochrome", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.seed", 1.0, Some((0.0, 1.0e9)), UiHint::Slider),
+];
+const VIGNETTE_PARAMS: &[ParamSpec] = &[
+    pf_def("params.amount", -0.5, Some((-1.0, 1.0)), UiHint::Slider),
+    pf_def("params.feather", 0.5, Some((0.0, 1.0)), UiHint::Slider),
+];
+const CA_PARAMS: &[ParamSpec] =
+    &[pf_def("params.amount", 2.0, Some((-64.0, 64.0)), UiHint::Slider)];
+const CLARITY_PARAMS: &[ParamSpec] = &[pf("params.amount", Some((-1.0, 1.0)), UiHint::Slider)];
+
+const CAPS_TRANSFER: Caps = Caps {
+    alpha: AlphaBehaviour::Preserves,
+    bit_depth: BitDepth::Any,
+    linear_light: false,
+    gpu: GpuSupport::Native,
+};
+
 // ── The table ────────────────────────────────────────────────────────────────
 
-/// The v1 effect catalogue, sorted by [`EffectId`] (invariant checked by test)
-/// so lookups and generated docs are stable.
+/// The effect catalogue, sorted by [`EffectId`] (invariant checked by test)
+/// so lookups and generated docs are stable. Includes the seven v1 kinds plus
+/// the K-B16 Tier-1 raster bridge expansion (30 §5.1).
 pub static MANIFESTS: &[EffectManifest] = &[
     EffectManifest {
         id: EffectId::new_static("blur.box"),
@@ -369,11 +440,132 @@ pub static MANIFESTS: &[EffectManifest] = &[
         arity: 1,
     },
     EffectManifest {
+        id: EffectId::new_static("blur.motion"),
+        version: 1,
+        name: "Motion Blur",
+        category: EffectCategory::Blur,
+        params: MOTION_BLUR_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.black_and_white"),
+        version: 1,
+        name: "Black & White",
+        category: EffectCategory::Color,
+        params: BW_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.channel_mixer"),
+        version: 1,
+        name: "Channel Mixer",
+        category: EffectCategory::Color,
+        params: CHANNEL_MIXER_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.clarity"),
+        version: 1,
+        name: "Clarity",
+        category: EffectCategory::Color,
+        params: CLARITY_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.desaturate"),
+        version: 1,
+        name: "Desaturate",
+        category: EffectCategory::Color,
+        params: INVERT_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.hue_saturation"),
+        version: 1,
+        name: "Hue/Saturation",
+        category: EffectCategory::Color,
+        params: HUE_SAT_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
         id: EffectId::new_static("color.invert"),
         version: 1,
         name: "Invert",
         category: EffectCategory::Color,
         params: INVERT_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.invert_raster"),
+        version: 1,
+        name: "Invert (Raster)",
+        category: EffectCategory::Color,
+        params: INVERT_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.levels"),
+        version: 1,
+        name: "Levels",
+        category: EffectCategory::Color,
+        params: LEVELS_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.posterize"),
+        version: 1,
+        name: "Posterize",
+        category: EffectCategory::Color,
+        params: POSTERIZE_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.threshold"),
+        version: 1,
+        name: "Threshold",
+        category: EffectCategory::Color,
+        params: THRESHOLD_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.vibrance"),
+        version: 1,
+        name: "Vibrance",
+        category: EffectCategory::Color,
+        params: VIBRANCE_PARAMS,
         caps: Caps::DEFAULT,
         applies: Applicability::CLIP_ONLY,
         space: OperandSpace::LinearStraight,
@@ -446,6 +638,17 @@ pub static MANIFESTS: &[EffectManifest] = &[
         arity: 1,
     },
     EffectManifest {
+        id: EffectId::new_static("stylize.chromatic_aberration"),
+        version: 1,
+        name: "Chromatic Aberration",
+        category: EffectCategory::Stylize,
+        params: CA_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
         id: EffectId::new_static("stylize.emboss"),
         version: 1,
         name: "Emboss",
@@ -473,6 +676,39 @@ pub static MANIFESTS: &[EffectManifest] = &[
         name: "Glow",
         category: EffectCategory::Stylize,
         params: GLOW_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("stylize.grain"),
+        version: 1,
+        name: "Grain",
+        category: EffectCategory::Stylize,
+        params: GRAIN_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("stylize.mosaic"),
+        version: 1,
+        name: "Mosaic",
+        category: EffectCategory::Stylize,
+        params: MOSAIC_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("stylize.vignette"),
+        version: 1,
+        name: "Vignette",
+        category: EffectCategory::Stylize,
+        params: VIGNETTE_PARAMS,
         caps: Caps::DEFAULT,
         applies: Applicability::CLIP_ONLY,
         space: OperandSpace::LinearStraight,
