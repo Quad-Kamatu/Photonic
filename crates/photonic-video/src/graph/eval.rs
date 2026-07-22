@@ -891,6 +891,79 @@ impl Evaluator {
                     logical_w,
                     logical_h,
                 ),
+                ("blur.motion", Some(src)) => self.passes.motion_blur(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.angle", 0.0),
+                    params.f32_or("params.distance", 8.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("color.hue_saturation", Some(src)) => self.passes.hue_saturation(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.hue", 0.0),
+                    params.f32_or("params.saturation", 0.0),
+                    params.f32_or("params.lightness", 0.0),
+                ),
+                ("color.vibrance", Some(src)) => self.passes.vibrance(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 0.0),
+                ),
+                ("color.channel_mixer", Some(src)) => self.passes.channel_mixer(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    [
+                        params.f32_or("params.rr", 1.0),
+                        params.f32_or("params.rg", 0.0),
+                        params.f32_or("params.rb", 0.0),
+                        params.f32_or("params.gr", 0.0),
+                        params.f32_or("params.gg", 1.0),
+                        params.f32_or("params.gb", 0.0),
+                        params.f32_or("params.br", 0.0),
+                        params.f32_or("params.bg", 0.0),
+                        params.f32_or("params.bb", 1.0),
+                    ],
+                ),
+                ("color.curves", Some(src)) => self.passes.curves_contrast(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.contrast", 0.0),
+                ),
+                ("color.black_and_white", Some(src)) => self.passes.black_and_white(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    [
+                        params.f32_or("params.wr", 0.299),
+                        params.f32_or("params.wg", 0.587),
+                        params.f32_or("params.wb", 0.114),
+                    ],
+                ),
+                ("sharpen.smart", Some(src)) => self.passes.sharpen(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 1.0),
+                    params.f32_or("params.radius", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("geo.pinch" | "geo.spherize", Some(src)) => self.passes.pinch(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 0.0),
+                    tag.as_str() == "geo.spherize",
+                    logical_w,
+                    logical_h,
+                ),
                 (_, Some(src)) => self.passes.blit(&self.gpu, &src.texture, target),
                 (_, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
@@ -1021,6 +1094,13 @@ struct Passes {
     desaturate_pipeline: wgpu::RenderPipeline,
     vignette_pipeline: wgpu::RenderPipeline,
     mosaic_pipeline: wgpu::RenderPipeline,
+    motion_blur_pipeline: wgpu::RenderPipeline,
+    hue_sat_pipeline: wgpu::RenderPipeline,
+    vibrance_pipeline: wgpu::RenderPipeline,
+    channel_mixer_pipeline: wgpu::RenderPipeline,
+    curves_contrast_pipeline: wgpu::RenderPipeline,
+    black_and_white_pipeline: wgpu::RenderPipeline,
+    pinch_pipeline: wgpu::RenderPipeline,
     /// Glow extract (K-0.2): keep pixels whose straight luma ≥ threshold.
     glow_extract_pipeline: wgpu::RenderPipeline,
     /// Glow composite (K-0.2): screen-add tinted glow over source.
@@ -1228,6 +1308,46 @@ impl Passes {
         );
         let mosaic_pipeline = make_pipeline(device, &blur_bgl, &mosaic_src, "fs");
 
+        // Motion blur: info = [angle_rad, distance, logical_w, logical_h]
+        let motion_blur_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let dist = max(i32(p.info.y + 0.5), 0);\n  let x = i32(pos.x); let y = i32(pos.y);\n  if (dist < 1) {{ return at(x, y); }}\n  let n = dist;\n  let half = f32(n - 1) * 0.5;\n  let dx = cos(p.info.x); let dy = sin(p.info.x);\n  var acc = vec4<f32>(0.0);\n  for (var i = 0; i < n; i++) {{\n    let t = f32(i) - half;\n    let sx = i32(round(f32(x) + dx * t));\n    let sy = i32(round(f32(y) + dy * t));\n    acc += at(sx, sy);\n  }}\n  return acc / f32(n);\n}}\n"
+        );
+        let motion_blur_pipeline = make_pipeline(device, &blur_bgl, &motion_blur_src, "fs");
+
+        // Hue/saturation: p = [hue_deg, sat, lightness, pad]
+        let hue_sat_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\nfn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {{\n  let mx = max(c.r, max(c.g, c.b)); let mn = min(c.r, min(c.g, c.b));\n  let l = 0.5 * (mx + mn); let d = mx - mn;\n  var h = 0.0; var sat = 0.0;\n  if (d > 1e-6) {{\n    sat = select(d / (2.0 - mx - mn), d / (mx + mn), l > 0.5);\n    if (mx == c.r) {{ h = (c.g - c.b) / d + select(0.0, 6.0, c.g < c.b); }}\n    else if (mx == c.g) {{ h = (c.b - c.r) / d + 2.0; }}\n    else {{ h = (c.r - c.g) / d + 4.0; }}\n    h = h / 6.0;\n  }}\n  return vec3<f32>(h * 360.0, sat, l);\n}}\nfn hue2rgb(p: f32, q: f32, t_in: f32) -> f32 {{\n  var t = t_in;\n  if (t < 0.0) {{ t += 1.0; }}\n  if (t > 1.0) {{ t -= 1.0; }}\n  if (t < 1.0/6.0) {{ return p + (q - p) * 6.0 * t; }}\n  if (t < 0.5) {{ return q; }}\n  if (t < 2.0/3.0) {{ return p + (q - p) * (2.0/3.0 - t) * 6.0; }}\n  return p;\n}}\nfn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {{\n  let h = hsl.x / 360.0; let s = hsl.y; let l = hsl.z;\n  if (s < 1e-6) {{ return vec3<f32>(l, l, l); }}\n  let q = select(l * (1.0 + s), l + s - l * s, l < 0.5);\n  let p = 2.0 * l - q;\n  return vec3<f32>(hue2rgb(p, q, h + 1.0/3.0), hue2rgb(p, q, h), hue2rgb(p, q, h - 1.0/3.0));\n}}\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  var hsl = rgb_to_hsl(rgb);\n  hsl.x = (hsl.x + u.p.x) % 360.0; if (hsl.x < 0.0) {{ hsl.x += 360.0; }}\n  hsl.y = clamp(hsl.y * (1.0 + clamp(u.p.y, -1.0, 1.0)), 0.0, 1.0);\n  let light = clamp(u.p.z, -1.0, 1.0);\n  if (light >= 0.0) {{ hsl.z = hsl.z + (1.0 - hsl.z) * light; }} else {{ hsl.z = hsl.z * (1.0 + light); }}\n  let outc = hsl_to_rgb(hsl);\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        );
+        let hue_sat_pipeline = make_pipeline(device, &filter_bgl, &hue_sat_src, "fs");
+
+        let vibrance_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\nfn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {{\n  let mx = max(c.r, max(c.g, c.b)); let mn = min(c.r, min(c.g, c.b));\n  let l = 0.5 * (mx + mn); let d = mx - mn;\n  var h = 0.0; var sat = 0.0;\n  if (d > 1e-6) {{\n    sat = select(d / (2.0 - mx - mn), d / (mx + mn), l > 0.5);\n    if (mx == c.r) {{ h = (c.g - c.b) / d + select(0.0, 6.0, c.g < c.b); }}\n    else if (mx == c.g) {{ h = (c.b - c.r) / d + 2.0; }}\n    else {{ h = (c.r - c.g) / d + 4.0; }}\n    h = h / 6.0;\n  }}\n  return vec3<f32>(h * 360.0, sat, l);\n}}\nfn hue2rgb(p: f32, q: f32, t_in: f32) -> f32 {{\n  var t = t_in;\n  if (t < 0.0) {{ t += 1.0; }}\n  if (t > 1.0) {{ t -= 1.0; }}\n  if (t < 1.0/6.0) {{ return p + (q - p) * 6.0 * t; }}\n  if (t < 0.5) {{ return q; }}\n  if (t < 2.0/3.0) {{ return p + (q - p) * (2.0/3.0 - t) * 6.0; }}\n  return p;\n}}\nfn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {{\n  let h = hsl.x / 360.0; let s = hsl.y; let l = hsl.z;\n  if (s < 1e-6) {{ return vec3<f32>(l, l, l); }}\n  let q = select(l * (1.0 + s), l + s - l * s, l < 0.5);\n  let p = 2.0 * l - q;\n  return vec3<f32>(hue2rgb(p, q, h + 1.0/3.0), hue2rgb(p, q, h), hue2rgb(p, q, h - 1.0/3.0));\n}}\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  var hsl = rgb_to_hsl(rgb);\n  let amt = clamp(u.p.x, -1.0, 1.0);\n  hsl.y = clamp(hsl.y + amt * (1.0 - hsl.y), 0.0, 1.0);\n  let outc = hsl_to_rgb(hsl);\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        );
+        let vibrance_pipeline = make_pipeline(device, &filter_bgl, &vibrance_src, "fs");
+
+        // Channel mixer: p0 = [rr,rg,rb,gr], p1 = [gg,gb,br,bg], p2 = [bb, pad...]
+        let channel_mixer_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let outc = vec3<f32>(\n    clamp(u.p0.x * rgb.r + u.p0.y * rgb.g + u.p0.z * rgb.b, 0.0, 1.0),\n    clamp(u.p0.w * rgb.r + u.p1.x * rgb.g + u.p1.y * rgb.b, 0.0, 1.0),\n    clamp(u.p1.z * rgb.r + u.p1.w * rgb.g + u.p2.x * rgb.b, 0.0, 1.0)\n  );\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        );
+        let channel_mixer_pipeline = make_pipeline(device, &filter_bgl, &channel_mixer_src, "fs");
+
+        // Curves contrast: pivot midtone by contrast amount.
+        let curves_contrast_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  let mid = clamp(0.5 + clamp(u.p.x, -1.0, 1.0) * 0.25, 0.05, 0.95);\n  // Piecewise linear through (0,0),(0.5,mid),(1,1).\n  var outc = vec3<f32>(0.0);\n  for (var k = 0; k < 3; k++) {{\n    let x = clamp(rgb[k], 0.0, 1.0);\n    if (x <= 0.5) {{ outc[k] = x * (mid / 0.5); }} else {{ outc[k] = mid + (x - 0.5) * ((1.0 - mid) / 0.5); }}\n  }}\n  return vec4<f32>(outc * c.a, c.a);\n}}\n"
+        );
+        let curves_contrast_pipeline = make_pipeline(device, &filter_bgl, &curves_contrast_src, "fs");
+
+        let black_and_white_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  var w = u.p.xyz;\n  let sum = w.x + w.y + w.z;\n  if (abs(sum) < 1e-6) {{ w = vec3<f32>(0.333333, 0.333333, 0.333333); }} else {{ w = w / sum; }}\n  let g = clamp(dot(rgb, w), 0.0, 1.0);\n  return vec4<f32>(g * c.a, g * c.a, g * c.a, c.a);\n}}\n"
+        );
+        let black_and_white_pipeline = make_pipeline(device, &filter_bgl, &black_and_white_src, "fs");
+
+        // Pinch / spherize: info = [amount, is_spherize, logical_w, logical_h]
+        let pinch_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn atf(xf: f32, yf: f32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  let x0 = i32(floor(xf)); let y0 = i32(floor(yf));\n  let fx = xf - f32(x0); let fy = yf - f32(y0);\n  let c00 = textureLoad(t, clamp(vec2<i32>(x0, y0), vec2<i32>(0), hi), 0);\n  let c10 = textureLoad(t, clamp(vec2<i32>(x0+1, y0), vec2<i32>(0), hi), 0);\n  let c01 = textureLoad(t, clamp(vec2<i32>(x0, y0+1), vec2<i32>(0), hi), 0);\n  let c11 = textureLoad(t, clamp(vec2<i32>(x0+1, y0+1), vec2<i32>(0), hi), 0);\n  return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let amount = clamp(p.info.x, -1.0, 1.0);\n  if (abs(amount) < 1e-6) {{\n    return textureLoad(t, vec2<i32>(i32(pos.x), i32(pos.y)), 0);\n  }}\n  let cx = lw * 0.5; let cy = lh * 0.5;\n  let radius = min(lw, lh) * 0.5;\n  let fx = pos.x; let fy = pos.y;\n  let relx = fx - cx; let rely = fy - cy;\n  let r = sqrt(relx * relx + rely * rely);\n  var sxf = fx; var syf = fy;\n  if (r > 0.0 && r < radius) {{\n    let nd = r / radius;\n    if (p.info.y > 0.5) {{\n      // spherize\n      let half_pi = 1.5707963;\n      var curved = nd;\n      if (amount >= 0.0) {{\n        let a = asin(nd) / half_pi;\n        curved = nd + (a - nd) * amount;\n      }} else {{\n        let a = sin(nd * half_pi);\n        curved = nd + (a - nd) * (-amount);\n      }}\n      let scale = curved / nd;\n      sxf = cx + relx * scale; syf = cy + rely * scale;\n    }} else {{\n      // pinch\n      let ff = 1.0 - nd;\n      let scale = 1.0 + amount * ff * ff;\n      sxf = cx + relx * scale; syf = cy + rely * scale;\n    }}\n  }}\n  return atf(sxf, syf);\n}}\n"
+        );
+        let pinch_pipeline = make_pipeline(device, &blur_bgl, &pinch_src, "fs");
+
         // Glow extract: zero out pixels whose straight luma is below threshold.
         // Reuses filter_bgl (tex + sampler + params).
         let glow_extract_src = format!(
@@ -1316,6 +1436,13 @@ impl Passes {
             desaturate_pipeline,
             vignette_pipeline,
             mosaic_pipeline,
+            motion_blur_pipeline,
+            hue_sat_pipeline,
+            vibrance_pipeline,
+            channel_mixer_pipeline,
+            curves_contrast_pipeline,
+            black_and_white_pipeline,
+            pinch_pipeline,
             glow_extract_pipeline,
             glow_comp_bgl,
             glow_comp_pipeline,
@@ -1655,6 +1782,175 @@ impl Passes {
     ) {
         let b = if block.is_finite() { block.max(1.0) } else { 8.0 };
         self.neighbourhood(gpu, &self.mosaic_pipeline, src, target, b, logical_w, logical_h);
+    }
+
+    fn motion_blur(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        angle_deg: f32,
+        distance: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let angle = if angle_deg.is_finite() {
+            angle_deg.to_radians()
+        } else {
+            0.0
+        };
+        let dist = if distance.is_finite() {
+            distance.max(0.0).min(128.0)
+        } else {
+            0.0
+        };
+        let uniform = [angle, dist, logical_w as f32, logical_h as f32];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("motion_blur_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("motion_blur_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.motion_blur_pipeline, &bind, target);
+    }
+
+    fn hue_saturation(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        hue: f32,
+        sat: f32,
+        lightness: f32,
+    ) {
+        self.run_filter(
+            gpu,
+            &self.hue_sat_pipeline,
+            src,
+            target,
+            &[hue, sat, lightness, 0.0],
+        );
+    }
+
+    fn vibrance(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, amount: f32) {
+        let a = if amount.is_finite() {
+            amount.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        self.run_filter(gpu, &self.vibrance_pipeline, src, target, &[a, 0.0, 0.0, 0.0]);
+    }
+
+    fn channel_mixer(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        m: [f32; 9],
+    ) {
+        let uniform = [
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], 0.0, 0.0, 0.0,
+        ];
+        self.run_filter(gpu, &self.channel_mixer_pipeline, src, target, &uniform);
+    }
+
+    fn curves_contrast(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        contrast: f32,
+    ) {
+        let c = if contrast.is_finite() {
+            contrast.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        self.run_filter(
+            gpu,
+            &self.curves_contrast_pipeline,
+            src,
+            target,
+            &[c, 0.0, 0.0, 0.0],
+        );
+    }
+
+    fn black_and_white(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        w: [f32; 3],
+    ) {
+        self.run_filter(
+            gpu,
+            &self.black_and_white_pipeline,
+            src,
+            target,
+            &[w[0], w[1], w[2], 0.0],
+        );
+    }
+
+    fn pinch(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amount: f32,
+        spherize: bool,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let amount = if amount.is_finite() {
+            amount.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let uniform = [
+            amount,
+            if spherize { 1.0 } else { 0.0 },
+            logical_w as f32,
+            logical_h as f32,
+        ];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("pinch_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pinch_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.pinch_pipeline, &bind, target);
     }
 
     /// High-pass combine: `src - blurred` on RGB, keep src alpha (K-B16).

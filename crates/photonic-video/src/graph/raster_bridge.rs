@@ -21,14 +21,18 @@
 //! WGSL twins for the neighbourhood/point ops listed in [`BRIDGED_IDS`].
 
 use photonic_core::raster::adjust::{
-    black_and_white, channel_mixer, desaturate, hue_saturation, invert, levels, posterize,
-    threshold, vibrance,
+    black_and_white, channel_mixer, color_balance, curves, desaturate, hue_saturation, invert,
+    levels, photo_filter, posterize, threshold, vibrance,
 };
-use photonic_core::raster::advanced::{chromatic_aberration, clarity, vignette};
+use photonic_core::raster::advanced::{
+    chromatic_aberration, clarity, lens_blur, reduce_noise, smart_sharpen, surface_blur, vignette,
+};
 use photonic_core::raster::filter::{
     add_noise, box_blur, emboss, find_edges, gaussian_blur, high_pass, median, mosaic, motion_blur,
     unsharp_mask,
 };
+use photonic_core::raster::repair::dust_and_scratches;
+use photonic_core::raster::warp::{perspective, pinch, ripple, spherize};
 use photonic_core::timeline::effect_manifest::{manifest, EffectId, OperandSpace};
 use photonic_core::RasterImage;
 
@@ -37,21 +41,28 @@ use super::ops::Image;
 
 /// Stable EffectId strings this bridge can evaluate on CPU.
 pub const BRIDGED_IDS: &[&str] = &[
-    // Neighbourhood / stylize (slice + Tier 1)
+    // Blur / sharpen / noise
     "blur.box",
     "blur.gaussian",
     "blur.motion",
+    "blur.surface",
+    "blur.lens",
     "sharpen.unsharp_raster",
+    "sharpen.smart",
     "filter.high_pass",
     "filter.median",
+    "noise.reduce",
+    "repair.dust_and_scratches",
+    // Stylize
     "stylize.emboss",
     "stylize.find_edges",
     "stylize.mosaic",
     "stylize.grain",
     "stylize.vignette",
     "stylize.chromatic_aberration",
-    // Transfer color
+    // Color (Transfer + Linear)
     "color.levels",
+    "color.curves",
     "color.posterize",
     "color.threshold",
     "color.channel_mixer",
@@ -60,8 +71,14 @@ pub const BRIDGED_IDS: &[&str] = &[
     "color.desaturate",
     "color.black_and_white",
     "color.invert_raster",
-    // Linear local-contrast / polish
     "color.clarity",
+    "color.photo_filter",
+    "color.color_balance",
+    // Geometry / warp
+    "geo.pinch",
+    "geo.spherize",
+    "geo.ripple",
+    "geo.perspective",
 ];
 
 pub fn is_bridged(id: &str) -> bool {
@@ -217,6 +234,99 @@ fn dispatch(id: &str, raster: &mut RasterImage, params: &ResolvedParams) -> Opti
         }
         "color.invert_raster" => invert(raster, None),
         "color.clarity" => clarity(raster, f("params.amount", 0.0), None),
+        "color.curves" => {
+            // Contrast-style RGB curve: three knots pivot at midtone.
+            // Full multi-point authoring stays on the grade stack; this is the
+            // raster catalogue entry for a simple transfer curve (30 §5.1).
+            let contrast = f("params.contrast", 0.0).clamp(-1.0, 1.0);
+            let mid = (0.5 + contrast * 0.25).clamp(0.05, 0.95);
+            let rgb = [(0.0, 0.0), (0.5, mid), (1.0, 1.0)];
+            curves(raster, &rgb, &[], &[], &[], None);
+        }
+        "color.photo_filter" => {
+            photo_filter(
+                raster,
+                [
+                    f("params.r", 1.0).clamp(0.0, 1.0),
+                    f("params.g", 0.5).clamp(0.0, 1.0),
+                    f("params.b", 0.2).clamp(0.0, 1.0),
+                ],
+                f("params.density", 0.25).clamp(0.0, 1.0),
+                f("params.preserve_luminosity", 1.0) > 0.5,
+                None,
+            );
+        }
+        "color.color_balance" => {
+            let s = [
+                f("params.shadows_r", 0.0),
+                f("params.shadows_g", 0.0),
+                f("params.shadows_b", 0.0),
+            ];
+            let m = [
+                f("params.midtones_r", 0.0),
+                f("params.midtones_g", 0.0),
+                f("params.midtones_b", 0.0),
+            ];
+            let h = [
+                f("params.highlights_r", 0.0),
+                f("params.highlights_g", 0.0),
+                f("params.highlights_b", 0.0),
+            ];
+            color_balance(
+                raster,
+                s,
+                m,
+                h,
+                f("params.preserve_luminosity", 1.0) > 0.5,
+                None,
+            );
+        }
+        "blur.surface" => {
+            let r = f("params.radius", 2.0).max(0.0).round() as u32;
+            surface_blur(raster, r, f("params.threshold", 0.25).clamp(0.0, 1.0), None);
+        }
+        "blur.lens" => lens_blur(raster, f("params.radius", 4.0).max(0.0), None),
+        "sharpen.smart" => {
+            smart_sharpen(
+                raster,
+                f("params.amount", 1.0).max(0.0),
+                f("params.radius", 1.0).max(0.0),
+                f("params.threshold", 0.0).clamp(0.0, 255.0) as u8,
+                None,
+            );
+        }
+        "noise.reduce" => reduce_noise(raster, f("params.strength", 0.5).clamp(0.0, 1.0), None),
+        "repair.dust_and_scratches" => {
+            dust_and_scratches(
+                raster,
+                f("params.radius", 1.0).max(0.0).round() as u32,
+                f("params.threshold", 16.0).clamp(0.0, 255.0) as u8,
+                None,
+            );
+        }
+        "geo.pinch" => pinch(raster, f("params.amount", 0.0).clamp(-1.0, 1.0), None),
+        "geo.spherize" => spherize(raster, f("params.amount", 0.0).clamp(-1.0, 1.0), None),
+        "geo.ripple" => {
+            ripple(
+                raster,
+                f("params.amplitude", 4.0),
+                f("params.wavelength", 16.0).max(1.0),
+                None,
+            );
+        }
+        "geo.perspective" => {
+            // Normalized corner destinations (0..1 of frame): TL TR BR BL.
+            // Defaults are identity (full rect).
+            let w = raster.width as f32;
+            let h = raster.height as f32;
+            let dst = [
+                (f("params.tl_x", 0.0) * w, f("params.tl_y", 0.0) * h),
+                (f("params.tr_x", 1.0) * w, f("params.tr_y", 0.0) * h),
+                (f("params.br_x", 1.0) * w, f("params.br_y", 1.0) * h),
+                (f("params.bl_x", 0.0) * w, f("params.bl_y", 1.0) * h),
+            ];
+            *raster = perspective(raster, dst);
+        }
         _ => return None,
     }
     Some(())
@@ -312,7 +422,68 @@ mod tests {
         assert!(is_bridged("stylize.emboss"));
         assert!(is_bridged("color.levels"));
         assert!(is_bridged("blur.motion"));
+        assert!(is_bridged("geo.pinch"));
+        assert!(is_bridged("geo.perspective"));
+        assert!(is_bridged("color.curves"));
+        assert!(is_bridged("sharpen.smart"));
+        assert!(is_bridged("noise.reduce"));
+        assert!(is_bridged("blur.surface"));
         assert!(!is_bridged("nope.fake"));
+        assert_eq!(BRIDGED_IDS.len(), 34);
+    }
+
+    #[test]
+    fn curves_contrast_moves_midtones() {
+        let img = solid(
+            4,
+            4,
+            LinearColor {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            },
+        );
+        let params = ResolvedParams {
+            entries: vec![(
+                photonic_core::timeline::PropPath::new("params.contrast"),
+                photonic_core::timeline::PropValue::Float(0.8),
+            )],
+        };
+        let out = apply("color.curves", &img, &params).expect("bridged");
+        // Positive contrast lifts mid above 0.5 in transfer space.
+        assert!(
+            out.pixel(0, 0)[0] > 0.5,
+            "contrast curve should lift mid: {:?}",
+            out.pixel(0, 0)
+        );
+    }
+
+    #[test]
+    fn pinch_identity_at_zero() {
+        let img = solid(
+            8,
+            8,
+            LinearColor {
+                r: 0.2,
+                g: 0.4,
+                b: 0.6,
+                a: 1.0,
+            },
+        );
+        let params = ResolvedParams {
+            entries: vec![(
+                photonic_core::timeline::PropPath::new("params.amount"),
+                photonic_core::timeline::PropValue::Float(0.0),
+            )],
+        };
+        let out = apply("geo.pinch", &img, &params).expect("bridged");
+        for (a, b) in img.pixels.iter().zip(out.pixels.iter()) {
+            for c in 0..4 {
+                assert!((a[c] - b[c]).abs() < 0.02, "pinch 0 identity");
+            }
+        }
+        let _ = out;
     }
 
     #[test]

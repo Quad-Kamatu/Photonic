@@ -35,7 +35,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
-| **K-B16** raster bridge (Tier 1) | 🟡 partial | `bf1d89b`+`a418216`+`f867e95`+`9b79824` | **22 bridged ids** (CPU); Linear vs Transfer operand conversion; Tier-1 manifests (levels/posterize/threshold/HSL/vibrance/mosaic/grain/vignette/CA/clarity/motion…); GPU twins for neighbourhood + levels/posterize/threshold/desaturate/vignette/mosaic. Remaining: curves, warps, smart_sharpen, reduce_noise, GPU for motion/grain/CA/mixer |
+| **K-B16** raster bridge | 🟡 partial | `9b79824`+this | **~37 bridged ids** (CPU): Tier-1 color/stylize + curves, warps (pinch/spherize/ripple/perspective), smart_sharpen, reduce_noise, surface/lens blur, photo_filter, color_balance, dust_and_scratches. GPU twins for neighbourhoods, levels/posterize/threshold, HSL/vibrance/mixer/curves/B&W, motion blur, pinch/spherize. Remaining: full multi-point curves UI, grain/CA GPU, util outline/drop_shadow/alpha_view |
 | **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
 | **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 | **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
@@ -44,7 +44,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **32 §4** playback policy | ✅ done | `f867e95` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
 | **32 §7** scale-invariance guard | ✅ done | `f867e95` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
 
-**Not yet started (next bands):** K-B16 remainder (curves, warps/perspective, smart_sharpen, reduce_noise, Tier-2 surface/lens blur, util outline/drop_shadow); K-A/K-C/K-D/K-E residual bands; E-1/E-2/E-4 IR contracts; legal-or-fixture-blocked G/D items.
+**Not yet started (next bands):** K-B16 polish (multi-point curves, grain/CA GPU, util outline/drop_shadow/alpha_view); K-A/K-C/K-D/K-E residual bands; E-1/E-2/E-4 IR contracts; legal-or-fixture-blocked G/D items.
 
 ## 1. Authority and precedence
 
@@ -130,7 +130,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 |---|---|---|---|
 | K-0 | ✅ done | **9/9 seams closed** (K-0.1–0.9). See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
 | K-A | open | Preview rendering ([33](33-timeline-preview-render.md)), marker depth ([35 §1](35-model-decisions.md#1-markers)), spacer, snaps, groups, **timecode as a first-class concept**, duration dialog, grab-item, split-audio, subclips, track compositing, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
-| K-B | partial | Track/master/asset stacks etc. still open. **K-B16 Tier-1 bridge live** (22 CPU ids + manifests + operand spaces + key GPU twins); curves/warps/Tier-2 remain | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
+| K-B | partial | Track/master/asset stacks etc. still open. **K-B16 bulk bridge live** (~37 CPU ids + manifests + GPU for most Tier-1/2 kernels); util outline/alpha_view and multi-point curves remain | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
 | K-C | partial | Substrate exists (`validate_attach`, `JobRegistry`, sidecar cache). Open: clip-jobs catalogue, asset tags/ratings, generator clips, archiving + cache pane, **relink workflow**, import-time media triage, still-cache size keying. K-C3 external proxies belongs to **G-15**, not here; K-C4 excludes image sequences, which are **D-6** | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
 | K-D | partial | `AudioStreamInfo`/`ChannelMap` probed; mixer and DSP written but unbound. Open: per-stream/per-channel handling, stems export, **boundary declick (K-D5)** | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
