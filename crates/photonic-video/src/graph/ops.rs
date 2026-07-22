@@ -232,6 +232,175 @@ pub fn luma709(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
+// ── Shared blur primitive (K-0.2) ────────────────────────────────────────────
+
+/// Cap on the 1-D Gaussian half-width, matching the WGSL blur in
+/// `photonic_render::pipeline::BLUR_SHADER` (`min(ceil(sigma*3), 128)`).
+const BLUR_RADIUS_CAP: i32 = 128;
+
+/// Build a normalized 1-D Gaussian kernel for `sigma`, identical in shape to the
+/// WGSL twin: radius = `min(ceil(sigma*3), 128)`, weight `exp(-i²/(2σ²))`,
+/// renormalized. Empty / identity when `sigma < 0.5` (the shader early-outs).
+pub fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
+    let sigma = if sigma.is_finite() {
+        sigma.max(0.0)
+    } else {
+        0.0
+    };
+    if sigma < 0.5 {
+        return Vec::new();
+    }
+    let radius = ((sigma * 3.0).ceil() as i32).clamp(1, BLUR_RADIUS_CAP);
+    let two_s2 = 2.0 * sigma * sigma;
+    let mut k = Vec::with_capacity((2 * radius + 1) as usize);
+    let mut sum = 0.0f32;
+    for i in -radius..=radius {
+        let fi = i as f32;
+        let w = (-(fi * fi) / two_s2).exp();
+        k.push(w);
+        sum += w;
+    }
+    if sum > 0.0 {
+        for w in &mut k {
+            *w /= sum;
+        }
+    }
+    k
+}
+
+/// One axis of a separable Gaussian over premultiplied linear RGBA. `horizontal`
+/// true → row convolution; false → column. Clamp-to-edge borders.
+fn separable_blur_axis(input: &Image, kernel: &[f32], horizontal: bool) -> Image {
+    let (w, h) = (input.width as i32, input.height as i32);
+    let radius = (kernel.len() as i32) / 2;
+    let mut out = Image::new(input.width, input.height);
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 4];
+            for (ki, &kw) in kernel.iter().enumerate() {
+                let off = ki as i32 - radius;
+                let (sx, sy) = if horizontal {
+                    ((x + off).clamp(0, w - 1), y)
+                } else {
+                    (x, (y + off).clamp(0, h - 1))
+                };
+                let p = input.pixel(sx as u32, sy as u32);
+                for c in 0..4 {
+                    acc[c] += p[c] * kw;
+                }
+            }
+            out.set(x as u32, y as u32, acc);
+        }
+    }
+    out
+}
+
+/// `Effect{Blur}` (08 §3 / K-0.2): separable Gaussian over premultiplied linear
+/// RGBA. `radius` is the sigma in pixels (registry `params.radius`). `sigma < 0.5`
+/// is a bit-exact identity (matches the GPU early-out). Operates in premultiplied
+/// space so transparent edges do not darken (same as the raster filter path).
+/// WGSL twin: two-pass `eval::Passes::gaussian_blur`.
+pub fn blur(input: &Image, radius: f32) -> Image {
+    let kernel = gaussian_kernel_1d(radius);
+    if kernel.is_empty() {
+        return input.clone();
+    }
+    let tmp = separable_blur_axis(input, &kernel, true);
+    separable_blur_axis(&tmp, &kernel, false)
+}
+
+/// `Effect{Sharpen}` (08 §3 / K-0.2): unsharp mask
+/// `out = src + amount · (src − blur(src, radius))` in premultiplied space.
+/// `amount == 0` or `radius < 0.5` is a bit-exact identity. Registry paths:
+/// `params.amount`, `params.radius`.
+pub fn sharpen(input: &Image, amount: f32, radius: f32) -> Image {
+    let amount = if amount.is_finite() { amount } else { 0.0 };
+    if amount == 0.0 {
+        return input.clone();
+    }
+    let blurred = blur(input, radius);
+    if blurred.pixels == input.pixels {
+        return input.clone();
+    }
+    let mut out = Image::new(input.width, input.height);
+    for ((o, s), b) in out
+        .pixels
+        .iter_mut()
+        .zip(input.pixels.iter())
+        .zip(blurred.pixels.iter())
+    {
+        *o = [
+            s[0] + amount * (s[0] - b[0]),
+            s[1] + amount * (s[1] - b[1]),
+            s[2] + amount * (s[2] - b[2]),
+            s[3] + amount * (s[3] - b[3]),
+        ];
+    }
+    out
+}
+
+/// `Effect{Glow}` (08 §3 / K-0.2): extract pixels whose straight Rec.709 luma
+/// exceeds `threshold`, blur that extract by `radius`, tint by `tint_linear`
+/// (straight linear RGB, alpha ignored — glow is a light add), scale by
+/// `intensity`, and screen-add over the source in premultiplied space:
+/// `out = src + glow * (1 − src)` componentwise on RGB, alpha =
+/// `src.a + glow.a * (1 − src.a)`. Registry: `params.radius/threshold/intensity/tint`.
+pub fn glow(
+    input: &Image,
+    radius: f32,
+    threshold: f32,
+    intensity: f32,
+    tint_linear: [f32; 3],
+) -> Image {
+    let threshold = if threshold.is_finite() {
+        threshold.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let intensity = if intensity.is_finite() {
+        intensity.max(0.0)
+    } else {
+        0.0
+    };
+    if intensity == 0.0 {
+        return input.clone();
+    }
+    // Bright extract: scale each premult pixel by a luma keep factor.
+    let mut extract = Image::new(input.width, input.height);
+    for (o, p) in extract.pixels.iter_mut().zip(input.pixels.iter()) {
+        let straight = unpremultiply(*p).unwrap_or([0.0; 3]);
+        let keep = if luma709(straight) >= threshold {
+            1.0
+        } else {
+            0.0
+        };
+        *o = [p[0] * keep, p[1] * keep, p[2] * keep, p[3] * keep];
+    }
+    let blurred = blur(&extract, radius);
+    let mut out = Image::new(input.width, input.height);
+    for ((o, s), g) in out
+        .pixels
+        .iter_mut()
+        .zip(input.pixels.iter())
+        .zip(blurred.pixels.iter())
+    {
+        // Tint the glow: multiply RGB by tint, scale by intensity; keep α from the blur.
+        let gr = g[0] * tint_linear[0] * intensity;
+        let gg = g[1] * tint_linear[1] * intensity;
+        let gb = g[2] * tint_linear[2] * intensity;
+        let ga = (g[3] * intensity).clamp(0.0, 1.0);
+        // Premultiplied "screen" / additive-over: src + glow*(1-src) on RGB;
+        // classic over on alpha.
+        *o = [
+            s[0] + gr * (1.0 - s[0]).max(0.0),
+            s[1] + gg * (1.0 - s[1]).max(0.0),
+            s[2] + gb * (1.0 - s[2]).max(0.0),
+            s[3] + ga * (1.0 - s[3]),
+        ];
+    }
+    out
+}
+
 /// sRGB EOTF (gamma → scene-linear), the standard breakpoint form. An authoring
 /// `Color` param (key colour, tint) is sRGB display-domain; the working space is
 /// scene-linear Rec.709 (D-09), so a key/tint colour converts on the way in.
@@ -868,6 +1037,89 @@ mod tests {
         assert!((p[3] - 1.0).abs() < 1e-4, "kept, a={}", p[3]);
         assert!((p[1] - 0.2).abs() < 1e-3, "green suppressed to mean, g={}", p[1]);
         assert!((p[0] - 0.2).abs() < 1e-3, "red untouched, r={}", p[0]);
+    }
+
+    // ── Blur / Sharpen / Glow (K-0.2) ────────────────────────────────────────
+
+    #[test]
+    fn blur_sigma_below_half_is_identity() {
+        let img = solid(
+            4,
+            4,
+            LinearColor {
+                r: 0.7,
+                g: 0.2,
+                b: 0.1,
+                a: 1.0,
+            },
+        );
+        let out = blur(&img, 0.4);
+        assert_eq!(out.pixels, img.pixels);
+    }
+
+    #[test]
+    fn blur_flattens_a_checker_edge() {
+        // 2×1: left white, right black → blur mixes them.
+        let mut img = Image::new(2, 1);
+        img.set(0, 0, [1.0, 1.0, 1.0, 1.0]);
+        img.set(1, 0, [0.0, 0.0, 0.0, 1.0]);
+        let out = blur(&img, 1.0);
+        let left = out.pixel(0, 0);
+        let right = out.pixel(1, 0);
+        assert!(left[0] < 1.0, "left pulled down by right neighbour");
+        assert!(right[0] > 0.0, "right pulled up by left neighbour");
+        // Alpha stays ~1 (both inputs opaque).
+        assert!((left[3] - 1.0).abs() < 1e-4);
+        assert!((right[3] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sharpen_zero_amount_is_identity() {
+        let img = solid(
+            4,
+            4,
+            LinearColor {
+                r: 0.4,
+                g: 0.5,
+                b: 0.6,
+                a: 1.0,
+            },
+        );
+        assert_eq!(sharpen(&img, 0.0, 2.0).pixels, img.pixels);
+    }
+
+    #[test]
+    fn sharpen_boosts_contrast_at_an_edge() {
+        let mut img = Image::new(4, 1);
+        for x in 0..2 {
+            img.set(x, 0, [0.0, 0.0, 0.0, 1.0]);
+        }
+        for x in 2..4 {
+            img.set(x, 0, [1.0, 1.0, 1.0, 1.0]);
+        }
+        let out = sharpen(&img, 1.0, 1.0);
+        // The bright side of the edge should be at least as bright as the source
+        // (unsharp boost); the dark side at most as bright.
+        assert!(out.pixel(3, 0)[0] >= img.pixel(3, 0)[0] - 1e-5);
+        assert!(out.pixel(0, 0)[0] <= img.pixel(0, 0)[0] + 1e-5);
+    }
+
+    #[test]
+    fn glow_zero_intensity_is_identity() {
+        let img = solid(
+            4,
+            4,
+            LinearColor {
+                r: 0.9,
+                g: 0.9,
+                b: 0.9,
+                a: 1.0,
+            },
+        );
+        assert_eq!(
+            glow(&img, 2.0, 0.0, 0.0, [1.0, 1.0, 1.0]).pixels,
+            img.pixels
+        );
     }
 
     #[test]

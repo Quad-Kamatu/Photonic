@@ -679,16 +679,67 @@ impl Evaluator {
                     );
                 }
             }
-            // Real effect kernels: Invert / LumaKey / ChromaKey / MaskShapeGen
-            // (08 §3), each reading its keyframe-resolved params (K-0.2), the WGSL
-            // twins of the `ops::*` kernels the CPU reference runs. Blur/Sharpen/
-            // Glow and unknown/forward-compat kinds fall through to the blit
-            // passthrough below.
+            // Real effect kernels for all seven v1 kinds (08 §3 / K-0.2), the
+            // WGSL twins of the `ops::*` kernels the CPU reference runs.
+            // Unknown/forward-compat kinds fall through to the blit passthrough.
             IrOp::Effect {
                 kind: EffectKind::Invert,
                 ..
             } => match inputs.first() {
                 Some(src) => self.passes.invert(&self.gpu, &src.texture, target),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Effect {
+                kind: EffectKind::Blur,
+                params,
+            } => match inputs.first() {
+                Some(src) => self.passes.gaussian_blur(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.radius", 0.0),
+                    logical_w,
+                    logical_h,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Effect {
+                kind: EffectKind::Sharpen,
+                params,
+            } => match inputs.first() {
+                Some(src) => self.passes.sharpen(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 0.0),
+                    params.f32_or("params.radius", 0.0),
+                    logical_w,
+                    logical_h,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Effect {
+                kind: EffectKind::Glow,
+                params,
+            } => match inputs.first() {
+                Some(src) => {
+                    let tint = params.color_or("params.tint", photonic_core::Color::WHITE);
+                    self.passes.glow(
+                        &self.gpu,
+                        &src.texture,
+                        target,
+                        params.f32_or("params.radius", 0.0),
+                        params.f32_or("params.threshold", 0.0),
+                        params.f32_or("params.intensity", 0.0),
+                        [
+                            crate::graph::ops::srgb_to_linear(tint.r),
+                            crate::graph::ops::srgb_to_linear(tint.g),
+                            crate::graph::ops::srgb_to_linear(tint.b),
+                        ],
+                        logical_w,
+                        logical_h,
+                    );
+                }
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
             IrOp::Effect {
@@ -831,6 +882,19 @@ struct Passes {
     filter_bgl: wgpu::BindGroupLayout,
     luma_key_pipeline: wgpu::RenderPipeline,
     chroma_key_pipeline: wgpu::RenderPipeline,
+    /// Separable Gaussian blur (K-0.2): tex + sampler + `BlurParams` uniform.
+    /// Shared by `Effect{Blur}` and the blur half of Sharpen/Glow. Algorithm
+    /// matches `photonic_render::pipeline::BLUR_SHADER` / `ops::blur`.
+    blur_bgl: wgpu::BindGroupLayout,
+    blur_pipeline: wgpu::RenderPipeline,
+    /// Unsharp combine (K-0.2): two textures (src, blurred) + amount uniform.
+    sharpen_bgl: wgpu::BindGroupLayout,
+    sharpen_pipeline: wgpu::RenderPipeline,
+    /// Glow extract (K-0.2): keep pixels whose straight luma ≥ threshold.
+    glow_extract_pipeline: wgpu::RenderPipeline,
+    /// Glow composite (K-0.2): screen-add tinted glow over source.
+    glow_comp_bgl: wgpu::BindGroupLayout,
+    glow_comp_pipeline: wgpu::RenderPipeline,
     /// `Effect{MaskShapeGen}` (08 §3): a 0-input generator, uniform-only BGL.
     mask_bgl: wgpu::BindGroupLayout,
     mask_shape_pipeline: wgpu::RenderPipeline,
@@ -948,6 +1012,46 @@ impl Passes {
         );
         let chroma_key_pipeline = make_pipeline(device, &filter_bgl, &chroma_key_src, "fs");
 
+        // Separable Gaussian blur (K-0.2) — WGSL twin of `ops::blur`. Uses
+        // `textureLoad` + LOGICAL dims (not physical pool-bucket size) so the
+        // kernel steps match the CPU's clamp-to-edge pixel sampling exactly.
+        // Uniform: `info = [sigma, horizontal, logical_w, logical_h]`.
+        let blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blur_bgl"),
+            entries: &[tex_entry(0), uniform_entry(1)],
+        });
+        let blur_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct BlurP {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: BlurP;\nfn at(px: i32, py: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(px, py), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let sigma = p.info.x;\n  let x = i32(pos.x); let y = i32(pos.y);\n  if (sigma < 0.5) {{ return at(x, y); }}\n  let radius = min(i32(ceil(sigma * 3.0)), 128);\n  var acc = vec4<f32>(0.0);\n  var w_total = 0.0;\n  let horiz = p.info.y > 0.5;\n  for (var k = -radius; k <= radius; k++) {{\n    let fi = f32(k);\n    let w = exp(-fi * fi / (2.0 * sigma * sigma));\n    var sx = x; var sy = y;\n    if (horiz) {{ sx = x + k; }} else {{ sy = y + k; }}\n    acc += at(sx, sy) * w;\n    w_total += w;\n  }}\n  return acc / w_total;\n}}\n"
+        );
+        let blur_pipeline = make_pipeline(device, &blur_bgl, &blur_src, "fs");
+
+        // Unsharp combine: `src + amount * (src - blurred)` (K-0.2).
+        let sharpen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sharpen_bgl"),
+            entries: &[tex_entry(0), tex_entry(1), sampler_entry(2), uniform_entry(3)],
+        });
+        let sharpen_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t_src: texture_2d<f32>;\n@group(0) @binding(1) var t_blur: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct S {{ amount: vec4<f32> }}\n@group(0) @binding(3) var<uniform> u: S;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let src = textureSample(t_src, s, i.uv);\n  let bl = textureSample(t_blur, s, i.uv);\n  return src + u.amount.x * (src - bl);\n}}\n"
+        );
+        let sharpen_pipeline = make_pipeline(device, &sharpen_bgl, &sharpen_src, "fs");
+
+        // Glow extract: zero out pixels whose straight luma is below threshold.
+        // Reuses filter_bgl (tex + sampler + params).
+        let glow_extract_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct G {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: G;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var straight = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ straight = c.rgb / c.a; }}\n  let luma = 0.2126 * straight.r + 0.7152 * straight.g + 0.0722 * straight.b;\n  let keep = select(0.0, 1.0, luma >= u.p.x);\n  return c * keep;\n}}\n"
+        );
+        let glow_extract_pipeline = make_pipeline(device, &filter_bgl, &glow_extract_src, "fs");
+
+        // Glow composite: screen-add tinted glow over source.
+        let glow_comp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("glow_comp_bgl"),
+            entries: &[tex_entry(0), tex_entry(1), sampler_entry(2), uniform_entry(3)],
+        });
+        let glow_comp_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t_src: texture_2d<f32>;\n@group(0) @binding(1) var t_glow: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct GC {{ tint: vec4<f32>, intensity: vec4<f32> }}\n@group(0) @binding(3) var<uniform> u: GC;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let src = textureSample(t_src, s, i.uv);\n  let g = textureSample(t_glow, s, i.uv);\n  let gr = g.r * u.tint.x * u.intensity.x;\n  let gg = g.g * u.tint.y * u.intensity.x;\n  let gb = g.b * u.tint.z * u.intensity.x;\n  let ga = clamp(g.a * u.intensity.x, 0.0, 1.0);\n  return vec4<f32>(\n    src.r + gr * max(1.0 - src.r, 0.0),\n    src.g + gg * max(1.0 - src.g, 0.0),\n    src.b + gb * max(1.0 - src.b, 0.0),\n    src.a + ga * (1.0 - src.a)\n  );\n}}\n"
+        );
+        let glow_comp_pipeline = make_pipeline(device, &glow_comp_bgl, &glow_comp_src, "fs");
+
         // MaskShapeGen (08 §3): a uniform-only ellipse-matte generator (no input).
         // `center = [cx, cy, sx, sy]`, `aux = [cos(-rot), sin(-rot), inner, pad]`
         // (inner = 1 − max(feather, eps)). WGSL twin of `ops::mask_shape`; uv is
@@ -1005,6 +1109,13 @@ impl Passes {
             filter_bgl,
             luma_key_pipeline,
             chroma_key_pipeline,
+            blur_bgl,
+            blur_pipeline,
+            sharpen_bgl,
+            sharpen_pipeline,
+            glow_extract_pipeline,
+            glow_comp_bgl,
+            glow_comp_pipeline,
             mask_bgl,
             mask_shape_pipeline,
             merge_pipeline,
@@ -1137,6 +1248,222 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.invert_pipeline, &bind, target);
+    }
+
+    /// Scratch texture matching `like`'s size for multi-pass effects (blur H/V).
+    fn temp_like(gpu: &GpuContext, like: &wgpu::Texture) -> wgpu::Texture {
+        gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("eval_temp"),
+            size: like.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    /// One axis of the separable Gaussian (`horizontal` = H pass).
+    fn blur_axis(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        sigma: f32,
+        horizontal: bool,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let uniform = [
+            sigma,
+            if horizontal { 1.0 } else { 0.0 },
+            logical_w as f32,
+            logical_h as f32,
+        ];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("blur_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blur_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.blur_pipeline, &bind, target);
+    }
+
+    /// `Effect{Blur}` — dual-pass separable Gaussian (H then V). `sigma < 0.5`
+    /// is a blit (matches `ops::blur` / the shader early-out). Each axis is a
+    /// separate submit; we `poll(Wait)` between them so the V pass samples a
+    /// finished H target (no cross-pass race on llvmpipe/soft adapters).
+    fn gaussian_blur(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        sigma: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let sigma = if sigma.is_finite() { sigma.max(0.0) } else { 0.0 };
+        if sigma < 0.5 {
+            self.blit(gpu, src, target);
+            return;
+        }
+        let tmp = Self::temp_like(gpu, target);
+        self.blur_axis(gpu, src, &tmp, sigma, true, logical_w, logical_h);
+        gpu.device().poll(wgpu::Maintain::Wait);
+        self.blur_axis(gpu, &tmp, target, sigma, false, logical_w, logical_h);
+    }
+
+    /// `Effect{Sharpen}` — unsharp mask via blur intermediate + combine pass.
+    #[allow(clippy::too_many_arguments)]
+    fn sharpen(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amount: f32,
+        radius: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let amount = if amount.is_finite() { amount } else { 0.0 };
+        if amount == 0.0 {
+            self.blit(gpu, src, target);
+            return;
+        }
+        let blurred = Self::temp_like(gpu, target);
+        self.gaussian_blur(gpu, src, &blurred, radius, logical_w, logical_h);
+        gpu.device().poll(wgpu::Maintain::Wait);
+        let sv = src.create_view(&Default::default());
+        let bv = blurred.create_view(&Default::default());
+        let uniform = [amount, 0.0, 0.0, 0.0];
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("sharpen_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sharpen_bg"),
+            layout: &self.sharpen_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&bv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.sharpen_pipeline, &bind, target);
+    }
+
+    /// `Effect{Glow}` — extract brights → blur → tinted screen-add over source.
+    #[allow(clippy::too_many_arguments)]
+    fn glow(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        radius: f32,
+        threshold: f32,
+        intensity: f32,
+        tint_linear: [f32; 3],
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let intensity = if intensity.is_finite() {
+            intensity.max(0.0)
+        } else {
+            0.0
+        };
+        if intensity == 0.0 {
+            self.blit(gpu, src, target);
+            return;
+        }
+        let threshold = if threshold.is_finite() {
+            threshold.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let extract = Self::temp_like(gpu, target);
+        let uniform = [threshold, 0.0, 0.0, 0.0];
+        self.run_filter(gpu, &self.glow_extract_pipeline, src, &extract, &uniform);
+        gpu.device().poll(wgpu::Maintain::Wait);
+        let blurred = Self::temp_like(gpu, target);
+        self.gaussian_blur(gpu, &extract, &blurred, radius, logical_w, logical_h);
+        gpu.device().poll(wgpu::Maintain::Wait);
+        let sv = src.create_view(&Default::default());
+        let gv = blurred.create_view(&Default::default());
+        let u = [
+            tint_linear[0],
+            tint_linear[1],
+            tint_linear[2],
+            0.0,
+            intensity,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("glow_comp_uniform"),
+                contents: bytemuck::cast_slice(&u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glow_comp_bg"),
+            layout: &self.glow_comp_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&gv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.glow_comp_pipeline, &bind, target);
     }
 
     /// `Effect{LumaKey}` pass — tex + sampler + a `[threshold, hi, invert, pad]`
@@ -2287,6 +2614,88 @@ mod tests {
                         ("params.size_y", PropValue::Float(0.5)),
                         ("params.rotation", PropValue::Float(0.0)),
                         ("params.feather", PropValue::Float(0.2)),
+                    ],
+                ))
+            },
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{Blur}` (K-0.2): a uniform solid is a fixed
+    /// point of the Gaussian, locking the dual-pass path. Tolerance is looser
+    /// than 1e-3 because the multi-tap f16 accumulation drifts ~1.5e-3 on α≈1.
+    #[test]
+    fn blur_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{EffectKind, PropValue};
+        let compiled = solid_project_graph(
+            Color {
+                r: 0.6,
+                g: 0.3,
+                b: 0.1,
+                a: 1.0,
+            },
+            |clip| {
+                clip.effects.push(effect_with(
+                    EffectKind::Blur,
+                    &[("params.radius", PropValue::Float(1.5))],
+                ))
+            },
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{Sharpen}` (K-0.2) on a uniform solid.
+    #[test]
+    fn sharpen_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{EffectKind, PropValue};
+        let compiled = solid_project_graph(
+            Color {
+                r: 0.4,
+                g: 0.5,
+                b: 0.6,
+                a: 1.0,
+            },
+            |clip| {
+                clip.effects.push(effect_with(
+                    EffectKind::Sharpen,
+                    &[
+                        ("params.amount", PropValue::Float(1.0)),
+                        ("params.radius", PropValue::Float(1.0)),
+                    ],
+                ))
+            },
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{Glow}` (K-0.2): threshold 0 keeps every pixel
+    /// in the extract, so a bright solid blooms under intensity.
+    #[test]
+    fn glow_solid_gpu_matches_cpu_reference() {
+        use photonic_core::timeline::{EffectKind, PropValue};
+        let compiled = solid_project_graph(
+            Color {
+                r: 0.9,
+                g: 0.85,
+                b: 0.7,
+                a: 1.0,
+            },
+            |clip| {
+                clip.effects.push(effect_with(
+                    EffectKind::Glow,
+                    &[
+                        ("params.radius", PropValue::Float(1.0)),
+                        ("params.threshold", PropValue::Float(0.0)),
+                        ("params.intensity", PropValue::Float(0.5)),
+                        (
+                            "params.tint",
+                            PropValue::Color(Color {
+                                r: 1.0,
+                                g: 1.0,
+                                b: 1.0,
+                                a: 1.0,
+                            }),
+                        ),
                     ],
                 ))
             },

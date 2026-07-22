@@ -12,7 +12,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **03 §4.5.3** grade operand space (A-3) | ✅ done | `a05ec8e` | grade ops run straight-alpha (unpremult→op→repremult); shared `ALPHA_EPS` with GPU shader |
 | **03 §4.5.4** live canvas linear (A-1) | ✅ done | `5a62494` | document renders to offscreen sRGB target, blitted into egui; canvas blends in linear like headless. *Follow-up:* CPU compositor isolated-layer path is P7-deferred (§4.3) |
 | **26 §8 K-0.1** export wiring | ✅ done | `fca5eda` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
-| **26 §8 K-0.2** render passthrough effects | 🟡 partial | `fca5eda` | `ResolvedParams` real+hashed for **all** effects; LumaKey/ChromaKey/MaskShapeGen wired CPU+GPU. *Remaining:* Blur/Sharpen/Glow (need golden/video re-bless + shared blur primitive) |
+| **26 §8 K-0.2** render passthrough effects | ✅ done | `fca5eda`+*(this commit)* | all 6 declared effects render: Luma/Chroma/Mask + Blur/Sharpen/Glow; shared separable Gaussian (`ops::blur` + dual-pass GPU `textureLoad`); CPU/GPU parity |
 | **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `9b2ec60` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
 | **26 §8 K-0.4** Wipe/Push passes | ✅ done | `ca6538b` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
 | **26 §8 K-0.5** `lut_provider` threading | ✅ done | `ca6538b` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
@@ -116,7 +116,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 
 | ID | Status | Live residual / gate | Owner |
 |---|---|---|---|
-| K-0 | partial | **7/9 seams closed** (K-0.1/0.3/0.4/0.5/0.6/0.9 done; K-0.2 partial 3/6 kernels). **Open:** K-0.7 export-audio mux + loudness; K-0.8 `Probe` wiring. See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
+| K-0 | partial | **8/9 seams closed** (K-0.1–0.6 + 0.9 done). **Open:** K-0.7 export-audio mux + loudness; K-0.8 `Probe` wiring. See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
 | K-A | open | Preview rendering ([33](33-timeline-preview-render.md)), marker depth ([35 §1](35-model-decisions.md#1-markers)), spacer, snaps, groups, **timecode as a first-class concept**, duration dialog, grab-item, split-audio, subclips, track compositing, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
 | K-B | open | Track/master/asset effect stacks, effect zones, presets, compare view, expressions, luma wipes, masking subgraph, roto, keyframe interchange, paste-attributes, easing presets, freeze frame, alpha view. **K-B16 — bridging the ~61 existing `raster::` kernels into the video catalogue — is the largest single capability win in the document** | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |

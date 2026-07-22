@@ -138,12 +138,30 @@ fn eval_op(
             Some(input) => ops::transform2d(input, *mat, *sampling),
             None => Image::new(cw, ch),
         },
-        // Real kernels: Invert / LumaKey / ChromaKey / MaskShapeGen (08 §3), each
-        // reading its keyframe-resolved `ResolvedParams` (K-0.2). Blur / Sharpen /
-        // Glow remain passthrough markers here (their kernels are pending); an
-        // unknown/forward-compat kind also passes through (39 §2.2).
+        // Real kernels for all seven v1 effects (08 §3 / K-0.2). An
+        // unknown/forward-compat kind passes through (39 §2.2).
         IrOp::Effect { kind, params } => match kind {
             EffectKind::Invert => ops::invert(&in0()),
+            EffectKind::Blur => ops::blur(&in0(), params.f32_or("params.radius", 0.0)),
+            EffectKind::Sharpen => ops::sharpen(
+                &in0(),
+                params.f32_or("params.amount", 0.0),
+                params.f32_or("params.radius", 0.0),
+            ),
+            EffectKind::Glow => {
+                let tint = params.color_or("params.tint", photonic_core::Color::WHITE);
+                ops::glow(
+                    &in0(),
+                    params.f32_or("params.radius", 0.0),
+                    params.f32_or("params.threshold", 0.0),
+                    params.f32_or("params.intensity", 0.0),
+                    [
+                        ops::srgb_to_linear(tint.r),
+                        ops::srgb_to_linear(tint.g),
+                        ops::srgb_to_linear(tint.b),
+                    ],
+                )
+            }
             EffectKind::LumaKey => {
                 let img = in0();
                 ops::luma_key(
@@ -182,6 +200,8 @@ fn eval_op(
                 params.f32_or("params.rotation", 0.0),
                 params.f32_or("params.feather", 0.0),
             ),
+            EffectKind::Unknown(_) => in0(),
+            // `#[non_exhaustive]`: any future kind is inert until a kernel lands.
             _ => in0(),
         },
         // Real kernel: the resolved grade stack (07 §3), the GPU-parity golden.
