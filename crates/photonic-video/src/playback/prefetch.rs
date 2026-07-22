@@ -9,6 +9,7 @@
 use photonic_core::timeline::{AssetId, ClipSource, FrameRate, Sequence, Tick, TrackKind};
 
 use crate::decode::scheduler::DecodeSource;
+use crate::graph::source_range::FrameRange;
 
 // ── Cut-ahead scan (pure) ───────────────────────────────────────────────────
 
@@ -52,6 +53,28 @@ pub fn cut_ahead_targets(seq: &Sequence, t: Tick, lead: Tick) -> Vec<CutAheadTar
 /// Default cut-ahead lead in frames (session uses this × ticks_per_frame).
 /// At 30 fps, 24 frames ≈ 800 ms — meets the ≥500 ms spirit of 02 §3.
 pub const CUT_AHEAD_LEAD_FRAMES: i64 = 24;
+
+/// E-1 / 32 §1: derive a decode look-ahead from the compiled graph's source
+/// range union. Temporal nodes (deinterlace, future motion blur) expand the
+/// window; pure graphs return zero extra lead so cut-ahead stays the default.
+///
+/// Returns the max distance from `playhead` to either end of `range`, in ticks
+/// (never negative). Callers `max` this with the cut-ahead lead.
+pub fn lead_from_source_range(range: FrameRange, playhead: Tick) -> Tick {
+    let back = playhead.0.saturating_sub(range.first.0);
+    let fwd = range.last.0.saturating_sub(playhead.0);
+    Tick(back.max(fwd).max(0))
+}
+
+/// Combine the fixed cut-ahead lead with the E-1 graph-driven window.
+pub fn combined_prefetch_lead(
+    cut_ahead: Tick,
+    source_range: FrameRange,
+    playhead: Tick,
+) -> Tick {
+    let from_graph = lead_from_source_range(source_range, playhead);
+    Tick(cut_ahead.0.max(from_graph.0))
+}
 
 /// Frames decoded per pump call — sized so one engine-loop iteration tops the
 /// ring toward capacity without monopolizing the present thread (poll ≈ 4 ms).
@@ -118,6 +141,24 @@ mod tests {
     use photonic_core::timeline::{
         AssetKind, Clip, ClipSource, FrameRate, MediaAsset, Sequence, Track, TrackKind,
     };
+
+    #[test]
+    fn lead_from_source_range_is_zero_for_identity() {
+        let ph = Tick(1000);
+        let r = FrameRange::identity(ph);
+        assert_eq!(lead_from_source_range(r, ph), Tick(0));
+    }
+
+    #[test]
+    fn lead_from_source_range_widens_for_deinterlace_window() {
+        let ph = Tick(100);
+        let r = FrameRange::span(Tick(99), Tick(101));
+        assert_eq!(lead_from_source_range(r, ph), Tick(1));
+        let combined = combined_prefetch_lead(Tick(24), r, ph);
+        assert_eq!(combined, Tick(24)); // cut-ahead still wins
+        let wide = FrameRange::span(Tick(0), Tick(200));
+        assert_eq!(combined_prefetch_lead(Tick(10), wide, ph), Tick(100));
+    }
 
     #[test]
     fn cut_ahead_finds_next_clip_within_lead() {

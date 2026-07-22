@@ -584,6 +584,21 @@ impl Evaluator {
                 self.passes
                     .fill(&self.gpu, target, [color.r, color.g, color.b, color.a]);
             }
+            IrOp::Deinterlace {
+                method,
+                field_order,
+            } => match inputs.first() {
+                Some(src) => self.passes.deinterlace(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    *method,
+                    *field_order,
+                    logical_w,
+                    logical_h,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             IrOp::Merge { mode, opacity } => match (inputs.first(), inputs.get(1)) {
                 (Some(top), Some(bottom)) => {
                     self.passes.merge(
@@ -1190,6 +1205,8 @@ struct Passes {
     transform_bgl: wgpu::BindGroupLayout,
     /// `Effect{Invert}` (08 §3): shares the blit bind-group layout (tex + sampler).
     invert_pipeline: wgpu::RenderPipeline,
+    /// K-G6 deinterlace: textureLoad + method/order/dims uniform (reuses transform_bgl).
+    deinterlace_pipeline: wgpu::RenderPipeline,
     /// `Effect{LumaKey}`/`Effect{ChromaKey}` (08 §3): a filter BGL (tex + sampler
     /// + a params uniform), the WGSL twins of `ops::luma_key`/`ops::chroma_key`.
     filter_bgl: wgpu::BindGroupLayout,
@@ -1336,6 +1353,15 @@ impl Passes {
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var straight = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ straight = clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0)); }}\n  let inv = (vec3<f32>(1.0) - straight) * c.a;\n  return vec4<f32>(inv, c.a);\n}}\n"
         );
         let invert_pipeline = make_pipeline(device, &blit_bgl, &invert_src, "fs");
+
+        // K-G6 deinterlace: WGSL twin of `ops::deinterlace` spatial methods.
+        // Uniform `info = [method, field_order, logical_w, logical_h]` —
+        // method 0=OneField, 1=LinearBlend, 2=YadifSpatial; field_order 0=TFF, 1=BFF.
+        // Reuses transform_bgl (tex + uniform).
+        let deinterlace_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn at(x: i32, y: i32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  return textureLoad(t, clamp(vec2<i32>(x, y), vec2<i32>(0), hi), 0);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  if (pos.x >= p.info.z || pos.y >= p.info.w) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x);\n  let y = i32(pos.y);\n  let method = i32(p.info.x + 0.5);\n  let keep_even = p.info.y < 0.5;\n  let even = (y % 2) == 0;\n  if (method == 1) {{\n    let a = at(x, y - 1);\n    let b = at(x, y);\n    let c = at(x, y + 1);\n    return (a + b * 2.0 + c) * 0.25;\n  }}\n  if (even == keep_even) {{ return at(x, y); }}\n  if (method == 2) {{\n    let yp = y - 1; let yn = y + 1;\n    let above = at(x, yp); let below = at(x, yn);\n    let diag_a = (at(x - 1, yp) + at(x + 1, yn)) * 0.5;\n    let diag_b = (at(x + 1, yp) + at(x - 1, yn)) * 0.5;\n    let vert = (above + below) * 0.5;\n    // Per-channel median of three predictors (spatial edge adapt).\n    var out = vec4<f32>(0.0);\n    for (var c = 0; c < 4; c++) {{\n      let v0 = vert[c]; let v1 = diag_a[c]; let v2 = diag_b[c];\n      let mn = min(v0, min(v1, v2));\n      let mx = max(v0, max(v1, v2));\n      out[c] = v0 + v1 + v2 - mn - mx;\n    }}\n    return out;\n  }}\n  return (at(x, y - 1) + at(x, y + 1)) * 0.5;\n}}\n"
+        );
+        let deinterlace_pipeline = make_pipeline(device, &transform_bgl, &deinterlace_src, "fs");
 
         // Filter BGL (tex + sampler + params uniform) — shared by LumaKey/ChromaKey.
         let filter_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1632,6 +1658,7 @@ impl Passes {
             transform_pipeline,
             transform_bgl,
             invert_pipeline,
+            deinterlace_pipeline,
             filter_bgl,
             luma_key_pipeline,
             chroma_key_pipeline,
@@ -1803,6 +1830,54 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.invert_pipeline, &bind, target);
+    }
+
+    /// K-G6 deinterlace — WGSL twin of `ops::deinterlace`.
+    fn deinterlace(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        method: crate::graph::ir::DeinterlaceMethod,
+        field_order: crate::graph::ir::FieldOrder,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        use crate::graph::ir::{DeinterlaceMethod, FieldOrder};
+        let method_f = match method {
+            DeinterlaceMethod::OneField => 0.0,
+            DeinterlaceMethod::LinearBlend => 1.0,
+            DeinterlaceMethod::YadifSpatial => 2.0,
+        };
+        let order_f = match field_order {
+            FieldOrder::TopFirst => 0.0,
+            FieldOrder::BottomFirst => 1.0,
+        };
+        let view = src.create_view(&Default::default());
+        let ubuf = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("deinterlace_u"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let info = [method_f, order_f, logical_w as f32, logical_h as f32];
+        gpu.queue()
+            .write_buffer(&ubuf, 0, bytemuck::cast_slice(&info));
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("deinterlace_bg"),
+            layout: &self.transform_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: ubuf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.deinterlace_pipeline, &bind, target);
     }
 
     /// Scratch texture matching `like`'s size for multi-pass effects (blur H/V).

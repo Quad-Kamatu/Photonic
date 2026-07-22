@@ -48,11 +48,15 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-F5** hardware encoders | ✅ done | `f867e95` | probe NVENC/VAAPI/VideoToolbox/QSV; prefer-HW fail-closed; detection report + raw-args hatch |
 | **32 §4** playback policy | ✅ done | `f867e95` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
 | **32 §7** scale-invariance guard | ✅ done | `f867e95` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
-| **K-G6** deinterlace node | ✅ done | `466fbeb` | `IrOp::Deinterlace` (OneField / LinearBlend / YadifSpatial); CPU kernels; source-range `[out−1,out+1]`; Serial threading; auto-insert after `DecodeVideo` when probe is interlaced. GPU blit until WGSL twin lands |
+| **K-G6** deinterlace node | ✅ done | `466fbeb`+`b88aadd` | `IrOp::Deinterlace` CPU + **GPU WGSL twins**; source-range; auto-insert for interlaced assets |
 | **E-2** analysis foundation | ✅ done (substrate) | `466fbeb` | `graph::analysis` — typed `AnalysisResult` (Histogram/Levels), content-hash cache, pull-based pure functions. Consumers (scopes/scene/loudness) wire next |
 | **K-E4** extract frame | ✅ done | `466fbeb` | `export::extract_frame` PNG path (export colour convert); GUI `video.extract_frame` / `…_to_bin` (Ctrl+Shift+E) via program-monitor readback |
+| **E-1** prefetch ← source-range | ✅ done | `b88aadd` | `lead_from_source_range` / `combined_prefetch_lead`; session cut-ahead lead = max(cut-ahead, graph window) so deinterlace expands decode warm |
+| **K-G6** GPU deinterlace | ✅ done | `b88aadd` | WGSL twin of spatial methods (OneField / LinearBlend / YadifSpatial) on `IrOp::Deinterlace` — preview no longer blit-combs |
+| **K-E1** vectorscope guides | ✅ done | `b88aadd` | I/Q lines + 75%/100% boxes + labels on scopes panel vectorscope overlay |
+| **K-C2** usage count | ✅ done (slice) | `b88aadd` | derived clip-reference count on media pool (`×N` / ON TL badge); tags/ratings still open |
 
-**Not yet started (next bands):** K-A/K-C/K-D residual bands; E-2 consumers; K-G6 GPU deinterlace WGSL; legal-or-fixture-blocked G/D items.
+**Not yet started (next bands):** K-A residual; K-C tags/ratings/relink/archive; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
 
 ## 1. Authority and precedence
 
@@ -140,15 +144,15 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-A | open | Preview rendering ([33](33-timeline-preview-render.md)), marker depth ([35 §1](35-model-decisions.md#1-markers)), spacer, snaps, groups, **timecode as a first-class concept**, duration dialog, grab-item, split-audio, subclips, track compositing, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
 | K-B | partial | Track/master/asset stacks etc. still open. **K-B16 catalogue bridge done** (38 ids, util, multi-point curves, GPU twins) | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
-| K-C | partial | Substrate exists (`validate_attach`, `JobRegistry`, sidecar cache). Open: clip-jobs catalogue, asset tags/ratings, generator clips, archiving + cache pane, **relink workflow**, import-time media triage, still-cache size keying. K-C3 external proxies belongs to **G-15**, not here; K-C4 excludes image sequences, which are **D-6** | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
+| K-C | partial | Substrate + **usage-count badge**. Open: clip-jobs, tags/ratings, generators, archive/cache pane, relink, import triage, still-cache keying. K-C3 → G-15; K-C4 image-seq → D-6 | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
 | K-D | partial | `AudioStreamInfo`/`ChannelMap` probed; mixer and DSP written but unbound. Open: per-stream/per-channel handling, stems export, **boundary declick (K-D5)** | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
-| K-E | partial | Histogram/waveform/parade/vectorscope ship; **extract-frame done**. Open: I/Q lines, 75% box, YUV/YPbPr, audio spectrum, per-clip tap, grids | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
+| K-E | partial | Scopes + extract-frame + **I/Q/75% vectorscope guides**. Open: YUV/YPbPr switch, audio spectrum, per-clip tap, grids | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
 | K-F | partial | **K-F1–F5 done** for the export/render band (queue + inspector, multi-format/marker, job options, HW preflight). Remaining polish: sleep-inhibit, add-to-bin, burn-in overlay, 2-pass, K-F7 one-eval-many-outputs | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
 | K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection + deinterlace node landed**; profiles/notes/templates still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |
-| E-1 | partial | `source_range_for_op` / `graph_source_range` identity defaults + soft cap; prefetch not yet driven by the union; temporal nodes (deinterlace) will extend arms | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |
+| E-1 | partial | source-range contract + **prefetch driven by graph union**; TimeOffset still compile-expanded | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |
 | E-2 | partial | Analysis substrate (`AnalysisResult`, cache, histogram/levels); consumers still open | [32 §2](32-engine-contracts.md#2-analysis-nodes), [31 §5](31-audio-architecture.md#5-pull-based-analysis) |
 | E-3 | partial | Manifest table + migration live (38 catalogue ids); kernel binding still video-side by id | [30 §2](30-effect-catalogue.md#2-the-manifest) |
 | E-4 | done | `threading_for_op` declared for every current `IrOp` | [32 §3](32-engine-contracts.md#3-threading-capability) |

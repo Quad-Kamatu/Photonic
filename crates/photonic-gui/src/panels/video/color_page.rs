@@ -1341,17 +1341,72 @@ fn draw_vectorscope(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex
             }
         }
     }
-    scope_image(ui, "scope_vectorscope", n, n, pixels, Some(draw_skin_line));
+    scope_image(
+        ui,
+        "scope_vectorscope",
+        n,
+        n,
+        pixels,
+        Some(draw_vectorscope_guides),
+    );
 }
 
-/// Overlay the standard I-line (skin-tone) reference from the vectorscope centre.
-fn draw_skin_line(ui: &Ui, painter: &egui::Painter, rect: Rect) {
+/// K-E1 vectorscope guides: I/Q axes (skin-tone on I), 75% / 100% boxes, and
+/// the outer chroma circle. Angles are NTSC-derived in degrees from +Cb.
+fn draw_vectorscope_guides(ui: &Ui, painter: &egui::Painter, rect: Rect) {
     let center = rect.center();
-    let ang = 123.0_f32.to_radians();
-    let dir = vec2(ang.cos(), -ang.sin());
-    let end = center + dir * (rect.width() * 0.45);
-    painter.line_segment([center, end], Stroke::new(1.0, muted(ui)));
-    painter.circle_stroke(center, rect.width() * 0.45, Stroke::new(0.5, border(ui)));
+    let r100 = rect.width() * 0.45;
+    let r75 = r100 * 0.75;
+    let stroke_soft = Stroke::new(0.5, border(ui));
+    let stroke_i = Stroke::new(1.2, Color32::from_rgb(0xE8, 0xB0, 0x70)); // warm skin
+    let stroke_q = Stroke::new(1.0, Color32::from_rgb(0x70, 0xB0, 0xE8)); // cool Q
+
+    // 100% outer circle + 75% broadcast-safe box (square inscribed at 0.75 radius).
+    painter.circle_stroke(center, r100, stroke_soft);
+    let box75 = Rect::from_center_size(center, vec2(r75 * 2.0 * 0.7071, r75 * 2.0 * 0.7071));
+    painter.rect_stroke(box75, 0.0, Stroke::new(0.8, Color32::from_rgb(0x90, 0x90, 0x70)));
+    // Fainter 100% box for the full legal box.
+    let box100 = Rect::from_center_size(center, vec2(r100 * 2.0 * 0.7071, r100 * 2.0 * 0.7071));
+    painter.rect_stroke(box100, 0.0, stroke_soft);
+
+    // I-line (≈123°) — skin tones; Q-line is perpendicular (≈33°).
+    let i_ang = 123.0_f32.to_radians();
+    let q_ang = 33.0_f32.to_radians();
+    let i_dir = vec2(i_ang.cos(), -i_ang.sin());
+    let q_dir = vec2(q_ang.cos(), -q_ang.sin());
+    painter.line_segment(
+        [center - i_dir * r100, center + i_dir * r100],
+        stroke_i,
+    );
+    painter.line_segment(
+        [center - q_dir * r100, center + q_dir * r100],
+        stroke_q,
+    );
+    // Tiny labels near the rim.
+    let i_label = center + i_dir * (r100 * 0.92);
+    let q_label = center + q_dir * (r100 * 0.92);
+    painter.text(
+        i_label,
+        egui::Align2::CENTER_CENTER,
+        "I",
+        egui::FontId::proportional(10.0),
+        stroke_i.color,
+    );
+    painter.text(
+        q_label,
+        egui::Align2::CENTER_CENTER,
+        "Q",
+        egui::FontId::proportional(10.0),
+        stroke_q.color,
+    );
+    // 75% label on the box corner.
+    painter.text(
+        box75.right_top() + vec2(-2.0, 2.0),
+        egui::Align2::RIGHT_TOP,
+        "75%",
+        egui::FontId::proportional(9.0),
+        muted(ui),
+    );
 }
 
 /// Upload a scope image and paint it square, with an optional overlay.

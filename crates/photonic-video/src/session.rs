@@ -1162,7 +1162,16 @@ impl EngineThread {
                 // ring instead of cold-starting (transparent flicker). Only while
                 // playing — a paused/scrubbing playhead has no imminent cut.
                 if self.controller.is_playing() {
-                    let lead = Tick(seq.frame_rate.ticks_per_frame().0 * CUT_AHEAD_LEAD_FRAMES);
+                    // E-1: cut-ahead lead is max(fixed cut-ahead, graph source-range
+                    // window) so temporal nodes (deinterlace …) expand decode warm.
+                    let cut = Tick(seq.frame_rate.ticks_per_frame().0 * CUT_AHEAD_LEAD_FRAMES);
+                    let graph_range =
+                        crate::graph::source_range::graph_source_range(&compiled.graph, t);
+                    let lead = crate::playback::prefetch::combined_prefetch_lead(
+                        cut,
+                        graph_range,
+                        t,
+                    );
                     self.media.prefetch_upcoming(seq, t, lead, quality);
                 }
             }

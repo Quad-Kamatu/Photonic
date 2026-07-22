@@ -558,6 +558,28 @@ pub fn assets_in_bin(pool: &MediaPool, bin: Option<BinId>) -> Vec<&MediaAsset> {
     out
 }
 
+/// K-C2: how many timeline clips reference `asset` across all sequences
+/// (derived query — not stored). Pure over the project graph.
+pub fn asset_usage_count(
+    project: &photonic_core::timeline::TimelineProject,
+    asset: AssetId,
+) -> usize {
+    let mut n = 0usize;
+    for seq in project.sequences.values() {
+        for track in seq.tracks() {
+            for clip in &track.clips {
+                if matches!(
+                    &clip.source,
+                    photonic_core::timeline::ClipSource::Asset { asset: a } if *a == asset
+                ) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
 fn kind_glyph(kind: AssetKind) -> &'static str {
     match kind {
         AssetKind::Video => ph::FILM_STRIP,
@@ -711,14 +733,10 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
 
     // ── Asset list / grid ───────────────────────────────────────────────────
     let assets = assets_in_bin(pool, ctx.media_ui.current_bin);
-    // Assets referenced by any clip on any sequence — badged "ON TL" so the user
-    // can tell which imported media is actually placed on the timeline.
-    let used_on_timeline: std::collections::HashSet<_> = project
-        .sequences
-        .values()
-        .flat_map(|s| s.video_tracks.iter().chain(s.audio_tracks.iter()))
-        .flat_map(|t| t.clips.iter())
-        .filter_map(|c| c.source.asset())
+    // K-C2 usage counts: pure derived query over timeline clips.
+    let usage: std::collections::HashMap<AssetId, usize> = assets
+        .iter()
+        .map(|a| (a.id, asset_usage_count(project, a.id)))
         .collect();
     if assets.is_empty() && ctx.media_ui.importing == 0 {
         ui.label(
@@ -734,14 +752,14 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             if ctx.media_ui.grid_view {
                 ui.horizontal_wrapped(|ui| {
                     for asset in &assets {
-                        let used = used_on_timeline.contains(&asset.id);
-                        draw_asset_cell(ui, ctx, asset, true, &pool.bins, used);
+                        let n = usage.get(&asset.id).copied().unwrap_or(0);
+                        draw_asset_cell(ui, ctx, asset, true, &pool.bins, n);
                     }
                 });
             } else {
                 for asset in &assets {
-                    let used = used_on_timeline.contains(&asset.id);
-                    draw_asset_cell(ui, ctx, asset, false, &pool.bins, used);
+                    let n = usage.get(&asset.id).copied().unwrap_or(0);
+                    draw_asset_cell(ui, ctx, asset, false, &pool.bins, n);
                 }
             }
         });
@@ -783,13 +801,14 @@ fn draw_bin_tree(
 
 /// One asset row (list) or tile (grid): kind glyph (thumbnail seam), name,
 /// probe metadata, offline/proxy badges, drag source + context menu.
+/// `usage` is the K-C2 clip-reference count (0 = unused).
 fn draw_asset_cell(
     ui: &mut Ui,
     ctx: &mut PropPanelCtx,
     asset: &MediaAsset,
     grid: bool,
     bins: &[MediaBin],
-    used: bool,
+    usage: usize,
 ) {
     let name = asset_display_name(asset);
     let offline = asset_is_offline(asset);
@@ -822,7 +841,7 @@ fn draw_asset_cell(
                             ui.label(egui::RichText::new(kind_glyph(asset.kind)).size(28.0));
                         }
                         ui.label(egui::RichText::new(&name).small());
-                        badges(ui, asset, offline, used);
+                        badges(ui, asset, offline, usage);
                     });
                 } else {
                     ui.horizontal(|ui| {
@@ -844,7 +863,7 @@ fn draw_asset_cell(
                         // (they used to draw into the same pixels).
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(egui::RichText::new(probe_summary(asset)).weak().small());
-                            badges(ui, asset, offline, used);
+                            badges(ui, asset, offline, usage);
                             ui.add(egui::Label::new(&name).truncate());
                         });
                     });
@@ -933,15 +952,23 @@ fn move_to_bin_items(
     }
 }
 
-fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, used: bool) {
-    if used {
+fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, usage: usize) {
+    if usage > 0 {
+        let label = if usage == 1 {
+            "ON TL".to_string()
+        } else {
+            format!("×{usage}")
+        };
         ui.label(
-            egui::RichText::new("ON TL")
+            egui::RichText::new(label)
                 .small()
                 .strong()
                 .color(egui::Color32::from_rgb(120, 200, 140)),
         )
-        .on_hover_text("Used on the timeline");
+        .on_hover_text(format!(
+            "Used on the timeline ({usage} clip{})",
+            if usage == 1 { "" } else { "s" }
+        ));
     }
     if offline {
         ui.label(
@@ -1037,6 +1064,38 @@ mod tests {
     }
 
     #[test]
+    fn usage_count_counts_clip_refs() {
+        use photonic_core::timeline::{
+            Clip, ClipSource, FrameRate, Sequence, TimelineProject, Track, TrackKind, Tick,
+        };
+        let mut project = TimelineProject::new();
+        let id = AssetId::new();
+        let other = AssetId::new();
+        let mut seq = Sequence::new("S", FrameRate::FPS_30, 320, 180);
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset: id },
+            Tick::ZERO,
+            Tick(100),
+        ));
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset: id },
+            Tick(100),
+            Tick(100),
+        ));
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset: other },
+            Tick(200),
+            Tick(100),
+        ));
+        seq.video_tracks.push(track);
+        let sid = seq.id;
+        project.sequences.insert(sid, seq);
+        assert_eq!(asset_usage_count(&project, id), 2);
+        assert_eq!(asset_usage_count(&project, other), 1);
+        assert_eq!(asset_usage_count(&project, AssetId::new()), 0);
+    }
+
     fn probe_summary_surfaces_interlaced_scan() {
         use photonic_core::timeline::{
             FrameRate, MediaProbe, ProbedColor, ScanType, VideoStreamInfo,
