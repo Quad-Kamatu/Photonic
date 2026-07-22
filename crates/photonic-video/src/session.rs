@@ -250,6 +250,21 @@ pub struct EngineStatus {
     /// until the session's first `EngineCmd::Export`. The GUI export dialog
     /// polls this wait-free.
     pub export: Option<ExportProgressSnapshot>,
+    /// Master-bus output meter (G-4): linear peak/RMS per channel `[L, R]`,
+    /// sampled from the mixer feeder's `StereoMeter` each status publish.
+    /// `None` when no feeder is running (paused / no audio device).
+    pub master_level: Option<MasterMeterSnapshot>,
+    /// Total graph latency in samples (31 §3): max track-path latency + master
+    /// chain. Published for A/V clock offset; 0 when no feeder is running.
+    pub graph_latency_samples: u32,
+}
+
+/// Wait-free master meter snapshot (G-4 / 09 §8). Linear amplitude, not dB —
+/// the GUI converts for display (same unit as `StereoMeter::peak`/`rms`).
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct MasterMeterSnapshot {
+    pub peak: [f32; 2],
+    pub rms: [f32; 2],
 }
 
 impl Default for EngineStatus {
@@ -270,6 +285,8 @@ impl Default for EngineStatus {
             preview_quality: PreviewQuality::Draft,
             buffering: false,
             export: None,
+            master_level: None,
+            graph_latency_samples: 0,
         }
     }
 }
@@ -543,6 +560,10 @@ struct EngineThread {
     export_cancel: Option<Arc<AtomicBool>>,
     /// Monotonic per-session export counter, stamped onto each snapshot.
     export_job_counter: u64,
+    /// Live master-bus meter handle published by the mixer feeder (G-4).
+    master_meter: Arc<ArcSwapOption<crate::audio::mixer::StereoMeter>>,
+    /// Live graph latency samples published by the mixer feeder (31 §3).
+    graph_latency: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl EngineThread {
@@ -586,6 +607,8 @@ impl EngineThread {
             export_progress: Arc::new(ArcSwapOption::from(None)),
             export_cancel: None,
             export_job_counter: 0,
+            master_meter: Arc::new(ArcSwapOption::from(None)),
+            graph_latency: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -1152,6 +1175,8 @@ impl EngineThread {
                             sample_rate,
                             producer,
                             self.tools.clone(),
+                            Arc::clone(&self.master_meter),
+                            Arc::clone(&self.graph_latency),
                         ));
                     }
                 }
@@ -1173,6 +1198,9 @@ impl EngineThread {
         self.controller.pause();
         self.feeder = None; // Drop stops + joins the feeder thread
         self.audio.stop();
+        // Clear live meter / latency so the GUI settles to silence (G-4).
+        self.master_meter.store(None);
+        self.graph_latency.store(0, Ordering::Relaxed);
     }
 
     fn publish_status(&mut self) {
@@ -1190,6 +1218,11 @@ impl EngineThread {
             .as_ref()
             .and_then(|p| self.effective_sequence(p));
         let export = self.export_progress.load_full();
+        let master_level = self.master_meter.load_full().map(|m| MasterMeterSnapshot {
+            peak: m.peak(),
+            rms: m.rms(),
+        });
+        let graph_latency_samples = self.graph_latency.load(Ordering::Relaxed);
         // Cheap signature: skip Arc allocation when the GUI-visible fields are
         // unchanged (idle paused loops were allocating status every 100 ms).
         let sig = {
@@ -1224,6 +1257,18 @@ impl EngineThread {
                     .wrapping_mul(0x9E37_79B9)
                     .wrapping_add(e.error.is_some() as u64);
             }
+            // Fold meter peak so the GUI re-samples while audio is live (G-4).
+            if let Some(m) = master_level {
+                h = h
+                    .wrapping_mul(0x9E37_79B9)
+                    .wrapping_add(m.peak[0].to_bits() as u64);
+                h = h
+                    .wrapping_mul(0x9E37_79B9)
+                    .wrapping_add(m.peak[1].to_bits() as u64);
+            }
+            h = h
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(graph_latency_samples as u64);
             h
         };
         if sig == self.last_status_sig && self.last_error.is_none() {
@@ -1248,6 +1293,8 @@ impl EngineThread {
             preview_quality: self.preview_quality,
             buffering: self.buffering,
             export: export.as_ref().map(|e| (**e).clone()),
+            master_level,
+            graph_latency_samples,
         }));
     }
 }
@@ -1983,6 +2030,8 @@ fn spawn_audio_feeder(
     sample_rate: u32,
     producer: RingProducer,
     tools: Option<FfmpegTools>,
+    master_meter: Arc<ArcSwapOption<crate::audio::mixer::StereoMeter>>,
+    graph_latency: Arc<std::sync::atomic::AtomicU32>,
 ) -> AudioFeeder {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
@@ -1997,6 +2046,8 @@ fn spawn_audio_feeder(
                 producer,
                 tools,
                 stop_flag,
+                master_meter,
+                graph_latency,
             )
         })
         .expect("spawn photonic-video mixer thread");
@@ -2014,6 +2065,8 @@ fn feeder_main(
     mut producer: RingProducer,
     tools: Option<FfmpegTools>,
     stop: Arc<AtomicBool>,
+    master_meter: Arc<ArcSwapOption<crate::audio::mixer::StereoMeter>>,
+    graph_latency: Arc<std::sync::atomic::AtomicU32>,
 ) {
     let sample_rate = sample_rate.max(1);
     let block_ticks =
@@ -2035,6 +2088,8 @@ fn feeder_main(
     };
 
     let mut mixer = Mixer::new(sample_rate);
+    // G-4: publish the live output meter so EngineStatus can sample it.
+    master_meter.store(Some(mixer.output_meter()));
     let default_clip_audio = ClipAudio::new();
     // Persistent per-clip PCM sidecars: opened when a clip becomes audible
     // (seeked to its mapped source position), read sequentially block after
@@ -2123,6 +2178,8 @@ fn feeder_main(
 
         out.fill(0.0);
         mixer.render_block(t, &mut voices, &seq.audio_master, &mut out);
+        // 31 §3: publish total graph latency for A/V clock offset.
+        graph_latency.store(mixer.last_graph_latency_samples(), Ordering::Relaxed);
         producer.push_block(&out);
         t = t + block_ticks;
     }

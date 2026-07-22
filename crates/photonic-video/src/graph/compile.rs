@@ -1168,16 +1168,23 @@ fn apply_stack(
 ) -> IrNodeId {
     let mut cur = input;
     for fx in effects {
-        if !fx.enabled {
+        if !fx.enabled || fx.inert {
             continue;
         }
         // Keyframe-resolve the effect's params at the scope's `dt` (K-0.2). The op
         // discriminant, kind, AND resolved params all participate in the content
         // hash (`hash_op`), so two clips differing only in e.g. Blur radius are
         // distinct cache identities — never a colliding NodeCache entry.
+        // K-B16: a bridged raster id lowers as `Unknown(tag)` so eval_cpu can
+        // dispatch the core raster kernel while the GPU still blit-passthroughs.
+        let kind = if crate::graph::raster_bridge::is_bridged(fx.id.as_str()) {
+            EffectKind::Unknown(photonic_core::timeline::UnknownTag::intern(fx.id.as_str()))
+        } else {
+            fx.kind
+        };
         cur = b.push(
             IrOp::Effect {
-                kind: fx.kind,
+                kind,
                 params: resolve_effect_params(fx.kind, &fx.params.base, &fx.params, dt),
             },
             vec![(cur, OutPort::default())],

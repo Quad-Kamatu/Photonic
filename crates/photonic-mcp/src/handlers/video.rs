@@ -6493,14 +6493,30 @@ pub async fn get_audio_meters(state: &AppState, args: GetAudioMetersArgs) -> Too
     if !p.sequences.contains_key(&args.sequence_id) {
         return ToolResult::error(format!("sequence {} not found", args.sequence_id));
     }
-    // Live per-track/master peak+RMS meters live inside the interactive audio
-    // mixer's `StereoMeter`s (09 §5), which the headless MCP engine bridge does
-    // not run — the shadow-document engine renders video without a cpal output
-    // graph. No committed surface exposes them here, so this is NotSupportedV1.
-    err_code(
-        "NotSupportedV1",
-        "live audio meters require the interactive audio mixer, which the headless MCP engine bridge does not run",
-    )
+    // G-4: when the engine is playing with a live feeder, `EngineStatus.master_level`
+    // carries the real mixer output meter. Headless MCP without a device still
+    // reports structured unavailability (not fabricated values).
+    drop(doc);
+    let Some(bridge) = state.video_engine.bridge() else {
+        return err_code(
+            "EngineUnavailable",
+            "no GPU adapter — audio meters require a live engine session",
+        );
+    };
+    let status = bridge.session().status();
+    match status.master_level {
+        Some(m) => ToolResult::text("master meter").with_data(json!({
+            "sequence_id": args.sequence_id,
+            "peak": m.peak,
+            "rms": m.rms,
+            "graph_latency_samples": status.graph_latency_samples,
+            "source": "mixer_output",
+        })),
+        None => err_code(
+            "NotSupportedV1",
+            "live audio meters require interactive playback (no feeder running — press play, or no audio device)",
+        ),
+    }
 }
 
 pub async fn get_waveform(state: &AppState, args: GetWaveformArgs) -> ToolResult {

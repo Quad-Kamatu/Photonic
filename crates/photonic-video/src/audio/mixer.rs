@@ -536,6 +536,55 @@ struct TrackSmoothState {
     pan: Smoother,
 }
 
+/// Circular delay line for latency compensation (31 §3): holds interleaved
+/// stereo frames and delays a block by a fixed number of frames.
+struct DelayLine {
+    /// Interleaved stereo ring, length = `delay_frames * CHANNELS`.
+    buf: Vec<f32>,
+    /// Write head in frames.
+    pos: usize,
+    delay_frames: usize,
+}
+
+impl DelayLine {
+    fn new() -> Self {
+        DelayLine {
+            buf: Vec::new(),
+            pos: 0,
+            delay_frames: 0,
+        }
+    }
+
+    fn set_delay(&mut self, frames: usize) {
+        if frames == self.delay_frames {
+            return;
+        }
+        self.delay_frames = frames;
+        self.buf = vec![0.0; frames.max(1) * CHANNELS];
+        self.pos = 0;
+    }
+
+    /// Delay `block` (one `BLOCK_FRAMES` interleaved buffer) by `delay_frames`.
+    /// Zero delay is a no-op.
+    fn process_block(&mut self, block: &mut [f32]) {
+        if self.delay_frames == 0 {
+            return;
+        }
+        debug_assert_eq!(block.len(), BLOCK_FRAMES * CHANNELS);
+        for f in 0..BLOCK_FRAMES {
+            let wi = (self.pos % self.delay_frames) * CHANNELS;
+            let ri = wi; // same slot: read old, then write new
+            for c in 0..CHANNELS {
+                let idx = f * CHANNELS + c;
+                let delayed = self.buf[ri + c];
+                self.buf[wi + c] = block[idx];
+                block[idx] = delayed;
+            }
+            self.pos = self.pos.wrapping_add(1);
+        }
+    }
+}
+
 /// The mixer graph. One instance per playing/exporting sequence; owned and
 /// driven by the mixer-worker thread (interactive) or the export render loop
 /// (offline, 09 §7) — never touched from the cpal callback itself (02 §1).
@@ -553,6 +602,10 @@ pub struct Mixer {
     master_fx: FxChainState,
     // Per-track segment-boundary tail rings (31 §8 step 4).
     tail_cache: HashMap<TrackId, TailBuf>,
+    // 31 §3: per-track delay lines for latency compensation.
+    track_delay: HashMap<TrackId, DelayLine>,
+    /// Last computed graph latency (samples) — for clock offset (31 §3).
+    last_graph_latency: u32,
     // Reused per-block scratch (avoids per-block allocation on the mixer-
     // worker hot path; not itself RT-required off the cpal callback thread,
     // but there is no reason to allocate every block either).
@@ -580,10 +633,18 @@ impl Mixer {
             track_fx: HashMap::new(),
             master_fx: FxChainState::new(),
             tail_cache: HashMap::new(),
+            track_delay: HashMap::new(),
+            last_graph_latency: 0,
             track_bus_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
             master_bus_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
             clip_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
         }
+    }
+
+    /// Total graph latency in samples from the last [`render_block`] (31 §3):
+    /// `max(track latencies) + master chain latency`. Used for A/V clock offset.
+    pub fn last_graph_latency_samples(&self) -> u32 {
+        self.last_graph_latency
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -603,6 +664,8 @@ impl Mixer {
         self.track_fx.clear();
         self.master_fx = FxChainState::new();
         self.tail_cache.clear();
+        self.track_delay.clear();
+        self.last_graph_latency = 0;
     }
 
     /// Apply a mixer-level discontinuity (31 §2.1/§2.3). MUST be called by the
@@ -760,6 +823,36 @@ impl Mixer {
         // after the track loop.
         let mut master_needs_reset = false;
 
+        // 31 §3: pre-sync chains so latency_samples is current, then equalise
+        // every track path to max_track_latency before the master sum.
+        for track in tracks.iter() {
+            let fx = self
+                .track_fx
+                .entry(track.id)
+                .or_insert_with(FxChainState::new);
+            if let Some(i) = fx.sync(&track.audio.fx_chain) {
+                fx.reset_from(i, AudioDiscontinuity::GraphChanged);
+                master_needs_reset = true;
+            }
+        }
+        if let Some(i) = self.master_fx.sync(&master.fx_chain) {
+            self.master_fx.reset_from(i, AudioDiscontinuity::GraphChanged);
+        }
+        // Pre-pass sizes delay lines for the current chain shape. Units that
+        // report 0 until first process (limiter lookahead) get 0 compensation
+        // for one block — acceptable and deterministic. Total latency is
+        // re-measured after process_block below.
+        let max_track_lat = tracks
+            .iter()
+            .map(|t| {
+                self.track_fx
+                    .get(&t.id)
+                    .map(|fx| fx.latency_samples(&t.audio.fx_chain))
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0);
+
         self.master_bus_scratch.fill(0.0);
 
         for track in tracks.iter_mut() {
@@ -802,21 +895,14 @@ impl Mixer {
                 buf.pending = Some(block_start_tick);
             }
 
-            // ── 31 §8 step 2: sync this track's fx chain to the model, then
-            //    process it in place. A shape change resets from the first
-            //    changed index (GraphChanged) and forces a wholesale master
-            //    reset. `sync` allocates only when the shape actually changes,
-            //    so the steady-state path stays allocation-free. ──
+            // ── 31 §8 step 2: process the (already-synced) track fx chain. ──
             let fx = self
                 .track_fx
                 .entry(track.id)
                 .or_insert_with(FxChainState::new);
-            if let Some(i) = fx.sync(&track.audio.fx_chain) {
-                fx.reset_from(i, AudioDiscontinuity::GraphChanged);
-                master_needs_reset = true;
-            }
             fx.set_block_params(&track.audio.fx_chain, block_start_tick);
             fx.process_block(&track.audio.fx_chain, sr, &mut self.track_bus_scratch);
+            let track_lat = fx.latency_samples(&track.audio.fx_chain);
 
             // Tap: post-fx (09 §4 tap table "Track post-fx"), now genuinely
             // after the fx chain (31 §8 step 2).
@@ -847,6 +933,18 @@ impl Mixer {
             self.track_post_fader_meter(track.id)
                 .update(&self.track_bus_scratch);
 
+            // 31 §3: delay this track so all paths arrive sample-aligned at
+            // the master bus (compensation = max_track_lat − track_lat).
+            let compensation = max_track_lat.saturating_sub(track_lat) as usize;
+            {
+                let dl = self
+                    .track_delay
+                    .entry(track.id)
+                    .or_insert_with(DelayLine::new);
+                dl.set_delay(compensation);
+                dl.process_block(&mut self.track_bus_scratch);
+            }
+
             // Solo-safe gating (09 §4): any solo active -> only soloed
             // (and not muted) tracks contribute; else normal mute-only gate.
             let active = if any_solo {
@@ -861,13 +959,8 @@ impl Mixer {
             }
         }
 
-        // ── 31 §8 step 2: master fx chain. Sync it, apply any graph-change
-        //    reset (its own edit, plus the wholesale reset any track graph
-        //    change forces since master is downstream of every track), then
-        //    process the summed master bus. ──
-        if let Some(i) = self.master_fx.sync(&master.fx_chain) {
-            self.master_fx.reset_from(i, AudioDiscontinuity::GraphChanged);
-        }
+        // ── 31 §8 step 2: master fx chain. Already synced above; apply any
+        //    wholesale reset a track graph change forced, then process. ──
         if master_needs_reset {
             self.master_fx.reset_from(0, AudioDiscontinuity::GraphChanged);
         }
@@ -894,6 +987,21 @@ impl Mixer {
 
         // Tap: output, post `MasterBusParams.volume_db` (09 §4 tap table).
         self.output_meter.update(out);
+
+        // 31 §3: publish total graph latency *after* process so units that
+        // allocate lookahead on first process report correctly.
+        let master_lat = self.master_fx.latency_samples(&master.fx_chain);
+        let max_track_lat = tracks
+            .iter()
+            .map(|t| {
+                self.track_fx
+                    .get(&t.id)
+                    .map(|fx| fx.latency_samples(&t.audio.fx_chain))
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0);
+        self.last_graph_latency = max_track_lat.saturating_add(master_lat);
     }
 }
 
@@ -1624,5 +1732,98 @@ mod tests {
                 "ring re-primed with silence"
             );
         }
+    }
+
+    // ── 31 §3 latency compensation ───────────────────────────────────────
+
+    /// Graph latency equals max track-path latency + master chain latency.
+    #[test]
+    fn graph_latency_sums_max_track_and_master() {
+        let mut mixer = Mixer::new(SR);
+        let mut master = MasterBus::new();
+        master.fx_chain = vec![AudioFxUnit::new(AudioFxKind::Limiter)];
+        let id = track_id(1);
+        let audio = TrackAudio::new();
+        // Dry track (0 latency) + master limiter (lookahead latency).
+        let clip_audio = ClipAudio::new();
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        // Two blocks: first allocates limiter lookahead, second reports it.
+        for _ in 0..2 {
+            let mut src = StepSource {
+                channels: 2,
+                sample_rate: SR,
+                value: 0.1,
+            };
+            let mut tracks = vec![TrackVoice {
+                id,
+                audio: &audio,
+                clips: vec![silent_clip_voice(&clip_audio, &mut src)],
+            }];
+            mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+        }
+        let master_lat = mixer.master_fx.latency_samples(&master.fx_chain);
+        assert!(master_lat > 0, "limiter must declare lookahead latency");
+        assert_eq!(
+            mixer.last_graph_latency_samples(),
+            master_lat,
+            "dry tracks ⇒ graph latency = master latency alone"
+        );
+    }
+
+    /// A dry track delayed by a lookahead unit's latency stays sample-aligned
+    /// with a wet track that carries the same unit (compensation equalises them).
+    #[test]
+    fn latency_compensation_equalises_wet_and_dry_tracks() {
+        let mut mixer = Mixer::new(SR);
+        let master = master_bus_no_limiter();
+        let wet_id = track_id(1);
+        let dry_id = track_id(2);
+        let mut wet_audio = TrackAudio::new();
+        wet_audio.fx_chain = vec![AudioFxUnit::new(AudioFxKind::Limiter)];
+        let dry_audio = TrackAudio::new();
+        let clip_audio = ClipAudio::new();
+        let mut out = vec![0.0; BLOCK_FRAMES * CHANNELS];
+        // Drive several blocks so delay lines settle.
+        for _ in 0..4 {
+            let mut wet_src = StepSource {
+                channels: 2,
+                sample_rate: SR,
+                value: 0.5,
+            };
+            let mut dry_src = StepSource {
+                channels: 2,
+                sample_rate: SR,
+                value: 0.5,
+            };
+            let mut tracks = vec![
+                TrackVoice {
+                    id: wet_id,
+                    audio: &wet_audio,
+                    clips: vec![silent_clip_voice(&clip_audio, &mut wet_src)],
+                },
+                TrackVoice {
+                    id: dry_id,
+                    audio: &dry_audio,
+                    clips: vec![silent_clip_voice(&clip_audio, &mut dry_src)],
+                },
+            ];
+            mixer.render_block(Tick(0), &mut tracks, &master, &mut out);
+        }
+        let wet_lat = mixer
+            .track_fx
+            .get(&wet_id)
+            .map(|fx| fx.latency_samples(&wet_audio.fx_chain))
+            .unwrap_or(0);
+        assert!(wet_lat > 0);
+        assert_eq!(
+            mixer.last_graph_latency_samples(),
+            wet_lat,
+            "max track path = wet latency (master dry)"
+        );
+        // Dry track must hold a delay of exactly wet_lat frames.
+        let dry_delay = mixer.track_delay.get(&dry_id).map(|d| d.delay_frames);
+        assert_eq!(dry_delay, Some(wet_lat as usize));
+        let wet_delay = mixer.track_delay.get(&wet_id).map(|d| d.delay_frames);
+        assert_eq!(wet_delay, Some(0));
     }
 }

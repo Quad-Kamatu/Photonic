@@ -33,8 +33,12 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **28 §9** MCP transport hardening | ✅ done | `a05ec8e` | bearer token, no permissive CORS |
 | **29 QA-1** acceptance-story harness | 🟡 scaffold | `a05ec8e` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
+| **G-4** master meter publish | ✅ done | *(this commit)* | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
+| **31 §3** latency compensation | ✅ done | *(this commit)* | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
+| **K-B16** raster bridge (slice) | 🟡 partial | *(this commit)* | CPU bridge for 6 raster kernels (box/emboss/edges/high-pass/median/unsharp); manifests registered; GPU WGSL twins remain |
+| **K-F1** render queue | ✅ done | *(this commit)* | `export::RenderQueue` multi-job FIFO with frozen snapshots + multi-segment enqueue (K-F2 foundation) |
 
-**Not yet started:** 30 full raster bridge (K-B16), 31 §3 latency compensation, 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`). G-4 master-meter GUI publish remains under K-0.6 residual.
+**Not yet started:** K-B16 GPU ports for bridged kernels; K-F2/3/4/5 full UI; 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`).
 
 ## 1. Authority and precedence
 
@@ -71,7 +75,7 @@ Status semantics:
 | G-1 | partial | Core planner consolidation; close-all/simplify MCP; acceptance | [19 §4](19-editing-velocity-shot-management.md#4-g-1--add-edit-close-gap-and-simplify-sequence) |
 | G-2 | partial | Linked-A/V policy; core/MCP closure | [19 §5](19-editing-velocity-shot-management.md#5-g-2--keyboard-trims) |
 | G-3 | partial | Source Monitor consumption; overlap priority | [19 §6](19-editing-velocity-shot-management.md#6-g-3--match-frame-and-reveal-in-project) |
-| G-4 | partial | Publish real mixer output meter to monitor | [19 §7](19-editing-velocity-shot-management.md#7-g-4--program-monitor-master-meter) |
+| G-4 | done | Live master meter from mixer feeder via EngineStatus | [19 §7](19-editing-velocity-shot-management.md#7-g-4--program-monitor-master-meter) |
 | G-5 | partial | Alt-drop, probe/EOF acceptance | [19 §8](19-editing-velocity-shot-management.md#8-g-5--replace-with-clip--replace-edit) |
 | G-6 | done | Protected source-patch/target routing | [19 §2](19-editing-velocity-shot-management.md#2-current-implementation-status) |
 | G-7 | partial | GUI create command/menu; paint clarity; goldens | [19 §9](19-editing-velocity-shot-management.md#9-g-7--adjustment-layer-clips) |
@@ -118,7 +122,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 
 | ID | Status | Live residual / gate | Owner |
 |---|---|---|---|
-| K-0 | ✅ done | **9/9 seams closed** (K-0.1–0.9). Residuals: G-4 meter GUI under K-0.6; 31 §3 latency compensation. See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
+| K-0 | ✅ done | **9/9 seams closed** (K-0.1–0.9). See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
 | K-A | open | Preview rendering ([33](33-timeline-preview-render.md)), marker depth ([35 §1](35-model-decisions.md#1-markers)), spacer, snaps, groups, **timecode as a first-class concept**, duration dialog, grab-item, split-audio, subclips, track compositing, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
 | K-B | open | Track/master/asset effect stacks, effect zones, presets, compare view, expressions, luma wipes, masking subgraph, roto, keyframe interchange, paste-attributes, easing presets, freeze frame, alpha view. **K-B16 — bridging the ~61 existing `raster::` kernels into the video catalogue — is the largest single capability win in the document** | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
@@ -127,7 +131,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
 | K-E | partial | Histogram/waveform/parade/vectorscope already ship with CPU references. Open: I/Q lines, 75% box, YUV/YPbPr switch, component + Rec.601/709 selection, audio spectrum, per-clip scope tap, monitor grids, extract-frame | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
-| K-F | open | GUI render queue, marker multi-export, multi-format render, multi-output fan-out, job options, hardware encoders + detection report + raw-args escape hatch. All gated on K-0.1/K-0.7 | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
+| K-F | partial | **K-F1 queue core done** (`RenderQueue` + multi-segment enqueue). Remaining: GUI queue panel, K-F2 marker multi-export UI, K-F3–F5 options/hardware | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
 | K-G | open | Project profiles, project notes, layout presets, templates, **undo-history surface** over the existing branch/checkpoint tree, **interlaced-source support (K-G6) — currently a silent wrong-output path** | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |
 | E-1 | open | Source-range declaration in the node contract; **precedes** G-11's rubber-band depth | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |

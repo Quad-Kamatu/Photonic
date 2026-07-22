@@ -77,7 +77,7 @@ impl Image {
     }
 
     #[inline]
-    fn set(&mut self, x: u32, y: u32, v: [f32; 4]) {
+    pub(crate) fn set(&mut self, x: u32, y: u32, v: [f32; 4]) {
         self.pixels[(y * self.width + x) as usize] = v;
     }
 

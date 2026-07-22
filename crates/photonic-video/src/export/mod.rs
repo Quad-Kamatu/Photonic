@@ -15,10 +15,14 @@
 //!   headless session through `render_loop::export_frames`. Both the GUI
 //!   (`EngineCmd::Export`) and MCP `export_sequence` funnel through it.
 //! - [`offline_audio`] — K-0.7 offline sequence mix + loudness (09 §7, 31 §6).
+//! - [`job_queue`] — K-F1 shared multi-job render queue (GUI + MCP).
 
 pub mod convert;
 pub mod encoder;
 pub mod job;
+pub mod job_queue;
 pub mod offline_audio;
 pub mod presets;
 pub mod render_loop;
+
+pub use job_queue::{QueueJobId, QueueJobStatus, QueuedExport, RenderQueue};

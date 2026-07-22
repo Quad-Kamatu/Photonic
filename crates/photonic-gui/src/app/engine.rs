@@ -175,33 +175,14 @@ impl EngineBridge {
     /// caller converts to dB itself (exactly like
     /// `panels/video/audio_mixer.rs`'s master strip does).
     ///
-    /// **Documented seam, not yet closed:** this returns `None` because
-    /// nothing publishes a level here to read. `photonic_video::session`'s
-    /// mixer-feeder thread (`feeder_main`) already builds a real
-    /// `Mixer::output_meter() -> Arc<StereoMeter>` right after
-    /// `Mixer::new(sample_rate)` — but never hands that handle to anything
-    /// the engine thread (let alone `EngineSession`) can reach, and
-    /// `EngineSession` itself exposes only `send`/`latest_frame`/`status`/
-    /// `shutdown`. Closing it is a small, additive change entirely inside
-    /// `photonic-video` (out of this story's territory,
-    /// `app/{monitor.rs,engine.rs}` only):
-    ///   1. Clone `mixer.output_meter()` once in `feeder_main` and publish
-    ///      the `Arc<StereoMeter>` somewhere the engine thread can read it
-    ///      (an `ArcSwapOption<StereoMeter>` set once alongside the existing
-    ///      `frame`/`status` publish points would do it).
-    ///   2. Add a level field to `EngineStatus` (e.g.
-    ///      `pub master_level: Option<([f32; 2], [f32; 2])>` for
-    ///      `(peak, rms)`), populated from that handle each time the engine
-    ///      thread publishes a new status snapshot.
-    ///   3. This method becomes `status.master_level.map(|(peak, rms)|
-    ///      MasterLevel { peak, rms })`.
-    ///
-    /// Until then, callers should treat `None` as "no data" and render
-    /// honestly at the silence floor rather than fabricating motion — see
-    /// `panels/video/audio_mixer.rs`'s own doc comment for the identical
-    /// seam blocking its (currently synthetic) master strip.
+    /// G-4 closed: reads `EngineStatus.master_level` published from the mixer
+    /// feeder's live `StereoMeter`. `None` while paused / no audio device —
+    /// callers render the silence floor honestly (no fabricated motion).
     pub(crate) fn master_level(&self) -> Option<MasterLevel> {
-        None
+        self.session.status().master_level.map(|m| MasterLevel {
+            peak: m.peak,
+            rms: m.rms,
+        })
     }
 
     /// The raw session handle (command sends, frame polls) for hosts/tests.
