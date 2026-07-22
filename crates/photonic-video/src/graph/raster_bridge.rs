@@ -79,6 +79,11 @@ pub const BRIDGED_IDS: &[&str] = &[
     "geo.spherize",
     "geo.ripple",
     "geo.perspective",
+    // Util (30 §5.1) — pure working-buffer ops, no RasterImage detour
+    "util.unpremultiply",
+    "util.alpha_view",
+    "util.drop_shadow",
+    "util.outline",
 ];
 
 pub fn is_bridged(id: &str) -> bool {
@@ -96,6 +101,10 @@ pub fn operand_space(id: &str) -> OperandSpace {
 pub fn apply(id: &str, input: &Image, params: &ResolvedParams) -> Option<Image> {
     if !is_bridged(id) {
         return None;
+    }
+    // Util ops work directly in linear premult working space.
+    if id.starts_with("util.") {
+        return dispatch_util(id, input, params);
     }
     let space = operand_space(id);
     let mut raster = image_to_raster(input, space);
@@ -332,6 +341,198 @@ fn dispatch(id: &str, raster: &mut RasterImage, params: &ResolvedParams) -> Opti
     Some(())
 }
 
+/// Util catalogue kernels operate on linear premult `Image` (no u8 detour).
+fn dispatch_util(id: &str, input: &Image, params: &ResolvedParams) -> Option<Image> {
+    let f = |path: &str, d: f32| params.f32_or(path, d);
+    match id {
+        "util.unpremultiply" => Some(util_unpremultiply(input)),
+        "util.alpha_view" => {
+            // mode: 0 = alpha-as-luma, 1 = premul RGB, 2 = straight RGB
+            let mode = f("params.mode", 0.0).round() as i32;
+            Some(util_alpha_view(input, mode))
+        }
+        "util.drop_shadow" => Some(util_drop_shadow(
+            input,
+            f("params.x", 4.0),
+            f("params.y", 4.0),
+            f("params.radius", 3.0).max(0.0),
+            [
+                f("params.r", 0.0),
+                f("params.g", 0.0),
+                f("params.b", 0.0),
+            ],
+            f("params.opacity", 0.5).clamp(0.0, 1.0),
+        )),
+        "util.outline" => Some(util_outline(
+            input,
+            f("params.thickness", 2.0).max(0.0),
+            [
+                f("params.r", 1.0),
+                f("params.g", 1.0),
+                f("params.b", 1.0),
+            ],
+            f("params.opacity", 1.0).clamp(0.0, 1.0),
+        )),
+        _ => None,
+    }
+}
+
+fn util_unpremultiply(input: &Image) -> Image {
+    let mut out = Image::new(input.width, input.height);
+    for (i, p) in input.pixels.iter().enumerate() {
+        let a = p[3].clamp(0.0, 1.0);
+        if a > 1e-6 {
+            out.pixels[i] = [p[0] / a, p[1] / a, p[2] / a, a];
+        } else {
+            out.pixels[i] = [0.0, 0.0, 0.0, 0.0];
+        }
+    }
+    out
+}
+
+fn util_alpha_view(input: &Image, mode: i32) -> Image {
+    let mut out = Image::new(input.width, input.height);
+    for (i, p) in input.pixels.iter().enumerate() {
+        let a = p[3].clamp(0.0, 1.0);
+        out.pixels[i] = match mode {
+            1 => *p, // premul RGB as-is
+            2 => {
+                // straight RGB (unpremult) with full alpha so it is visible
+                if a > 1e-6 {
+                    [p[0] / a, p[1] / a, p[2] / a, 1.0]
+                } else {
+                    [0.0, 0.0, 0.0, 1.0]
+                }
+            }
+            _ => [a, a, a, 1.0], // alpha as luma
+        };
+    }
+    out
+}
+
+fn sample_clamped(img: &Image, x: i32, y: i32) -> [f32; 4] {
+    let x = x.clamp(0, img.width as i32 - 1) as u32;
+    let y = y.clamp(0, img.height as i32 - 1) as u32;
+    img.pixel(x, y)
+}
+
+fn util_drop_shadow(
+    input: &Image,
+    ox: f32,
+    oy: f32,
+    radius: f32,
+    color: [f32; 3],
+    opacity: f32,
+) -> Image {
+    let w = input.width;
+    let h = input.height;
+    let mut alpha = vec![0.0f32; (w * h) as usize];
+    let dx = ox.round() as i32;
+    let dy = oy.round() as i32;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let s = sample_clamped(input, x - dx, y - dy);
+            alpha[(y as u32 * w + x as u32) as usize] = s[3];
+        }
+    }
+    // Box blur alpha (separable, radius in px).
+    let r = radius.round().max(0.0) as i32;
+    if r > 0 {
+        let mut tmp = alpha.clone();
+        let k = 2 * r + 1;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let mut acc = 0.0;
+                for i in -r..=r {
+                    let xx = (x + i).clamp(0, w as i32 - 1);
+                    acc += alpha[(y as u32 * w + xx as u32) as usize];
+                }
+                tmp[(y as u32 * w + x as u32) as usize] = acc / k as f32;
+            }
+        }
+        alpha = tmp;
+        let mut tmp = alpha.clone();
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let mut acc = 0.0;
+                for j in -r..=r {
+                    let yy = (y + j).clamp(0, h as i32 - 1);
+                    acc += alpha[(yy as u32 * w + x as u32) as usize];
+                }
+                tmp[(y as u32 * w + x as u32) as usize] = acc / k as f32;
+            }
+        }
+        alpha = tmp;
+    }
+    let mut out = Image::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let sa = (alpha[i] * opacity).clamp(0.0, 1.0);
+            let shadow = [color[0] * sa, color[1] * sa, color[2] * sa, sa];
+            let top = input.pixel(x, y);
+            // Premultiplied over: top over shadow.
+            let oa = top[3] + shadow[3] * (1.0 - top[3]);
+            let or = top[0] + shadow[0] * (1.0 - top[3]);
+            let og = top[1] + shadow[1] * (1.0 - top[3]);
+            let ob = top[2] + shadow[2] * (1.0 - top[3]);
+            out.set(x, y, [or, og, ob, oa]);
+        }
+    }
+    out
+}
+
+fn util_outline(input: &Image, thickness: f32, color: [f32; 3], opacity: f32) -> Image {
+    let w = input.width;
+    let h = input.height;
+    let t = thickness.ceil().max(1.0) as i32;
+    // Outside distance field via min distance to any opaque pixel.
+    let mut out = Image::new(w, h);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let center = sample_clamped(input, x, y);
+            let mut min_d = f32::MAX;
+            let inside = center[3] > 0.5;
+            if !inside {
+                for j in -t..=t {
+                    for i in -t..=t {
+                        let s = sample_clamped(input, x + i, y + j);
+                        if s[3] > 0.5 {
+                            let d = ((i * i + j * j) as f32).sqrt();
+                            if d < min_d {
+                                min_d = d;
+                            }
+                        }
+                    }
+                }
+            }
+            let edge = if inside {
+                0.0
+            } else if min_d <= thickness {
+                // Soft falloff at the outer rim.
+                (1.0 - (min_d / thickness.max(1e-4))).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let ea = edge * opacity;
+            let outline = [color[0] * ea, color[1] * ea, color[2] * ea, ea];
+            // Premultiplied over: original over outline (outline behind content).
+            let oa = center[3] + outline[3] * (1.0 - center[3]);
+            out.set(
+                x as u32,
+                y as u32,
+                [
+                    center[0] + outline[0] * (1.0 - center[3]),
+                    center[1] + outline[1] * (1.0 - center[3]),
+                    center[2] + outline[2] * (1.0 - center[3]),
+                    oa,
+                ],
+            );
+        }
+    }
+    out
+}
+
 /// Working buffer → raster, honouring operand space.
 fn image_to_raster(img: &Image, space: OperandSpace) -> RasterImage {
     let mut out = RasterImage::new(img.width, img.height);
@@ -429,7 +630,9 @@ mod tests {
         assert!(is_bridged("noise.reduce"));
         assert!(is_bridged("blur.surface"));
         assert!(!is_bridged("nope.fake"));
-        assert_eq!(BRIDGED_IDS.len(), 34);
+        assert_eq!(BRIDGED_IDS.len(), 38);
+        assert!(is_bridged("util.outline"));
+        assert!(is_bridged("util.drop_shadow"));
     }
 
     #[test]
@@ -456,6 +659,58 @@ mod tests {
             out.pixel(0, 0)[0] > 0.5,
             "contrast curve should lift mid: {:?}",
             out.pixel(0, 0)
+        );
+    }
+
+    #[test]
+    fn unpremultiply_restores_straight_rgb() {
+        let mut img = Image::new(2, 1);
+        img.set(0, 0, [0.25, 0.0, 0.0, 0.5]); // premul red at 50%
+        img.set(1, 0, [0.0, 0.0, 0.0, 0.0]);
+        let out = apply("util.unpremultiply", &img, &ResolvedParams::default()).expect("bridged");
+        assert!((out.pixel(0, 0)[0] - 0.5).abs() < 1e-4);
+        assert!((out.pixel(0, 0)[3] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn alpha_view_shows_alpha_as_luma() {
+        let mut img = Image::new(1, 1);
+        img.set(0, 0, [0.1, 0.2, 0.3, 0.75]);
+        let out = apply("util.alpha_view", &img, &ResolvedParams::default()).expect("bridged");
+        assert!((out.pixel(0, 0)[0] - 0.75).abs() < 1e-4);
+        assert!((out.pixel(0, 0)[3] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn outline_grows_opaque_silhouette() {
+        let mut img = Image::new(8, 8);
+        // Center pixel opaque white.
+        img.set(4, 4, [1.0, 1.0, 1.0, 1.0]);
+        let params = ResolvedParams {
+            entries: vec![
+                (
+                    photonic_core::timeline::PropPath::new("params.thickness"),
+                    photonic_core::timeline::PropValue::Float(2.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.r"),
+                    photonic_core::timeline::PropValue::Float(1.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.g"),
+                    photonic_core::timeline::PropValue::Float(0.0),
+                ),
+                (
+                    photonic_core::timeline::PropPath::new("params.b"),
+                    photonic_core::timeline::PropValue::Float(0.0),
+                ),
+            ],
+        };
+        let out = apply("util.outline", &img, &params).expect("bridged");
+        // Neighbour of the center should pick up red outline.
+        assert!(
+            out.pixel(5, 4)[0] > 0.1 || out.pixel(4, 5)[0] > 0.1,
+            "outline should paint neighbours"
         );
     }
 

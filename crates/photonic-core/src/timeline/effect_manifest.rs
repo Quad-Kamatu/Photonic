@@ -454,6 +454,24 @@ const PERSPECTIVE_PARAMS: &[ParamSpec] = &[
     pf("params.bl_x", Some((-1.0, 2.0)), UiHint::Slider),
     pf_def("params.bl_y", 1.0, Some((-1.0, 2.0)), UiHint::Slider),
 ];
+const ALPHA_VIEW_PARAMS: &[ParamSpec] =
+    &[pf("params.mode", Some((0.0, 2.0)), UiHint::Slider)]; // 0=alpha,1=premul,2=straight
+const DROP_SHADOW_PARAMS: &[ParamSpec] = &[
+    pf_def("params.x", 4.0, Some((-200.0, 200.0)), UiHint::Slider),
+    pf_def("params.y", 4.0, Some((-200.0, 200.0)), UiHint::Slider),
+    pf_def("params.radius", 3.0, Some((0.0, 64.0)), UiHint::Slider),
+    pf("params.r", Some((0.0, 1.0)), UiHint::Slider),
+    pf("params.g", Some((0.0, 1.0)), UiHint::Slider),
+    pf("params.b", Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.opacity", 0.5, Some((0.0, 1.0)), UiHint::Slider),
+];
+const OUTLINE_PARAMS: &[ParamSpec] = &[
+    pf_def("params.thickness", 2.0, Some((0.0, 64.0)), UiHint::Slider),
+    pf_def("params.r", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.g", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.b", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.opacity", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+];
 
 const CAPS_TRANSFER: Caps = Caps {
     alpha: AlphaBehaviour::Preserves,
@@ -898,6 +916,28 @@ pub static MANIFESTS: &[EffectManifest] = &[
         arity: 1,
     },
     EffectManifest {
+        id: EffectId::new_static("util.alpha_view"),
+        version: 1,
+        name: "Alpha View",
+        category: EffectCategory::Util,
+        params: ALPHA_VIEW_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("util.drop_shadow"),
+        version: 1,
+        name: "Drop Shadow",
+        category: EffectCategory::Util,
+        params: DROP_SHADOW_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
         id: EffectId::new_static("util.mask_shape"),
         version: 1,
         name: "Mask Shape",
@@ -908,6 +948,28 @@ pub static MANIFESTS: &[EffectManifest] = &[
         space: OperandSpace::LinearStraight,
         // Generator: zero image inputs.
         arity: 0,
+    },
+    EffectManifest {
+        id: EffectId::new_static("util.outline"),
+        version: 1,
+        name: "Outline",
+        category: EffectCategory::Util,
+        params: OUTLINE_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("util.unpremultiply"),
+        version: 1,
+        name: "Unpremultiply",
+        category: EffectCategory::Util,
+        params: INVERT_PARAMS,
+        caps: Caps::DEFAULT,
+        applies: Applicability::CLIP_ONLY,
+        space: OperandSpace::LinearStraight,
+        arity: 1,
     },
 ];
 

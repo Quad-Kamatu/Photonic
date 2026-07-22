@@ -964,6 +964,89 @@ impl Evaluator {
                     logical_w,
                     logical_h,
                 ),
+                ("geo.ripple", Some(src)) => self.passes.ripple(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amplitude", 4.0),
+                    params.f32_or("params.wavelength", 16.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("geo.perspective", Some(src)) => self.passes.perspective(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    [
+                        params.f32_or("params.tl_x", 0.0),
+                        params.f32_or("params.tl_y", 0.0),
+                        params.f32_or("params.tr_x", 1.0),
+                        params.f32_or("params.tr_y", 0.0),
+                        params.f32_or("params.br_x", 1.0),
+                        params.f32_or("params.br_y", 1.0),
+                        params.f32_or("params.bl_x", 0.0),
+                        params.f32_or("params.bl_y", 1.0),
+                    ],
+                    logical_w,
+                    logical_h,
+                ),
+                ("stylize.grain", Some(src)) => self.passes.grain(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 0.1),
+                    params.f32_or("params.monochrome", 1.0) > 0.5,
+                    params.f32_or("params.seed", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("stylize.chromatic_aberration", Some(src)) => self.passes.chromatic_aberration(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.amount", 2.0),
+                    logical_w,
+                    logical_h,
+                ),
+                ("util.unpremultiply", Some(src)) => {
+                    self.passes.unpremultiply(&self.gpu, &src.texture, target)
+                }
+                ("util.alpha_view", Some(src)) => self.passes.alpha_view(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.mode", 0.0),
+                ),
+                ("util.drop_shadow", Some(src)) => self.passes.drop_shadow(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.x", 4.0),
+                    params.f32_or("params.y", 4.0),
+                    params.f32_or("params.radius", 3.0),
+                    [
+                        params.f32_or("params.r", 0.0),
+                        params.f32_or("params.g", 0.0),
+                        params.f32_or("params.b", 0.0),
+                    ],
+                    params.f32_or("params.opacity", 0.5),
+                    logical_w,
+                    logical_h,
+                ),
+                ("util.outline", Some(src)) => self.passes.outline(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    params.f32_or("params.thickness", 2.0),
+                    [
+                        params.f32_or("params.r", 1.0),
+                        params.f32_or("params.g", 1.0),
+                        params.f32_or("params.b", 1.0),
+                    ],
+                    params.f32_or("params.opacity", 1.0),
+                    logical_w,
+                    logical_h,
+                ),
                 (_, Some(src)) => self.passes.blit(&self.gpu, &src.texture, target),
                 (_, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
@@ -1101,6 +1184,15 @@ struct Passes {
     curves_contrast_pipeline: wgpu::RenderPipeline,
     black_and_white_pipeline: wgpu::RenderPipeline,
     pinch_pipeline: wgpu::RenderPipeline,
+    ripple_pipeline: wgpu::RenderPipeline,
+    perspective_pipeline: wgpu::RenderPipeline,
+    grain_pipeline: wgpu::RenderPipeline,
+    ca_pipeline: wgpu::RenderPipeline,
+    unpremultiply_pipeline: wgpu::RenderPipeline,
+    alpha_view_pipeline: wgpu::RenderPipeline,
+    outline_pipeline: wgpu::RenderPipeline,
+    drop_shadow_pipeline: wgpu::RenderPipeline,
+    util2_bgl: wgpu::BindGroupLayout,
     /// Glow extract (K-0.2): keep pixels whose straight luma ≥ threshold.
     glow_extract_pipeline: wgpu::RenderPipeline,
     /// Glow composite (K-0.2): screen-add tinted glow over source.
@@ -1348,6 +1440,64 @@ impl Passes {
         );
         let pinch_pipeline = make_pipeline(device, &blur_bgl, &pinch_src, "fs");
 
+        // Ripple: info = [amplitude, wavelength, logical_w, logical_h]
+        let ripple_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn atf(xf: f32, yf: f32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  let x0 = i32(floor(xf)); let y0 = i32(floor(yf));\n  let fx = xf - f32(x0); let fy = yf - f32(y0);\n  let c00 = textureLoad(t, clamp(vec2<i32>(x0, y0), vec2<i32>(0), hi), 0);\n  let c10 = textureLoad(t, clamp(vec2<i32>(x0+1, y0), vec2<i32>(0), hi), 0);\n  let c01 = textureLoad(t, clamp(vec2<i32>(x0, y0+1), vec2<i32>(0), hi), 0);\n  let c11 = textureLoad(t, clamp(vec2<i32>(x0+1, y0+1), vec2<i32>(0), hi), 0);\n  return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let amp = p.info.x; let wl = max(p.info.y, 1.0);\n  let k = 6.2831853 / wl;\n  let sxf = pos.x + amp * sin(k * pos.y);\n  let syf = pos.y + amp * sin(k * pos.x);\n  return atf(sxf, syf);\n}}\n"
+        );
+        let ripple_pipeline = make_pipeline(device, &blur_bgl, &ripple_src, "fs");
+
+        // Perspective (bilinear approx of inverse mapping via 4 normalized corners).
+        // c0=[tlx,tly,trx,try], c1=[brx,bry,blx,bly], c2=[lw,lh,0,0]
+        // Inverse: map dest UV → source via bilinear interp of corners is forward;
+        // for inverse we use bilinear patch: sample at inverse of bilinear is hard,
+        // so use simple projective approx: treat as bilinear UV warp of source.
+        let perspective_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ c0: vec4<f32>, c1: vec4<f32>, c2: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn atf(xf: f32, yf: f32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.c2.x), i32(p.c2.y)) - vec2<i32>(1);\n  if (xf < 0.0 || yf < 0.0 || xf >= p.c2.x || yf >= p.c2.y) {{ return vec4<f32>(0.0); }}\n  let x0 = i32(floor(xf)); let y0 = i32(floor(yf));\n  let fx = xf - f32(x0); let fy = yf - f32(y0);\n  let c00 = textureLoad(t, clamp(vec2<i32>(x0, y0), vec2<i32>(0), hi), 0);\n  let c10 = textureLoad(t, clamp(vec2<i32>(x0+1, y0), vec2<i32>(0), hi), 0);\n  let c01 = textureLoad(t, clamp(vec2<i32>(x0, y0+1), vec2<i32>(0), hi), 0);\n  let c11 = textureLoad(t, clamp(vec2<i32>(x0+1, y0+1), vec2<i32>(0), hi), 0);\n  return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.c2.x; let lh = p.c2.y;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  // Normalized dest UV.\n  let u = pos.x / max(lw - 1.0, 1.0); let v = pos.y / max(lh - 1.0, 1.0);\n  // Inverse bilinear: find source UV by interpolating corner origins (identity src corners).\n  // We map dest → source by treating dst corners as where unit square lands, solve approx:\n  // source pos ≈ bilinear of unit-square corners at inverse of dest bilinear (Newton-free):\n  // For identity defaults, corners match unit square → passthrough.\n  let tl = p.c0.xy; let tr = p.c0.zw; let br = p.c1.xy; let bl = p.c1.zw;\n  // Forward bilinear from source unit square s,t to dest:\n  // dest = mix(mix(tl,tr,s), mix(bl,br,s), t). Invert with simple grid search (2 Newton steps).\n  var s = u; var t = v;\n  for (var iter = 0; iter < 4; iter++) {{\n    let top = mix(tl, tr, s); let bot = mix(bl, br, s);\n    let pxy = mix(top, bot, t);\n    let want = vec2<f32>(u, v);\n    let err = pxy - want;\n    // Jacobian via finite differences.\n    let eps = 1e-3;\n    let tops = mix(tl, tr, s + eps); let bots = mix(bl, br, s + eps);\n    let dsd = (mix(tops, bots, t) - pxy) / eps;\n    let topt = mix(tl, tr, s); let bott = mix(bl, br, s);\n    // d/dt of mix(top,bot,t) = bot-top\n    let dtd = bot - top;\n    // Solve J * ds = -err (2x2).\n    let det = dsd.x * dtd.y - dsd.y * dtd.x;\n    if (abs(det) > 1e-8) {{\n      let inv = 1.0 / det;\n      let ds = inv * (-err.x * dtd.y + err.y * dtd.x);\n      let dt = inv * (-dsd.x * err.y + dsd.y * err.x);\n      s = clamp(s + ds, 0.0, 1.0);\n      t = clamp(t + dt, 0.0, 1.0);\n    }}\n  }}\n  return atf(s * (lw - 1.0), t * (lh - 1.0));\n}}\n"
+        );
+        let perspective_pipeline = make_pipeline(device, &blur_bgl, &perspective_src, "fs");
+
+        // Grain: deterministic hash noise. info = [amount, mono, seed, 0], dims in second half via p
+        // Use filter_bgl: p = [amount, mono, seed, 0]
+        let grain_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\nfn hash21(p: vec2<f32>) -> f32 {{\n  var p3 = fract(vec3<f32>(p.xyx) * 0.1031 + u.p.z * 0.017);\n  p3 += dot(p3, p3.yzx + 33.33);\n  return fract((p3.x + p3.y) * p3.z) * 2.0 - 1.0;\n}}\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  let amt = clamp(u.p.x, 0.0, 1.0);\n  if (amt < 1e-6) {{ return c; }}\n  let px = i.uv * 1024.0;\n  if (u.p.y > 0.5) {{\n    let n = hash21(px) * amt;\n    return vec4<f32>(c.rgb + vec3<f32>(n, n, n) * c.a, c.a);\n  }}\n  let nr = hash21(px) * amt;\n  let ng = hash21(px + vec2<f32>(17.0, 0.0)) * amt;\n  let nb = hash21(px + vec2<f32>(0.0, 31.0)) * amt;\n  return vec4<f32>(c.r + nr * c.a, c.g + ng * c.a, c.b + nb * c.a, c.a);\n}}\n"
+        );
+        let grain_pipeline = make_pipeline(device, &filter_bgl, &grain_src, "fs");
+
+        // Chromatic aberration: info = [amount_px, 0, logical_w, logical_h]
+        let ca_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn atf(xf: f32, yf: f32) -> vec4<f32> {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  let x0 = i32(floor(xf)); let y0 = i32(floor(yf));\n  let fx = xf - f32(x0); let fy = yf - f32(y0);\n  let c00 = textureLoad(t, clamp(vec2<i32>(x0, y0), vec2<i32>(0), hi), 0);\n  let c10 = textureLoad(t, clamp(vec2<i32>(x0+1, y0), vec2<i32>(0), hi), 0);\n  let c01 = textureLoad(t, clamp(vec2<i32>(x0, y0+1), vec2<i32>(0), hi), 0);\n  let c11 = textureLoad(t, clamp(vec2<i32>(x0+1, y0+1), vec2<i32>(0), hi), 0);\n  return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let amount = p.info.x;\n  let cx = (lw - 1.0) * 0.5; let cy = (lh - 1.0) * 0.5;\n  let dx = pos.x - cx; let dy = pos.y - cy;\n  let dist = sqrt(dx * dx + dy * dy);\n  let maxd = max(sqrt(cx * cx + cy * cy), 1e-4);\n  var ux = 0.0; var uy = 0.0;\n  if (dist > 1e-4) {{ ux = dx / dist; uy = dy / dist; }}\n  let off = amount * (dist / maxd);\n  let center = atf(pos.x, pos.y);\n  let red = atf(pos.x + ux * off, pos.y + uy * off);\n  let blue = atf(pos.x - ux * off, pos.y - uy * off);\n  return vec4<f32>(red.r, center.g, blue.b, center.a);\n}}\n"
+        );
+        let ca_pipeline = make_pipeline(device, &blur_bgl, &ca_src, "fs");
+
+        let unpremultiply_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  if (c.a > 1e-6) {{ return vec4<f32>(c.rgb / c.a, c.a); }}\n  return vec4<f32>(0.0);\n}}\n"
+        );
+        let unpremultiply_pipeline = make_pipeline(device, &filter_bgl, &unpremultiply_src, "fs");
+
+        // Alpha view: mode in p.x — 0 alpha-as-luma, 1 premul, 2 straight
+        let alpha_view_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  let mode = i32(u.p.x + 0.5);\n  if (mode == 1) {{ return c; }}\n  if (mode == 2) {{\n    if (c.a > 1e-6) {{ return vec4<f32>(c.rgb / c.a, 1.0); }}\n    return vec4<f32>(0.0, 0.0, 0.0, 1.0);\n  }}\n  return vec4<f32>(c.a, c.a, c.a, 1.0);\n}}\n"
+        );
+        let alpha_view_pipeline = make_pipeline(device, &filter_bgl, &alpha_view_src, "fs");
+
+        // Outline: util2_bgl = tex + 32-byte uniform (info + color).
+        // info = [thickness, opacity, logical_w, logical_h], col = [r, g, b, pad]
+        let util2_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("util2_bgl"),
+            entries: &[tex_entry(0), uniform_entry(1)],
+        });
+        let outline_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32>, col: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let hi = vec2<i32>(i32(lw), i32(lh)) - vec2<i32>(1);\n  let center = textureLoad(t, clamp(vec2<i32>(x, y), vec2<i32>(0), hi), 0);\n  let thick = max(p.info.x, 0.0);\n  let tpx = i32(ceil(thick));\n  var min_d = 1e9;\n  let inside = center.a > 0.5;\n  if (!inside && tpx > 0) {{\n    for (var j = -tpx; j <= tpx; j++) {{\n      for (var i = -tpx; i <= tpx; i++) {{\n        let a = textureLoad(t, clamp(vec2<i32>(x + i, y + j), vec2<i32>(0), hi), 0).a;\n        if (a > 0.5) {{ min_d = min(min_d, sqrt(f32(i * i + j * j))); }}\n      }}\n    }}\n  }}\n  var edge = 0.0;\n  if (!inside && min_d <= thick) {{ edge = clamp(1.0 - min_d / max(thick, 1e-4), 0.0, 1.0); }}\n  let ea = edge * clamp(p.info.y, 0.0, 1.0);\n  let outline = p.col.xyz * ea;\n  return vec4<f32>(center.rgb + outline * (1.0 - center.a), center.a + ea * (1.0 - center.a));\n}}\n"
+        );
+        let outline_pipeline = make_pipeline(device, &util2_bgl, &outline_src, "fs");
+
+        // Drop shadow: info = [ox, oy, lw, lh], col = [r, g, b, opacity]
+        // Soft shadow via multi-tap of source alpha at offset.
+        let drop_shadow_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32>, col: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\nfn alpha_at(xf: f32, yf: f32) -> f32 {{\n  let hi = vec2<i32>(i32(p.info.z), i32(p.info.w)) - vec2<i32>(1);\n  let x0 = i32(floor(xf)); let y0 = i32(floor(yf));\n  return textureLoad(t, clamp(vec2<i32>(x0, y0), vec2<i32>(0), hi), 0).a;\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let hi = vec2<i32>(i32(lw), i32(lh)) - vec2<i32>(1);\n  let center = textureLoad(t, clamp(vec2<i32>(x, y), vec2<i32>(0), hi), 0);\n  let ox = p.info.x; let oy = p.info.y;\n  // 5-tap soft shadow of alpha at offset.\n  var sa = 0.0;\n  sa += alpha_at(pos.x - ox, pos.y - oy);\n  sa += alpha_at(pos.x - ox - 1.0, pos.y - oy) * 0.5;\n  sa += alpha_at(pos.x - ox + 1.0, pos.y - oy) * 0.5;\n  sa += alpha_at(pos.x - ox, pos.y - oy - 1.0) * 0.5;\n  sa += alpha_at(pos.x - ox, pos.y - oy + 1.0) * 0.5;\n  sa = clamp(sa / 3.0, 0.0, 1.0) * clamp(p.col.w, 0.0, 1.0);\n  let shadow = vec4<f32>(p.col.xyz * sa, sa);\n  return vec4<f32>(center.rgb + shadow.rgb * (1.0 - center.a), center.a + shadow.a * (1.0 - center.a));\n}}\n"
+        );
+        let drop_shadow_pipeline = make_pipeline(device, &util2_bgl, &drop_shadow_src, "fs");
+
         // Glow extract: zero out pixels whose straight luma is below threshold.
         // Reuses filter_bgl (tex + sampler + params).
         let glow_extract_src = format!(
@@ -1443,6 +1593,15 @@ impl Passes {
             curves_contrast_pipeline,
             black_and_white_pipeline,
             pinch_pipeline,
+            ripple_pipeline,
+            perspective_pipeline,
+            grain_pipeline,
+            ca_pipeline,
+            unpremultiply_pipeline,
+            alpha_view_pipeline,
+            outline_pipeline,
+            drop_shadow_pipeline,
+            util2_bgl,
             glow_extract_pipeline,
             glow_comp_bgl,
             glow_comp_pipeline,
@@ -1951,6 +2110,293 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.pinch_pipeline, &bind, target);
+    }
+
+    fn ripple(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amplitude: f32,
+        wavelength: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let amp = if amplitude.is_finite() { amplitude } else { 0.0 };
+        let wl = if wavelength.is_finite() {
+            wavelength.max(1.0)
+        } else {
+            16.0
+        };
+        let uniform = [amp, wl, logical_w as f32, logical_h as f32];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ripple_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ripple_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.ripple_pipeline, &bind, target);
+    }
+
+    fn perspective(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        corners: [f32; 8],
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let uniform = [
+            corners[0],
+            corners[1],
+            corners[2],
+            corners[3],
+            corners[4],
+            corners[5],
+            corners[6],
+            corners[7],
+            logical_w as f32,
+            logical_h as f32,
+            0.0,
+            0.0,
+        ];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("perspective_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("perspective_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        // perspective uniform is 48 bytes; blur_bgl only has min_binding_size None so OK.
+        self.run(gpu, &self.perspective_pipeline, &bind, target);
+    }
+
+    fn grain(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amount: f32,
+        mono: bool,
+        seed: f32,
+        _logical_w: u32,
+        _logical_h: u32,
+    ) {
+        let amount = if amount.is_finite() {
+            amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.run_filter(
+            gpu,
+            &self.grain_pipeline,
+            src,
+            target,
+            &[
+                amount,
+                if mono { 1.0 } else { 0.0 },
+                seed,
+                0.0,
+            ],
+        );
+    }
+
+    fn chromatic_aberration(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        amount: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let amount = if amount.is_finite() { amount } else { 0.0 };
+        let uniform = [amount, 0.0, logical_w as f32, logical_h as f32];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ca_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.ca_pipeline, &bind, target);
+    }
+
+    fn unpremultiply(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture) {
+        self.run_filter(gpu, &self.unpremultiply_pipeline, src, target, &[0.0; 4]);
+    }
+
+    fn alpha_view(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        mode: f32,
+    ) {
+        self.run_filter(
+            gpu,
+            &self.alpha_view_pipeline,
+            src,
+            target,
+            &[mode, 0.0, 0.0, 0.0],
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drop_shadow(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        ox: f32,
+        oy: f32,
+        _radius: f32,
+        color: [f32; 3],
+        opacity: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let uniform = [
+            ox,
+            oy,
+            logical_w as f32,
+            logical_h as f32,
+            color[0],
+            color[1],
+            color[2],
+            if opacity.is_finite() {
+                opacity.clamp(0.0, 1.0)
+            } else {
+                0.5
+            },
+        ];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("drop_shadow_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("drop_shadow_bg"),
+            layout: &self.util2_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.drop_shadow_pipeline, &bind, target);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn outline(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        thickness: f32,
+        color: [f32; 3],
+        opacity: f32,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let thick = if thickness.is_finite() {
+            thickness.max(0.0)
+        } else {
+            0.0
+        };
+        let opac = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let uniform = [
+            thick,
+            opac,
+            logical_w as f32,
+            logical_h as f32,
+            color[0],
+            color[1],
+            color[2],
+            0.0,
+        ];
+        let view = src.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("outline_params"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("outline_bg"),
+            layout: &self.util2_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.outline_pipeline, &bind, target);
     }
 
     /// High-pass combine: `src - blurred` on RGB, keep src alpha (K-B16).
