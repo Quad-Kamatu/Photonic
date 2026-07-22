@@ -32,7 +32,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **29 QA-1** acceptance-story harness | 🟡 scaffold | `a05ec8e` | harness + fixtures scaffolded; `video-p1-contract` gate removed |
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
 
-**Not yet started:** K-0.7 (export-audio mux + loudness), K-0.8 (`Probe` wiring), 30 full raster bridge (K-B16), 31 §3 latency compensation, 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`).
+**Not yet started:** K-0.7 (export-audio mux + loudness), K-0.8 (`Probe` wiring), 30 full raster bridge (K-B16), 31 §3 latency compensation, 32 §11 remaining guards (scale-invariance, playback policy — some scaffolded in `a05ec8e`). G-4 master-meter GUI publish remains under K-0.6 residual.
 
 ## 1. Authority and precedence
 
