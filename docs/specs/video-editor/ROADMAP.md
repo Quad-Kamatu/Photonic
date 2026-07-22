@@ -35,14 +35,14 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
-| **K-B16** raster bridge (slice) | ✅ done (slice) | `bf1d89b`+`a418216`+this | CPU + GPU for all 6 bridged kernels (box/unsharp/high-pass/emboss/find_edges/median); remaining ~55 raster kernels still open |
-| **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+this | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
+| **K-B16** raster bridge (slice) | ✅ done (slice) | `bf1d89b`+`a418216`+`f867e95` | CPU + GPU for all 6 bridged kernels (box/unsharp/high-pass/emboss/find_edges/median); remaining ~55 raster kernels still open |
+| **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
 | **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 | **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
-| **K-F4** job options | ✅ done | this | `RenderJobOptions` (proxies, preview res, encoder speed, raw args) on `ExportJob`; dialog collapsible |
-| **K-F5** hardware encoders | ✅ done | this | probe NVENC/VAAPI/VideoToolbox/QSV; prefer-HW fail-closed; detection report + raw-args hatch |
-| **32 §4** playback policy | ✅ done | this | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
-| **32 §7** scale-invariance guard | ✅ done | this | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
+| **K-F4** job options | ✅ done | `f867e95` | `RenderJobOptions` (proxies, preview res, encoder speed, raw args) on `ExportJob`; dialog collapsible |
+| **K-F5** hardware encoders | ✅ done | `f867e95` | probe NVENC/VAAPI/VideoToolbox/QSV; prefer-HW fail-closed; detection report + raw-args hatch |
+| **32 §4** playback policy | ✅ done | `f867e95` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
+| **32 §7** scale-invariance guard | ✅ done | `f867e95` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
 
 **Not yet started (next bands):** full K-B16 catalogue (~55 remaining raster kernels); K-A/K-C/K-D/K-E residual bands; E-1/E-2/E-4 IR contracts; legal-or-fixture-blocked G/D items.
 
