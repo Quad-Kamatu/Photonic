@@ -14,16 +14,16 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **26 §8 K-0.1** export wiring | ✅ done | `fca5eda` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
 | **26 §8 K-0.2** render passthrough effects | 🟡 partial | `fca5eda` | `ResolvedParams` real+hashed for **all** effects; LumaKey/ChromaKey/MaskShapeGen wired CPU+GPU. *Remaining:* Blur/Sharpen/Glow (need golden/video re-bless + shared blur primitive) |
 | **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `9b2ec60` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
-| **26 §8 K-0.4** Wipe/Push passes | ✅ done | `3bdf9f6` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
-| **26 §8 K-0.5** `lut_provider` threading | ✅ done | `3bdf9f6` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
+| **26 §8 K-0.4** Wipe/Push passes | ✅ done | `ca6538b` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
+| **26 §8 K-0.5** `lut_provider` threading | ✅ done | `ca6538b` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
 | **26 §8 K-0.6** audio FX chain + mixer + meter | ✅ done | `367511d` | mixer owns track/master fx, discontinuity policy, declick tail. *Remaining:* G-4 master-meter GUI publish; 31 §3 latency compensation |
-| **26 §8 K-0.9** `sync_lock` propagation | ✅ done | `3bdf9f6` | `expand_sync_lock_ripple` in core; insert/extract/ripple_delete/ripple_trim all expand; GUI + MCP ride the same batch |
+| **26 §8 K-0.9** `sync_lock` propagation | ✅ done | `ca6538b` | `expand_sync_lock_ripple` in core; insert/extract/ripple_delete/ripple_trim all expand; GUI + MCP ride the same batch |
 | **30** effect manifest (E-3/X-4) | ✅ done | `48fb5da`,`49bd585` | schema + 7 authored manifests + `EffectKind`↔`EffectId` bridge + migration/inert-unknown; MCP `list_effect_kinds`/`set_effect_param` generated with range refusal. *Remaining:* full raster bridge (K-B16, 61 kernels) |
 | **31 §2/§3** DSP reset/latency contracts (E-10) | ✅ done | `1ccbeea` | mandatory `reset(AudioDiscontinuity)` + latency/tail across all units |
 | **35** markers, effect scopes, groups | ✅ done | `9b2ec60`,`367511d`,`49bd585` | marker categories/anchors, clip markers, group tree; Track/master/asset effect scopes applied in compile; V4→V5 migration; version bumped |
 | **36** error model (taxonomy) | ✅ done | `a05ec8e` | `core::diag` taxonomy + catalogue tests. *Remaining:* wire `EngineStatus.last_error` → `Diagnostic` |
 | **37** robustness | ✅ done | `a05ec8e` | capability floor, gpu_state, atomic_write, child reaping, scale targets, CI split |
-| **38** sequence semantics | ✅ done | `435a3a6`+*(this commit)* | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup; LoadNotice + transition-out-at-cut validation/migration |
+| **38** sequence semantics | ✅ done | `435a3a6`+`ca6538b` | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup; LoadNotice + transition-out-at-cut validation/migration |
 | **39 §2.2** unknown-preserving variants | ✅ done | `a05ec8e` | forward-compat inert round-trip |
 | **40 §7** spec verification infra | ✅ done | `a05ec8e` | `tools/spec-extract`, drift + acceptance-index scripts |
 | **41** accessibility | ✅ done | `1ccbeea`,`a05ec8e` | curve-editor/node-editor focus fixes, keyboard-gate + contrast lints |
