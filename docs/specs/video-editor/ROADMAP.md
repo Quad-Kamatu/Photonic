@@ -12,7 +12,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **03 §4.5.3** grade operand space (A-3) | ✅ done | `a05ec8e` | grade ops run straight-alpha (unpremult→op→repremult); shared `ALPHA_EPS` with GPU shader |
 | **03 §4.5.4** live canvas linear (A-1) | ✅ done | `5a62494` | document renders to offscreen sRGB target, blitted into egui; canvas blends in linear like headless. *Follow-up:* CPU compositor isolated-layer path is P7-deferred (§4.3) |
 | **26 §8 K-0.1** export wiring | ✅ done | `fca5eda` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
-| **26 §8 K-0.2** render passthrough effects | ✅ done | `fca5eda`+*(this commit)* | all 6 declared effects render: Luma/Chroma/Mask + Blur/Sharpen/Glow; shared separable Gaussian (`ops::blur` + dual-pass GPU `textureLoad`); CPU/GPU parity |
+| **26 §8 K-0.2** render passthrough effects | ✅ done | `fca5eda`+`5a83c50` | all 6 declared effects render: Luma/Chroma/Mask + Blur/Sharpen/Glow; shared separable Gaussian (`ops::blur` + dual-pass GPU `textureLoad`); CPU/GPU parity |
 | **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `9b2ec60` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
 | **26 §8 K-0.4** Wipe/Push passes | ✅ done | `ca6538b` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
 | **26 §8 K-0.5** `lut_provider` threading | ✅ done | `ca6538b` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
