@@ -35,7 +35,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
-| **K-B16** raster bridge | ✅ done (catalogue) | `7a7f38d`+this | **38 bridged ids** with manifests + Linear/Transfer operand spaces; multi-point curves (5 knots + contrast); GPU for surface/lens/smart_sharpen + prior twins. Residual polish only: richer curves UI widgets in inspector, exact bilateral/disc parity goldens |
+| **K-B16** raster bridge | ✅ done (catalogue) | `7a7f38d`+`73e6a66` | **38 bridged ids** with manifests + Linear/Transfer operand spaces; multi-point curves (5 knots + contrast); GPU for surface/lens/smart_sharpen + prior twins. Residual polish only: richer curves UI widgets in inspector, exact bilateral/disc parity goldens |
 | **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
 | **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 | **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
