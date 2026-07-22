@@ -35,7 +35,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **GUI** export progress + diag surface | ✅ done | `1acd25f` | live progress/cancel dialog; diagnostic badge view-model |
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
-| **K-B16** raster bridge | 🟡 partial | `a773407`+this | **38 bridged ids** (CPU+manifests): full Tier-1/2 catalogue + util.unpremultiply/alpha_view/drop_shadow/outline. GPU twins for grain, CA, ripple, perspective, outline, drop_shadow, unpremultiply, alpha_view (+ prior set). Remaining: multi-point curves UI, surface/lens/smart_sharpen GPU fidelity |
+| **K-B16** raster bridge | 🟡 partial | `a773407`+`7a7f38d` | **38 bridged ids** (CPU+manifests): full Tier-1/2 catalogue + util.unpremultiply/alpha_view/drop_shadow/outline. GPU twins for grain, CA, ripple, perspective, outline, drop_shadow, unpremultiply, alpha_view (+ prior set). Remaining: multi-point curves UI, surface/lens/smart_sharpen GPU fidelity |
 | **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
 | **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 | **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
