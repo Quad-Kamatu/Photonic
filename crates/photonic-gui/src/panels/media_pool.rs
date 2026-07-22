@@ -40,6 +40,10 @@ pub struct MediaPoolUi {
     pub want_peek: Option<AssetId>,
     /// Bin filter; `None` = pool root (shows unfiled assets).
     pub current_bin: Option<BinId>,
+    /// K-C2 filter: only show unused assets (usage == 0).
+    pub filter_unused_only: bool,
+    /// K-C2 filter: minimum star rating (0 = any).
+    pub filter_min_rating: u8,
     pub new_bin_name: String,
     /// L1–L5 jobs still in flight (24-preview-media-load ladder).
     pub importing: usize,
@@ -99,6 +103,8 @@ impl Default for MediaPoolUi {
             selected: None,
             want_peek: None,
             current_bin: None,
+            filter_unused_only: false,
+            filter_min_rating: 0,
             new_bin_name: String::new(),
             importing: 0,
             meta_tx,
@@ -685,6 +691,44 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         }
     });
 
+    // ── K-C2 filters + K-C5 remove-unused ───────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.checkbox(&mut ctx.media_ui.filter_unused_only, "Unused only")
+            .on_hover_text("Show only assets not placed on any sequence");
+        ui.label("Min ★");
+        for r in 0u8..=5 {
+            let label = if r == 0 {
+                "Any".to_string()
+            } else {
+                format!("{r}")
+            };
+            if ui
+                .selectable_label(ctx.media_ui.filter_min_rating == r, label)
+                .clicked()
+            {
+                ctx.media_ui.filter_min_rating = r;
+            }
+        }
+        ui.separator();
+        let unused_n = project
+            .media
+            .assets
+            .keys()
+            .filter(|id| asset_usage_count(project, **id) == 0)
+            .count();
+        if ui
+            .add_enabled(
+                unused_n > 0,
+                egui::Button::new(format!("Remove unused ({unused_n})")),
+            )
+            .on_hover_text("Delete every media pool asset with zero timeline references (undoable)")
+            .clicked()
+        {
+            ctx.action = Some(PanelAction::MediaRemoveUnused);
+        }
+    });
+
     ui.separator();
 
     // ── Bins tree (flat with parent refs → indented tree) ───────────────────
@@ -732,12 +776,28 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     }
 
     // ── Asset list / grid ───────────────────────────────────────────────────
-    let assets = assets_in_bin(pool, ctx.media_ui.current_bin);
+    let mut assets = assets_in_bin(pool, ctx.media_ui.current_bin);
     // K-C2 usage counts: pure derived query over timeline clips.
     let usage: std::collections::HashMap<AssetId, usize> = assets
         .iter()
         .map(|a| (a.id, asset_usage_count(project, a.id)))
         .collect();
+    // Apply K-C2 filters (unused-only / min rating).
+    let min_r = ctx.media_ui.filter_min_rating;
+    let unused_only = ctx.media_ui.filter_unused_only;
+    assets.retain(|a| {
+        let n = usage.get(&a.id).copied().unwrap_or(0);
+        if unused_only && n > 0 {
+            return false;
+        }
+        if min_r > 0 {
+            match a.rating {
+                Some(r) if r >= min_r => {}
+                _ => return false,
+            }
+        }
+        true
+    });
     if assets.is_empty() && ctx.media_ui.importing == 0 {
         ui.label(
             egui::RichText::new("No media here yet. Import files or drop them on the window.")
@@ -894,6 +954,32 @@ fn draw_asset_cell(
                 ctx.action = Some(PanelAction::MediaRelink { asset: asset.id });
                 ui.close_menu();
             }
+            // K-C2 star rating.
+            ui.menu_button("Rating", |ui| {
+                if ui
+                    .selectable_label(asset.rating.is_none(), "Unrated")
+                    .clicked()
+                {
+                    ctx.action = Some(PanelAction::MediaSetRating {
+                        asset: asset.id,
+                        rating: None,
+                    });
+                    ui.close_menu();
+                }
+                for r in 1u8..=5 {
+                    let stars = "★".repeat(r as usize);
+                    if ui
+                        .selectable_label(asset.rating == Some(r), format!("{stars} ({r})"))
+                        .clicked()
+                    {
+                        ctx.action = Some(PanelAction::MediaSetRating {
+                            asset: asset.id,
+                            rating: Some(r),
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
             // G-15A: attach a user-owned proxy without re-encoding; detach never
             // deletes Attached files (handler / set_asset_proxy only clears ref).
             if asset.kind == AssetKind::Video
@@ -953,6 +1039,14 @@ fn move_to_bin_items(
 }
 
 fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, usage: usize) {
+    if let Some(r) = asset.rating {
+        ui.label(
+            egui::RichText::new(format!("{}★", r.min(5)))
+                .small()
+                .color(egui::Color32::from_rgb(235, 200, 80)),
+        )
+        .on_hover_text(format!("Rating: {r}/5"));
+    }
     if usage > 0 {
         let label = if usage == 1 {
             "ON TL".to_string()
@@ -1096,6 +1190,7 @@ mod tests {
         assert_eq!(asset_usage_count(&project, AssetId::new()), 0);
     }
 
+    #[test]
     fn probe_summary_surfaces_interlaced_scan() {
         use photonic_core::timeline::{
             FrameRate, MediaProbe, ProbedColor, ScanType, VideoStreamInfo,

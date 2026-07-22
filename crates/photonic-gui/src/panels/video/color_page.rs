@@ -1208,24 +1208,62 @@ fn scope_source_label(doc: &Document, selection: &[ClipId]) -> String {
     "Program".to_string()
 }
 
+/// K-E1 histogram component mask: bit0=Y, bit1=R, bit2=G, bit3=B.
+#[derive(Clone, Copy)]
+struct HistChannels {
+    y: bool,
+    r: bool,
+    g: bool,
+    b: bool,
+}
+
+impl Default for HistChannels {
+    fn default() -> Self {
+        Self {
+            y: true,
+            r: true,
+            g: true,
+            b: true,
+        }
+    }
+}
+
 fn draw_histogram(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
     let h = photonic_render::scopes::histogram_gpu(device, queue, tex);
+    // K-E1: channel toggles (session-only, egui temp data).
+    let id = ui.id().with("hist_channels");
+    let mut ch = ui
+        .data(|d| d.get_temp::<HistChannels>(id))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Show").small().color(muted(ui)));
+        ui.checkbox(&mut ch.y, "Y");
+        ui.checkbox(&mut ch.r, "R");
+        ui.checkbox(&mut ch.g, "G");
+        ui.checkbox(&mut ch.b, "B");
+    });
+    ui.data_mut(|d| d.insert_temp(id, ch));
+
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, w * 0.6), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 3.0, Color32::from_rgb(7, 7, 11));
 
     let bins = h.luma.len();
-    let max = h
-        .luma
-        .iter()
-        .chain(h.red.iter())
-        .chain(h.green.iter())
-        .chain(h.blue.iter())
-        .copied()
-        .max()
-        .unwrap_or(1)
-        .max(1) as f32;
+    let mut max = 1u32;
+    if ch.y {
+        max = max.max(h.luma.iter().copied().max().unwrap_or(0));
+    }
+    if ch.r {
+        max = max.max(h.red.iter().copied().max().unwrap_or(0));
+    }
+    if ch.g {
+        max = max.max(h.green.iter().copied().max().unwrap_or(0));
+    }
+    if ch.b {
+        max = max.max(h.blue.iter().copied().max().unwrap_or(0));
+    }
+    let max = max.max(1) as f32;
     let bw = rect.width() / bins as f32;
     let filled = |data: &[u32], color: Color32| {
         for (i, &c) in data.iter().enumerate() {
@@ -1253,10 +1291,18 @@ fn draw_histogram(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: 
             }
         }
     };
-    filled(&h.luma, on_surface(ui).gamma_multiply(0.45));
-    line(&h.red, Color32::from_rgb(220, 90, 90));
-    line(&h.green, Color32::from_rgb(90, 200, 110));
-    line(&h.blue, Color32::from_rgb(100, 130, 230));
+    if ch.y {
+        filled(&h.luma, on_surface(ui).gamma_multiply(0.45));
+    }
+    if ch.r {
+        line(&h.red, Color32::from_rgb(220, 90, 90));
+    }
+    if ch.g {
+        line(&h.green, Color32::from_rgb(90, 200, 110));
+    }
+    if ch.b {
+        line(&h.blue, Color32::from_rgb(100, 130, 230));
+    }
     painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
 }
 

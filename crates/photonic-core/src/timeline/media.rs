@@ -65,6 +65,12 @@ pub struct MediaAsset {
     /// `None` = neutral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<Grade>,
+    /// Star rating 1–5 (K-C2). `None` = unrated. Additive; omitted in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<u8>,
+    /// Free-form tags (K-C2). Empty omitted. Full `TagId` registry is follow-up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl MediaAsset {
@@ -79,6 +85,8 @@ impl MediaAsset {
             bin: None,
             effects: Vec::new(),
             grade: None,
+            rating: None,
+            tags: Vec::new(),
         }
     }
 

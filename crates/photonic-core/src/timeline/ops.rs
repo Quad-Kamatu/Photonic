@@ -115,6 +115,79 @@ pub fn remove_asset(p: &TimelineProject, asset: AssetId) -> Result<TimelineCmd, 
     })
 }
 
+/// K-C2: set or clear a 1–5 star rating (`None` / out-of-range clears).
+pub fn set_asset_rating(
+    p: &TimelineProject,
+    asset: AssetId,
+    rating: Option<u8>,
+) -> Result<TimelineCmd, EditError> {
+    let a = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?;
+    let new = rating.filter(|r| (1..=5).contains(r));
+    Ok(TimelineCmd::SetAssetRating {
+        asset,
+        old: a.rating,
+        new,
+    })
+}
+
+/// K-C2: replace free-form tags (deduped, trimmed, non-empty).
+pub fn set_asset_tags(
+    p: &TimelineProject,
+    asset: AssetId,
+    tags: Vec<String>,
+) -> Result<TimelineCmd, EditError> {
+    let a = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?;
+    let mut new: Vec<String> = tags
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    new.sort();
+    new.dedup();
+    Ok(TimelineCmd::SetAssetTags {
+        asset,
+        old: a.tags.clone(),
+        new,
+    })
+}
+
+/// K-C5: assets with zero timeline references (candidates for remove-unused).
+pub fn unused_assets(p: &TimelineProject) -> Vec<AssetId> {
+    let mut used = std::collections::HashSet::new();
+    for seq in p.sequences.values() {
+        for track in seq.tracks() {
+            for clip in &track.clips {
+                if let Some(id) = clip.source.asset() {
+                    used.insert(id);
+                }
+            }
+        }
+    }
+    p.media
+        .assets
+        .keys()
+        .copied()
+        .filter(|id| !used.contains(id))
+        .collect()
+}
+
+/// K-C5: batch-remove every unused asset as one undoable step (caller wraps
+/// in `Command::Batch` if multiple). Returns one `RemoveAsset` per id.
+pub fn remove_unused_assets(p: &TimelineProject) -> Vec<TimelineCmd> {
+    unused_assets(p)
+        .into_iter()
+        .filter_map(|id| remove_asset(p, id).ok())
+        .collect()
+}
+
 pub fn relink_asset(
     p: &TimelineProject,
     asset: AssetId,
@@ -2118,6 +2191,82 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::history::Command;
+
+    #[test]
+    fn set_asset_rating_and_unused_assets() {
+        use super::super::media::{AssetKind, AssetSource, MediaAsset};
+        use std::path::PathBuf;
+
+        let mut project = TimelineProject::new();
+        let used = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: PathBuf::from("/a.mp4"),
+                rel_path: None,
+            },
+        );
+        let used_id = used.id;
+        let free = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: PathBuf::from("/b.mp4"),
+                rel_path: None,
+            },
+        );
+        let free_id = free.id;
+        project.media.insert(used);
+        project.media.insert(free);
+
+        let mut seq = Sequence::new("S", FrameRate::FPS_30, 320, 180);
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset: used_id },
+            Tick(0),
+            Tick(100),
+        ));
+        seq.video_tracks.push(track);
+        project.insert_sequence(seq);
+
+        let unused = unused_assets(&project);
+        assert!(unused.contains(&free_id));
+        assert!(!unused.contains(&used_id));
+
+        let mut doc = Document::new("t", 1.0, 1.0);
+        doc.timeline = Some(project);
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd = set_asset_rating(project, used_id, Some(4)).unwrap();
+        cmd.apply(&mut doc);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().media.assets[&used_id].rating,
+            Some(4)
+        );
+
+        let inv = cmd.inverse(&doc).unwrap();
+        inv.apply(&mut doc);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().media.assets[&used_id].rating,
+            None
+        );
+
+        // Out of range clears.
+        doc.timeline
+            .as_mut()
+            .unwrap()
+            .media
+            .assets
+            .get_mut(&used_id)
+            .unwrap()
+            .rating = Some(3);
+        let cmd = set_asset_rating(doc.timeline.as_ref().unwrap(), used_id, Some(9)).unwrap();
+        cmd.apply(&mut doc);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().media.assets[&used_id].rating,
+            None
+        );
+
+        let removed = remove_unused_assets(doc.timeline.as_ref().unwrap());
+        assert_eq!(removed.len(), 1);
+    }
 
     /// One sequence, one video track with a single clip. Returns the
     /// document plus the ids needed to address that clip.

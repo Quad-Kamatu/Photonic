@@ -399,6 +399,18 @@ pub enum TimelineCmd {
         old_hash: Option<String>,
         new_hash: Option<String>,
     },
+    /// K-C2 star rating (1–5) or clear (`None`).
+    SetAssetRating {
+        asset: AssetId,
+        old: Option<u8>,
+        new: Option<u8>,
+    },
+    /// K-C2 free-form tags replace.
+    SetAssetTags {
+        asset: AssetId,
+        old: Vec<String>,
+        new: Vec<String>,
+    },
     /// Toggle project-wide "generate proxies on import" (G-15C / 24 L7).
     /// Document policy only — does not start or cancel running jobs.
     SetGenerateProxiesOnImport {
@@ -1568,6 +1580,8 @@ impl TimelineCmd {
             TimelineCmd::RelinkAsset { .. } => "Relink media".into(),
             TimelineCmd::SetAssetProxy { .. } => "Update media proxy".into(),
             TimelineCmd::SetAssetMeta { .. } => "Update media metadata".into(),
+            TimelineCmd::SetAssetRating { .. } => "Rate media".into(),
+            TimelineCmd::SetAssetTags { .. } => "Tag media".into(),
             TimelineCmd::SetGenerateProxiesOnImport { new, .. } => {
                 if *new {
                     "Enable generate proxies on import".into()
@@ -1680,6 +1694,16 @@ impl TimelineCmd {
                 if let Some(a) = p.media.assets.get_mut(asset) {
                     a.probe = new_probe.clone();
                     a.content_hash = new_hash.clone();
+                }
+            }
+            TimelineCmd::SetAssetRating { asset, new, .. } => {
+                if let Some(a) = p.media.assets.get_mut(asset) {
+                    a.rating = *new;
+                }
+            }
+            TimelineCmd::SetAssetTags { asset, new, .. } => {
+                if let Some(a) = p.media.assets.get_mut(asset) {
+                    a.tags = new.clone();
                 }
             }
             TimelineCmd::SetGenerateProxiesOnImport { new, .. } => {
@@ -2053,6 +2077,16 @@ impl TimelineCmd {
                 new_probe: old_probe.clone(),
                 old_hash: new_hash.clone(),
                 new_hash: old_hash.clone(),
+            },
+            TimelineCmd::SetAssetRating { asset, old, new } => TimelineCmd::SetAssetRating {
+                asset: *asset,
+                old: *new,
+                new: *old,
+            },
+            TimelineCmd::SetAssetTags { asset, old, new } => TimelineCmd::SetAssetTags {
+                asset: *asset,
+                old: new.clone(),
+                new: old.clone(),
             },
             TimelineCmd::SetGenerateProxiesOnImport { old, new } => {
                 TimelineCmd::SetGenerateProxiesOnImport {

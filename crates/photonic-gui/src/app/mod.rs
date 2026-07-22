@@ -880,6 +880,8 @@ pub struct PhotonicApp {
     pub(crate) monitor_loop_enabled: bool,
     /// Safe-area guide overlay toggle (04 §3.3).
     pub(crate) monitor_safe_area: bool,
+    /// K-E3 composition grid: 0=off, 1=thirds, 2=golden ratio (cycled from toolbar).
+    pub(crate) monitor_comp_grid: u8,
     /// Transform tool toggle: show the in-monitor reframe/transform handles for
     /// the selected clip only when on (off by default — the handles are opt-in,
     /// not always drawn over the picture).
@@ -1593,6 +1595,7 @@ impl Default for PhotonicApp {
             monitor_play_speed: 1.0,
             monitor_loop_enabled: false,
             monitor_safe_area: false,
+            monitor_comp_grid: 0,
             monitor_transform_tool: false,
             show_video_shortcut_sheet: false,
             initial_mode_checked: false,

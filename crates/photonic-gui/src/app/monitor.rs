@@ -1132,6 +1132,13 @@ impl PhotonicApp {
         if self.monitor_safe_area {
             draw_safe_area_guides(&content_painter, video_rect);
         }
+        if self.monitor_comp_grid > 0 {
+            draw_composition_grid(
+                &content_painter,
+                video_rect,
+                self.monitor_comp_grid,
+            );
+        }
 
         // Reframe transform handles (04 §3.3, 05 §4.2, CAP-012) — real, undoable
         // edits via `ops::set_clip_prop`. Opt-in: only drawn when the Transform
@@ -1520,6 +1527,25 @@ impl PhotonicApp {
                 {
                     self.monitor_safe_area = !self.monitor_safe_area;
                 }
+                {
+                    let grid_label = match self.monitor_comp_grid {
+                        1 => "⅓",
+                        2 => "φ",
+                        _ => "▦",
+                    };
+                    let tip = match self.monitor_comp_grid {
+                        1 => "Composition grid: rule of thirds (click to cycle)",
+                        2 => "Composition grid: golden ratio (click to cycle)",
+                        _ => "Composition grid: off (click for thirds)",
+                    };
+                    if ui
+                        .selectable_label(self.monitor_comp_grid > 0, grid_label)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.monitor_comp_grid = (self.monitor_comp_grid + 1) % 3;
+                    }
+                }
                 if ui
                     .selectable_label(self.monitor_transform_tool, ph::ARROWS_OUT_CARDINAL)
                     .on_hover_text("Transform tool — reposition/scale/rotate the selected clip")
@@ -1691,6 +1717,41 @@ fn scrub_x_to_tick(x: f32, left: f32, width: f32, end: Tick, fr: FrameRate) -> T
     let frac = ((x - left) / width).clamp(0.0, 1.0);
     let raw = Tick((frac as f64 * end.0 as f64).round() as i64);
     fr.snap(raw).clamp(Tick::ZERO, end)
+}
+
+/// K-E3 composition grids: rule of thirds (`mode=1`) or golden ratio (`mode=2`).
+fn draw_composition_grid(painter: &egui::Painter, video_rect: egui::Rect, mode: u8) {
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(220, 220, 220, 90));
+    let (fx, fy) = match mode {
+        2 => (0.382_f32, 0.618_f32), // golden section
+        _ => (1.0 / 3.0, 2.0 / 3.0), // thirds
+    };
+    let xs = [
+        video_rect.left() + video_rect.width() * fx,
+        video_rect.left() + video_rect.width() * fy,
+    ];
+    let ys = [
+        video_rect.top() + video_rect.height() * fx,
+        video_rect.top() + video_rect.height() * fy,
+    ];
+    for x in xs {
+        painter.line_segment(
+            [
+                egui::pos2(x, video_rect.top()),
+                egui::pos2(x, video_rect.bottom()),
+            ],
+            stroke,
+        );
+    }
+    for y in ys {
+        painter.line_segment(
+            [
+                egui::pos2(video_rect.left(), y),
+                egui::pos2(video_rect.right(), y),
+            ],
+            stroke,
+        );
+    }
 }
 
 /// Action-safe (90%) / title-safe (80%) guide rectangles (04 §3.3).

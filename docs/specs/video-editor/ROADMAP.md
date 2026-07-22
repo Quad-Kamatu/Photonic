@@ -55,8 +55,12 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-G6** GPU deinterlace | ✅ done | `5626717` | WGSL twin of spatial methods (OneField / LinearBlend / YadifSpatial) on `IrOp::Deinterlace` — preview no longer blit-combs |
 | **K-E1** vectorscope guides | ✅ done | `5626717` | I/Q lines + 75%/100% boxes + labels on scopes panel vectorscope overlay |
 | **K-C2** usage count | ✅ done (slice) | `5626717` | derived clip-reference count on media pool (`×N` / ON TL badge); tags/ratings still open |
+| **K-C2** ratings + filter | ✅ done | `2d87bf7` | `MediaAsset.rating` 1–5 + free-form tags field; undoable `SetAssetRating`; pool filter (unused / min ★) + context-menu rate |
+| **K-C5** remove unused | ✅ done (slice) | `6026b5b` | `ops::unused_assets` / `remove_unused_assets`; media-pool **Remove unused (N)** toolbar button (undo batch) |
+| **K-E3** composition grids | ✅ done (slice) | `6026b5b` | Monitor toolbar cycles thirds / golden / off over program picture |
+| **K-E1** histogram channels | ✅ done (slice) | `6026b5b` | Y/R/G/B component toggles on scopes histogram |
 
-**Not yet started (next bands):** K-A residual; K-C tags/ratings/relink/archive; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
+**Not yet started (next bands):** K-A residual; K-C full tags registry/archive/relink polish; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
 
 ## 1. Authority and precedence
 
@@ -144,11 +148,11 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-A | open | Preview rendering ([33](33-timeline-preview-render.md)), marker depth ([35 §1](35-model-decisions.md#1-markers)), spacer, snaps, groups, **timecode as a first-class concept**, duration dialog, grab-item, split-audio, subclips, track compositing, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
 | K-B | partial | Track/master/asset stacks etc. still open. **K-B16 catalogue bridge done** (38 ids, util, multi-point curves, GPU twins) | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
-| K-C | partial | Substrate + **usage-count badge**. Open: clip-jobs, tags/ratings, generators, archive/cache pane, relink, import triage, still-cache keying. K-C3 → G-15; K-C4 image-seq → D-6 | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
+| K-C | partial | Usage count + **ratings/filter + remove-unused**. Open: full TagId registry, clip-jobs, generators, archive/cache pane, relink polish, import triage. K-C3 → G-15; K-C4 → D-6 | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
 | K-D | partial | `AudioStreamInfo`/`ChannelMap` probed; mixer and DSP written but unbound. Open: per-stream/per-channel handling, stems export, **boundary declick (K-D5)** | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
-| K-E | partial | Scopes + extract-frame + **I/Q/75% vectorscope guides**. Open: YUV/YPbPr switch, audio spectrum, per-clip tap, grids | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
+| K-E | partial | Scopes + extract + I/Q/75% + **hist Y/R/G/B** + **comp grids**. Open: YUV/YPbPr, audio spectrum, per-clip tap | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
 | K-F | partial | **K-F1–F5 done** for the export/render band (queue + inspector, multi-format/marker, job options, HW preflight). Remaining polish: sleep-inhibit, add-to-bin, burn-in overlay, 2-pass, K-F7 one-eval-many-outputs | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
 | K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection + deinterlace node landed**; profiles/notes/templates still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |

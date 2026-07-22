@@ -105,6 +105,27 @@ impl PhotonicApp {
                         self.media_pool_ui.selected = None;
                     }
                 }
+                PanelAction::MediaRemoveUnused => {
+                    use photonic_core::timeline::ops;
+                    if let Some(p) = doc.timeline.as_ref() {
+                        let cmds = ops::remove_unused_assets(p);
+                        if !cmds.is_empty() {
+                            let batch = cmds.into_iter().map(Command::Timeline).collect();
+                            history.execute_discrete(Command::Batch(batch), doc);
+                            doc_modified = true;
+                            self.media_pool_ui.selected = None;
+                        }
+                    }
+                }
+                PanelAction::MediaSetRating { asset, rating } => {
+                    use photonic_core::timeline::ops;
+                    if let Some(p) = doc.timeline.as_ref() {
+                        if let Ok(cmd) = ops::set_asset_rating(p, asset, rating) {
+                            history.execute_discrete(Command::Timeline(cmd), doc);
+                            doc_modified = true;
+                        }
+                    }
+                }
                 PanelAction::MediaAssignBin { asset, bin } => {
                     use photonic_core::timeline::ops;
                     if let Some(p) = doc.timeline.as_ref() {

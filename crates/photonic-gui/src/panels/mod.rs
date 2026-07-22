@@ -860,6 +860,13 @@ pub enum PanelAction {
     MediaRemoveAsset {
         asset: photonic_core::timeline::AssetId,
     },
+    /// K-C5: remove every asset with zero timeline references (one undo batch).
+    MediaRemoveUnused,
+    /// K-C2: set or clear star rating (1–5 / None).
+    MediaSetRating {
+        asset: photonic_core::timeline::AssetId,
+        rating: Option<u8>,
+    },
     /// Move an asset to `bin` (`None` = pool root).
     MediaAssignBin {
         asset: photonic_core::timeline::AssetId,
