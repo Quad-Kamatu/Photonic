@@ -125,6 +125,36 @@ fn assert_undo_roundtrip(doc: &Document, cmd: &TimelineCmd) {
     );
 }
 
+/// Same undo contract as [`assert_undo_roundtrip`], for a batch of timeline
+/// commands applied in order (inverse applied in reverse).
+fn assert_batch_undo_roundtrip(doc: &Document, cmds: &[TimelineCmd]) {
+    let before = doc.timeline.clone();
+
+    let mut d1 = doc.clone();
+    for cmd in cmds {
+        Command::Timeline(cmd.clone()).apply(&mut d1);
+    }
+    let after_apply = d1.timeline.clone();
+
+    let mut d2 = d1.clone();
+    for cmd in cmds.iter().rev() {
+        let inv = cmd
+            .inverse(&d2)
+            .expect("every implemented variant has an inverse");
+        Command::Timeline(inv).apply(&mut d2);
+    }
+    assert_eq!(d2.timeline, before, "batch inverse did not restore original");
+
+    let mut d3 = d2.clone();
+    for cmd in cmds {
+        Command::Timeline(cmd.clone()).apply(&mut d3);
+    }
+    assert_eq!(
+        d3.timeline, after_apply,
+        "batch apply→inverse→apply != apply"
+    );
+}
+
 // ── Undo idempotency across variants ────────────────────────────────────────
 
 #[test]
@@ -579,9 +609,11 @@ fn ripple_trim_end_and_start() {
     // V1: A[0..1000], B[1000..2000]. Ripple-trim A's END to 600 → A[0..600],
     // and B shifts left by -400 to [600..1600].
     let end = ops::ripple_trim(p, f.seq, f.vtrack, f.clip_a, ClipEdge::End, Tick(600)).unwrap();
-    assert_undo_roundtrip(&f.doc, &end);
+    assert_batch_undo_roundtrip(&f.doc, &end);
     let mut d = f.doc.clone();
-    Command::Timeline(end).apply(&mut d);
+    for cmd in &end {
+        Command::Timeline(cmd.clone()).apply(&mut d);
+    }
     let seq = &d.timeline.as_ref().unwrap().sequences[&f.seq];
     let clips = &seq.track(f.vtrack).unwrap().clips;
     assert_eq!(clips[0].duration, Tick(600));
@@ -600,9 +632,11 @@ fn ripple_trim_end_and_start() {
         Tick(1200),
     )
     .unwrap();
-    assert_undo_roundtrip(&f.doc, &start);
+    assert_batch_undo_roundtrip(&f.doc, &start);
     let mut d2 = f.doc.clone();
-    Command::Timeline(start).apply(&mut d2);
+    for cmd in &start {
+        Command::Timeline(cmd.clone()).apply(&mut d2);
+    }
     let seq2 = &d2.timeline.as_ref().unwrap().sequences[&f.seq];
     assert!(seq2.validate().is_ok());
 
@@ -1577,27 +1611,27 @@ proptest! {
             let clips = &p.sequences[&f.seq].track(f.vtrack).unwrap().clips;
             let nth_id = |i: usize| clips.get(i).map(|c| c.id);
 
-            let cmd: Option<TimelineCmd> = match edit {
+            let cmds: Option<Vec<TimelineCmd>> = match edit {
                 RandomEdit::Insert { start, dur } => {
                     ops::insert_clip(
                         p, f.seq, f.vtrack,
                         Clip::new(ClipSource::Adjustment, Tick(start), Tick(dur)),
-                    ).ok()
+                    ).ok().map(|c| vec![c])
                 }
                 RandomEdit::Move { idx, start } => {
-                    nth_id(idx).and_then(|id| ops::move_clip(p, f.seq, f.vtrack, id, Tick(start)).ok())
+                    nth_id(idx).and_then(|id| ops::move_clip(p, f.seq, f.vtrack, id, Tick(start)).ok()).map(|c| vec![c])
                 }
                 RandomEdit::Trim { idx, start, dur } => {
                     nth_id(idx).and_then(|id| ops::trim_clip(
                         p, f.seq, f.vtrack, id,
                         ClipTiming { start: Tick(start), duration: Tick(dur), source_in: Tick(0) },
-                    ).ok())
+                    ).ok()).map(|c| vec![c])
                 }
                 RandomEdit::Remove { idx } => {
-                    nth_id(idx).and_then(|id| ops::remove_clip(p, f.seq, f.vtrack, id).ok())
+                    nth_id(idx).and_then(|id| ops::remove_clip(p, f.seq, f.vtrack, id).ok()).map(|c| vec![c])
                 }
                 RandomEdit::Split { idx, at } => {
-                    nth_id(idx).and_then(|id| ops::split_clip(p, f.seq, f.vtrack, id, Tick(at)).ok())
+                    nth_id(idx).and_then(|id| ops::split_clip(p, f.seq, f.vtrack, id, Tick(at)).ok()).map(|c| vec![c])
                 }
                 RandomEdit::RippleTrimEnd { idx, boundary } => {
                     nth_id(idx).and_then(|id| ops::ripple_trim(
@@ -1613,18 +1647,20 @@ proptest! {
                     // Roll the shared edit between adjacent clips `idx`, `idx + 1`.
                     match (nth_id(idx), nth_id(idx + 1)) {
                         (Some(l), Some(r)) => {
-                            ops::roll_edit(p, f.seq, f.vtrack, l, r, Tick(delta)).ok()
+                            ops::roll_edit(p, f.seq, f.vtrack, l, r, Tick(delta)).ok().map(|c| vec![c])
                         }
                         _ => None,
                     }
                 }
                 RandomEdit::Slide { idx, delta } => {
-                    nth_id(idx).and_then(|id| ops::slide_clip(p, f.seq, f.vtrack, id, Tick(delta)).ok())
+                    nth_id(idx).and_then(|id| ops::slide_clip(p, f.seq, f.vtrack, id, Tick(delta)).ok()).map(|c| vec![c])
                 }
             };
 
-            if let Some(cmd) = cmd {
-                Command::Timeline(cmd).apply(&mut doc);
+            if let Some(cmds) = cmds {
+                for cmd in cmds {
+                    Command::Timeline(cmd).apply(&mut doc);
+                }
                 // The invariant must hold after every accepted edit.
                 let seq = &doc.timeline.as_ref().unwrap().sequences[&f.seq];
                 prop_assert!(seq.validate().is_ok(), "invariant broken: {:?}", seq.validate());

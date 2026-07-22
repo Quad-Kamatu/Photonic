@@ -160,12 +160,19 @@ pub fn finalize_load(project: &mut TimelineProject) -> Result<LoadReport, LoadEr
             dissolved_groups.push((*seq_id, gid));
         }
     }
+    // Pre-validation migration (01 §5): a `transition_out` sitting at a hard cut
+    // is invalid (the incoming clip's `transition_in` owns the blend there), so
+    // `validate` below would reject the whole document. Rather than fail an old
+    // file, DROP the offending transition and record a typed notice. Runs after
+    // group repair, before validation.
+    let notices = migrate_transition_out_at_cut(project);
     let report = LoadReport {
         unknown_variants: collect_unknown_variants(project),
         dissolved_groups,
         // A marker whose category is missing renders neutral and is flagged; it
         // is NEVER silently remapped (35 §1.3), so this only reports.
         dangling_categories: dangling_marker_categories(project),
+        notices,
     };
     for seq in project.sequences.values() {
         seq.validate()?;
@@ -237,6 +244,69 @@ pub fn dangling_marker_categories(
         }
     }
     out
+}
+
+// ── transition_out-at-a-cut migration (01 §5) ────────────────────────────────
+
+/// Pre-validation migration (01 §5): a `transition_out` is a fade to transparent
+/// into a gap/end. At a hard cut — the next clip on the track is *adjacent*, no
+/// gap — the incoming clip's `transition_in` owns the blend, so an outgoing
+/// transition there is invalid and [`Sequence::validate`] rejects it. Rather than
+/// fail an old document that predates the rule, DROP each such `transition_out`
+/// and record a [`LoadNotice`] so the caller can surface it.
+///
+/// A `transition_out` on the LAST clip of a track (or one whose next clip leaves
+/// a gap) fades into a gap/end and is left untouched. Sequences and tracks are
+/// visited in id-sorted order so the notice list is deterministic.
+fn migrate_transition_out_at_cut(project: &mut TimelineProject) -> Vec<LoadNotice> {
+    let mut notices = Vec::new();
+    let mut seq_ids: Vec<SequenceId> = project.sequences.keys().copied().collect();
+    seq_ids.sort();
+    for seq_id in seq_ids {
+        let seq = project
+            .sequences
+            .get_mut(&seq_id)
+            .expect("id came from keys()");
+        for track in seq
+            .video_tracks
+            .iter_mut()
+            .chain(seq.audio_tracks.iter_mut())
+        {
+            // Indices whose `transition_out` sits at a hard cut (next clip
+            // adjacent). Collected first so the mutating pass borrows cleanly.
+            let cut_indices: Vec<usize> = track
+                .clips
+                .iter()
+                .enumerate()
+                .filter(|(i, clip)| {
+                    clip.transition_out.is_some()
+                        && track
+                            .clips
+                            .get(i + 1)
+                            .is_some_and(|next| next.start == clip.end())
+                })
+                .map(|(i, _)| i)
+                .collect();
+            for i in cut_indices {
+                let clip = &mut track.clips[i];
+                clip.transition_out = None;
+                notices.push(LoadNotice {
+                    code: LoadNoticeCode::TransitionOutAtCutDropped,
+                    message: format!(
+                        "dropped transition_out on clip {} at a hard cut: the next \
+                         clip is adjacent, so its transition_in owns the blend",
+                        clip.id
+                    ),
+                    subject: Some(NoticeSubject {
+                        sequence: seq_id,
+                        track: track.id,
+                        clip: clip.id,
+                    }),
+                });
+            }
+        }
+    }
+    notices
 }
 
 // ── Corrupt-known-variant guard (39 §2.2 rule 4) ─────────────────────────────
@@ -494,6 +564,40 @@ pub struct UnknownVariant {
     pub first_site: UnknownSite,
 }
 
+/// A non-fatal load-time finding: a document was migrated or repaired in a way
+/// the caller may want to surface. Distinct from [`LoadError`] (fatal) and from
+/// the structured [`unknown_variants`](LoadReport::unknown_variants) /
+/// [`dissolved_groups`](LoadReport::dissolved_groups) findings — a `LoadNotice`
+/// carries a machine-readable [`code`](LoadNotice::code), a human `message`, and
+/// the optional clip it concerns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadNotice {
+    /// Machine-readable classifier so a caller can act on the notice kind
+    /// without parsing `message`.
+    pub code: LoadNoticeCode,
+    /// Human-readable one-line description of what was migrated/repaired.
+    pub message: String,
+    /// The clip the notice concerns, when it names one.
+    pub subject: Option<NoticeSubject>,
+}
+
+/// The machine-readable classifier for a [`LoadNotice`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadNoticeCode {
+    /// A `transition_out` sitting at a hard cut was dropped during load (01 §5):
+    /// at a cut the incoming clip's `transition_in` owns the blend, so the
+    /// outgoing fade was invalid and is migrated away so the document loads.
+    TransitionOutAtCutDropped,
+}
+
+/// The clip a [`LoadNotice`] concerns (mirrors [`UnknownSite::Clip`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoticeSubject {
+    pub sequence: SequenceId,
+    pub track: TrackId,
+    pub clip: ClipId,
+}
+
 /// The side-band produced by [`finalize_load`]. Empty for a document with no
 /// unknown variants.
 ///
@@ -511,6 +615,9 @@ pub struct LoadReport {
     ///
     /// [`MarkerCategory`]: super::sequence::MarkerCategory
     pub dangling_categories: Vec<(MarkerScope, MarkerId, MarkerCategoryId)>,
+    /// Non-fatal migrations/repairs applied during load (e.g. a `transition_out`
+    /// dropped at a cut, 01 §5). Empty for a document that needed none.
+    pub notices: Vec<LoadNotice>,
 }
 
 /// Accumulates unknown-variant findings, deduping by `(enum_name, tag)` while
@@ -1047,6 +1154,67 @@ mod load_repair_tests {
             project.sequences[&sid].markers[0].category,
             Some(missing),
             "the marker's category must be left untouched"
+        );
+    }
+
+    // ── Part 1: typed load notices + transition_out-at-a-cut migration ────────
+
+    #[test]
+    fn finalize_load_returns_empty_notices_for_clean_project() {
+        let (seq, _) = seq_with_one_clip();
+        let mut project = TimelineProject::new();
+        project.insert_sequence(seq);
+
+        let report = finalize_load(&mut project).expect("a clean project loads");
+        assert!(
+            report.notices.is_empty(),
+            "a clean project must produce no load notices"
+        );
+    }
+
+    #[test]
+    fn finalize_load_migrates_transition_out_at_a_cut() {
+        use crate::timeline::{FrameRate, Transition, TransitionKind};
+        // Two adjacent clips — [0,100) then [100,100), no gap. The first carries
+        // a `transition_out`, which is invalid at a hard cut: load must DROP it
+        // and record a notice rather than reject the whole document.
+        let mut t = Track::new(TrackKind::Video, "V1");
+        let mut a = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+        a.transition_out = Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        let aid = a.id;
+        let tid = t.id;
+        t.clips.push(a);
+        t.clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(100), Tick(100)));
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 1920, 1080);
+        let sid = seq.id;
+        seq.video_tracks.push(t);
+        let mut project = TimelineProject::new();
+        project.insert_sequence(seq);
+
+        let report = finalize_load(&mut project)
+            .expect("a transition_out at a cut is migrated away, not rejected");
+
+        // The offending transition is gone (the second clip is untouched)...
+        let clip = &project.sequences[&sid].video_tracks[0].clips[0];
+        assert_eq!(clip.id, aid);
+        assert!(
+            clip.transition_out.is_none(),
+            "the transition_out at the cut must be dropped on load"
+        );
+        // ...and the drop is reported as a typed notice naming the clip.
+        assert_eq!(report.notices.len(), 1, "exactly one drop must be reported");
+        assert_eq!(
+            report.notices[0].code,
+            LoadNoticeCode::TransitionOutAtCutDropped
+        );
+        assert_eq!(
+            report.notices[0].subject,
+            Some(NoticeSubject {
+                sequence: sid,
+                track: tid,
+                clip: aid,
+            })
         );
     }
 }

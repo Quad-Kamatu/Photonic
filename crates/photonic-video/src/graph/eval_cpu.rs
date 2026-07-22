@@ -197,6 +197,23 @@ fn eval_op(
             (None, Some(bottom)) => (*bottom).clone(),
             (None, None) => Image::new(cw, ch),
         },
+        // Directional transitions (08 §2.0b): inputs are [incoming, outgoing].
+        IrOp::WipeMix {
+            direction,
+            softness,
+            t,
+        } => match (inputs.first(), inputs.get(1)) {
+            (Some(incoming), Some(outgoing)) => {
+                ops::wipe(incoming, outgoing, *direction, *softness, *t)
+            }
+            (Some(only), None) | (None, Some(only)) => (*only).clone(),
+            (None, None) => Image::new(cw, ch),
+        },
+        IrOp::PushMix { direction, t } => match (inputs.first(), inputs.get(1)) {
+            (Some(incoming), Some(outgoing)) => ops::push(incoming, outgoing, *direction, *t),
+            (Some(only), None) | (None, Some(only)) => (*only).clone(),
+            (None, None) => Image::new(cw, ch),
+        },
         IrOp::Crop => match inputs.first() {
             Some(input) => ops::crop(input),
             None => Image::new(cw, ch),

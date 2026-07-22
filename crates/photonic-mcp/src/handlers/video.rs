@@ -977,6 +977,7 @@ pub async fn remove_clip(state: &AppState, args: RemoveClipArgs) -> ToolResult {
         return ToolResult::error(format!("clip {} not found", args.clip_id));
     };
     if args.ripple {
+        // Core `ripple_delete` already expands to sync-locked siblings (14 §M-9).
         match ops::ripple_delete(project, seq_id, track_id, args.clip_id) {
             Ok(cmds) => {
                 history.execute_discrete(
@@ -992,8 +993,8 @@ pub async fn remove_clip(state: &AppState, args: RemoveClipArgs) -> ToolResult {
             Ok(cmd) => {
                 // Fan the delete across the link group (14 §M-2) — deleting
                 // one half of a linked pair takes the other half with it, in
-                // the same undo step. `ripple`'s branch above deliberately
-                // does not do this (Sync Lock, 14 §M-9, isn't built yet).
+                // the same undo step. Ripple-delete above uses sync-lock
+                // expansion instead of link-group fan-out.
                 let mut cmds = vec![cmd];
                 cmds.extend(expand_link_group_delete(
                     project,
@@ -1117,8 +1118,12 @@ pub async fn ripple_edit(state: &AppState, args: RippleEditArgs) -> ToolResult {
         core_edge,
         new_boundary,
     ) {
-        Ok(cmd) => {
-            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+        Ok(cmds) => {
+            // Core already expands to sync-locked siblings (14 §M-9).
+            history.execute_discrete(
+                Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+                &mut doc,
+            );
             ToolResult::text("Rippled edit")
         }
         Err(e) => map_edit_error(e),

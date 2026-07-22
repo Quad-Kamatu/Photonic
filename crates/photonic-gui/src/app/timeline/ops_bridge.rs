@@ -477,61 +477,10 @@ pub fn trim(
 // An edit-locked track is skipped even if `sync_lock` is set — `locked`
 // always wins, matching every other op's refusal to touch a locked track.
 
-/// Expand a ripple edit on `edited_track` to every OTHER sync-locked,
-/// non-edit-locked track in `seq`: each qualifying track gets its own
-/// `RippleEdit` shifting every clip with `start >= point` by the identical
-/// `delta`, mirroring the per-clip negative-start guard `ripple_trim` already
-/// applies to its own track (a clip that would go negative is dropped, not
-/// the whole track's batch). Returns one `TimelineCmd::RippleEdit` per
-/// affected track (skipped entirely if it would end up empty).
-fn expand_sync_lock_ripple(
-    p: &TimelineProject,
-    seq: SequenceId,
-    edited_track: TrackId,
-    point: Tick,
-    delta: Tick,
-) -> Vec<TimelineCmd> {
-    if delta.0 == 0 {
-        return Vec::new();
-    }
-    let Some(s) = p.sequences.get(&seq) else {
-        return Vec::new();
-    };
-    s.tracks()
-        .filter(|t| t.id != edited_track && t.sync_lock && !t.locked)
-        .filter_map(|t| {
-            let mut changes = Vec::new();
-            for c in &t.clips {
-                if c.start >= point {
-                    let old = ClipTiming::of(c);
-                    let shifted = ClipTiming {
-                        start: c.start + delta,
-                        ..old
-                    };
-                    if shifted.start.0 >= 0 {
-                        changes.push((c.id, old, shifted));
-                    }
-                }
-            }
-            if changes.is_empty() {
-                None
-            } else {
-                Some(TimelineCmd::RippleEdit {
-                    seq,
-                    track: t.id,
-                    changes,
-                })
-            }
-        })
-        .collect()
-}
-
-/// Ripple-trim (Shift+edge, 04 §2.4): trim the clip and shift every downstream
-/// clip on the same track by the same delta, as one undo step. The core has no
-/// dedicated ripple-trim op, so this composes `trim_clip` with a
-/// locally-derived `RippleEdit` (a command, not a direct mutation). Every
-/// OTHER sync-locked track (14 §M-9) rides along in the SAME undo step via
-/// `expand_sync_lock_ripple`.
+/// Ripple-trim (Shift+edge, 04 §2.4): end-edge trims ride the core
+/// [`ops::ripple_trim`] batch (which already expands sync-locked siblings).
+/// Start-edge (or non-end) updates fall back to `trim_clip` + a local
+/// downstream `RippleEdit` with the shared core expand helper.
 /// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
 pub fn ripple_trim(
     doc: &mut Document,
@@ -544,16 +493,32 @@ pub fn ripple_trim(
     let Some(p) = doc.timeline.as_ref() else {
         return;
     };
-    let Ok(trim_cmd) = ops::trim_clip(p, seq, track, clip, new) else {
-        return;
-    };
-    // Delta by which the clip's end moved: downstream clips shift by the same.
     let Some(t) = p.sequences.get(&seq).and_then(|s| s.track(track)) else {
         return;
     };
     let Some(c) = t.clips.iter().find(|c| c.id == clip) else {
         return;
     };
+    // Prefer the core end-edge path when the timeline start is unchanged (the
+    // common Shift+edge drag). Core already fans out to sync-locked tracks.
+    if new.start == c.start {
+        let new_boundary = new.start + new.duration;
+        if let Ok(cmds) = ops::ripple_trim(
+            p,
+            seq,
+            track,
+            clip,
+            ops::ClipEdge::End,
+            new_boundary,
+        ) {
+            commit_group(history, doc, cmds);
+            return;
+        }
+    }
+    let Ok(trim_cmd) = ops::trim_clip(p, seq, track, clip, new) else {
+        return;
+    };
+    // Delta by which the clip's end moved: downstream clips shift by the same.
     let old_end = c.end();
     let new_end = new.start + new.duration;
     let delta = new_end - old_end;
@@ -580,7 +545,7 @@ pub fn ripple_trim(
             changes,
         });
     }
-    cmds.extend(expand_sync_lock_ripple(p, seq, track, old_end, delta));
+    cmds.extend(ops::expand_sync_lock_ripple(p, seq, track, old_end, delta));
     commit_group(history, doc, cmds);
 }
 
@@ -677,9 +642,8 @@ pub fn remove_clip(
 }
 
 /// Ripple-delete a clip: remove it and shift every downstream clip on its own
-/// track left by its duration. Every OTHER sync-locked track (14 §M-9) rides
-/// along in the SAME undo step via `expand_sync_lock_ripple`, shifting its own
-/// downstream clips by the identical delta.
+/// track left by its duration. Sync-locked siblings ride along inside the core
+/// [`ops::ripple_delete`] batch (14 §M-9) — no GUI-side re-expand.
 pub(crate) fn ripple_delete(
     doc: &mut Document,
     history: &mut CommandHistory,
@@ -690,19 +654,9 @@ pub(crate) fn ripple_delete(
     let Some(p) = doc.timeline.as_ref() else {
         return;
     };
-    let Ok(mut cmds) = ops::ripple_delete(p, seq, track, clip) else {
+    let Ok(cmds) = ops::ripple_delete(p, seq, track, clip) else {
         return;
     };
-    if let Some(c) = p
-        .sequences
-        .get(&seq)
-        .and_then(|s| s.track(track))
-        .and_then(|t| t.clips.iter().find(|c| c.id == clip))
-    {
-        let point = c.start;
-        let delta = Tick(0) - c.duration;
-        cmds.extend(expand_sync_lock_ripple(p, seq, track, point, delta));
-    }
     commit_batch(history, doc, cmds);
 }
 

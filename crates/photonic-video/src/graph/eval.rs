@@ -36,7 +36,7 @@ use wgpu::util::DeviceExt;
 
 use crate::contract::{AssetId, Tick, VectorRef, VectorStateKey};
 use crate::graph::cache::{CacheStats, NodeCache};
-use crate::graph::ir::{FrameGraph, IrOp, TextureDesc};
+use crate::graph::ir::{FrameGraph, IrOp, TextureDesc, WipeDirection};
 use crate::pool::DEFAULT_BUDGET_BYTES;
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -218,6 +218,90 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     let out_rgb = a_s * cs_prime + (1.0 - a_s) * bot.rgb;
     let out_a = a_s + a_b * (1.0 - a_s);
     return vec4<f32>(out_rgb, out_a);
+}
+"#;
+
+/// `WipeMix` fragment shader (08 §2.0b) — the WGSL twin of `graph::ops::wipe`.
+/// Reveal (`1` = incoming, `0` = outgoing) is a `smoothstep` edge at the eased
+/// factor's remapped position `edge`, with a `hw` half-width band. The edge
+/// position is derived from `@builtin(position)` and the LOGICAL canvas dims
+/// (`dims.xy`) — matching the CPU pixel-center sweep coord — while the two layers
+/// are sampled at the quad uv (same-pixel, like `MERGE_FS`). Premultiplied linear
+/// is closed under lerp, so the blend is a plain `mix`.
+const WIPE_FS: &str = r#"
+@group(0) @binding(0) var t_in: texture_2d<f32>;
+@group(0) @binding(1) var t_out: texture_2d<f32>;
+@group(0) @binding(2) var s: sampler;
+struct W { params: vec4<f32>, dims: vec4<f32> }
+@group(0) @binding(3) var<uniform> u: W;
+@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+  let xn = i.pos.x / u.dims.x;
+  let yn = i.pos.y / u.dims.y;
+  let dir = i32(u.params.x + 0.5);
+  var p = xn;
+  if (dir == 1) { p = 1.0 - xn; }
+  else if (dir == 2) { p = yn; }
+  else if (dir == 3) { p = 1.0 - yn; }
+  let edge = u.params.y;
+  let hw = u.params.z;
+  let reveal = 1.0 - smoothstep(edge - hw, edge + hw, p);
+  let inc = textureSample(t_in, s, i.uv);
+  let outg = textureSample(t_out, s, i.uv);
+  return mix(outg, inc, reveal);
+}
+"#;
+
+/// `PushMix` fragment shader (08 §2.0b) — the WGSL twin of `graph::ops::push`.
+/// Both layers translate along the direction axis by `t`; each output pixel picks
+/// the incoming or outgoing layer and bilinear-samples it at the translated
+/// pixel-center via `textureLoad` clamped to the source's LOGICAL dims (`dims.zw`)
+/// — byte-for-byte the transform pass's edge-clamp/pixel-center semantics.
+const PUSH_FS: &str = r#"
+@group(0) @binding(0) var t_in: texture_2d<f32>;
+@group(0) @binding(1) var t_out: texture_2d<f32>;
+struct P { params: vec4<f32>, dims: vec4<f32> }
+@group(0) @binding(2) var<uniform> u: P;
+fn at_in(p: vec2<i32>) -> vec4<f32> {
+  let hi = vec2<i32>(u.dims.zw) - vec2<i32>(1);
+  return textureLoad(t_in, clamp(p, vec2<i32>(0), hi), 0);
+}
+fn at_out(p: vec2<i32>) -> vec4<f32> {
+  let hi = vec2<i32>(u.dims.zw) - vec2<i32>(1);
+  return textureLoad(t_out, clamp(p, vec2<i32>(0), hi), 0);
+}
+fn bilin_in(pf: vec2<f32>) -> vec4<f32> {
+  let q = pf - vec2<f32>(0.5);
+  let p0f = floor(q); let p0 = vec2<i32>(p0f); let f = q - p0f;
+  return mix(mix(at_in(p0), at_in(p0 + vec2<i32>(1, 0)), f.x),
+             mix(at_in(p0 + vec2<i32>(0, 1)), at_in(p0 + vec2<i32>(1, 1)), f.x), f.y);
+}
+fn bilin_out(pf: vec2<f32>) -> vec4<f32> {
+  let q = pf - vec2<f32>(0.5);
+  let p0f = floor(q); let p0 = vec2<i32>(p0f); let f = q - p0f;
+  return mix(mix(at_out(p0), at_out(p0 + vec2<i32>(1, 0)), f.x),
+             mix(at_out(p0 + vec2<i32>(0, 1)), at_out(p0 + vec2<i32>(1, 1)), f.x), f.y);
+}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  if (pos.x >= u.dims.x || pos.y >= u.dims.y) { return vec4<f32>(0.0); }
+  let dir = i32(u.params.x + 0.5);
+  let t = u.params.y;
+  let horizontal = (dir == 0 || dir == 1);
+  let forward = (dir == 0 || dir == 2);
+  var uc: f32; var npx: f32;
+  if (horizontal) { uc = pos.x / u.dims.x; npx = u.dims.x; }
+  else { uc = pos.y / u.dims.y; npx = u.dims.y; }
+  var uu = uc;
+  if (!forward) { uu = 1.0 - uc; }
+  var use_in = false; var src_u = 0.0;
+  if (uu >= t) { use_in = false; src_u = uu - t; }
+  else { use_in = true; src_u = uu - t + 1.0; }
+  var along = src_u;
+  if (!forward) { along = 1.0 - src_u; }
+  var pf: vec2<f32>;
+  if (horizontal) { pf = vec2<f32>(along * npx, pos.y); }
+  else { pf = vec2<f32>(pos.x, along * npx); }
+  if (use_in) { return bilin_in(pf); }
+  return bilin_out(pf);
 }
 "#;
 
@@ -516,6 +600,47 @@ impl Evaluator {
                 }
                 (None, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
+            // Directional transitions (08 §2.0b): inputs [incoming, outgoing], the
+            // WGSL twins of `ops::wipe` / `ops::push`.
+            IrOp::WipeMix {
+                direction,
+                softness,
+                t,
+            } => match (inputs.first(), inputs.get(1)) {
+                (Some(incoming), Some(outgoing)) => self.passes.wipe(
+                    &self.gpu,
+                    &incoming.texture,
+                    &outgoing.texture,
+                    *direction,
+                    *softness,
+                    *t,
+                    target,
+                    logical_w,
+                    logical_h,
+                ),
+                (Some(only), None) | (None, Some(only)) => {
+                    self.passes.blit(&self.gpu, &only.texture, target)
+                }
+                (None, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::PushMix { direction, t } => match (inputs.first(), inputs.get(1)) {
+                (Some(incoming), Some(outgoing)) => self.passes.push(
+                    &self.gpu,
+                    &incoming.texture,
+                    &outgoing.texture,
+                    *direction,
+                    *t,
+                    target,
+                    logical_w,
+                    logical_h,
+                    incoming.width,
+                    incoming.height,
+                ),
+                (Some(only), None) | (None, Some(only)) => {
+                    self.passes.blit(&self.gpu, &only.texture, target)
+                }
+                (None, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             // Styled-text generator (G-12 title clips): start transparent, then
             // burn the resolved cue on top via the SAME glyphon compositor the
             // `CaptionOverlay` path uses (06 §5.3) — text over transparent, which
@@ -711,7 +836,25 @@ struct Passes {
     mask_shape_pipeline: wgpu::RenderPipeline,
     merge_pipeline: wgpu::RenderPipeline,
     merge_bgl: wgpu::BindGroupLayout,
+    /// `WipeMix` (08 §2.0b): binary directional smoothstep wipe. Reuses the merge
+    /// BGL (two textures + sampler + a params uniform). WGSL twin of `ops::wipe`.
+    wipe_pipeline: wgpu::RenderPipeline,
+    /// `PushMix` (08 §2.0b): binary directional slide. Its own BGL (two textures +
+    /// a params uniform; textureLoad, no sampler). WGSL twin of `ops::push`.
+    push_pipeline: wgpu::RenderPipeline,
+    push_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+}
+
+/// Stable numeric id for a wipe/push direction, fed to the wipe/push shaders (and
+/// matching the `ops::sweep_coord` / `ops::push` axis+orientation branch order).
+fn wipe_direction_index(dir: WipeDirection) -> f32 {
+    match dir {
+        WipeDirection::LeftToRight => 0.0,
+        WipeDirection::RightToLeft => 1.0,
+        WipeDirection::TopToBottom => 2.0,
+        WipeDirection::BottomToTop => 3.0,
+    }
 }
 
 const QUAD_VS: &str = r#"
@@ -836,6 +979,21 @@ impl Passes {
         let merge_src = format!("{QUAD_VS}\n{MERGE_FS}");
         let merge_pipeline = make_pipeline(device, &merge_bgl, &merge_src, "fs");
 
+        // WipeMix (08 §2.0b): binary directional wipe, reusing the merge BGL
+        // (two textures + sampler + a params uniform). WGSL twin of `ops::wipe`.
+        let wipe_src = format!("{QUAD_VS}\n{WIPE_FS}");
+        let wipe_pipeline = make_pipeline(device, &merge_bgl, &wipe_src, "fs");
+
+        // PushMix (08 §2.0b): binary directional slide via textureLoad (no
+        // sampler) — its own BGL (two textures + a params uniform). WGSL twin of
+        // `ops::push`.
+        let push_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("push_bgl"),
+            entries: &[tex_entry(0), tex_entry(1), uniform_entry(2)],
+        });
+        let push_src = format!("{QUAD_VS}\n{PUSH_FS}");
+        let push_pipeline = make_pipeline(device, &push_bgl, &push_src, "fs");
+
         Passes {
             fill_pipeline,
             fill_bgl,
@@ -851,6 +1009,9 @@ impl Passes {
             mask_shape_pipeline,
             merge_pipeline,
             merge_bgl,
+            wipe_pipeline,
+            push_pipeline,
+            push_bgl,
             sampler,
         }
     }
@@ -1163,6 +1324,125 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.merge_pipeline, &bind, target);
+    }
+
+    /// `WipeMix` pass (08 §2.0b): the WGSL twin of `ops::wipe`. `edge`/`hw` are
+    /// computed in Rust identically to the CPU kernel so the smoothstep bands
+    /// agree; the sweep coord is derived in-shader from the logical dims.
+    #[allow(clippy::too_many_arguments)]
+    fn wipe(
+        &self,
+        gpu: &GpuContext,
+        incoming: &wgpu::Texture,
+        outgoing: &wgpu::Texture,
+        dir: WipeDirection,
+        softness: f32,
+        t: f32,
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let s = softness.max(0.0);
+        let edge = -s + t * (1.0 + 2.0 * s);
+        let hw = s.max(crate::graph::ops::KEY_BAND_EPS);
+        let uniform = [
+            wipe_direction_index(dir),
+            edge,
+            hw,
+            0.0,
+            logical_w as f32,
+            logical_h as f32,
+            0.0,
+            0.0,
+        ];
+        let iv = incoming.create_view(&Default::default());
+        let ov = outgoing.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("wipe_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wipe_bg"),
+            layout: &self.merge_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&iv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ov),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.wipe_pipeline, &bind, target);
+    }
+
+    /// `PushMix` pass (08 §2.0b): the WGSL twin of `ops::push`. `dims.zw` is the
+    /// source's logical size (edge-clamp bound); `dims.xy` the logical canvas.
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &self,
+        gpu: &GpuContext,
+        incoming: &wgpu::Texture,
+        outgoing: &wgpu::Texture,
+        dir: WipeDirection,
+        t: f32,
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+        source_w: u32,
+        source_h: u32,
+    ) {
+        let uniform = [
+            wipe_direction_index(dir),
+            t,
+            0.0,
+            0.0,
+            logical_w as f32,
+            logical_h as f32,
+            source_w as f32,
+            source_h as f32,
+        ];
+        let iv = incoming.create_view(&Default::default());
+        let ov = outgoing.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("push_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("push_bg"),
+            layout: &self.push_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&iv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ov),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.push_pipeline, &bind, target);
     }
 
     fn run(
@@ -2208,5 +2488,166 @@ mod tests {
             lit.len(),
             red_dominant
         );
+    }
+
+    // ── K-0.5 resolved LUT grade / K-0.4 directional transitions parity ───────
+
+    /// A `SolidColor → Grade{Lut3d} → Output` graph carrying a resolved 2³ LUT
+    /// that maps `c → 0.5·c` (a linear map, so trilinear reconstruction is exact
+    /// on both the GPU sampler and the CPU reference).
+    fn lut_grade_graph(color: crate::graph::ir::LinearColor) -> crate::graph::compile::CompiledFrame {
+        use photonic_render::grade::{ResolvedGradeOp, ResolvedGradePayload, ResolvedLut3d};
+        let mut table = photonic_render::Lut3d::identity(2);
+        for sample in &mut table.data {
+            for v in sample {
+                *v *= 0.5;
+            }
+        }
+        let op = ResolvedGradeOp {
+            payload: ResolvedGradePayload::Lut3d(ResolvedLut3d {
+                table: Arc::new(table),
+                intensity: 1.0,
+                tetrahedral: false,
+            }),
+            mask: None,
+        };
+        let graph = FrameGraph {
+            nodes: vec![
+                IrNode {
+                    op: IrOp::SolidColor { color },
+                    inputs: vec![],
+                    content_hash: ContentHash(820),
+                },
+                IrNode {
+                    op: IrOp::Grade { ops: vec![op] },
+                    inputs: vec![(IrNodeId(0), OutPort::default())],
+                    content_hash: ContentHash(821),
+                },
+            ],
+            output: Some(IrNodeId(1)),
+        };
+        crate::graph::compile::CompiledFrame {
+            graph,
+            diagnostics: vec![],
+        }
+    }
+
+    /// K-0.5: a resolved `Lut3d` grade evaluates identically on the GPU (3D-LUT
+    /// sampler) and the CPU reference (03 §4.4).
+    #[test]
+    fn resolved_lut_grade_gpu_matches_cpu() {
+        let compiled = lut_grade_graph(crate::graph::ir::LinearColor {
+            r: 0.6,
+            g: 0.4,
+            b: 0.8,
+            a: 1.0,
+        });
+        assert!(
+            compiled
+                .graph
+                .nodes
+                .iter()
+                .any(|n| matches!(&n.op, IrOp::Grade { ops } if !ops.is_empty())),
+            "a resolved LUT Grade node is present"
+        );
+        assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// A two-`SolidColor` → binary-transition (`WipeMix`/`PushMix`) → `Output`
+    /// graph; inputs are `[incoming, outgoing]`.
+    fn transition_graph(
+        op: IrOp,
+        incoming: crate::graph::ir::LinearColor,
+        outgoing: crate::graph::ir::LinearColor,
+    ) -> crate::graph::compile::CompiledFrame {
+        let graph = FrameGraph {
+            nodes: vec![
+                IrNode {
+                    op: IrOp::SolidColor { color: incoming },
+                    inputs: vec![],
+                    content_hash: ContentHash(830),
+                },
+                IrNode {
+                    op: IrOp::SolidColor { color: outgoing },
+                    inputs: vec![],
+                    content_hash: ContentHash(831),
+                },
+                IrNode {
+                    op,
+                    inputs: vec![
+                        (IrNodeId(0), OutPort::default()),
+                        (IrNodeId(1), OutPort::default()),
+                    ],
+                    content_hash: ContentHash(832),
+                },
+            ],
+            output: Some(IrNodeId(2)),
+        };
+        crate::graph::compile::CompiledFrame {
+            graph,
+            diagnostics: vec![],
+        }
+    }
+
+    const PARITY_DIRS: [WipeDirection; 4] = [
+        WipeDirection::LeftToRight,
+        WipeDirection::RightToLeft,
+        WipeDirection::TopToBottom,
+        WipeDirection::BottomToTop,
+    ];
+
+    /// K-0.4: the `WipeMix` GPU pass must match `ops::wipe` for every direction at
+    /// t = 0.25/0.5/0.75 (a softened edge exercises the smoothstep band).
+    #[test]
+    fn wipe_gpu_matches_cpu_for_every_direction_and_t() {
+        let inc = crate::graph::ir::LinearColor {
+            r: 0.8,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
+        let outg = crate::graph::ir::LinearColor {
+            r: 0.1,
+            g: 0.5,
+            b: 0.9,
+            a: 1.0,
+        };
+        for dir in PARITY_DIRS {
+            for t in [0.25f32, 0.5, 0.75] {
+                let op = IrOp::WipeMix {
+                    direction: dir,
+                    softness: 0.1,
+                    t,
+                };
+                assert_graph_gpu_matches_cpu(&transition_graph(op, inc, outg), 1e-3);
+            }
+        }
+    }
+
+    /// K-0.4: the `PushMix` GPU pass must match `ops::push` for every direction at
+    /// t = 0.25/0.5/0.75.
+    #[test]
+    fn push_gpu_matches_cpu_for_every_direction_and_t() {
+        let inc = crate::graph::ir::LinearColor {
+            r: 0.8,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
+        let outg = crate::graph::ir::LinearColor {
+            r: 0.1,
+            g: 0.5,
+            b: 0.9,
+            a: 1.0,
+        };
+        for dir in PARITY_DIRS {
+            for t in [0.25f32, 0.5, 0.75] {
+                let op = IrOp::PushMix {
+                    direction: dir,
+                    t,
+                };
+                assert_graph_gpu_matches_cpu(&transition_graph(op, inc, outg), 1e-3);
+            }
+        }
     }
 }

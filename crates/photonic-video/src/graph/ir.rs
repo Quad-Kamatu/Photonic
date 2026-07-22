@@ -91,6 +91,18 @@ pub enum Channel {
     A,
 }
 
+/// Sweep axis + orientation for a directional `WipeMix`/`PushMix` transition
+/// (08 §2.0b), lowered from `photonic_core::timeline::WipeDirection`. The name
+/// states the direction the incoming clip is revealed / pushed toward: e.g.
+/// `LeftToRight` reveals the incoming from the left edge as the mix advances.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum WipeDirection {
+    LeftToRight,
+    RightToLeft,
+    TopToBottom,
+    BottomToTop,
+}
+
 /// One frame-graph operation. Each op is one wgpu render/compute pass (or a
 /// CPU worker-thread op where noted), with a CPU `eval_cpu` reference
 /// implementation for export determinism and golden tests (02 §2).
@@ -142,6 +154,25 @@ pub enum IrOp {
     Merge {
         mode: BlendMode,
         opacity: f32,
+    },
+    /// Directional wipe transition (08 §2.0b): a per-pixel `smoothstep` edge
+    /// sweeping across `direction` at normalised position `t`, with a `softness`
+    /// half-width feather; a premultiplied lerp between the two layers. Inputs:
+    /// [incoming, outgoing]. `t` is the compile-time eased mix factor, so distinct
+    /// ticks yield distinct content hashes (like the cross-dissolve). At `t == 0`
+    /// the output equals `outgoing`; at `t == 1` it equals `incoming`.
+    WipeMix {
+        direction: WipeDirection,
+        softness: f32,
+        t: f32,
+    },
+    /// Directional push transition (08 §2.0b): both layers translate along
+    /// `direction` by `t`, the incoming sliding in as the outgoing slides out,
+    /// with `ops::transform2d` edge-clamp/pixel-center sampling. Inputs:
+    /// [incoming, outgoing]. `t == 0` is `outgoing`, `t == 1` is `incoming`.
+    PushMix {
+        direction: WipeDirection,
+        t: f32,
     },
     CaptionOverlay {
         cue_batch: CaptionBatch,

@@ -604,7 +604,8 @@ pub fn slip_clip(
 }
 
 /// Ripple-delete a clip: remove it and shift every later clip on the track left
-/// by its duration. Returns `[RemoveClip, RippleEdit]` for the caller to batch.
+/// by its duration. Returns `[RemoveClip, RippleEdit, …]` for the caller to
+/// batch — including one `RippleEdit` per sync-locked sibling track (14 §M-9).
 pub fn ripple_delete(
     p: &TimelineProject,
     id: SequenceId,
@@ -627,7 +628,7 @@ pub fn ripple_delete(
             changes.push((other.id, old, new));
         }
     }
-    Ok(vec![
+    let mut cmds = vec![
         TimelineCmd::RemoveClip {
             seq: id,
             track: track_id,
@@ -638,7 +639,72 @@ pub fn ripple_delete(
             track: track_id,
             changes,
         },
-    ])
+    ];
+    // Sync-locked siblings ripple left by the same duration in the SAME batch
+    // (14 §M-9). Point is the deleted clip's start; delta is negative duration.
+    cmds.extend(expand_sync_lock_ripple(
+        p,
+        id,
+        track_id,
+        start,
+        Tick(0) - shift,
+    ));
+    Ok(cmds)
+}
+
+/// Expand a ripple edit on `edited_track` to every OTHER sync-locked,
+/// non-edit-locked track in the sequence (14 §M-9): each qualifying track gets
+/// its own `RippleEdit` shifting every clip with `start >= point` by the
+/// identical `delta`. A clip whose shifted start would go negative is dropped
+/// from that track's batch (not the whole batch), mirroring the per-clip guard
+/// the ripple ops apply to their own track. Returns one `TimelineCmd::RippleEdit`
+/// per affected track, skipping any that would end up empty.
+///
+/// This is the single shared core of sync-lock propagation (14 §M-9) so every
+/// caller — GUI `ops_bridge`, MCP handlers, future scripting — rides the same
+/// implementation. The edited track itself always ripples regardless of its own
+/// `sync_lock` bit (that is just what a ripple edit *is*); `sync_lock` only
+/// governs whether *other* tracks tag along, and `locked` always wins over it.
+pub fn expand_sync_lock_ripple(
+    p: &TimelineProject,
+    id: SequenceId,
+    edited_track: TrackId,
+    point: Tick,
+    delta: Tick,
+) -> Vec<TimelineCmd> {
+    if delta.0 == 0 {
+        return Vec::new();
+    }
+    let Some(s) = p.sequences.get(&id) else {
+        return Vec::new();
+    };
+    s.tracks()
+        .filter(|t| t.id != edited_track && t.sync_lock && !t.locked)
+        .filter_map(|t| {
+            let mut changes = Vec::new();
+            for c in &t.clips {
+                if c.start >= point {
+                    let old = ClipTiming::of(c);
+                    let shifted = ClipTiming {
+                        start: c.start + delta,
+                        ..old
+                    };
+                    if shifted.start.0 >= 0 {
+                        changes.push((c.id, old, shifted));
+                    }
+                }
+            }
+            if changes.is_empty() {
+                None
+            } else {
+                Some(TimelineCmd::RippleEdit {
+                    seq: id,
+                    track: t.id,
+                    changes,
+                })
+            }
+        })
+        .collect()
 }
 
 /// Which edge of a clip a trim targets.
@@ -659,9 +725,9 @@ pub enum ClipEdge {
 ///   duration shrinks/grows by the delta; later clips shift by `-delta` so the
 ///   left gap closes. `new_boundary` is the new in-point position on the timeline.
 ///
-/// Emitted as a single `RippleEdit` command (one undo step) whose changes list
-/// carries the trimmed clip plus every shifted clip — invariant-safe by
-/// construction and inverted by the existing `RippleEdit` logic.
+/// Returns a batch: the edited track's `RippleEdit` (trimmed clip + shifted
+/// siblings) plus one `RippleEdit` per sync-locked sibling track (14 §M-9).
+/// Invariant-safe by construction; inverted by the existing `RippleEdit` logic.
 pub fn ripple_trim(
     p: &TimelineProject,
     id: SequenceId,
@@ -669,7 +735,7 @@ pub fn ripple_trim(
     clip_id: ClipId,
     edge: ClipEdge,
     new_boundary: Tick,
-) -> Result<TimelineCmd, EditError> {
+) -> Result<Vec<TimelineCmd>, EditError> {
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
     let c = clip(t, clip_id)?;
@@ -730,11 +796,15 @@ pub fn ripple_trim(
         }
     }
 
-    Ok(TimelineCmd::RippleEdit {
+    let mut cmds = vec![TimelineCmd::RippleEdit {
         seq: id,
         track: track_id,
         changes,
-    })
+    }];
+    // Downstream content on this track moves from `old_end`; sync-locked
+    // siblings share that same point and delta (14 §M-9).
+    cmds.extend(expand_sync_lock_ripple(p, id, track_id, old_end, shift));
+    Ok(cmds)
 }
 
 /// Roll the shared edit point between two adjacent clips.
@@ -1959,6 +2029,10 @@ pub fn insert_edit(
         track: track_id,
         clip: Box::new(placed),
     });
+
+    // 4. Sync-locked sibling tracks ripple right by the same source duration in
+    //    the SAME batch (14 §M-9) — an insert is a ripple op.
+    cmds.extend(expand_sync_lock_ripple(p, id, track_id, at, shift));
     Ok(cmds)
 }
 
@@ -2029,7 +2103,13 @@ pub fn extract_edit(
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
     // Right-of-range content closes the gap by shifting left by its width.
-    Ok(clear_and_shift(t, id, track_id, rs, re, Tick(rs.0 - re.0)))
+    let delta = Tick(rs.0 - re.0);
+    let mut cmds = clear_and_shift(t, id, track_id, rs, re, delta);
+    // Sync-locked sibling tracks ripple left by the same width in the SAME batch
+    // (14 §M-9) — an extract is a ripple op. Their clips shift from the edit
+    // point `rs`, matching the gap that closes on the edited track.
+    cmds.extend(expand_sync_lock_ripple(p, id, track_id, rs, delta));
+    Ok(cmds)
 }
 
 #[cfg(test)]
@@ -2646,6 +2726,152 @@ mod tests {
         let out = apply_batch(&doc, &cmds);
         validate_ok(&out, seq_id);
         assert_eq!(track_end(&out, seq_id, track_id), 350);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    // ── Sync lock (14 §M-9) ──────────────────────────────────────────────────
+
+    /// A three-track sequence, one clip at `[100,100)` on each track: the edited
+    /// track, a `sync_lock`ed sibling, and an unlocked sibling. Returns the doc
+    /// plus `(seq, edited_track, sync_track, free_track)`.
+    fn sync_lock_fixture() -> (Document, SequenceId, TrackId, TrackId, TrackId) {
+        let mut project = TimelineProject::new();
+        let mut sequence = Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
+
+        let mut mk = |name: &str, sync: bool| {
+            let mut tr = Track::new(TrackKind::Video, name);
+            tr.sync_lock = sync;
+            tr.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(100), Tick(100)));
+            let id = tr.id;
+            sequence.video_tracks.push(tr);
+            id
+        };
+        let edit_id = mk("V_edit", false);
+        let sync_id = mk("V_sync", true);
+        let free_id = mk("V_free", false);
+
+        let seq_id = sequence.id;
+        project.insert_sequence(sequence);
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+        (doc, seq_id, edit_id, sync_id, free_id)
+    }
+
+    #[test]
+    fn insert_edit_ripples_sync_locked_sibling_but_not_an_unlocked_one() {
+        let (doc, seq_id, edit_id, sync_id, free_id) = sync_lock_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        // Insert a 50-tick source at the head of the edited clip (a cut point).
+        let cmds = insert_edit(p, seq_id, edit_id, Tick(100), adj_clip(50)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        // Edited track: source dropped into the opened gap, its clip shifted right.
+        assert_eq!(spans_of(&out, seq_id, edit_id), vec![(100, 50), (150, 100)]);
+        // The sync-locked sibling rode along: 100 → 150.
+        assert_eq!(spans_of(&out, seq_id, sync_id), vec![(150, 100)]);
+        // The unlocked sibling did NOT move.
+        assert_eq!(spans_of(&out, seq_id, free_id), vec![(100, 100)]);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn extract_edit_ripples_sync_locked_sibling_but_not_an_unlocked_one() {
+        let (doc, seq_id, edit_id, sync_id, free_id) = sync_lock_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        // Extract [100,150): removes the edited clip's head and closes the gap by
+        // shifting later content left by 50 — a ripple the sync sibling shares.
+        let cmds = extract_edit(p, seq_id, edit_id, (Tick(100), Tick(150))).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        // The sync-locked sibling's clip shifted left: 100 → 50.
+        assert_eq!(spans_of(&out, seq_id, sync_id), vec![(50, 100)]);
+        // The unlocked sibling stayed put.
+        assert_eq!(spans_of(&out, seq_id, free_id), vec![(100, 100)]);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn ripple_delete_ripples_sync_locked_sibling_but_not_an_unlocked_one() {
+        let (doc, seq_id, edit_id, sync_id, free_id) = sync_lock_fixture();
+        // Two clips on the edited track so a delete of the first has something
+        // to ripple on its own track; the sync sibling rides the same left-shift.
+        let mut doc = doc;
+        {
+            let p = doc.timeline.as_mut().unwrap();
+            let t = p
+                .sequences
+                .get_mut(&seq_id)
+                .unwrap()
+                .track_mut(edit_id)
+                .unwrap();
+            // Existing clip sits at [100,100); prepend [0,100) to delete.
+            t.clips.insert(
+                0,
+                Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)),
+            );
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let head = p.sequences[&seq_id].track(edit_id).unwrap().clips[0].id;
+        let cmds = ripple_delete(p, seq_id, edit_id, head).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        // Sync sibling: 100 → 0 (left by the deleted clip's duration).
+        assert_eq!(spans_of(&out, seq_id, sync_id), vec![(0, 100)]);
+        // Free sibling stayed put.
+        assert_eq!(spans_of(&out, seq_id, free_id), vec![(100, 100)]);
+        assert_batch_undo_roundtrip(&doc, &cmds);
+    }
+
+    #[test]
+    fn ripple_trim_end_ripples_sync_locked_sibling_but_not_an_unlocked_one() {
+        // End-trim expands from `old_end`: only clips with start >= old_end on
+        // other tracks ride along (mirrors the edited track's own downstream
+        // rule). Seed every track with a clip that starts at the head's out
+        // point so the expand has something to shift.
+        let mut project = TimelineProject::new();
+        let mut sequence = Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
+
+        let mut edit = Track::new(TrackKind::Video, "V_edit");
+        edit.clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(100), Tick(100))); // [100,200)
+        edit.clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(200), Tick(100))); // [200,300)
+        let edit_id = edit.id;
+        sequence.video_tracks.push(edit);
+
+        let mut sync = Track::new(TrackKind::Video, "V_sync");
+        sync.sync_lock = true;
+        sync.clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(200), Tick(100)));
+        let sync_id = sync.id;
+        sequence.video_tracks.push(sync);
+
+        let mut free = Track::new(TrackKind::Video, "V_free");
+        free.clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(200), Tick(100)));
+        let free_id = free.id;
+        sequence.video_tracks.push(free);
+
+        let seq_id = sequence.id;
+        project.insert_sequence(sequence);
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+
+        let p = doc.timeline.as_ref().unwrap();
+        let head = p.sequences[&seq_id].track(edit_id).unwrap().clips[0].id;
+        // End-trim head 200 → 150 (delta -50): edited downstream + sync at 200
+        // both shift left; free track does not.
+        let cmds = ripple_trim(p, seq_id, edit_id, head, ClipEdge::End, Tick(150)).unwrap();
+        let out = apply_batch(&doc, &cmds);
+
+        validate_ok(&out, seq_id);
+        assert_eq!(spans_of(&out, seq_id, edit_id), vec![(100, 50), (150, 100)]);
+        assert_eq!(spans_of(&out, seq_id, sync_id), vec![(150, 100)]);
+        assert_eq!(spans_of(&out, seq_id, free_id), vec![(200, 100)]);
         assert_batch_undo_roundtrip(&doc, &cmds);
     }
 

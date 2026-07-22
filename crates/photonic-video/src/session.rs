@@ -52,7 +52,8 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
-    compile, compile_asset_peek, fit_long_edge, Quality, DRAFT_MAX_LONG_EDGE,
+    compile_asset_peek, compile_with_luts, fit_long_edge, CompileDiagnostic, DiagSeverity,
+    LutProvider, Quality, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
 use crate::graph::ir::IrOp;
@@ -413,6 +414,81 @@ impl Drop for EngineSession {
     }
 }
 
+// ── LUT provider (K-0.5) ─────────────────────────────────────────────────────
+
+/// One cached `.cube` LUT: the source path it was parsed from (so a relinked
+/// asset re-parses) and the parsed table (`None` = a cached miss — offline or
+/// unparsable).
+struct LutEntry {
+    path: PathBuf,
+    table: Option<Arc<photonic_render::Lut3d>>,
+}
+
+/// Memoised `.cube` LUT cache (K-0.5): every referenced `Lut3d` asset is parsed
+/// exactly ONCE, in [`warm`](LutCache::warm) (engine thread, on snapshot change),
+/// so the compiler's [`LutProvider`] read is a lock-free `HashMap` hit and no
+/// `.cube` parsing ever happens on the per-frame compile hot path. A read/parse
+/// failure caches a negative entry (→ the grade op resolves inert / identity,
+/// never a black frame — 07 §1) and records one diagnostic.
+#[derive(Default)]
+struct LutCache {
+    entries: HashMap<AssetId, LutEntry>,
+    /// One diagnostic per still-unresolved LUT, surfaced onto the compiled frame.
+    failures: Vec<CompileDiagnostic>,
+}
+
+impl LutCache {
+    /// (Re)parse every file-backed `Lut3d` asset in `project` whose path is not
+    /// already cached, and rebuild the failure list. Off the per-frame path.
+    fn warm(&mut self, project: &TimelineProject) {
+        self.failures.clear();
+        for (id, asset) in &project.media.assets {
+            if asset.kind != AssetKind::Lut3d {
+                continue;
+            }
+            let AssetSource::File { path, .. } = &asset.source else {
+                continue;
+            };
+            // Parse only when absent or the source path changed (relink) — reads
+            // never happen per frame.
+            let stale = self.entries.get(id).map(|e| &e.path != path).unwrap_or(true);
+            if stale {
+                let table = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|src| photonic_render::parse_cube(&src).ok())
+                    .map(Arc::new);
+                self.entries.insert(
+                    *id,
+                    LutEntry {
+                        path: path.clone(),
+                        table,
+                    },
+                );
+            }
+            if self.entries.get(id).and_then(|e| e.table.as_ref()).is_none() {
+                self.failures.push(CompileDiagnostic {
+                    message: format!(
+                        "LUT asset {id} could not be loaded from {}; the grade op \
+                         renders inert (identity)",
+                        path.display()
+                    ),
+                    graph: None,
+                    node: None,
+                    code: None,
+                    severity: DiagSeverity::Warning,
+                    clip: None,
+                });
+            }
+        }
+    }
+}
+
+impl LutProvider for LutCache {
+    fn lut(&self, asset: AssetId) -> Option<Arc<photonic_render::Lut3d>> {
+        self.entries.get(&asset).and_then(|e| e.table.clone())
+    }
+}
+
 // ── Engine thread ────────────────────────────────────────────────────────────
 
 struct EngineThread {
@@ -427,6 +503,9 @@ struct EngineThread {
     controller: PlaybackController,
 
     snapshot: Option<Arc<TimelineProject>>,
+    /// Memoised `.cube` LUT tables (K-0.5), warmed on snapshot change and read
+    /// lock-free by the compiler's `Grade` `Lut3d` resolution.
+    lut_cache: LutCache,
     last_revision: Option<u64>,
     active_sequence_override: Option<SequenceId>,
     proxy_mode: ProxyMode,
@@ -484,6 +563,7 @@ impl EngineThread {
             media: MediaSources::new(tools.clone()),
             controller: PlaybackController::new(FrameRate::FPS_30),
             snapshot: None,
+            lut_cache: LutCache::default(),
             last_revision: None,
             active_sequence_override: None,
             proxy_mode: ProxyMode::Auto,
@@ -809,6 +889,9 @@ impl EngineThread {
         // Single Arc handoff to media + snapshot (was clone + move = 2 bumps).
         if let Some(ref p) = snap {
             self.media.set_project(Arc::clone(p));
+            // Warm the LUT cache off the per-frame path (K-0.5): parse any newly
+            // referenced `.cube` assets now so compile's provider read is a hit.
+            self.lut_cache.warm(p);
         }
         self.snapshot = snap;
         self.controller.request_present();
@@ -880,8 +963,21 @@ impl EngineThread {
                         (compiled, canvas, *source_time, Some(*asset))
                     }
                     _ => {
-                        let compiled =
-                            compile(project.as_ref(), seq_id, format_index, t, quality, None);
+                        // Thread the pre-warmed LUT cache so `Grade` `Lut3d` ops
+                        // resolve to real tables (K-0.5); parse-failure diagnostics
+                        // ride along on the compiled frame.
+                        let mut compiled = compile_with_luts(
+                            project.as_ref(),
+                            seq_id,
+                            format_index,
+                            t,
+                            quality,
+                            None,
+                            Some(&self.lut_cache),
+                        );
+                        compiled
+                            .diagnostics
+                            .extend(self.lut_cache.failures.iter().cloned());
                         let (fw, fh) = seq
                             .formats
                             .get(format_index)

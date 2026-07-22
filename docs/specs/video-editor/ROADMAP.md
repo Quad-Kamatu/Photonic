@@ -14,16 +14,16 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **26 §8 K-0.1** export wiring | ✅ done | `fca5eda` | `EngineCmd::Export` renders via shadow session + progress/cancel; one path shared engine+MCP; e2e ffprobe test |
 | **26 §8 K-0.2** render passthrough effects | 🟡 partial | `fca5eda` | `ResolvedParams` real+hashed for **all** effects; LumaKey/ChromaKey/MaskShapeGen wired CPU+GPU. *Remaining:* Blur/Sharpen/Glow (need golden/video re-bless + shared blur primitive) |
 | **26 §8 K-0.3** GPU Merge blend modes (E-9) | ✅ done | `9b2ec60` | GPU Merge honours all 26 modes; CPU/GPU parity sweep across 6 IR enums |
-| **26 §8 K-0.4** Wipe/Push passes | 🟠 in progress | — | wave in flight |
-| **26 §8 K-0.5** `lut_provider` threading | 🟠 in progress | — | wave in flight |
+| **26 §8 K-0.4** Wipe/Push passes | ✅ done | `3bdf9f6` | real `WipeMix`/`PushMix` IR + CPU kernels + WGSL twins; CPU/GPU parity per direction×t; no P3 cross-dissolve fallback |
+| **26 §8 K-0.5** `lut_provider` threading | ✅ done | `3bdf9f6` | `LutProvider` trait + `compile_with_luts`; session `LutCache` warms on snapshot change; grade `Lut3d` resolves to real tables (or inert identity) |
 | **26 §8 K-0.6** audio FX chain + mixer + meter | ✅ done | `367511d` | mixer owns track/master fx, discontinuity policy, declick tail. *Remaining:* G-4 master-meter GUI publish; 31 §3 latency compensation |
-| **26 §8 K-0.9** `sync_lock` propagation (core) | 🟠 in progress | — | wave in flight (core half) |
+| **26 §8 K-0.9** `sync_lock` propagation | ✅ done | `3bdf9f6` | `expand_sync_lock_ripple` in core; insert/extract/ripple_delete/ripple_trim all expand; GUI + MCP ride the same batch |
 | **30** effect manifest (E-3/X-4) | ✅ done | `48fb5da`,`49bd585` | schema + 7 authored manifests + `EffectKind`↔`EffectId` bridge + migration/inert-unknown; MCP `list_effect_kinds`/`set_effect_param` generated with range refusal. *Remaining:* full raster bridge (K-B16, 61 kernels) |
 | **31 §2/§3** DSP reset/latency contracts (E-10) | ✅ done | `1ccbeea` | mandatory `reset(AudioDiscontinuity)` + latency/tail across all units |
 | **35** markers, effect scopes, groups | ✅ done | `9b2ec60`,`367511d`,`49bd585` | marker categories/anchors, clip markers, group tree; Track/master/asset effect scopes applied in compile; V4→V5 migration; version bumped |
 | **36** error model (taxonomy) | ✅ done | `a05ec8e` | `core::diag` taxonomy + catalogue tests. *Remaining:* wire `EngineStatus.last_error` → `Diagnostic` |
 | **37** robustness | ✅ done | `a05ec8e` | capability floor, gpu_state, atomic_write, child reaping, scale targets, CI split |
-| **38** sequence semantics | ✅ done | `435a3a6` | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup (23 tests, mutation-verified). *Remaining:* core-side LoadNotice + transition-out-at-cut validation (wave in flight) |
+| **38** sequence semantics | ✅ done | `435a3a6`+*(this commit)* | transition handle-clamp, fade-out-at-gap, nest outer-format, frame-rate conform diagnostics, nest dedup; LoadNotice + transition-out-at-cut validation/migration |
 | **39 §2.2** unknown-preserving variants | ✅ done | `a05ec8e` | forward-compat inert round-trip |
 | **40 §7** spec verification infra | ✅ done | `a05ec8e` | `tools/spec-extract`, drift + acceptance-index scripts |
 | **41** accessibility | ✅ done | `1ccbeea`,`a05ec8e` | curve-editor/node-editor focus fixes, keyboard-gate + contrast lints |
@@ -116,7 +116,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 
 | ID | Status | Live residual / gate | Owner |
 |---|---|---|---|
-| K-0 | open | Nine phase-gated seams, none delivered: export command, effect rendering, GPU blend modes, wipe/push, LUT provider, audio chain + meters, export audio + loudness, `Probe`, inert `sync_lock`. Existing P4–P8 work; gates most of K-B/K-D/K-F | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
+| K-0 | partial | **7/9 seams closed** (K-0.1/0.3/0.4/0.5/0.6/0.9 done; K-0.2 partial 3/6 kernels). **Open:** K-0.7 export-audio mux + loudness; K-0.8 `Probe` wiring. See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
 | K-A | open | Preview rendering ([33](33-timeline-preview-render.md)), marker depth ([35 §1](35-model-decisions.md#1-markers)), spacer, snaps, groups, **timecode as a first-class concept**, duration dialog, grab-item, split-audio, subclips, track compositing, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
 | K-B | open | Track/master/asset effect stacks, effect zones, presets, compare view, expressions, luma wipes, masking subgraph, roto, keyframe interchange, paste-attributes, easing presets, freeze frame, alpha view. **K-B16 — bridging the ~61 existing `raster::` kernels into the video catalogue — is the largest single capability win in the document** | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |

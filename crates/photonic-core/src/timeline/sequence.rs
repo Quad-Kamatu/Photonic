@@ -389,7 +389,33 @@ impl Sequence {
                 prev_end = Some(clip.end());
             }
         }
+        self.validate_transitions()?;
         self.validate_groups()?;
+        Ok(())
+    }
+
+    /// The transition pass of [`validate`](Self::validate) (01 §5): a
+    /// `transition_out` is a fade to transparent into a gap/end. At a hard cut —
+    /// the next clip on the track is adjacent (`next.start == clip.end()`, no
+    /// gap) — the incoming clip's `transition_in` owns the blend, so an outgoing
+    /// transition there is invalid. A `transition_out` on the last clip, or one
+    /// whose next clip leaves a gap, fades into a gap/end and is accepted. Assumes
+    /// clips are already sorted (the caller enforces that above).
+    fn validate_transitions(&self) -> Result<(), ValidationError> {
+        for track in self.tracks() {
+            for (i, clip) in track.clips.iter().enumerate() {
+                if clip.transition_out.is_some() {
+                    if let Some(next) = track.clips.get(i + 1) {
+                        if next.start == clip.end() {
+                            return Err(ValidationError::TransitionOutAtCut {
+                                track: track.id,
+                                clip_start: clip.start,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -509,6 +535,11 @@ pub enum ValidationError {
     EmptyGroup { group: GroupId },
     /// A `GroupKind::Normal` group with exactly one transitive member (35 §3).
     SingletonNormalGroup { group: GroupId },
+    /// A clip carries a `transition_out` while its outgoing edge is a hard cut —
+    /// the next clip on the track is adjacent, no gap (01 §5). At a cut the
+    /// incoming clip's `transition_in` owns the blend, so an outgoing fade is
+    /// invalid. `clip_start` names the offending clip's timeline start.
+    TransitionOutAtCut { track: TrackId, clip_start: Tick },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -533,6 +564,12 @@ impl std::fmt::Display for ValidationError {
             ValidationError::EmptyGroup { group } => write!(f, "group {group} is empty"),
             ValidationError::SingletonNormalGroup { group } => {
                 write!(f, "normal group {group} has a single member")
+            }
+            ValidationError::TransitionOutAtCut { track, clip_start } => {
+                write!(
+                    f,
+                    "clip at {clip_start:?} on track {track} has a transition_out at a hard cut"
+                )
             }
         }
     }
@@ -930,6 +967,44 @@ mod tests {
             s.validate(),
             Err(ValidationError::NonPositiveDuration { .. })
         ));
+    }
+
+    #[test]
+    fn validate_rejects_transition_out_at_a_cut() {
+        use super::super::clip::{Transition, TransitionKind};
+        // [0,100) then an adjacent [100,50) — a hard cut. The first clip's
+        // transition_out has no gap to fade into, so it must be rejected.
+        let mut t = vid_track_with(vec![(0, 100), (100, 50)]);
+        t.clips[0].transition_out =
+            Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        let s = seq_with(t);
+        assert!(matches!(
+            s.validate(),
+            Err(ValidationError::TransitionOutAtCut { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_transition_out_into_a_gap() {
+        use super::super::clip::{Transition, TransitionKind};
+        // [0,100) then [150,50) — a 50-tick gap after the first clip, so its
+        // transition_out fades into the gap and is valid.
+        let mut t = vid_track_with(vec![(0, 100), (150, 50)]);
+        t.clips[0].transition_out =
+            Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        let s = seq_with(t);
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_transition_out_on_last_clip() {
+        use super::super::clip::{Transition, TransitionKind};
+        // The only (hence last) clip fades into the end of the timeline — valid.
+        let mut t = vid_track_with(vec![(0, 100)]);
+        t.clips[0].transition_out =
+            Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        let s = seq_with(t);
+        assert!(s.validate().is_ok());
     }
 
     #[test]

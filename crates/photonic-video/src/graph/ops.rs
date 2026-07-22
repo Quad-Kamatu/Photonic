@@ -36,7 +36,7 @@ use glam::{Mat3, Vec2};
 use photonic_core::layer::BlendMode;
 use photonic_core::raster::blend::blend_rgb;
 
-use crate::graph::ir::{FitMode, LinearColor, Sampling};
+use crate::graph::ir::{FitMode, LinearColor, Sampling, WipeDirection};
 
 /// An f32 premultiplied linear-Rec.709 RGBA image — the CPU reference working
 /// buffer. Row-major, `pixels.len() == width * height`.
@@ -434,6 +434,98 @@ fn merge_pixel(tp: [f32; 4], bp: [f32; 4], mode: BlendMode, opacity: f32) -> [f3
     out
 }
 
+/// Normalised sweep coordinate in `0..1` for a directional transition at pixel
+/// (`x`,`y`) of a `w`×`h` frame: the fraction of the way along `direction`'s axis
+/// measured from the edge the incoming layer enters. Pixel-centered (`(i+0.5)/n`)
+/// so the CPU and GPU agree on where the edge sits. Shared by [`wipe`].
+#[inline]
+fn sweep_coord(dir: WipeDirection, x: u32, y: u32, w: u32, h: u32) -> f32 {
+    let xn = (x as f32 + 0.5) / w as f32;
+    let yn = (y as f32 + 0.5) / h as f32;
+    match dir {
+        WipeDirection::LeftToRight => xn,
+        WipeDirection::RightToLeft => 1.0 - xn,
+        WipeDirection::TopToBottom => yn,
+        WipeDirection::BottomToTop => 1.0 - yn,
+    }
+}
+
+/// `WipeMix` (08 §2.0b): a directional `smoothstep` wipe between `incoming` and
+/// `outgoing` at eased factor `t`; `softness` is the edge half-width (canvas-
+/// normalised). The edge is remapped to sweep the full `[-s, 1+s]` range so the
+/// endpoints stay bit-exact for **any** softness: `t == 0` returns `outgoing`,
+/// `t == 1` returns `incoming`. Premultiplied linear is closed under linear
+/// interpolation, so the blend is a plain componentwise lerp (no fringing). The
+/// WGSL twin is `eval::Passes::wipe`.
+pub fn wipe(incoming: &Image, outgoing: &Image, dir: WipeDirection, softness: f32, t: f32) -> Image {
+    let w = incoming.width.max(outgoing.width);
+    let h = incoming.height.max(outgoing.height);
+    let mut out = Image::new(w, h);
+    let s = softness.max(0.0);
+    let edge = -s + t * (1.0 + 2.0 * s);
+    let hw = s.max(KEY_BAND_EPS);
+    for y in 0..h {
+        for x in 0..w {
+            let p = sweep_coord(dir, x, y, w, h);
+            // `reveal`: 1 = fully incoming, 0 = fully outgoing.
+            let reveal = 1.0 - smoothstep(edge - hw, edge + hw, p);
+            let ip = sample_clamped(incoming, x, y);
+            let op = sample_clamped(outgoing, x, y);
+            let mut v = [0.0f32; 4];
+            for c in 0..4 {
+                v[c] = op[c] * (1.0 - reveal) + ip[c] * reveal;
+            }
+            out.set(x, y, v);
+        }
+    }
+    out
+}
+
+/// `PushMix` (08 §2.0b): both layers translate along `direction` by `t`, the
+/// incoming sliding in from the entering edge as the outgoing slides out, sampled
+/// with [`transform2d`]'s pixel-center / edge-clamp bilinear semantics (03 §4.5).
+/// `t == 0` returns `outgoing`, `t == 1` returns `incoming`, bit-exact. The WGSL
+/// twin is `eval::Passes::push`.
+pub fn push(incoming: &Image, outgoing: &Image, dir: WipeDirection, t: f32) -> Image {
+    let w = incoming.width.max(outgoing.width);
+    let h = incoming.height.max(outgoing.height);
+    let mut out = Image::new(w, h);
+    // `horizontal`: the sweep axis is x (else y). `forward`: the incoming enters
+    // from the low-coordinate edge, so screen coord increases *into* the outgoing.
+    let (horizontal, forward) = match dir {
+        WipeDirection::LeftToRight => (true, true),
+        WipeDirection::RightToLeft => (true, false),
+        WipeDirection::TopToBottom => (false, true),
+        WipeDirection::BottomToTop => (false, false),
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (u, npx) = if horizontal {
+                ((x as f32 + 0.5) / w as f32, w as f32)
+            } else {
+                ((y as f32 + 0.5) / h as f32, h as f32)
+            };
+            // Mirror the axis for the reverse directions, run the forward selection,
+            // then unmirror the sampled coordinate.
+            let uu = if forward { u } else { 1.0 - u };
+            let (use_incoming, src_u) = if uu >= t {
+                (false, uu - t) // outgoing shifted by +t
+            } else {
+                (true, uu - t + 1.0) // incoming sliding in from the low edge
+            };
+            let sample_along = if forward { src_u } else { 1.0 - src_u };
+            let src = if use_incoming { incoming } else { outgoing };
+            let (px, py) = if horizontal {
+                (sample_along * npx, y as f32 + 0.5)
+            } else {
+                (x as f32 + 0.5, sample_along * npx)
+            };
+            out.set(x, y, src.sample_bilinear(px, py));
+        }
+    }
+    out
+}
+
 /// α below which RGB is carried through unchanged instead of divided (03 §4.5.2).
 ///
 /// For premultiplied storage α == 0 implies RGB == 0, so callers of
@@ -804,5 +896,66 @@ mod tests {
         for c in 0..3 {
             assert!((mid[c] - 0.5).abs() < 1e-6, "channel {c} = {}", mid[c]);
         }
+    }
+
+    // ── Directional wipe / push transitions (K-0.4) ──────────────────────────
+    const RED: LinearColor = LinearColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    const BLUE: LinearColor = LinearColor { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+    const DIRS: [WipeDirection; 4] = [
+        WipeDirection::LeftToRight,
+        WipeDirection::RightToLeft,
+        WipeDirection::TopToBottom,
+        WipeDirection::BottomToTop,
+    ];
+
+    /// The wipe endpoints are bit-exact for every direction (even with softness):
+    /// `t == 0` is the outgoing frame, `t == 1` the incoming.
+    #[test]
+    fn wipe_endpoints_are_exact_for_every_direction() {
+        let incoming = solid(8, 8, RED);
+        let outgoing = solid(8, 8, BLUE);
+        for dir in DIRS {
+            let at0 = wipe(&incoming, &outgoing, dir, 0.25, 0.0);
+            assert_eq!(at0.pixels, outgoing.pixels, "t=0 == outgoing ({dir:?})");
+            let at1 = wipe(&incoming, &outgoing, dir, 0.25, 1.0);
+            assert_eq!(at1.pixels, incoming.pixels, "t=1 == incoming ({dir:?})");
+        }
+    }
+
+    /// A hard (softness 0) left→right wipe at `t = 0.5` splits an 8-wide row: the
+    /// edge sits at `p = 0.5` (x = 3.5), so x < 4 shows the incoming and x ≥ 4 the
+    /// outgoing.
+    #[test]
+    fn wipe_midpoint_boundary_splits_incoming_and_outgoing() {
+        let incoming = solid(8, 1, RED);
+        let outgoing = solid(8, 1, BLUE);
+        let out = wipe(&incoming, &outgoing, WipeDirection::LeftToRight, 0.0, 0.5);
+        assert_eq!(out.pixel(0, 0), [1.0, 0.0, 0.0, 1.0], "left edge is incoming");
+        assert_eq!(out.pixel(7, 0), [0.0, 0.0, 1.0, 1.0], "right edge is outgoing");
+    }
+
+    /// The push endpoints are bit-exact for every direction: `t == 0` is outgoing,
+    /// `t == 1` incoming.
+    #[test]
+    fn push_endpoints_are_exact_for_every_direction() {
+        let incoming = solid(8, 8, RED);
+        let outgoing = solid(8, 8, BLUE);
+        for dir in DIRS {
+            let at0 = push(&incoming, &outgoing, dir, 0.0);
+            assert_eq!(at0.pixels, outgoing.pixels, "t=0 == outgoing ({dir:?})");
+            let at1 = push(&incoming, &outgoing, dir, 1.0);
+            assert_eq!(at1.pixels, incoming.pixels, "t=1 == incoming ({dir:?})");
+        }
+    }
+
+    /// A left→right push at `t = 0.5` shows the incoming trailing into the left of
+    /// the row and the outgoing leading out the right (boundary at u = 0.5).
+    #[test]
+    fn push_midpoint_boundary_splits_incoming_and_outgoing() {
+        let incoming = solid(8, 1, RED);
+        let outgoing = solid(8, 1, BLUE);
+        let out = push(&incoming, &outgoing, WipeDirection::LeftToRight, 0.5);
+        assert_eq!(out.pixel(0, 0), [1.0, 0.0, 0.0, 1.0], "left edge is incoming");
+        assert_eq!(out.pixel(7, 0), [0.0, 0.0, 1.0, 1.0], "right edge is outgoing");
     }
 }

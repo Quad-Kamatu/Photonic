@@ -64,7 +64,7 @@ use crate::contract::{
 };
 use crate::graph::ir::{
     Channel, ContentHash, FitMode, FrameGraph, IrNode, IrNodeId, IrOp, LinearColor, OutPort,
-    Sampling, TextureDesc,
+    Sampling, TextureDesc, WipeDirection,
 };
 
 /// Preview vs full-resolution compile flags (02 §2's "quality flags"). `proxy`
@@ -90,6 +90,19 @@ impl Quality {
 pub struct ViewNodeOverride {
     pub graph: GraphId,
     pub node: GraphNodeId,
+}
+
+/// Supplies parsed 3D-LUT tables so `Grade` `Lut3d` ops resolve to a ready-to-
+/// sample table (K-0.5 / 07 §3.8). Object-safe and threaded as `&dyn LutProvider`
+/// (never a generic) so `compile`'s call tree is not monomorphised over the
+/// provider type.
+///
+/// **Hot-path invariant:** [`lut`](LutProvider::lut) is called during compile,
+/// which runs per frame, so it MUST be a lock-free read of a pre-warmed cache —
+/// never parse a `.cube` file here. A `None` result (offline / unresolvable /
+/// failed asset) keeps the LUT op inert (identity), never a black frame (07 §1).
+pub trait LutProvider {
+    fn lut(&self, asset: AssetId) -> Option<std::sync::Arc<photonic_render::Lut3d>>;
 }
 
 /// A stable diagnostic code for the coded compile/load conditions 38 registers
@@ -244,6 +257,8 @@ pub fn compile_asset_peek(
 /// Compile the active sequence at `tick` in `format_index` to a frame graph.
 ///
 /// `view_override` (08 §6.7) is session state — pass `None` for export/headless.
+/// `Grade` `Lut3d` ops resolve inert (identity) with no LUT provider; use
+/// [`compile_with_luts`] to thread one in.
 pub fn compile(
     project: &TimelineProject,
     sequence: SequenceId,
@@ -252,7 +267,33 @@ pub fn compile(
     quality: Quality,
     view_override: Option<ViewNodeOverride>,
 ) -> CompiledFrame {
+    compile_with_luts(
+        project,
+        sequence,
+        format_index,
+        tick,
+        quality,
+        view_override,
+        None,
+    )
+}
+
+/// [`compile`] with a [`LutProvider`] threaded in so `Grade` `Lut3d` ops resolve
+/// to real tables (K-0.5). The provider read is a lock-free cache hit (no `.cube`
+/// parsing on this per-frame path). `luts == None` behaves exactly like
+/// [`compile`] (LUT ops inert → identity).
+#[allow(clippy::too_many_arguments)]
+pub fn compile_with_luts(
+    project: &TimelineProject,
+    sequence: SequenceId,
+    format_index: usize,
+    tick: Tick,
+    quality: Quality,
+    view_override: Option<ViewNodeOverride>,
+    luts: Option<&dyn LutProvider>,
+) -> CompiledFrame {
     let mut b = Builder::new();
+    b.luts = luts;
 
     let Some(seq) = project.sequences.get(&sequence) else {
         b.diag(CompileDiagnostic::plain(format!(
@@ -319,7 +360,7 @@ pub fn compile(
 /// Arena builder with content-hash dedup. Nodes are appended in dependency order
 /// (every input is pushed before its consumer), so the finished `nodes` vector is
 /// already topologically sorted (02 §2 "topo-sorted at build").
-struct Builder {
+struct Builder<'a> {
     nodes: Vec<IrNode>,
     /// content hash → node id, so an identical (op, inputs) subgraph is emitted
     /// once (TimeOffset dedup, 02 §2 step 7).
@@ -328,15 +369,19 @@ struct Builder {
     /// Records every lowered `(graph, node)` → IR id so a `ViewNodeOverride`
     /// (08 §6.7) can reroute output to a pinned node.
     view_index: HashMap<(GraphId, GraphNodeId), IrNodeId>,
+    /// Parsed-LUT provider (K-0.5), threaded so `Grade` `Lut3d` ops resolve to a
+    /// real table. `None` = no provider (LUT ops resolve inert → identity).
+    luts: Option<&'a dyn LutProvider>,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
     fn new() -> Self {
         Builder {
             nodes: Vec::new(),
             dedup: HashMap::new(),
             diagnostics: Vec::new(),
             view_index: HashMap::new(),
+            luts: None,
         }
     }
 
@@ -417,7 +462,7 @@ impl Builder {
 }
 
 fn resolve_view_override(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     view: Option<ViewNodeOverride>,
     real_output: IrNodeId,
 ) -> IrNodeId {
@@ -443,7 +488,7 @@ fn resolve_view_override(
 /// node, honouring Adjustment re-rooting. Returns `None` for an empty program.
 #[allow(clippy::too_many_arguments)]
 fn fold_sequence(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     seq: &Sequence,
     format_index: usize,
@@ -748,7 +793,7 @@ fn active_fade_out(clips: &[Clip], idx: usize, tick: Tick) -> Option<f32> {
 /// past its own end, into its source handles — the standard NLE overlap model).
 #[allow(clippy::too_many_arguments)]
 fn build_transition(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     seq: &Sequence,
     format_index: usize,
@@ -814,7 +859,7 @@ fn build_transition(
 /// Fade `node` toward transparent by `opacity` (premultiplied) when `opacity < 1`,
 /// so a partner's own clip opacity is baked into its side of a transition before
 /// the mix. A fully-opaque partner is returned unchanged.
-fn bake_opacity(b: &mut Builder, node: IrNodeId, opacity: f32) -> IrNodeId {
+fn bake_opacity(b: &mut Builder<'_>, node: IrNodeId, opacity: f32) -> IrNodeId {
     if opacity >= 1.0 {
         return node;
     }
@@ -847,7 +892,7 @@ fn bake_opacity(b: &mut Builder, node: IrNodeId, opacity: f32) -> IrNodeId {
 /// (and thus distinct content hashes). Geometric `Wipe`/`Push` fall back to a
 /// cross-dissolve in P3 (no directional wipe pass yet) with a diagnostic.
 fn transition_mix(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     kind: TransitionKind,
     params: &timeline::TransitionParams,
     outgoing: IrNodeId,
@@ -864,13 +909,32 @@ fn transition_mix(
             t,
             params.color.unwrap_or_else(opaque_black),
         ),
-        TransitionKind::Wipe | TransitionKind::Push => {
-            b.diag(CompileDiagnostic::plain(format!(
-                "{kind:?} transition renders as a cross-dissolve in P3 \
-                 (directional wipe/push pass pending)"
-            )));
-            merge_over(b, incoming, outgoing, t)
-        }
+        // Directional geometric transitions (08 §2.0b): dedicated binary IR ops
+        // (inputs [incoming, outgoing]) rather than an overloaded `Merge`. `t` is
+        // the compile-time eased factor, so distinct ticks give distinct content
+        // hashes exactly as the cross-dissolve does. The CPU kernels in
+        // `graph::ops` are the golden reference (02 §2), with WGSL twins in `eval`.
+        TransitionKind::Wipe => b.push(
+            IrOp::WipeMix {
+                direction: wipe_direction(params.direction),
+                softness: params.softness,
+                t,
+            },
+            vec![
+                (incoming, OutPort::default()),
+                (outgoing, OutPort::default()),
+            ],
+        ),
+        TransitionKind::Push => b.push(
+            IrOp::PushMix {
+                direction: wipe_direction(params.direction),
+                t,
+            },
+            vec![
+                (incoming, OutPort::default()),
+                (outgoing, OutPort::default()),
+            ],
+        ),
         // Forward-compat (39 §2.2): an unknown transition renders as a HARD CUT
         // — the incoming clip directly, no blend — never a guessed dissolve.
         // `TransitionKind` is `#[non_exhaustive]`, so this wildcard also catches
@@ -886,9 +950,22 @@ fn transition_mix(
     }
 }
 
+/// Lower the authoring [`timeline::WipeDirection`] (the sweep axis + orientation
+/// on `TransitionParams`) to the IR [`WipeDirection`] the Wipe/Push evaluators
+/// consume. `Left`/`Up` reveal the incoming from that edge (`…ToRight`/`…ToTop`);
+/// `Right`/`Down` are their mirrors.
+fn wipe_direction(d: timeline::WipeDirection) -> WipeDirection {
+    match d {
+        timeline::WipeDirection::Left => WipeDirection::LeftToRight,
+        timeline::WipeDirection::Right => WipeDirection::RightToLeft,
+        timeline::WipeDirection::Up => WipeDirection::BottomToTop,
+        timeline::WipeDirection::Down => WipeDirection::TopToBottom,
+    }
+}
+
 /// `Merge` `top` over `bottom` at `opacity` (Normal blend), the fold primitive
 /// shared by every transition kind.
-fn merge_over(b: &mut Builder, top: IrNodeId, bottom: IrNodeId, opacity: f32) -> IrNodeId {
+fn merge_over(b: &mut Builder<'_>, top: IrNodeId, bottom: IrNodeId, opacity: f32) -> IrNodeId {
     b.push(
         IrOp::Merge {
             mode: BlendMode::Normal,
@@ -902,7 +979,7 @@ fn merge_over(b: &mut Builder, top: IrNodeId, bottom: IrNodeId, opacity: f32) ->
 /// `color` over the first half (`t < 0.5`), then `color` reveals the incoming
 /// over the second half.
 fn dip_through(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     outgoing: IrNodeId,
     incoming: IrNodeId,
     t: f32,
@@ -956,7 +1033,7 @@ fn ease(curve: EaseCurve, t: f32) -> f32 {
 /// when it is a plain fully-opaque `Normal` merge (any non-Normal blend or reduced
 /// opacity must still emit the node so it reaches the accumulator's colour).
 fn fold_over(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     acc: Option<IrNodeId>,
     top: IrNodeId,
     opacity: f32,
@@ -993,7 +1070,7 @@ fn fold_over(
 /// source(or composition splice) → Transform2D → effects → grade.
 #[allow(clippy::too_many_arguments)]
 fn build_clip_chain(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     seq: &Sequence,
     format_index: usize,
@@ -1083,7 +1160,7 @@ fn build_clip_chain(
 /// keyframe on the stack with no error and no visible warning — get it right at
 /// the call site.
 fn apply_stack(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     effects: &[ClipEffect],
     grade: Option<&Grade>,
     input: IrNodeId,
@@ -1115,8 +1192,8 @@ fn apply_stack(
 /// Resolve `grade` at `tick` and emit a `Grade` IR op carrying the resolved stack
 /// (07 §2/§3), or return `input` unchanged when the grade is bypassed / empty /
 /// fully inert. Shared by clip grades (step 2) and graph `Grade`/`Lut` nodes.
-fn apply_grade(b: &mut Builder, grade: &Grade, input: IrNodeId, tick: Tick) -> IrNodeId {
-    let ops = resolve_grade(grade, tick);
+fn apply_grade(b: &mut Builder<'_>, grade: &Grade, input: IrNodeId, tick: Tick) -> IrNodeId {
+    let ops = resolve_grade(b.luts, grade, tick);
     if ops.is_empty() {
         input
     } else {
@@ -1127,12 +1204,18 @@ fn apply_grade(b: &mut Builder, grade: &Grade, input: IrNodeId, tick: Tick) -> I
 /// Resolve an authoring [`Grade`] at `tick` into the resolved op stack (07 §2)
 /// via `photonic_render::grade::resolve`.
 ///
-/// P3 has no `MediaPool` at the compile layer, so `Lut3d` asset ops resolve inert
-/// (dropped → identity). LUT-table resolution lands when a `lut_provider` is
-/// threaded through `compile` (needs pool access — out of `graph/` territory).
-fn resolve_grade(grade: &Grade, tick: Tick) -> Vec<crate::contract::ResolvedGradeOp> {
-    photonic_render::grade::resolve(grade, tick, |_asset: AssetId| {
-        None::<std::sync::Arc<photonic_render::Lut3d>>
+/// `Lut3d` asset ops resolve against `luts` (K-0.5): a table is looked up per
+/// referenced [`AssetId`]; a `None` result (no provider / offline / failed asset)
+/// drops the op to identity (07 §1 — never a black frame). The provider's `lut`
+/// is a lock-free read of a pre-warmed cache, so no `.cube` parsing happens on
+/// this per-frame path (see [`LutProvider`]).
+fn resolve_grade(
+    luts: Option<&dyn LutProvider>,
+    grade: &Grade,
+    tick: Tick,
+) -> Vec<crate::contract::ResolvedGradeOp> {
+    photonic_render::grade::resolve(grade, tick, |asset: AssetId| {
+        luts.and_then(|p| p.lut(asset))
     })
 }
 
@@ -1141,7 +1224,7 @@ fn resolve_grade(grade: &Grade, tick: Tick) -> Vec<crate::contract::ResolvedGrad
 /// Build the clip's source op (after trim + speed source-time mapping, 01 §5.1).
 #[allow(clippy::too_many_arguments)]
 fn build_clip_source(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     seq: &Sequence,
     format_index: usize,
@@ -1295,7 +1378,7 @@ fn rates_equal(a: FrameRate, b: FrameRate) -> bool {
 /// clip's id so those per-nest diagnostics have a subject without another borrow.
 #[allow(clippy::too_many_arguments)]
 fn build_nested_sequence(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     sequence: SequenceId,
     parent_format_index: usize,
@@ -1413,7 +1496,7 @@ fn build_nested_sequence(
 /// and surface a diagnostic (02 §2 step 3, 08 §3.3 `Output` row).
 #[allow(clippy::too_many_arguments)]
 fn lower_composition(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     seq: &Sequence,
     format_index: usize,
@@ -1484,7 +1567,7 @@ fn lower_composition(
 /// (`Output` with nothing wired) is a passthrough. A missing `Output` input with
 /// no program to fall back on skips the splice (08 §3.3 `Output` row).
 fn splice_project_graph(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     project: &TimelineProject,
     program: Option<IrNodeId>,
     format: &SequenceFormat,
@@ -1569,7 +1652,7 @@ struct LowerCtx<'a> {
 /// Lower the graph's `Output` node's single input at `tick`. Returns `None` when
 /// `Output` has no wired input (08 §3.3 `Output` row).
 fn lower_output(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     lc: &mut LowerCtx,
     tick: Tick,
     cycle: &mut HashSet<SequenceId>,
@@ -1590,7 +1673,7 @@ fn input_source(graph: &NodeGraph, node: GraphNodeId, port: InPort) -> Option<Gr
 
 /// Lower one graph node at evaluation time `tick`, memoized per `(node, tick)`.
 fn lower_node(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     lc: &mut LowerCtx,
     node_id: GraphNodeId,
     tick: Tick,
@@ -1611,7 +1694,7 @@ fn lower_node(
 }
 
 fn lower_node_uncached(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     lc: &mut LowerCtx,
     node: &GraphNode,
     tick: Tick,
@@ -1903,7 +1986,7 @@ fn single_lut_grade(asset: AssetId) -> Grade {
 /// black for a composition, the program for the project graph (08 §3.3 unary row
 /// / §5 program-splice).
 fn lower_primary_or_default(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     lc: &mut LowerCtx,
     primary: Option<GraphNodeId>,
     tick: Tick,
@@ -1917,7 +2000,7 @@ fn lower_primary_or_default(
 
 /// The unwired-input default: the program (fold result) in the project graph,
 /// transparent black otherwise.
-fn project_default_or_transparent(b: &mut Builder, lc: &LowerCtx) -> IrNodeId {
+fn project_default_or_transparent(b: &mut Builder<'_>, lc: &LowerCtx) -> IrNodeId {
     if lc.is_project_graph {
         if let Some(program) = lc.program {
             return program;
@@ -1972,7 +2055,7 @@ fn graph_op_effect_kind(op: &GraphOp) -> EffectKind {
 /// time-ignorant (02 §2). Tracks with no covering cue contribute nothing; a
 /// `None` program (captions over an empty sequence) roots on transparent black.
 fn splice_captions(
-    b: &mut Builder,
+    b: &mut Builder<'_>,
     seq: &Sequence,
     format: &SequenceFormat,
     tick: Tick,
@@ -2482,6 +2565,21 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[*mode as u8]);
             f32b(h, *opacity);
         }
+        IrOp::WipeMix {
+            direction,
+            softness,
+            t,
+        } => {
+            h.update(&[16]);
+            h.update(&[*direction as u8]);
+            f32b(h, *softness);
+            f32b(h, *t);
+        }
+        IrOp::PushMix { direction, t } => {
+            h.update(&[17]);
+            h.update(&[*direction as u8]);
+            f32b(h, *t);
+        }
         IrOp::CaptionOverlay { cue_batch } => {
             h.update(&[8]);
             hash_caption_batch(h, cue_batch);
@@ -2683,6 +2781,16 @@ fn hash_resolved_grade_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &crate::contract:
             h.update(&(l.table.size as u32).to_le_bytes());
             for v in l.table.domain_min.iter().chain(&l.table.domain_max) {
                 f32b(h, *v);
+            }
+            // Digest the table samples too (K-0.5): now that LUTs resolve to real
+            // tables, two distinct `.cube` files sharing size + domain must NOT
+            // collide, and a LUT whose contents change under the same size/domain
+            // must invalidate. The cost is a per-node xxh3 over the table (µs for a
+            // 33³ LUT), off the pixel path.
+            for sample in &l.table.data {
+                for v in sample {
+                    f32b(h, *v);
+                }
             }
         }
     }
@@ -3866,6 +3974,8 @@ mod tests {
             IrOp::Effect { .. } => "Effect",
             IrOp::Grade { .. } => "Grade",
             IrOp::Merge { .. } => "Merge",
+            IrOp::WipeMix { .. } => "WipeMix",
+            IrOp::PushMix { .. } => "PushMix",
             IrOp::CaptionOverlay { .. } => "CaptionOverlay",
             IrOp::Crop => "Crop",
             IrOp::Resize { .. } => "Resize",
@@ -4801,5 +4911,170 @@ mod tests {
             .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
             .count();
         assert_eq!(solids, 2, "different source times ⇒ two distinct inner sources");
+    }
+
+    // ── K-0.5: LUT provider threading ────────────────────────────────────────
+
+    /// A stub [`LutProvider`] returning one fixed table for any asset.
+    struct StubLut(std::sync::Arc<photonic_render::Lut3d>);
+    impl LutProvider for StubLut {
+        fn lut(&self, _asset: AssetId) -> Option<std::sync::Arc<photonic_render::Lut3d>> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn lut_grade_project() -> (TimelineProject, SequenceId) {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        let mut clip = solid_clip(
+            Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            },
+            0,
+            200,
+        );
+        // A single-op `Lut3d` grade referencing an asset the provider resolves.
+        clip.grade = Some(single_lut_grade(AssetId::new()));
+        t.clips.push(clip);
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+        (project, seq_id)
+    }
+
+    /// K-0.5: a `Lut3d` grade resolves to a `Grade` node carrying the provider's
+    /// table when a provider is threaded, and drops to identity (no `Grade` node)
+    /// with `None` — never a black frame.
+    #[test]
+    fn lut_grade_resolves_with_provider_and_drops_without() {
+        use photonic_render::grade::ResolvedGradePayload;
+        let (project, seq_id) = lut_grade_project();
+
+        let table = std::sync::Arc::new(photonic_render::Lut3d::identity(2));
+        let stub = StubLut(table);
+        let with =
+            compile_with_luts(&project, seq_id, 0, Tick(0), Quality::FULL, None, Some(&stub));
+        let grade = with
+            .graph
+            .nodes
+            .iter()
+            .find_map(|n| match &n.op {
+                IrOp::Grade { ops } => Some(ops),
+                _ => None,
+            })
+            .expect("a Grade node is present with a provider");
+        assert_eq!(grade.len(), 1, "one resolved op");
+        match &grade[0].payload {
+            ResolvedGradePayload::Lut3d(l) => {
+                assert_eq!(l.table.size, 2, "the Grade carries the provider's table")
+            }
+            other => panic!("expected a resolved Lut3d op, got {other:?}"),
+        }
+
+        // No provider ⇒ the LUT op is inert ⇒ dropped to identity ⇒ no Grade node.
+        let without = compile(&project, seq_id, 0, Tick(0), Quality::FULL, None);
+        assert!(
+            !without
+                .graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Grade { .. })),
+            "the Lut3d op drops to identity with no provider"
+        );
+    }
+
+    // ── K-0.4: directional Wipe / Push lowering ──────────────────────────────
+
+    /// K-0.4: a `Wipe` transition lowers to a `WipeMix` node and emits NO
+    /// diagnostic (the P3 cross-dissolve-fallback warning is gone).
+    #[test]
+    fn wipe_transition_lowers_without_diagnostic() {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        t.clips.push(solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            100,
+        ));
+        let mut b = solid_clip(
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            100,
+            100,
+        );
+        b.transition_in = Some(Transition::new(TransitionKind::Wipe, Tick(40)));
+        t.clips.push(b);
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+
+        // Midpoint of the [100,140) overlap.
+        let out = compile(&project, seq_id, 0, Tick(120), Quality::FULL, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::WipeMix { .. })),
+            "a WipeMix node lowers for a Wipe transition"
+        );
+    }
+
+    /// K-0.4: a `Push` transition lowers to a `PushMix` node and emits no
+    /// diagnostic.
+    #[test]
+    fn push_transition_lowers_without_diagnostic() {
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        t.clips.push(solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            100,
+        ));
+        let mut b = solid_clip(
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            100,
+            100,
+        );
+        b.transition_in = Some(Transition::new(TransitionKind::Push, Tick(40)));
+        t.clips.push(b);
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+
+        let out = compile(&project, seq_id, 0, Tick(120), Quality::FULL, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::PushMix { .. })),
+            "a PushMix node lowers for a Push transition"
+        );
     }
 }
