@@ -15,7 +15,8 @@ use std::path::Path;
 use std::process::Command;
 
 use photonic_core::timeline::{
-    AudioStreamInfo, FrameRate, MediaProbe, ProbedColor, Tick, VideoStreamInfo, TICKS_PER_SECOND,
+    AudioStreamInfo, FrameRate, MediaProbe, ProbedColor, ScanType, Tick, VideoStreamInfo,
+    TICKS_PER_SECOND,
 };
 use serde::Deserialize;
 
@@ -51,6 +52,9 @@ pub struct ProbeDetails {
     /// Heuristic: the container's average and base rates disagree beyond
     /// rounding ⇒ treat as VFR (decode then uses the pts-table path — 02 §4).
     pub is_vfr: bool,
+    /// Progressive / interlaced / unknown (K-G6 / 32 §6). Mirrors
+    /// `probe.video.scan` when video is present.
+    pub scan: ScanType,
 }
 
 /// Probe `path`, returning the persisted [`MediaProbe`] only.
@@ -125,6 +129,8 @@ struct FfStream {
     color_transfer: Option<String>,
     color_space: Option<String>,
     color_range: Option<String>,
+    /// ffprobe field_order: progressive / tt / bb / tb / bt / …
+    field_order: Option<String>,
     // audio
     sample_rate: Option<String>,
     channels: Option<u16>,
@@ -180,6 +186,7 @@ fn fold(p: FfProbe) -> Result<ProbeDetails, ProbeError> {
     let mut has_alpha = false;
     let mut avg_frame_rate = None;
     let mut is_vfr = false;
+    let mut scan = ScanType::Unknown;
 
     let video_info = video.map(|s| {
         let frame_rate = s
@@ -198,6 +205,7 @@ fn fold(p: FfProbe) -> Result<ProbeDetails, ProbeError> {
             .as_deref()
             .map(pixel_format_has_alpha)
             .unwrap_or(false);
+        scan = parse_field_order(s.field_order.as_deref());
 
         VideoStreamInfo {
             width: s.width.unwrap_or(0),
@@ -215,6 +223,7 @@ fn fold(p: FfProbe) -> Result<ProbeDetails, ProbeError> {
                 full_range: s.color_range.as_deref().and_then(parse_color_range),
             },
             keyframe_index_cached: false,
+            scan,
         }
     });
 
@@ -234,6 +243,11 @@ fn fold(p: FfProbe) -> Result<ProbeDetails, ProbeError> {
         .or_else(|| audio.and_then(|s| s.codec_name.clone()))
         .unwrap_or_default();
 
+    // Audio-only media: scan is N/A → Progressive (no field path to mishandle).
+    if video_info.is_none() {
+        scan = ScanType::Progressive;
+    }
+
     Ok(ProbeDetails {
         probe: MediaProbe {
             duration,
@@ -246,7 +260,41 @@ fn fold(p: FfProbe) -> Result<ProbeDetails, ProbeError> {
         has_alpha,
         avg_frame_rate,
         is_vfr,
+        scan,
     })
+}
+
+/// Map ffprobe `field_order` into [`ScanType`] (K-G6).
+///
+/// | ffprobe | ScanType |
+/// |---|---|
+/// | progressive / unknown / missing | Progressive / Unknown |
+/// | tt / tb | InterlacedTopFirst |
+/// | bb / bt | InterlacedBottomFirst |
+pub fn parse_field_order(raw: Option<&str>) -> ScanType {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => ScanType::Unknown,
+        Some(s) if s.eq_ignore_ascii_case("progressive") => ScanType::Progressive,
+        Some(s) if s.eq_ignore_ascii_case("tt") || s.eq_ignore_ascii_case("tb") => {
+            ScanType::InterlacedTopFirst
+        }
+        Some(s) if s.eq_ignore_ascii_case("bb") || s.eq_ignore_ascii_case("bt") => {
+            ScanType::InterlacedBottomFirst
+        }
+        Some(_) => ScanType::Unknown,
+    }
+}
+
+/// Human-readable consequence string for triage / diagnostics (K-G6 / K-C7).
+pub fn interlaced_consequence(scan: ScanType) -> Option<&'static str> {
+    match scan {
+        ScanType::InterlacedTopFirst | ScanType::InterlacedBottomFirst => Some(
+            "Interlaced fields will be treated as progressive frames until a \
+             deinterlace source-range node is applied — expect combing on motion. \
+             (K-G6: detection only; deinterlace is a separate engine node.)",
+        ),
+        _ => None,
+    }
 }
 
 /// ffprobe uses `"N/A"` / `"unknown"` for missing color tags; drop those.
@@ -381,6 +429,27 @@ mod tests {
         assert_eq!(parse_color_range("pc"), Some(true));
         assert_eq!(parse_color_range("tv"), Some(false));
         assert_eq!(parse_color_range("unknown"), None);
+    }
+
+    #[test]
+    fn field_order_parsing() {
+        assert_eq!(parse_field_order(Some("progressive")), ScanType::Progressive);
+        assert_eq!(parse_field_order(Some("tt")), ScanType::InterlacedTopFirst);
+        assert_eq!(parse_field_order(Some("tb")), ScanType::InterlacedTopFirst);
+        assert_eq!(
+            parse_field_order(Some("bb")),
+            ScanType::InterlacedBottomFirst
+        );
+        assert_eq!(
+            parse_field_order(Some("bt")),
+            ScanType::InterlacedBottomFirst
+        );
+        assert_eq!(parse_field_order(None), ScanType::Unknown);
+        assert_eq!(parse_field_order(Some("weird")), ScanType::Unknown);
+        assert!(parse_field_order(Some("tt")).is_interlaced());
+        assert!(!parse_field_order(Some("progressive")).is_interlaced());
+        assert!(interlaced_consequence(ScanType::InterlacedTopFirst).is_some());
+        assert!(interlaced_consequence(ScanType::Progressive).is_none());
     }
 
     #[test]

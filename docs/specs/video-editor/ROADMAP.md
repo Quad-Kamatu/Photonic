@@ -36,6 +36,9 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **G-4** master meter publish | ✅ done | `bf1d89b` | feeder publishes `StereoMeter` → `EngineStatus.master_level`; GUI `master_level()` reads it; MCP `get_audio_meters` when live |
 | **31 §3** latency compensation | ✅ done | `bf1d89b` | per-track delay lines equalise paths to max latency; `graph_latency_samples` on status for A/V offset |
 | **K-B16** raster bridge | ✅ done (catalogue) | `7a7f38d`+`73e6a66` | **38 bridged ids** with manifests + Linear/Transfer operand spaces; multi-point curves (5 knots + contrast); GPU for surface/lens/smart_sharpen + prior twins. Residual polish only: richer curves UI widgets in inspector, exact bilateral/disc parity goldens |
+| **E-1** source-range contract | ✅ done | this | `graph::source_range` — `FrameRange`, per-op identity default, graph union, soft cap (16); TimeOffset still compile-expanded |
+| **E-4** threading capability | ✅ done | this | `ir::Threading` + `threading_for_op` (Any / PerInstance / Serial; undeclared → Serial) |
+| **K-G6** interlaced detection | 🟡 partial | this | `ScanType` on `VideoStreamInfo` + `ProbeDetails`; ffprobe `field_order` parse; probe warn + triage consequence string. Deinterlace node still open |
 | **K-F1** render queue | ✅ done | `bf1d89b`+`7bbd978`+`f867e95` | `export::RenderQueue` multi-job FIFO; GUI queue inspector panel + multi-format/marker enqueue |
 | **K-F2** marker multi-export | ✅ done | `7bbd978` | export dialog "per ranged marker" checkbox → one job per marker×format via RenderQueue |
 | **K-F3** multi-format render | ✅ done | `7bbd978` | format checklist → one job per checked `Sequence.formats` entry via RenderQueue |
@@ -44,7 +47,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **32 §4** playback policy | ✅ done | `f867e95` | `playback::policy::PlaybackPolicy` constants (prefill/drops/ring) + unit pin |
 | **32 §7** scale-invariance guard | ✅ done | `f867e95` | Draft vs downsampled Full tolerance tests (CPU+GPU) on geometry+blur fixture |
 
-**Not yet started (next bands):** K-A/K-C/K-D/K-E residual bands; E-1/E-2/E-4 IR contracts; legal-or-fixture-blocked G/D items. K-B16 catalogue is capability-complete; inspector curve-editor chrome is UI polish.
+**Not yet started (next bands):** K-A/K-C/K-D/K-E residual bands; E-2 analysis nodes; K-G6 deinterlace node (detection landed); legal-or-fixture-blocked G/D items.
 
 ## 1. Authority and precedence
 
@@ -138,22 +141,22 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
 | K-E | partial | Histogram/waveform/parade/vectorscope already ship with CPU references. Open: I/Q lines, 75% box, YUV/YPbPr switch, component + Rec.601/709 selection, audio spectrum, per-clip scope tap, monitor grids, extract-frame | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
 | K-F | partial | **K-F1–F5 done** for the export/render band (queue + inspector, multi-format/marker, job options, HW preflight). Remaining polish: sleep-inhibit, add-to-bin, burn-in overlay, 2-pass, K-F7 one-eval-many-outputs | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
-| K-G | open | Project profiles, project notes, layout presets, templates, **undo-history surface** over the existing branch/checkpoint tree, **interlaced-source support (K-G6) — currently a silent wrong-output path** | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
+| K-G | partial | Project profiles, notes, layouts, templates, undo-history surface open. **K-G6 detection landed** (`ScanType` + probe warn); deinterlace source-range node still open | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |
-| E-1 | open | Source-range declaration in the node contract; **precedes** G-11's rubber-band depth | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |
+| E-1 | partial | `source_range_for_op` / `graph_source_range` identity defaults + soft cap; prefetch not yet driven by the union; temporal nodes (deinterlace) will extend arms | [32 §1](32-engine-contracts.md#1-source-range--the-one-mechanism-for-temporal-access) |
 | E-2 | open | Analysis-as-node; unblocks K-B10, D-15, K-D1/G-20 sync, D-4, loudness-on-export, live meters | [32 §2](32-engine-contracts.md#2-analysis-nodes), [31 §5](31-audio-architecture.md#5-pull-based-analysis) |
-| E-3 | open | Declarative effect manifest as source of truth; gates the K-B catalogue | [30 §2](30-effect-catalogue.md#2-the-manifest) |
-| E-4 | open | Declared per-node threading capability | [32 §3](32-engine-contracts.md#3-threading-capability) |
+| E-3 | partial | Manifest table + migration live (38 catalogue ids); kernel binding still video-side by id | [30 §2](30-effect-catalogue.md#2-the-manifest) |
+| E-4 | done | `threading_for_op` declared for every current `IrOp` | [32 §3](32-engine-contracts.md#3-threading-capability) |
 | E-5 | partial | Policy constants land in `playback::policy`; soak coverage still open | [32 §4](32-engine-contracts.md#4-playback-policy) |
 | E-6 | partial | Draft/Full scale-invariance CI guard landed (`tests/scale_invariance.rs`); broaden to more geometry ops as catalogue grows | [32 §7](32-engine-contracts.md#7-scale-invariance) |
 | E-7 | partial | Byte-budgeted decode window; stated playback/scrub/export seek policy | [32 §5](32-engine-contracts.md#5-seek-policy-and-decode-budgets) |
 | E-8 | protected | Ten properties Photonic already holds that MLT's own docs identify as structural weaknesses. **Five are not in 26 §5's PA-list** — single working format in the graph interior, normalization as an explicit compile pass, cut-as-cheap-view, locale-independent serialization, deterministic ordered params — so §9 must protect them explicitly | [26 §E-8](26-kdenlive-mlt-parity.md#e-8--protected-properties-that-are-already-right) |
-| E-10 | open | **Audio-graph discontinuity and latency contracts.** No `reset()` exists on any DSP unit and there is no graph-level latency reporting. Must land **with** K-0.6, not after — retrofitting touches every unit | [31 §2](31-audio-architecture.md#2-contract-1--discontinuity), [31 §3](31-audio-architecture.md#3-contract-2--latency) |
-| E-9 | open | **CPU/GPU evaluator equivalence.** A live divergence exists today — the CPU reference blends all 26 modes, the GPU `Merge` ignores `mode`. SS-3 / golden-parity hazard, not a missing feature | [32 §8](32-engine-contracts.md#8-cpugpu-equivalence) |
+| E-10 | done | `reset(AudioDiscontinuity)` + latency/tail contracts landed with K-0.6; mixer equalises paths | [31 §2](31-audio-architecture.md#2-contract-1--discontinuity), [31 §3](31-audio-architecture.md#3-contract-2--latency) |
+| E-9 | partial | K-0.3 GPU Merge honours 26 modes + `cpu_gpu_parity` sweep; keep expanding as catalogue grows | [32 §8](32-engine-contracts.md#8-cpugpu-equivalence) |
 | X-1 | open | MLT XML / `.kdenlive` read-only import with an explicit unsupported-feature report | [34 §3](34-interchange.md#3-x-1--mlt-xml-and-kdenlive) |
 | X-2 | open | OpenTimelineIO import/export; Photonic-authored JSON reader/writer preferred over a dependency | [34 §4](34-interchange.md#4-x-2--opentimelineio) |
 | X-3 | open | EDL standalone; AAF/FCPXML via X-2 | [34 §5](34-interchange.md#5-x-3--edl) |
-| X-4 | open | Versioned, drift-checked effect-manifest schema | [30 §2.6](30-effect-catalogue.md#26-versioning-and-migration) |
+| X-4 | partial | Versioned manifests + migration framework live; drift CI still thin | [30 §2.6](30-effect-catalogue.md#26-versioning-and-migration) |
 
 **Ownership resolved so nothing is built twice.** **K-0.6 ⊃ G-4** — *not* an equivalence: G-4 is only "publish a real mixer output-meter snapshot through engine status", has no blockers, and ships first; K-0.6 additionally binds the FX chain and mixer panel (P8). · **K-C3 → G-15** (its "batch attach-by-name" residual). · **K-C4's image-sequence half → D-6.** · **K-B13 → D-15**, which should widen its residual to cover the generic split-at-cuts workflow. · **K-A11 → G-20.** · **K-B10 ≠ D-12** — S2 explicitly excludes object tracking. · **E-1 precedes G-11.**
 

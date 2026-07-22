@@ -7,6 +7,7 @@
 //! - [`cache`] — content-hash → GPU-texture result cache over the pool (02 §5).
 //! - [`eval`] — the wgpu evaluator (02 §2 evaluation).
 //! - [`raster_bridge`] — K-B16 CPU bridge from `photonic_core::raster` kernels.
+//! - [`source_range`] — E-1 temporal source-range contract (32 §1).
 
 pub mod ir;
 
@@ -18,6 +19,11 @@ pub mod ops;
 pub mod panorama;
 pub mod panorama_gpu;
 pub mod raster_bridge;
+pub mod source_range;
+
+pub use source_range::{
+    exceeds_soft_cap, graph_source_range, source_range_for_op, FrameRange, SOURCE_RANGE_SOFT_CAP,
+};
 
 pub use compile::{
     compile, CompileCode, CompileDiagnostic, CompiledFrame, DiagSeverity, Quality, ViewNodeOverride,

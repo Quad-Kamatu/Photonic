@@ -91,6 +91,51 @@ pub enum Channel {
     A,
 }
 
+/// Per-node threading capability (E-4 / 32 §3).
+///
+/// Declared so the scheduler can parallelise safely as CPU-side work multiplies.
+/// **Default for any undeclared kind is [`Threading::Serial`]** — fail safe, not
+/// fast.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Threading {
+    /// Pure function of inputs — freely parallelisable.
+    Any,
+    /// Holds per-instance state; one instance must not run concurrently with itself.
+    PerInstance,
+    /// Must run in frame order (temporal state, sequential DSP, …).
+    Serial,
+}
+
+/// Threading capability declared by `op`. Undeclared / stateful / temporal ops
+/// return [`Threading::Serial`].
+pub fn threading_for_op(op: &IrOp) -> Threading {
+    match op {
+        // Pure pixel transforms and generators.
+        IrOp::SolidColor { .. }
+        | IrOp::Transform2D { .. }
+        | IrOp::Effect { .. }
+        | IrOp::Grade { .. }
+        | IrOp::Merge { .. }
+        | IrOp::WipeMix { .. }
+        | IrOp::PushMix { .. }
+        | IrOp::Crop
+        | IrOp::Resize { .. }
+        | IrOp::ChannelSplit { .. }
+        | IrOp::ChannelCombine
+        | IrOp::Output { .. } => Threading::Any,
+
+        // Decode / rasterize hold per-source state (rings, caches).
+        IrOp::DecodeVideo { .. }
+        | IrOp::DecodeStill { .. }
+        | IrOp::RasterVector { .. }
+        | IrOp::TextGen { .. }
+        | IrOp::CaptionOverlay { .. } => Threading::PerInstance,
+
+        // Matte inference is a sequential CPU worker op.
+        IrOp::MatteExtract { .. } => Threading::Serial,
+    }
+}
+
 /// Sweep axis + orientation for a directional `WipeMix`/`PushMix` transition
 /// (08 §2.0b), lowered from `photonic_core::timeline::WipeDirection`. The name
 /// states the direction the incoming clip is revealed / pushed toward: e.g.
@@ -230,6 +275,33 @@ pub struct FrameGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threading_defaults_serial_safe_for_matte_and_any_for_pure() {
+        assert_eq!(
+            threading_for_op(&IrOp::SolidColor {
+                color: LinearColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            }),
+            Threading::Any
+        );
+        assert_eq!(
+            threading_for_op(&IrOp::MatteExtract {
+                model: MatteModel::U2NetP,
+            }),
+            Threading::Serial
+        );
+        assert_eq!(
+            threading_for_op(&IrOp::DecodeStill {
+                asset: AssetId::new(),
+            }),
+            Threading::PerInstance
+        );
+    }
 
     #[test]
     fn texture_bucket_rounds_up_to_64() {

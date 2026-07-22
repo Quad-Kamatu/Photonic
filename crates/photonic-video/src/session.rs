@@ -896,9 +896,21 @@ impl EngineThread {
         ids.insert(asset);
         self.media.invalidate_assets(&ids);
         self.last_error = None;
+        // K-G6: surface interlaced detection as a visible notice (no longer a
+        // silent wrong-output path). Deinterlace itself is a separate node;
+        // scan is persisted on VideoStreamInfo for triage / GUI.
+        if let Some(msg) = crate::media::probe::interlaced_consequence(details.scan) {
+            tracing::warn!(
+                target: "photonic_video::session",
+                %asset,
+                scan = ?details.scan,
+                "{msg}"
+            );
+        }
         tracing::info!(
             target: "photonic_video::session",
             %asset,
+            scan = ?details.scan,
             "EngineCmd::Probe: media meta updated"
         );
     }

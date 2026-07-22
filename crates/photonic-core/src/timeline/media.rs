@@ -152,6 +152,27 @@ pub struct MediaProbe {
     pub codec: String,
 }
 
+/// Field / scan type from probe (K-G6 / 32 §6). Default [`ScanType::Progressive`]
+/// so pre-K-G6 documents load unchanged.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanType {
+    #[default]
+    Progressive,
+    InterlacedTopFirst,
+    InterlacedBottomFirst,
+    Unknown,
+}
+
+impl ScanType {
+    pub fn is_interlaced(self) -> bool {
+        matches!(
+            self,
+            ScanType::InterlacedTopFirst | ScanType::InterlacedBottomFirst
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoStreamInfo {
     pub width: u32,
@@ -164,6 +185,13 @@ pub struct VideoStreamInfo {
     /// Whether a keyframe (GOP) index has been built and cached in the sidecar.
     #[serde(default)]
     pub keyframe_index_cached: bool,
+    /// Progressive / interlaced / unknown (K-G6). Omitted in older projects.
+    #[serde(default, skip_serializing_if = "is_default_scan")]
+    pub scan: ScanType,
+}
+
+fn is_default_scan(s: &ScanType) -> bool {
+    matches!(s, ScanType::Progressive)
 }
 
 fn default_pixel_aspect() -> f32 {

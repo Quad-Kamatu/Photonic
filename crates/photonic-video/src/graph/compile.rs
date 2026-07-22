@@ -4075,6 +4075,7 @@ mod tests {
                 pixel_aspect: 1.0,
                 color: ProbedColor::default(),
                 keyframe_index_cached: false,
+                scan: Default::default(),
             }),
             audio: None,
             container: "mp4".into(),
