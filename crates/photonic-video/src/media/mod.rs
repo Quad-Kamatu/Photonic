@@ -6,6 +6,8 @@
 
 /// Atomic file writes for cache/export outputs (37 §2.3): temp-and-rename.
 pub mod atomic_write;
+/// K-C5 cache-data size summary (project sidecar walk).
+pub mod cache_stats;
 /// Orphaned ffmpeg-child reaping (37 §2.2): pid/session registry + reaper.
 pub mod child_registry;
 pub mod ffmpeg_locate;
@@ -16,6 +18,8 @@ pub mod probe;
 pub mod proxy;
 /// Clip thumbnails + waveform loading, sidecar-cached (spec 15, NLE parity 10).
 pub mod thumbnails;
+
+pub use cache_stats::{summarize_cache, CacheCategory, CacheReport};
 
 pub use atomic_write::{staging_path, sweep_stale_staging, write_atomic};
 pub use child_registry::{ChildRecord, ChildRegistry};

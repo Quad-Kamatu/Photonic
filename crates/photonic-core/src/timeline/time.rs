@@ -89,6 +89,11 @@ impl FrameRate {
         num: 24000,
         den: 1001,
     };
+    /// 59.94 (NTSC).
+    pub const FPS_59_94: FrameRate = FrameRate {
+        num: 60000,
+        den: 1001,
+    };
 
     #[inline]
     pub const fn new(num: u32, den: u32) -> FrameRate {
@@ -138,6 +143,163 @@ impl FrameRate {
         let den = self.den as i64;
         (TICKS_PER_SECOND * den) % num == 0
     }
+
+    /// Nominal integer frame rate used by the SMPTE label grid
+    /// (`round(num/den)` → 30 for 30000/1001).
+    #[inline]
+    pub fn nominal_fps(&self) -> i64 {
+        let den = self.den.max(1) as i64;
+        ((self.num as i64) + den / 2) / den
+    }
+
+    /// True when this rate uses SMPTE drop-frame labelling (29.97 / 59.94 only).
+    #[inline]
+    pub fn is_drop_frame_rate(&self) -> bool {
+        matches!(
+            (self.num, self.den),
+            (30000, 1001) | (60000, 1001)
+        )
+    }
+}
+
+// ── K-A12 Timecode ───────────────────────────────────────────────────────────
+
+/// SMPTE timecode label over an exact rational [`FrameRate`] (K-A12 / 26).
+///
+/// Drop-frame is a **labelling convention** over 30000/1001 (and 60000/1001),
+/// not a rate change. `;` in `HH:MM:SS;FF` selects drop-frame; `:` is non-drop.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Timecode {
+    pub hours: i64,
+    pub minutes: i64,
+    pub seconds: i64,
+    pub frames: i64,
+    /// True when this label was authored / should be rendered as drop-frame.
+    pub drop_frame: bool,
+}
+
+impl Timecode {
+    /// Format as `HH:MM:SS:FF` or `HH:MM:SS;FF` when [`Self::drop_frame`].
+    pub fn format(self) -> String {
+        let sep = if self.drop_frame { ';' } else { ':' };
+        format!(
+            "{:02}:{:02}:{:02}{}{:02}",
+            self.hours, self.minutes, self.seconds, sep, self.frames
+        )
+    }
+
+    /// Convert a 0-based frame index (from sequence zero) to a timecode label.
+    ///
+    /// When `prefer_drop` is true **and** `rate` is 29.97/59.94, SMPTE drop-frame
+    /// labelling is applied. Otherwise non-drop (`:`) is used.
+    pub fn from_frame_index(frame_index: i64, rate: FrameRate, prefer_drop: bool) -> Self {
+        let f = frame_index.max(0);
+        let nominal = rate.nominal_fps().max(1);
+        if prefer_drop && rate.is_drop_frame_rate() {
+            return Self::from_frame_index_drop(f, nominal);
+        }
+        let total_secs = f / nominal;
+        let frames = f % nominal;
+        Timecode {
+            hours: total_secs / 3600,
+            minutes: (total_secs % 3600) / 60,
+            seconds: total_secs % 60,
+            frames,
+            drop_frame: false,
+        }
+    }
+
+    /// SMPTE drop-frame: skip frame numbers 0 and 1 (or 0–3 at 59.94) at the
+    /// start of every minute except every 10th minute.
+    ///
+    /// Algorithm matches the common QT/SMPTE conversion (frame count → DF label).
+    fn from_frame_index_drop(frame_number: i64, nominal_fps: i64) -> Self {
+        let drop = if nominal_fps >= 60 { 4 } else { 2 };
+        let frames_per_min = nominal_fps * 60 - drop;
+        let frames_per_10min = frames_per_min * 10 + drop;
+
+        let d = frame_number / frames_per_10min;
+        let m = frame_number % frames_per_10min;
+
+        // David Heidelberger / SMPTE: add dropped frames for complete 10-min
+        // blocks, then for complete minutes past the first drop in the block.
+        let mut adj = frame_number + drop * 9 * d;
+        if m > drop {
+            adj += drop * ((m - drop) / frames_per_min);
+        }
+
+        let frames = adj % nominal_fps;
+        let total_secs = adj / nominal_fps;
+        Timecode {
+            hours: total_secs / 3600,
+            minutes: (total_secs % 3600) / 60,
+            seconds: total_secs % 60,
+            frames,
+            drop_frame: true,
+        }
+    }
+
+    /// Parse `HH:MM:SS:FF` (non-drop) or `HH:MM:SS;FF` (drop-frame) to a tick
+    /// relative to sequence zero (before adding [`Sequence::start_timecode`]).
+    ///
+    /// Drop-frame parse only succeeds for 29.97 / 59.94 rates; other rates
+    /// reject `;`. Non-drop always works.
+    pub fn parse_to_tick(tc: &str, rate: FrameRate) -> Option<Tick> {
+        let sep_pos = tc.rfind([':', ';'])?;
+        let drop = tc.as_bytes().get(sep_pos)? == &b';';
+        let hms = &tc[..sep_pos];
+        let ff_str = &tc[sep_pos + 1..];
+        let parts: Vec<&str> = hms.split(':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let h: i64 = parts[0].parse().ok()?;
+        let m: i64 = parts[1].parse().ok()?;
+        let s: i64 = parts[2].parse().ok()?;
+        let ff: i64 = ff_str.parse().ok()?;
+        let nominal = rate.nominal_fps();
+        if h < 0 || m < 0 || s < 0 || ff < 0 || m >= 60 || s >= 60 || nominal < 1 || ff >= nominal
+        {
+            return None;
+        }
+        if drop && !rate.is_drop_frame_rate() {
+            return None;
+        }
+        let total_frames = if drop {
+            Self::drop_components_to_frame_index(h, m, s, ff, nominal)?
+        } else {
+            (h * 3600 + m * 60 + s) * nominal + ff
+        };
+        Some(Tick(total_frames * rate.ticks_per_frame().0))
+    }
+
+    /// Inverse of [`from_frame_index_drop`]: components → 0-based frame index.
+    fn drop_components_to_frame_index(
+        h: i64,
+        m: i64,
+        s: i64,
+        f: i64,
+        nominal_fps: i64,
+    ) -> Option<i64> {
+        let drop = if nominal_fps >= 60 { 4 } else { 2 };
+        // Invalid dropped numbers: :00 and :01 (or :00–:03) of non-10th minutes.
+        if m % 10 != 0 && f < drop {
+            return None;
+        }
+        let total_minutes = h * 60 + m;
+        let raw = ((h * 3600 + m * 60 + s) * nominal_fps) + f;
+        // Subtract the frames that drop-frame skips in the label space.
+        let dropped = drop * (total_minutes - total_minutes / 10);
+        Some(raw - dropped)
+    }
+
+    /// Format `tick` for UI display at `rate`, optionally drop-frame for NTSC.
+    /// `start` is the sequence start offset (added before labelling).
+    pub fn format_tick(tick: Tick, rate: FrameRate, start: Tick, prefer_drop: bool) -> String {
+        let abs = Tick(tick.0.saturating_add(start.0).max(0));
+        let frame_idx = rate.frame_at(abs).max(0);
+        Self::from_frame_index(frame_idx, rate, prefer_drop && rate.is_drop_frame_rate()).format()
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +348,51 @@ mod tests {
         assert!(!fr.is_exact());
         // Still produces a sensible nearest-tick value.
         assert_eq!(fr.ticks_per_frame().0, (TICKS_PER_SECOND + 5) / 11);
+    }
+
+    #[test]
+    fn nondrop_round_trips_through_parse() {
+        let fr = FrameRate::FPS_30;
+        let t = Tick(fr.ticks_per_frame().0 * (1 * 3600 * 30 + 2 * 60 * 30 + 3 * 30 + 4));
+        let tc = Timecode::from_frame_index(fr.frame_at(t), fr, false);
+        assert_eq!(tc.format(), "01:02:03:04");
+        assert!(!tc.drop_frame);
+        let back = Timecode::parse_to_tick(&tc.format(), fr).unwrap();
+        assert_eq!(fr.frame_at(back), fr.frame_at(t));
+    }
+
+    #[test]
+    fn drop_frame_separator_rejected_for_25fps() {
+        assert!(Timecode::parse_to_tick("00:01:00;00", FrameRate::FPS_25).is_none());
+        assert!(Timecode::parse_to_tick("00:01:00:00", FrameRate::FPS_25).is_some());
+    }
+
+    #[test]
+    fn drop_frame_formats_semicolon_and_skips_00_01_on_minute() {
+        let fr = FrameRate::FPS_29_97;
+        // Frame 1800 of non-drop 30 would be 00:01:00:00, but DF has already
+        // dropped 2 frames in that minute — label should not be :00:00 on DF.
+        // At exactly 1 minute of wall *count* in DF: after 1798 real frames...
+        // Verify known anchor: frame 0 → 00:00:00;00
+        let z = Timecode::from_frame_index(0, fr, true);
+        assert_eq!(z.format(), "00:00:00;00");
+        assert!(z.drop_frame);
+        // Round-trip a few minutes of DF.
+        for n in [0i64, 30, 1798, 17982, 100_000] {
+            let tc = Timecode::from_frame_index(n, fr, true);
+            assert!(tc.drop_frame, "n={n}");
+            assert!(tc.format().contains(';'));
+            let back = Timecode::parse_to_tick(&tc.format(), fr).expect("parse");
+            assert_eq!(fr.frame_at(back), n, "n={n} tc={}", tc.format());
+        }
+    }
+
+    #[test]
+    fn format_tick_adds_sequence_start() {
+        let fr = FrameRate::FPS_30;
+        let start = Tick(fr.ticks_per_frame().0 * 30 * 3600); // 01:00:00:00
+        let s = Timecode::format_tick(Tick::ZERO, fr, start, false);
+        assert_eq!(s, "01:00:00:00");
     }
 
     #[test]

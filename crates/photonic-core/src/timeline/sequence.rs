@@ -159,6 +159,15 @@ pub struct Sequence {
     /// In/out for preview + export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_range: Option<(Tick, Tick)>,
+    /// Sequence start timecode offset (K-A12). Display labels are
+    /// `start_timecode + playhead`. Default zero (legacy files). Deliveries
+    /// often use `01:00:00:00` (`frame_rate.frame_start(nominal_fps * 3600)`).
+    #[serde(default, skip_serializing_if = "is_tick_zero")]
+    pub start_timecode: Tick,
+}
+
+fn is_tick_zero(t: &Tick) -> bool {
+    t.0 == 0
 }
 
 impl Sequence {
@@ -179,6 +188,7 @@ impl Sequence {
             master_effects: Vec::new(),
             master_grade: None,
             work_range: None,
+            start_timecode: Tick::ZERO,
         }
     }
 

@@ -90,5 +90,5 @@ pub use sequence::{
     GroupKind, GroupNode, Marker, MarkerAnchor, MarkerCategory, MarkerGlyph, ProjectVideoSettings,
     Sequence, SequenceFormat, TimelineProject, Track, TrackKind, ValidationError,
 };
-pub use time::{FrameRate, Tick, TICKS_PER_SECOND};
+pub use time::{FrameRate, Tick, Timecode, TICKS_PER_SECOND};
 pub use unknown::UnknownTag;

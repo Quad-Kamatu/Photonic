@@ -1100,6 +1100,49 @@ pub fn unlink_clip(
     set_clip_prop(p, id, track_id, new)
 }
 
+/// K-A13: detach linked A/V partners of `clip_id` into independent clips
+/// (clear every member's `link_group`). One undo unit when the caller wraps
+/// the returned vec as a batch. Empty vec when the clip was not linked.
+///
+/// Does **not** move audio to another track — it only breaks the linkage so
+/// subsequent trims/moves can diverge. That is the routine "Split Audio"
+/// half of Kdenlive's verb (restore link is `link_clips`).
+pub fn split_av_link(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let c = clip(t, clip_id)?;
+    let Some(group) = c.link_group else {
+        return Ok(Vec::new());
+    };
+    // Locate every member (video + audio tracks) and unlink each.
+    let mut cmds = Vec::new();
+    for track in s.video_tracks.iter().chain(s.audio_tracks.iter()) {
+        for member in track.clips.iter().filter(|c| c.link_group == Some(group)) {
+            cmds.push(unlink_clip(p, id, track.id, member.id)?);
+        }
+    }
+    Ok(cmds)
+}
+
+/// K-A12: set the sequence start timecode offset (display label origin).
+pub fn set_sequence_start_timecode(
+    p: &TimelineProject,
+    id: SequenceId,
+    new: Tick,
+) -> Result<TimelineCmd, EditError> {
+    let s = seq(p, id)?;
+    Ok(TimelineCmd::SetSequenceStartTimecode {
+        seq: id,
+        old: s.start_timecode,
+        new,
+    })
+}
+
 /// All clip ids across the project sharing `group` (14 §M-2 helper — e.g. to
 /// resolve an A/V pair to move/select as a unit). Pure read; empty when the
 /// group has no members.
@@ -2191,6 +2234,27 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::history::Command;
+
+    #[test]
+    fn split_av_link_unlinks_both_members() {
+        let (mut doc, seq_id, vtrack, vclip) = fixture();
+        let (atrack, aclip) = add_audio_clip(&mut doc, seq_id);
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = link_clips(project, seq_id, vtrack, vclip, atrack, aclip).unwrap();
+        for c in cmds {
+            c.apply(&mut doc);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let group = find_clip(&doc, seq_id, vtrack, vclip).link_group;
+        assert!(group.is_some());
+        let split = split_av_link(project, seq_id, vtrack, vclip).unwrap();
+        assert_eq!(split.len(), 2);
+        for c in split {
+            c.apply(&mut doc);
+        }
+        assert!(find_clip(&doc, seq_id, vtrack, vclip).link_group.is_none());
+        assert!(find_clip(&doc, seq_id, atrack, aclip).link_group.is_none());
+    }
 
     #[test]
     fn set_asset_rating_and_unused_assets() {

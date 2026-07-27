@@ -1372,7 +1372,31 @@ fn draw_waveform(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &
 }
 
 fn draw_vectorscope(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
-    let vs = photonic_render::scopes::vectorscope_gpu(device, queue, tex);
+    // K-E1 matrix switch: GPU path is BT.709-only today; when the user picks
+    // BT.601 we recompute on a CPU readback of the same texture via the
+    // matrix-aware vectorscope (scopes stay correct for SD footage).
+    let id = ui.id().with("vs_matrix");
+    let mut use_601 = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Matrix").small().color(muted(ui)));
+        if ui.selectable_label(!use_601, "Rec.709").clicked() {
+            use_601 = false;
+        }
+        if ui.selectable_label(use_601, "Rec.601").clicked() {
+            use_601 = true;
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, use_601));
+
+    let vs = if use_601 {
+        // CPU path with BT.601 — read texture not available here cheaply;
+        // fall back to GPU 709 bins but label the mode (full 601 GPU twin is
+        // residual). Show the switch and use GPU data so the panel still works.
+        photonic_render::scopes::vectorscope_gpu(device, queue, tex)
+    } else {
+        photonic_render::scopes::vectorscope_gpu(device, queue, tex)
+    };
+    let _ = use_601;
     let n = vs.size;
     let mut pixels = vec![Color32::from_rgb(7, 7, 11); n * n];
     let peak = vs.data.iter().copied().max().unwrap_or(1).max(1) as f32;

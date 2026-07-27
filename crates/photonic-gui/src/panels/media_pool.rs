@@ -727,7 +727,54 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         {
             ctx.action = Some(PanelAction::MediaRemoveUnused);
         }
+        // K-C5: cache size report (read-only).
+        if ui
+            .button("Cache…")
+            .on_hover_text("Show project sidecar cache sizes (proxies, posters, …)")
+            .clicked()
+        {
+            // Project path is not on PropPanelCtx; global proxy cache + any
+            // open project's cache is enough for a size readout (K-C5 slice).
+            let report = photonic_video::media::summarize_cache(None);
+            let mut lines = vec![format!(
+                "Cache root: {}\n{:.2} MB total",
+                report.root.display(),
+                report.total_mb()
+            )];
+            for c in &report.categories {
+                if c.files > 0 {
+                    lines.push(format!(
+                        "  {}: {:.2} MB ({} files)",
+                        c.name,
+                        c.bytes as f64 / (1024.0 * 1024.0),
+                        c.files
+                    ));
+                }
+            }
+            // Surface via the same status path as imports.
+            // PropPanelCtx may not have set_import_status — use action-less toast via selection of label.
+            ui.memory_mut(|m| {
+                m.data.insert_temp(
+                    egui::Id::new("media_cache_report"),
+                    lines.join("\n"),
+                );
+            });
+        }
     });
+    if let Some(report) = ui.memory(|m| {
+        m.data
+            .get_temp::<String>(egui::Id::new("media_cache_report"))
+    }) {
+        ui.collapsing("Cache report", |ui| {
+            ui.monospace(&report);
+            if ui.button("Dismiss").clicked() {
+                ui.memory_mut(|m| {
+                    m.data
+                        .remove::<String>(egui::Id::new("media_cache_report"));
+                });
+            }
+        });
+    }
 
     ui.separator();
 

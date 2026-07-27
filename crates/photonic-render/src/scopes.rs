@@ -151,12 +151,45 @@ pub fn vectorscope_cpu(pixels: &[f32], _width: u32, _height: u32) -> Vectorscope
 /// Rec.709 (Cb, Cr) bin indices for a signal-domain R'G'B'.
 #[inline]
 fn cbcr_bins(s: [f32; 3]) -> (usize, usize) {
-    let y = luma709(s);
-    let cb = (s[2] - y) / color::BT709_CB_B; // 1.8556
-    let cr = (s[0] - y) / color::BT709_CR_R; // 1.5748
+    cbcr_bins_matrix(s, color::Matrix::Bt709)
+}
+
+/// K-E1: Cb/Cr bins with selectable matrix (BT.709 HD default / BT.601 SD).
+#[inline]
+pub fn cbcr_bins_matrix(s: [f32; 3], matrix: color::Matrix) -> (usize, usize) {
+    let (y, cb_b, cr_r) = match matrix {
+        color::Matrix::Bt709 => (luma709(s), color::BT709_CB_B, color::BT709_CR_R),
+        color::Matrix::Bt601 => {
+            // BT.601 luma weights Kr=0.299, Kg=0.587, Kb=0.114
+            let y = 0.299 * s[0] + 0.587 * s[1] + 0.114 * s[2];
+            (y, color::BT601_CB_B, color::BT601_CR_R)
+        }
+    };
+    let cb = (s[2] - y) / cb_b;
+    let cr = (s[0] - y) / cr_r;
     let cb_bin = ((cb + 0.5) * 255.0).round().clamp(0.0, 255.0) as usize;
     let cr_bin = ((cr + 0.5) * 255.0).round().clamp(0.0, 255.0) as usize;
+    let _ = cr_r; // used above
     (cb_bin, cr_bin)
+}
+
+/// CPU vectorscope with selectable matrix (K-E1 YUV / YPbPr labelling switch).
+pub fn vectorscope_cpu_matrix(
+    pixels: &[f32],
+    _width: u32,
+    _height: u32,
+    matrix: color::Matrix,
+) -> Vectorscope {
+    let mut data = vec![0u32; VECTORSCOPE_SIZE * VECTORSCOPE_SIZE];
+    for px in pixels.chunks_exact(4) {
+        let s = signal(px);
+        let (cb_bin, cr_bin) = cbcr_bins_matrix(s, matrix);
+        data[cr_bin * VECTORSCOPE_SIZE + cb_bin] += 1;
+    }
+    Vectorscope {
+        size: VECTORSCOPE_SIZE,
+        data,
+    }
 }
 
 /// All three CPU scopes for one frame.

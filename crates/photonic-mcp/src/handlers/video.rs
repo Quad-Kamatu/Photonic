@@ -108,51 +108,14 @@ fn resolve_tick(
     ))
 }
 
-/// `HH:MM:SS:FF` or `HH:MM:SS;FF` (the `;` denotes NTSC drop-frame by
-/// convention only — drop-frame frame-count compensation is NOT applied in
-/// v1; documented simplification, not a hidden bug).
+/// `HH:MM:SS:FF` (non-drop) or `HH:MM:SS;FF` (drop-frame, K-A12).
 ///
-/// The `HH:MM:SS` field counts **frames**, not wall-clock seconds: a timecode
-/// addresses a position on the frame grid, so `SS` is `nominal_fps` frames
-/// (spec 10 §1.3, 01 §1). Resolving via wall-clock seconds would land a
-/// 1001-denominator rate (29.97 = 30000/1001) off its own frame boundaries —
-/// e.g. `00:01:00:00` @ 29.97 would fall ~1.8 frames early. Instead we count
-/// `total_frames = (h*3600 + m*60 + s) * nominal_fps + ff` and multiply by
-/// `FrameRate::ticks_per_frame`, so the result is always frame-aligned.
-///
-/// Returns `None` for malformed input or out-of-range components (negative
-/// values, `MM`/`SS >= 60`, or `FF >= nominal_fps`).
+/// Delegates to [`photonic_core::timeline::Timecode::parse_to_tick`]: `;` is
+/// real SMPTE drop-frame compensation on 29.97/59.94 (not a synonym for `:`).
+/// Non-drop always uses the frame-grid nominal-fps count so 1001 rates land
+/// on exact frame boundaries (spec 10 §1.3, 01 §1).
 fn parse_timecode(tc: &str, fr: FrameRate) -> Option<Tick> {
-    let sep_pos = tc.rfind([':', ';'])?;
-    let hms = &tc[..sep_pos];
-    let ff_str = &tc[sep_pos + 1..];
-    let parts: Vec<&str> = hms.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let h: i64 = parts[0].parse().ok()?;
-    let m: i64 = parts[1].parse().ok()?;
-    let s: i64 = parts[2].parse().ok()?;
-    let ff: i64 = ff_str.parse().ok()?;
-    // Nominal integer frame rate: round(num/den) (30000/1001 → 30). This is the
-    // number of frame slots a `SS` second occupies on the timecode grid.
-    let den = fr.den.max(1) as i64;
-    let nominal_fps = ((fr.num as i64) + den / 2) / den;
-    // Reject impossible components (spec 10 §1.3): no negatives, MM/SS < 60,
-    // and the frame field must be within one nominal second.
-    if h < 0
-        || m < 0
-        || s < 0
-        || ff < 0
-        || m >= 60
-        || s >= 60
-        || nominal_fps < 1
-        || ff >= nominal_fps
-    {
-        return None;
-    }
-    let total_frames = (h * 3600 + m * 60 + s) * nominal_fps + ff;
-    Some(Tick(total_frames * fr.ticks_per_frame().0))
+    photonic_core::timeline::Timecode::parse_to_tick(tc, fr)
 }
 
 /// Which `(SequenceId, TrackId)` owns a clip — a plain project scan, not edit
@@ -6786,8 +6749,15 @@ mod tests {
 
         // Frame field carries within the nominal second: 00:00:00:29 = frame 29.
         assert_eq!(parse_timecode("00:00:00:29", fr).unwrap(), Tick(29 * tpf));
-        // ';' (drop-frame marker) is accepted but not compensated — same value.
-        assert_eq!(parse_timecode("00:01:00;00", fr).unwrap(), Tick(1800 * tpf));
+        // K-A12: `;` is real SMPTE drop-frame — :00/:01 of non-10th minutes are
+        // invalid labels; 00:01:00;02 is the first legal label after the drop.
+        assert!(
+            parse_timecode("00:01:00;00", fr).is_none(),
+            "DF drops frames 0–1 at mm=01"
+        );
+        let df = parse_timecode("00:01:00;02", fr).unwrap();
+        // raw (1*60*30+2) − 2 dropped = frame 1800
+        assert_eq!(df, Tick(1800 * tpf));
     }
 
     #[test]

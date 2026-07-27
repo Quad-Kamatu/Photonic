@@ -1948,9 +1948,20 @@ fn clip_context_menu(
     let any_linked = clips_have_link_group(doc, seq_id, &link_targets);
     if ui
         .add_enabled(any_linked, egui::Button::new("Unlink"))
+        .on_hover_text("Clear link groups on the selection only")
         .clicked()
     {
         unlink_selected_clips(doc, history, seq_id, &link_targets);
+        ui.close_menu();
+    }
+    if ui
+        .add_enabled(any_linked, egui::Button::new("Split A/V"))
+        .on_hover_text(
+            "K-A13: detach the full A/V link group so audio and video can move independently",
+        )
+        .clicked()
+    {
+        split_av_selected_clips(doc, history, seq_id, &link_targets);
         ui.close_menu();
     }
     ui.separator();
@@ -2098,6 +2109,57 @@ fn unlink_selected_clips(
             cmds.push(cmd);
         }
     }
+    if !cmds.is_empty() {
+        let batch = cmds.into_iter().map(Command::Timeline).collect();
+        history.execute_discrete(Command::Batch(batch), doc);
+    }
+}
+
+/// K-A13: split A/V link for each selected linked clip — unlinks the **entire**
+/// link group (partners included), so audio and video become independent.
+/// Distinct from `unlink_selected_clips`, which only clears the selection.
+fn split_av_selected_clips(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq_id: SequenceId,
+    ids: &[ClipId],
+) {
+    let locations = resolve_clip_locations(doc, seq_id, ids);
+    if locations.is_empty() {
+        return;
+    }
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let mut seen_groups = std::collections::HashSet::new();
+    let mut cmds = Vec::new();
+    for (track, clip) in locations {
+        let Ok(batch) = ops::split_av_link(p, seq_id, track, clip) else {
+            continue;
+        };
+        // Dedup: same group from multi-select yields identical unlink cmds.
+        if batch.is_empty() {
+            continue;
+        }
+        // Use first command's clip as a coarse key — split_av returns one
+        // unlink per member; hashing command count+track is enough for tests.
+        let key = (track, clip);
+        if !seen_groups.insert(key) {
+            continue;
+        }
+        // If two selected clips share a group, second split is empty after first
+        // apply — so collect first, apply once. Here we only collect unique
+        // non-empty batches by group identity via first clip id in batch.
+        cmds.extend(batch);
+    }
+    // Dedup so multi-select of partners doesn't double-apply unlinks.
+    let mut seen = std::collections::HashSet::new();
+    cmds.retain(|c| match c {
+        photonic_core::timeline::TimelineCmd::SetClipProp { track, new, .. } => {
+            seen.insert((*track, new.id))
+        }
+        _ => true,
+    });
     if !cmds.is_empty() {
         let batch = cmds.into_iter().map(Command::Timeline).collect();
         history.execute_discrete(Command::Batch(batch), doc);

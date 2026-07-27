@@ -425,6 +425,12 @@ pub enum TimelineCmd {
         order_index: usize,
         was_active: bool,
     },
+    /// K-A12: sequence start timecode offset (display origin).
+    SetSequenceStartTimecode {
+        seq: SequenceId,
+        old: Tick,
+        new: Tick,
+    },
     /// Rename a sequence (17 §G-17 tab rename). Old/new names swapped on inverse.
     RenameSequence {
         seq: SequenceId,
@@ -1592,6 +1598,7 @@ impl TimelineCmd {
             TimelineCmd::AddSequence { sequence } => format!("Add sequence \"{}\"", sequence.name),
             TimelineCmd::RemoveSequence { .. } => "Remove sequence".into(),
             TimelineCmd::RenameSequence { new, .. } => format!("Rename sequence \"{new}\""),
+            TimelineCmd::SetSequenceStartTimecode { .. } => "Set sequence start timecode".into(),
             TimelineCmd::SetActiveSequence { .. } => "Switch sequence".into(),
             TimelineCmd::SetActiveFormat { .. } => "Switch format".into(),
             TimelineCmd::SetSequenceFormat { .. } => "Edit format".into(),
@@ -1733,6 +1740,11 @@ impl TimelineCmd {
             TimelineCmd::RenameSequence { seq, new, .. } => {
                 if let Some(s) = p.sequences.get_mut(seq) {
                     s.name = new.clone();
+                }
+            }
+            TimelineCmd::SetSequenceStartTimecode { seq, new, .. } => {
+                if let Some(s) = p.sequences.get_mut(seq) {
+                    s.start_timecode = *new;
                 }
             }
             TimelineCmd::SetActiveSequence { new, .. } => p.active_sequence = *new,
@@ -2107,6 +2119,13 @@ impl TimelineCmd {
                 old: new.clone(),
                 new: old.clone(),
             },
+            TimelineCmd::SetSequenceStartTimecode { seq, old, new } => {
+                TimelineCmd::SetSequenceStartTimecode {
+                    seq: *seq,
+                    old: *new,
+                    new: *old,
+                }
+            }
             TimelineCmd::SetActiveSequence { old, new } => TimelineCmd::SetActiveSequence {
                 old: *new,
                 new: *old,

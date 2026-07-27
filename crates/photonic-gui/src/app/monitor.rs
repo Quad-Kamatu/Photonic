@@ -583,16 +583,17 @@ fn sequence_end_tick(doc: &Document) -> Tick {
         .unwrap_or(Tick::ZERO)
 }
 
-/// Format a tick as `HH:MM:SS:FF` at the given frame rate (04 §3.2).
+/// Format a tick as SMPTE timecode (K-A12 / 04 §3.2).
+/// Uses drop-frame (`;`) automatically for 29.97 / 59.94 and honours the
+/// sequence `start_timecode` offset when a document sequence is available.
 fn format_timecode(fr: FrameRate, t: Tick) -> String {
-    let frame_idx = fr.frame_at(t).max(0);
-    let fps = ((fr.num as f64 / fr.den.max(1) as f64).round() as i64).max(1);
-    let total_secs = frame_idx / fps;
-    let ff = frame_idx % fps;
-    let hh = total_secs / 3600;
-    let mm = (total_secs % 3600) / 60;
-    let ss = total_secs % 60;
-    format!("{hh:02}:{mm:02}:{ss:02}:{ff:02}")
+    format_timecode_with_start(fr, t, Tick::ZERO)
+}
+
+fn format_timecode_with_start(fr: FrameRate, t: Tick, start: Tick) -> String {
+    use photonic_core::timeline::Timecode;
+    // Prefer drop-frame labelling on NTSC rates (broadcast default).
+    Timecode::format_tick(t, fr, start, true)
 }
 
 // ── Transport (04 §3.2, §5.1) ───────────────────────────────────────────────
@@ -1440,6 +1441,9 @@ impl PhotonicApp {
                 // Prominent current / total timecode readout (pro-NLE feel).
                 // When SOURCE peaking: source clock (G-10); else sequence playhead.
                 let fr = active_frame_rate(doc);
+                let start_tc = active_sequence(doc)
+                    .map(|s| s.start_timecode)
+                    .unwrap_or(Tick::ZERO);
                 let source_io = self.io_targets_source_marks();
                 let (now, end) = if source_io {
                     (
@@ -1450,17 +1454,22 @@ impl PhotonicApp {
                 } else {
                     (self.playhead, sequence_end_tick(doc))
                 };
+                // Sequence labels include start_timecode; source peek is absolute.
+                let tc_start = if source_io { Tick::ZERO } else { start_tc };
                 ui.label(
-                    egui::RichText::new(format_timecode(fr, now))
+                    egui::RichText::new(format_timecode_with_start(fr, now, tc_start))
                         .monospace()
                         .size(16.0)
                         .strong()
                         .color(egui::Color32::from_rgb(0x9d, 0x8c, 0xf5)),
                 );
                 ui.label(
-                    egui::RichText::new(format!("/ {}", format_timecode(fr, end)))
-                        .monospace()
-                        .weak(),
+                    egui::RichText::new(format!(
+                        "/ {}",
+                        format_timecode_with_start(fr, end, tc_start)
+                    ))
+                    .monospace()
+                    .weak(),
                 );
 
                 ui.separator();
