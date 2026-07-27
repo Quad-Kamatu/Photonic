@@ -950,6 +950,9 @@ pub struct PhotonicApp {
     /// duration + ripple). `None` = closed.
     pub(crate) edit_duration_dialog:
         Option<crate::panels::video::duration_dialog::EditDurationDialog>,
+    /// [timeline K-A7] Keyboard grab session — arrow keys preview a move; Enter
+    /// commits one undo unit, Esc cancels. `None` = not grabbing.
+    pub(crate) timeline_grab: Option<crate::app::timeline::interact::GrabSession>,
 
     // ── 17-nle-parity-round2.md choke-point session state ───────────────────
     // Session fields for the round-2 deferred features (source monitor,
@@ -1622,6 +1625,7 @@ impl Default for PhotonicApp {
             export_dialog_open: false,
             last_export_preset: String::new(),
             edit_duration_dialog: None,
+            timeline_grab: None,
             source_monitor_scrub: None,
             multicam_active_angle: None,
             multicam_view_open: false,

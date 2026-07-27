@@ -65,6 +65,115 @@ pub(crate) struct DragState {
     pub moved: bool,
 }
 
+// ── K-A7 Grab item / arrow-key nudge ─────────────────────────────────────────
+
+/// Keyboard grab session (K-A7): selected clip is "held" so arrow keys preview a
+/// move; Enter commits one undo unit, Esc cancels. Mirrors mouse-drag commit-on-
+/// release so N nudges never pollute the undo stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GrabSession {
+    pub seq: SequenceId,
+    pub track: TrackId,
+    pub clip: ClipId,
+    /// Original timing at grab engage (commit delta is relative to this).
+    pub orig_start: Tick,
+    pub duration: Tick,
+    /// Live preview placement (ghost).
+    pub preview_start: Tick,
+    pub preview_track: TrackId,
+}
+
+/// Horizontal / vertical nudge intent while a [`GrabSession`] is active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrabNudge {
+    /// Earlier on the timeline (`ArrowLeft`).
+    Earlier,
+    /// Later on the timeline (`ArrowRight`).
+    Later,
+    /// Previous track of the same kind (`ArrowUp` — higher video lane / earlier audio).
+    TrackPrev,
+    /// Next track of the same kind (`ArrowDown`).
+    TrackNext,
+}
+
+impl GrabSession {
+    /// Seed a grab from a live clip. Returns `None` if the clip cannot be found
+    /// or its track is locked.
+    pub fn seed(seq: &Sequence, seq_id: SequenceId, track: TrackId, clip: ClipId) -> Option<Self> {
+        let t = seq.track(track)?;
+        if t.locked {
+            return None;
+        }
+        let c = t.clips.iter().find(|c| c.id == clip)?;
+        Some(Self {
+            seq: seq_id,
+            track,
+            clip,
+            orig_start: c.start,
+            duration: c.duration,
+            preview_start: c.start,
+            preview_track: track,
+        })
+    }
+
+    /// Whether the preview differs from the grab-start placement (anything to commit).
+    pub fn is_dirty(&self) -> bool {
+        self.preview_start != self.orig_start || self.preview_track != self.track
+    }
+}
+
+/// Apply one keyboard nudge to `session` against `seq` (pure — no doc mutation).
+///
+/// Horizontal steps by `frame_step` ticks (caller supplies 1× or N× frame).
+/// Vertical moves to the previous/next **unlocked** track of the same kind.
+/// Overlap / out-of-range previews are still written; commit validates via ops.
+pub(crate) fn apply_grab_nudge(
+    session: &mut GrabSession,
+    seq: &Sequence,
+    nudge: GrabNudge,
+    frame_step: Tick,
+) {
+    match nudge {
+        GrabNudge::Earlier => {
+            let step = frame_step.0.max(1);
+            session.preview_start = Tick((session.preview_start.0 - step).max(0));
+        }
+        GrabNudge::Later => {
+            let step = frame_step.0.max(1);
+            session.preview_start = Tick(session.preview_start.0.saturating_add(step));
+        }
+        GrabNudge::TrackPrev | GrabNudge::TrackNext => {
+            let Some(cur) = seq.track(session.preview_track) else {
+                return;
+            };
+            let kind = cur.kind;
+            let lane: Vec<TrackId> = seq
+                .tracks()
+                .filter(|t| t.kind == kind && !t.locked)
+                .map(|t| t.id)
+                .collect();
+            let Some(idx) = lane.iter().position(|id| *id == session.preview_track) else {
+                return;
+            };
+            let next = match nudge {
+                GrabNudge::TrackPrev => idx.checked_sub(1),
+                GrabNudge::TrackNext => {
+                    let n = idx + 1;
+                    if n < lane.len() {
+                        Some(n)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(i) = next {
+                session.preview_track = lane[i];
+            }
+        }
+    }
+}
+
 /// Transient marquee (rubber-band) select state.
 #[derive(Clone, Copy)]
 pub(crate) struct Marquee {
@@ -1256,5 +1365,61 @@ mod edit_tests {
             Tick(150)
         ));
         assert_eq!(clips_of(&doc, seq, v), vec![(Tick(100), Tick(100))]);
+    }
+}
+
+#[cfg(test)]
+mod grab_tests {
+    use super::*;
+    use photonic_core::timeline::{FrameRate, Sequence, Track};
+
+    fn seq_two_video() -> (Sequence, TrackId, TrackId, ClipId) {
+        let mut seq = Sequence::new("s", FrameRate::FPS_30, 1920, 1080);
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        let c = Clip::new(ClipSource::Adjustment, Tick(100), Tick(50));
+        let clip = c.id;
+        v1.clips.push(c);
+        let t1 = v1.id;
+        let v2 = Track::new(TrackKind::Video, "V2");
+        let t2 = v2.id;
+        seq.video_tracks.push(v1);
+        seq.video_tracks.push(v2);
+        (seq, t1, t2, clip)
+    }
+
+    #[test]
+    fn grab_seed_and_horizontal_nudge() {
+        let (seq, t1, _t2, clip) = seq_two_video();
+        let mut g = GrabSession::seed(&seq, seq.id, t1, clip).unwrap();
+        assert!(!g.is_dirty());
+        let tpf = FrameRate::FPS_30.ticks_per_frame();
+        apply_grab_nudge(&mut g, &seq, GrabNudge::Later, tpf);
+        assert_eq!(g.preview_start, Tick(100 + tpf.0));
+        assert!(g.is_dirty());
+        apply_grab_nudge(&mut g, &seq, GrabNudge::Earlier, tpf);
+        assert_eq!(g.preview_start, Tick(100));
+        // Clamp at zero.
+        g.preview_start = Tick(0);
+        apply_grab_nudge(&mut g, &seq, GrabNudge::Earlier, tpf);
+        assert_eq!(g.preview_start, Tick(0));
+    }
+
+    #[test]
+    fn grab_track_nudge_same_kind() {
+        let (seq, t1, t2, clip) = seq_two_video();
+        let mut g = GrabSession::seed(&seq, seq.id, t1, clip).unwrap();
+        apply_grab_nudge(&mut g, &seq, GrabNudge::TrackNext, Tick(1));
+        assert_eq!(g.preview_track, t2);
+        apply_grab_nudge(&mut g, &seq, GrabNudge::TrackNext, Tick(1));
+        assert_eq!(g.preview_track, t2); // no further
+        apply_grab_nudge(&mut g, &seq, GrabNudge::TrackPrev, Tick(1));
+        assert_eq!(g.preview_track, t1);
+    }
+
+    #[test]
+    fn grab_seed_rejects_locked_track() {
+        let (mut seq, t1, _t2, clip) = seq_two_video();
+        seq.track_mut(t1).unwrap().locked = true;
+        assert!(GrabSession::seed(&seq, seq.id, t1, clip).is_none());
     }
 }

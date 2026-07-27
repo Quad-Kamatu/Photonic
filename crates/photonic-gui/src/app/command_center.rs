@@ -259,6 +259,13 @@ impl PhotonicApp {
             "video.match_frame" => self.timeline_match_frame(doc),
             "video.reveal_in_project" => self.timeline_reveal_in_project(doc),
             "video.edit_duration" => self.timeline_open_edit_duration(doc),
+            "video.grab_item" => self.timeline_toggle_grab(doc),
+            "video.grab_commit" => {
+                self.timeline_grab_commit(doc, history);
+            }
+            "video.grab_cancel" => {
+                self.timeline_grab = None;
+            }
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the
@@ -1662,6 +1669,138 @@ impl PhotonicApp {
         }
     }
 
+    /// K-A7: toggle keyboard grab on the primary selected (or playhead) clip.
+    pub(crate) fn timeline_toggle_grab(&mut self, doc: &Document) {
+        if self.timeline_grab.is_some() {
+            // Second Shift+G releases without committing (same as Esc).
+            self.timeline_grab = None;
+            return;
+        }
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+            return;
+        };
+        let target = if let Some(&clip_id) = self.timeline_selection.first() {
+            seq.tracks()
+                .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).map(|_| (t.id, clip_id)))
+        } else {
+            interact::clip_at_playhead(seq, &self.timeline_selection, self.playhead)
+        };
+        if let Some((track, clip)) = target {
+            if let Some(session) = interact::GrabSession::seed(seq, seq_id, track, clip) {
+                self.timeline_selection = vec![clip];
+                self.timeline_grab = Some(session);
+            }
+        }
+    }
+
+    /// K-A7: commit the grab preview as one move (linked partners ride along).
+    /// On overlap / reject the session stays open so the user can nudge away.
+    pub(crate) fn timeline_grab_commit(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(session) = self.timeline_grab.clone() else {
+            return;
+        };
+        if !session.is_dirty() {
+            self.timeline_grab = None;
+            return;
+        }
+        // Preflight pure ops so a blocked placement does not clear the grab.
+        let ok = doc.timeline.as_ref().is_some_and(|p| {
+            if session.preview_track != session.track {
+                ops::move_clip_to_track(
+                    p,
+                    session.seq,
+                    session.track,
+                    session.clip,
+                    session.preview_start,
+                    Some(session.preview_track),
+                )
+                .is_ok()
+            } else {
+                ops::move_clip(
+                    p,
+                    session.seq,
+                    session.track,
+                    session.clip,
+                    session.preview_start,
+                )
+                .is_ok()
+            }
+        });
+        if !ok {
+            return;
+        }
+        if session.preview_track != session.track {
+            ops_bridge::move_clip_cross_track(
+                doc,
+                history,
+                session.seq,
+                session.track,
+                session.preview_track,
+                session.clip,
+                session.preview_start,
+            );
+        } else {
+            ops_bridge::move_clip(
+                doc,
+                history,
+                session.seq,
+                session.track,
+                session.clip,
+                session.preview_start,
+            );
+        }
+        self.timeline_grab = None;
+    }
+
+    /// K-A7: apply one vertical (track) arrow nudge to the grab session.
+    pub(crate) fn timeline_grab_nudge(&mut self, doc: &Document, nudge: interact::GrabNudge) {
+        let Some(session) = self.timeline_grab.as_mut() else {
+            return;
+        };
+        let Some(seq) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&session.seq))
+        else {
+            self.timeline_grab = None;
+            return;
+        };
+        interact::apply_grab_nudge(session, seq, nudge, Tick(1));
+    }
+
+    /// K-A7: nudge by `frames` frames (signed; negative = earlier).
+    pub(crate) fn timeline_grab_nudge_frames(&mut self, doc: &Document, frames: i64) {
+        if frames == 0 {
+            return;
+        }
+        let Some(session) = self.timeline_grab.as_mut() else {
+            return;
+        };
+        let Some(seq) = doc
+            .timeline
+            .as_ref()
+            .and_then(|p| p.sequences.get(&session.seq))
+        else {
+            self.timeline_grab = None;
+            return;
+        };
+        let tpf = seq.frame_rate.ticks_per_frame();
+        let step = Tick(tpf.0.saturating_mul(frames.unsigned_abs() as i64));
+        let dir = if frames < 0 {
+            interact::GrabNudge::Earlier
+        } else {
+            interact::GrabNudge::Later
+        };
+        interact::apply_grab_nudge(session, seq, dir, step);
+    }
+
     /// K-A6: open Edit Duration for the primary selected clip, else the clip
     /// under the playhead.
     pub(crate) fn timeline_open_edit_duration(&mut self, doc: &Document) {
@@ -1701,6 +1840,39 @@ impl PhotonicApp {
         if ctx.wants_keyboard_input() {
             return;
         }
+
+        // K-A7: while grab is active, arrow keys / Enter / Esc own the keyboard
+        // so they never step the playhead or fire unrelated timeline verbs.
+        if self.timeline_grab.is_some() {
+            let shift = ctx.input(|i| i.modifiers.shift);
+            let frame_mul = if shift { 5 } else { 1 };
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.timeline_grab_nudge_frames(doc, -frame_mul);
+                return;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.timeline_grab_nudge_frames(doc, frame_mul);
+                return;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                self.timeline_grab_nudge(doc, interact::GrabNudge::TrackPrev);
+                return;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                self.timeline_grab_nudge(doc, interact::GrabNudge::TrackNext);
+                return;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.timeline_grab_commit(doc, history);
+                return;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.timeline_grab = None;
+                return;
+            }
+            // Shift+G still toggles off via the command table below.
+        }
+
         const KEYS: &[CommandId] = &[
             "video.split_all_tracks",
             "video.close_gap",
@@ -1713,6 +1885,9 @@ impl PhotonicApp {
             "video.roll_next_to_playhead",
             "video.match_frame",
             "video.reveal_in_project",
+            // `video.grab_item` is dispatched from `handle_video_keyboard` only
+            // (avoids double-toggle when both pollers run in one frame).
+            "video.edit_duration",
         ];
         for &id in KEYS {
             if self.binding_pressed(ctx, id) {

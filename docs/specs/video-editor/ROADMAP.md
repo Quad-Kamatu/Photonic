@@ -64,6 +64,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-C5** cache report | ✅ done (slice) | `cb2a862` | `media::summarize_cache` + media-pool **Cache…** collapsing report |
 | **K-E1** Rec.601 matrix UI | ✅ done (slice) | `cb2a862` | Vectorscope Rec.709 / Rec.601 switch (GPU path still 709; CPU matrix helper landed) |
 | **K-A6** Edit Duration dialog | ✅ done | `bb13d2a` | `ops::edit_clip_timing` (trim / move / slip / ripple_end) + floating form (position / source in / out / duration + ripple); context menu, clip inspector, command `video.edit_duration` |
+| **K-A7** Grab item / arrow nudge | ✅ done | this | Keyboard grab (`Shift+G`): ←→ frame (Shift×5), ↑↓ same-kind track, Enter commits one move undo (link partners ride), Esc cancels; ghost preview + context menu |
 
 **Not yet started (next bands):** K-A preview/spacer/snaps polish; K-C TagId registry + purge; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
 
@@ -150,7 +151,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | ID | Status | Live residual / gate | Owner |
 |---|---|---|---|
 | K-0 | ✅ done | **9/9 seams closed** (K-0.1–0.9). See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
-| K-A | partial | **Timecode + Split A/V + Edit Duration landed**. Open: preview chunks, marker depth, spacer, snaps polish, subclips, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
+| K-A | partial | **Timecode + Split A/V + Edit Duration + Grab nudge landed**. Open: preview chunks, marker depth, spacer, snaps polish, subclips, fixed playhead | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
 | K-B | partial | Track/master/asset stacks etc. still open. **K-B16 catalogue bridge done** (38 ids, util, multi-point curves, GPU twins) | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
 | K-C | partial | Ratings/filter/remove-unused + **cache size report**. Open: TagId registry, clip-jobs, generators, purge actions, relink polish | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |

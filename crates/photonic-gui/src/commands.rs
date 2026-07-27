@@ -598,6 +598,24 @@ pub static REGISTRY: &[CommandDef] = &[
         // inspector open the form. Users can rebind in preferences.
         default: None,
     },
+    // K-A7 grab item / arrow-key nudge (Shift+G engage; arrows while grabbed;
+    // Enter commit; Esc cancel). Arrow keys are handled specially while grab
+    // is active so they don't step the playhead.
+    CommandDef {
+        id: "video.grab_item",
+        label: "Grab Item (keyboard move)",
+        default: Some(KeyBinding::shift(Key::G)),
+    },
+    CommandDef {
+        id: "video.grab_commit",
+        label: "Commit Grabbed Item Move",
+        default: None, // Enter hardwired while grab active
+    },
+    CommandDef {
+        id: "video.grab_cancel",
+        label: "Cancel Grabbed Item Move",
+        default: None, // Esc hardwired while grab active
+    },
 ];
 
 /// Tool-activation commands surfaced in the palette. Labels come from

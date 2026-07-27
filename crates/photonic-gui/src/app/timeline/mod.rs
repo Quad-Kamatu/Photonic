@@ -550,6 +550,20 @@ impl PhotonicApp {
                     doc, seq_id, track, clip,
                 );
         }
+        // K-A7: context-menu "Grab item" seeds a session via egui temp data.
+        if let Some((gseq, gtrack, gclip)) =
+            ui.data(|d| d.get_temp::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_a7_grab_request")))
+        {
+            ui.data_mut(|d| {
+                d.remove::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_a7_grab_request"));
+            });
+            if let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&gseq)) {
+                if let Some(session) = interact::GrabSession::seed(seq, gseq, gtrack, gclip) {
+                    selection = vec![gclip];
+                    self.timeline_grab = Some(session);
+                }
+            }
+        }
 
         // ── Media-pool asset drop (05 §2) ───────────────────────────────────
         // A drag started in the media pool drawer carries an `AssetDrag`
@@ -670,6 +684,25 @@ impl PhotonicApp {
             playhead,
         );
 
+        // K-A7: paint grab ghost + status strip while a keyboard grab is open.
+        if let Some(session) = self.timeline_grab.as_ref() {
+            if let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) {
+                paint_grab_ghost(ui, seq, session, &view, lane_left, lanes_rect, &rows);
+            }
+            // Lightweight status cue above the navigator.
+            let status = format!(
+                "Grab: ←→ frame{}  ↑↓ track  Enter commit  Esc cancel",
+                if session.is_dirty() { " · dirty" } else { "" }
+            );
+            ui.painter().text(
+                egui::pos2(lanes_rect.left() + 6.0, lanes_rect.top() + 4.0),
+                egui::Align2::LEFT_TOP,
+                status,
+                egui::FontId::proportional(11.0),
+                ui.visuals().strong_text_color(),
+            );
+        }
+
         // Write session state back.
         self.timeline_view = view;
         self.playhead = playhead;
@@ -683,6 +716,49 @@ impl PhotonicApp {
         // Restore the media caches taken at the top of the frame.
         self.timeline_media = media_caches;
     }
+}
+
+/// K-A7 ghost outline at the grab session's preview placement.
+fn paint_grab_ghost(
+    ui: &egui::Ui,
+    seq: &Sequence,
+    session: &interact::GrabSession,
+    view: &TimelineView,
+    lane_left: f32,
+    lanes_rect: egui::Rect,
+    rows: &[tracks::TrackRow],
+) {
+    let Some(track_rect) = lane_rect_for_track(rows, lanes_rect, view, session.preview_track) else {
+        return;
+    };
+    // Prefer live duration if the clip still exists (speed edits mid-grab are rare).
+    let duration = seq
+        .track(session.track)
+        .and_then(|t| t.clips.iter().find(|c| c.id == session.clip))
+        .map(|c| c.duration)
+        .unwrap_or(session.duration);
+    let accent = ui.visuals().selection.stroke.color;
+    let painter = ui.painter_at(lanes_rect);
+    let x0 = view.tick_to_x(session.preview_start, lane_left);
+    let x1 = view.tick_to_x(session.preview_start + duration, lane_left);
+    let ghost = egui::Rect::from_min_max(
+        egui::pos2(x0.min(x1), track_rect.top() + 2.0),
+        egui::pos2(x0.max(x1), track_rect.bottom() - 2.0),
+    );
+    painter.rect(
+        ghost,
+        egui::Rounding::same(3.0),
+        accent.gamma_multiply(0.18),
+        egui::Stroke::new(2.0, accent),
+    );
+    // Vertical guide at the preview in-point.
+    painter.line_segment(
+        [
+            egui::pos2(x0, track_rect.top()),
+            egui::pos2(x0, track_rect.bottom()),
+        ],
+        egui::Stroke::new(1.0, accent.gamma_multiply(0.7)),
+    );
 }
 
 /// The `pub(crate)` timeline command entry points (04 §5). The mode-switch story
@@ -1885,6 +1961,22 @@ fn clip_context_menu(
         .clicked()
     {
         *open_edit_duration = Some((track, clip));
+        ui.close_menu();
+    }
+    // K-A7: keyboard grab (Shift+G) — also offered here for discoverability.
+    if ui
+        .button("Grab item")
+        .on_hover_text("Keyboard move: arrows nudge, Enter commits, Esc cancels (K-A7 / Shift+G)")
+        .clicked()
+    {
+        // Seed via the same session type as Shift+G; parent reads this through
+        // a side-channel on PhotonicApp after the menu closes.
+        ui.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("k_a7_grab_request"),
+                (seq_id, track, clip),
+            );
+        });
         ui.close_menu();
     }
     let toggle_label = if enabled { "Disable" } else { "Enable" };

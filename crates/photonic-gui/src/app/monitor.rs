@@ -1635,6 +1635,10 @@ impl PhotonicApp {
         if !viewport_kb(ctx) {
             return;
         }
+        // K-A7: while a keyboard grab is active, arrow / edit-point keys belong
+        // to the grab session (handled in `handle_timeline_shortcuts`) — do not
+        // step the playhead or jump edit points underneath a move preview.
+        let grab_active = self.timeline_grab.is_some();
         const KEYS: &[commands::CommandId] = &[
             "video.play_pause",
             "video.play_reverse",
@@ -1666,8 +1670,23 @@ impl PhotonicApp {
             "video.zoom_fit",
             "video.playhead_home",
             "video.playhead_end",
+            "video.grab_item",
         ];
         for &id in KEYS {
+            if grab_active
+                && matches!(
+                    id,
+                    "video.step_back"
+                        | "video.step_forward"
+                        | "video.prev_edit_point"
+                        | "video.next_edit_point"
+                )
+            {
+                continue;
+            }
+            // `video.grab_item` is also listed in `handle_timeline_shortcuts` —
+            // only dispatch it here (central monitor path always runs in video
+            // mode) so Shift+G never toggles twice in one frame.
             if self.binding_pressed(ctx, id) {
                 self.dispatch_command(id, doc, history);
             }
