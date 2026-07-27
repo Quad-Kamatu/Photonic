@@ -13,6 +13,7 @@
 //! - [`node_editor`]     — 08-fusion-node-flows.md (left palette + central canvas)
 //! - [`audio_mixer`]     — 09-audio-mixer.md
 //! - [`export_dialog`]   — 05-import-export.md
+//! - [`duration_dialog`] — 26 K-A6 Edit Duration (position/in/out/duration + ripple)
 //! - [`titles`]          — 05-import-export.md §4b / 17 G-12 (minimal: starter
 //!   presets + `ClipSource::Text` insert/edit; not the full VectorDoc template
 //!   system — see [`titles`]'s module doc for the scope cut)
@@ -40,6 +41,7 @@ pub(crate) mod clip_inspector;
 pub(crate) mod color_page;
 pub(crate) mod diagnostics;
 pub(crate) mod effects_browser;
+pub(crate) mod duration_dialog;
 pub(crate) mod export_dialog;
 pub(crate) mod keyframe_editor;
 pub(crate) mod render_queue_panel;

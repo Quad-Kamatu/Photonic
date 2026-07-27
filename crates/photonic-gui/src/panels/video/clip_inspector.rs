@@ -78,6 +78,20 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     ui.label(RichText::new(&clip.name).strong());
     ui.add_space(2.0);
 
+    // K-A6: numeric Edit Duration form (position / in / out / duration + ripple).
+    if ui
+        .button(format!("{} Edit duration…", ph::TIMER))
+        .on_hover_text("Frame-accurate position, source in/out, and duration (K-A6)")
+        .clicked()
+    {
+        action = Some(PanelAction::OpenEditDuration {
+            seq: seq_id,
+            track: track_id,
+            clip: clip_id,
+        });
+    }
+    ui.add_space(4.0);
+
     draw_transform_section(ui, ctx, project, seq_id, track_id, clip, &mut action);
     draw_speed_section(ui, project, seq_id, track_id, clip, &mut action);
     draw_reframe_section(

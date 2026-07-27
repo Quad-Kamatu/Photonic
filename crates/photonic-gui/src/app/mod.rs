@@ -946,6 +946,10 @@ pub struct PhotonicApp {
     /// [export_dialog, 05 §3] Name of the last-used export preset, seed for the
     /// dialog. Session-only for now; the export story persists it to prefs.
     pub(crate) last_export_preset: String,
+    /// [duration_dialog, 26 K-A6] Open Edit Duration session (position/in/out/
+    /// duration + ripple). `None` = closed.
+    pub(crate) edit_duration_dialog:
+        Option<crate::panels::video::duration_dialog::EditDurationDialog>,
 
     // ── 17-nle-parity-round2.md choke-point session state ───────────────────
     // Session fields for the round-2 deferred features (source monitor,
@@ -1617,6 +1621,7 @@ impl Default for PhotonicApp {
             caption_edit_cue: None,
             export_dialog_open: false,
             last_export_preset: String::new(),
+            edit_duration_dialog: None,
             source_monitor_scrub: None,
             multicam_active_angle: None,
             multicam_view_open: false,
@@ -3858,6 +3863,15 @@ impl PhotonicApp {
                     &mut self.scope_kind,
                 );
             }
+            // K-A6 Edit Duration floating form (position / in / out / duration +
+            // ripple). Drawn next to the export dialog so both can share the
+            // post-timeline borrow window on `doc`/`history`.
+            panels::video::duration_dialog::draw_edit_duration_dialog(
+                ctx,
+                doc,
+                history,
+                &mut self.edit_duration_dialog,
+            );
             if self.export_dialog_open {
                 // Widened from the skeleton's `(ctx, vid)` stub — `VideoPanelUi`
                 // carries no `doc`/history handle (unlike the timeline panel's

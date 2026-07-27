@@ -1314,6 +1314,8 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::RelinkAsset { .. } => {}
         TimelineCmd::SetAssetProxy { .. } => {}
         TimelineCmd::SetAssetMeta { .. } => {}
+        TimelineCmd::SetAssetRating { .. } => {} // K-C2
+        TimelineCmd::SetAssetTags { .. } => {} // K-C2
         TimelineCmd::SetGenerateProxiesOnImport { .. } => {}
         // Sequences / formats / tracks.
         TimelineCmd::AddSequence { .. } => {}
@@ -1322,6 +1324,7 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::SetActiveSequence { .. } => {}
         TimelineCmd::SetActiveFormat { .. } => {}
         TimelineCmd::SetSequenceFormat { .. } => {}
+        TimelineCmd::SetSequenceStartTimecode { .. } => {} // K-A12
         TimelineCmd::AddTrack { .. } => {}
         TimelineCmd::RemoveTrack { .. } => {}
         TimelineCmd::SetTrackProp { .. } => {}

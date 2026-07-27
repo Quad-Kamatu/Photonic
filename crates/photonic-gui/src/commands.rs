@@ -591,6 +591,13 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Reveal in Media Pool",
         default: None,
     },
+    CommandDef {
+        id: "video.edit_duration",
+        label: "Edit Duration…",
+        // No default — Ctrl+D is `edit.duplicate`; palette / context menu /
+        // inspector open the form. Users can rebind in preferences.
+        default: None,
+    },
 ];
 
 /// Tool-activation commands surfaced in the palette. Labels come from

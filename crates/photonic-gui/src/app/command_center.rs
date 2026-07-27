@@ -258,6 +258,7 @@ impl PhotonicApp {
             "video.roll_next_to_playhead" => self.timeline_roll_to_playhead(doc, history, false),
             "video.match_frame" => self.timeline_match_frame(doc),
             "video.reveal_in_project" => self.timeline_reveal_in_project(doc),
+            "video.edit_duration" => self.timeline_open_edit_duration(doc),
             _ => {
                 if let Some(t) = commands::tool_for_command(id) {
                     // Clear stale point-edit state so entering Direct Select via the
@@ -1658,6 +1659,29 @@ impl PhotonicApp {
             });
         if let Some(asset) = asset {
             self.media_pool_ui.selected = Some(asset);
+        }
+    }
+
+    /// K-A6: open Edit Duration for the primary selected clip, else the clip
+    /// under the playhead.
+    pub(crate) fn timeline_open_edit_duration(&mut self, doc: &Document) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+            return;
+        };
+        let target = if let Some(&clip_id) = self.timeline_selection.first() {
+            seq.tracks()
+                .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).map(|_| (t.id, clip_id)))
+        } else {
+            interact::clip_at_playhead(seq, &self.timeline_selection, self.playhead)
+        };
+        if let Some((track, clip)) = target {
+            self.edit_duration_dialog =
+                crate::panels::video::duration_dialog::EditDurationDialog::seed(
+                    doc, seq_id, track, clip,
+                );
         }
     }
 

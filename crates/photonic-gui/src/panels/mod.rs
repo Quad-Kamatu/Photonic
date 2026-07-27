@@ -339,6 +339,12 @@ pub enum PanelAction {
     OpenExportDialog,
     /// Open the Export dialog in batch mode: one file per artboard over a range.
     OpenArtboardExportDialog,
+    /// Open the K-A6 Edit Duration dialog for a timeline clip.
+    OpenEditDuration {
+        seq: photonic_core::timeline::SequenceId,
+        track: photonic_core::timeline::TrackId,
+        clip: photonic_core::timeline::ClipId,
+    },
     /// Set the color tag of a layer (None = clear).
     SetLayerColor {
         layer_id: LayerId,

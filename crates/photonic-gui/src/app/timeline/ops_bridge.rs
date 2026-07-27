@@ -521,6 +521,40 @@ pub fn trim(
     }
 }
 
+/// K-A6 Edit Duration — apply a full position / duration / source_in write
+/// (optionally rippling the end) as **one** undo step via
+/// [`ops::edit_clip_timing`].
+///
+/// Returns `Ok(())` on success (including a no-op), or an error string for the
+/// dialog surface when the pure planner rejects the request.
+pub fn edit_duration(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+    new: ClipTiming,
+    ripple: bool,
+) -> Result<(), String> {
+    let Some(p) = doc.timeline.as_ref() else {
+        return Err("No video project".into());
+    };
+    match ops::edit_clip_timing(p, seq, track, clip, new, ripple) {
+        Ok(cmds) if cmds.is_empty() => Ok(()),
+        Ok(cmds) => {
+            commit_batch(history, doc, cmds);
+            Ok(())
+        }
+        Err(ops::EditError::NonPositiveDuration) => {
+            Err("Duration must be greater than zero".into())
+        }
+        Err(ops::EditError::Overlap) => {
+            Err("Edit would overlap another clip or is out of range".into())
+        }
+        Err(e) => Err(format!("Edit rejected: {e:?}")),
+    }
+}
+
 // ── Sync-locked track ripple propagation (14 §M-9) ──────────────────────────
 //
 // `Track::sync_lock` + its header toggle already exist (`tracks.rs`); this is

@@ -634,6 +634,77 @@ pub fn trim_clip(
     })
 }
 
+/// K-A6 frame-accurate Edit Duration planner.
+///
+/// Applies a desired `start` / `duration` / `source_in` to one clip in a single
+/// undo batch. When `ripple` is true and the timeline **start is unchanged**
+/// but the **end moves**, later clips (and sync-locked siblings) shift via
+/// [`ripple_trim`]; otherwise a non-ripple [`trim_clip`] (or pure
+/// [`move_clip`] / [`slip_clip`] when only those fields change) is used.
+///
+/// Returns an empty `Ok(vec![])` when nothing would change.
+pub fn edit_clip_timing(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    new: ClipTiming,
+    ripple: bool,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    if new.duration.0 <= 0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    if new.start.0 < 0 || new.source_in.0 < 0 {
+        return Err(EditError::Overlap);
+    }
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let c = clip(t, clip_id)?;
+    let old = ClipTiming::of(c);
+    if old == new {
+        return Ok(Vec::new());
+    }
+
+    // Pure slip: timeline placement unchanged, only source_in.
+    if new.start == old.start && new.duration == old.duration && new.source_in != old.source_in {
+        return Ok(vec![slip_clip(p, id, track_id, clip_id, new.source_in)?]);
+    }
+
+    // Pure move: only timeline start changes.
+    if new.start != old.start && new.duration == old.duration && new.source_in == old.source_in {
+        return Ok(vec![move_clip(p, id, track_id, clip_id, new.start)?]);
+    }
+
+    // Ripple duration (end-edge) when the start is held fixed — the dialog's
+    // "ripple" checkbox. Start-edge / position changes never ride this path.
+    if ripple && new.start == old.start && new.duration != old.duration {
+        let mut cmds = ripple_trim(
+            p,
+            id,
+            track_id,
+            clip_id,
+            ClipEdge::End,
+            new.start + new.duration,
+        )?;
+        if new.source_in != old.source_in {
+            // Slip against the post-trim project is not available here (pure
+            // planner). Emit SlipClip with the desired value — apply order is
+            // ripple first then slip, and Slip only touches source_in.
+            cmds.push(TimelineCmd::SlipClip {
+                seq: id,
+                track: track_id,
+                clip: clip_id,
+                old_source_in: old.source_in,
+                new_source_in: new.source_in,
+            });
+        }
+        return Ok(cmds);
+    }
+
+    // Non-ripple full timing write (position + duration + source_in).
+    Ok(vec![trim_clip(p, id, track_id, clip_id, new)?])
+}
+
 pub fn split_clip(
     p: &TimelineProject,
     id: SequenceId,
@@ -2330,6 +2401,162 @@ mod tests {
 
         let removed = remove_unused_assets(doc.timeline.as_ref().unwrap());
         assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn edit_clip_timing_shortens_without_ripple() {
+        let (doc, seq, track, clip_id) = fixture();
+        // Second clip after the first so we can prove no-ripple leaves it.
+        let mut d = doc.clone();
+        {
+            let t = d
+                .timeline
+                .as_mut()
+                .unwrap()
+                .sequences
+                .get_mut(&seq)
+                .unwrap()
+                .track_mut(track)
+                .unwrap();
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(100), Tick(50)));
+        }
+        let p = d.timeline.as_ref().unwrap();
+        let cmds = edit_clip_timing(
+            p,
+            seq,
+            track,
+            clip_id,
+            ClipTiming {
+                start: Tick(0),
+                duration: Tick(60),
+                source_in: Tick(0),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 1);
+        for c in &cmds {
+            c.apply(&mut d);
+        }
+        let t = d
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq)
+            .unwrap()
+            .track(track)
+            .unwrap();
+        assert_eq!(t.clips[0].duration, Tick(60));
+        // Later clip stays put (gap opened).
+        assert_eq!(t.clips[1].start, Tick(100));
+    }
+
+    #[test]
+    fn edit_clip_timing_ripple_shortens_and_shifts_later() {
+        let (doc, seq, track, clip_id) = fixture();
+        let mut d = doc.clone();
+        {
+            let t = d
+                .timeline
+                .as_mut()
+                .unwrap()
+                .sequences
+                .get_mut(&seq)
+                .unwrap()
+                .track_mut(track)
+                .unwrap();
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(100), Tick(50)));
+        }
+        let p = d.timeline.as_ref().unwrap();
+        let cmds = edit_clip_timing(
+            p,
+            seq,
+            track,
+            clip_id,
+            ClipTiming {
+                start: Tick(0),
+                duration: Tick(60),
+                source_in: Tick(0),
+            },
+            true,
+        )
+        .unwrap();
+        assert!(!cmds.is_empty());
+        for c in &cmds {
+            c.apply(&mut d);
+        }
+        let t = d
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq)
+            .unwrap()
+            .track(track)
+            .unwrap();
+        assert_eq!(t.clips[0].duration, Tick(60));
+        // Later clip ripples left by 40.
+        assert_eq!(t.clips[1].start, Tick(60));
+    }
+
+    #[test]
+    fn edit_clip_timing_pure_move_and_noop() {
+        let (doc, seq, track, clip_id) = fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = edit_clip_timing(
+            p,
+            seq,
+            track,
+            clip_id,
+            ClipTiming {
+                start: Tick(25),
+                duration: Tick(100),
+                source_in: Tick(0),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            TimelineCmd::MoveClip { new_start, .. } => assert_eq!(*new_start, Tick(25)),
+            other => panic!("expected MoveClip, got {other:?}"),
+        }
+        let noop = edit_clip_timing(
+            p,
+            seq,
+            track,
+            clip_id,
+            ClipTiming {
+                start: Tick(0),
+                duration: Tick(100),
+                source_in: Tick(0),
+            },
+            false,
+        )
+        .unwrap();
+        assert!(noop.is_empty());
+    }
+
+    #[test]
+    fn edit_clip_timing_rejects_non_positive_duration() {
+        let (doc, seq, track, clip_id) = fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        let err = edit_clip_timing(
+            p,
+            seq,
+            track,
+            clip_id,
+            ClipTiming {
+                start: Tick(0),
+                duration: Tick(0),
+                source_in: Tick(0),
+            },
+            false,
+        );
+        assert_eq!(err, Err(EditError::NonPositiveDuration));
     }
 
     /// One sequence, one video track with a single clip. Returns the

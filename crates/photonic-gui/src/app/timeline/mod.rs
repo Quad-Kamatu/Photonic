@@ -525,6 +525,7 @@ impl PhotonicApp {
             self.pending_source.as_ref(),
             self.media_pool_ui.selected,
         );
+        let mut open_edit_duration: Option<(TrackId, ClipId)> = None;
         self_interact(
             ui,
             doc,
@@ -541,7 +542,14 @@ impl PhotonicApp {
             &rows,
             &hits,
             replace_candidate,
+            &mut open_edit_duration,
         );
+        if let Some((track, clip)) = open_edit_duration {
+            self.edit_duration_dialog =
+                crate::panels::video::duration_dialog::EditDurationDialog::seed(
+                    doc, seq_id, track, clip,
+                );
+        }
 
         // ── Media-pool asset drop (05 §2) ───────────────────────────────────
         // A drag started in the media pool drawer carries an `AssetDrag`
@@ -1305,6 +1313,7 @@ fn self_interact(
     rows: &[tracks::TrackRow],
     hits: &[interact::HitCandidate],
     replace_candidate: Option<(ClipSource, Option<Tick>, String)>,
+    open_edit_duration: &mut Option<(TrackId, ClipId)>,
 ) {
     let resp = ui.interact(
         lanes_rect,
@@ -1463,6 +1472,7 @@ fn self_interact(
             ph,
             selection.as_slice(),
             replace_candidate,
+            open_edit_duration,
         )
     });
 }
@@ -1821,6 +1831,7 @@ fn clip_context_menu(
     playhead: Tick,
     selection: &[ClipId],
     replace_candidate: Option<(ClipSource, Option<Tick>, String)>,
+    open_edit_duration: &mut Option<(TrackId, ClipId)>,
 ) {
     let Some((track, clip)) = target else {
         // No clip under the cursor — offer Close Gap when it is over a closeable
@@ -1865,6 +1876,15 @@ fn clip_context_menu(
     }
     if ui.button("Ripple delete").clicked() {
         ops_bridge::ripple_delete(doc, history, seq_id, track, clip);
+        ui.close_menu();
+    }
+    // K-A6: frame-accurate position / in / out / duration form.
+    if ui
+        .button("Edit duration…")
+        .on_hover_text("Set position, source in/out, and duration numerically (K-A6)")
+        .clicked()
+    {
+        *open_edit_duration = Some((track, clip));
         ui.close_menu();
     }
     let toggle_label = if enabled { "Disable" } else { "Enable" };

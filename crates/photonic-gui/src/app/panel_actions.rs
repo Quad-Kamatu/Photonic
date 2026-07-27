@@ -2842,6 +2842,14 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::OpenEditDuration { seq, track, clip } => {
+                    // K-A6: seed the Edit Duration floating form from the live clip.
+                    self.edit_duration_dialog =
+                        crate::panels::video::duration_dialog::EditDurationDialog::seed(
+                            doc, seq, track, clip,
+                        );
+                }
+
                 PanelAction::OpenExportDialog => {
                     // Export (#176): open the export dialog seeded from the
                     // Document-tab settings (format, scale, area).
