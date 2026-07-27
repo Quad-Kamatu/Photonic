@@ -59,10 +59,10 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-C5** remove unused | ✅ done (slice) | `0f8b6b9` | `ops::unused_assets` / `remove_unused_assets`; media-pool **Remove unused (N)** toolbar button (undo batch) |
 | **K-E3** composition grids | ✅ done (slice) | `0f8b6b9` | Monitor toolbar cycles thirds / golden / off over program picture |
 | **K-E1** histogram channels | ✅ done (slice) | `0f8b6b9` | Y/R/G/B component toggles on scopes histogram |
-| **K-A12** Timecode | ✅ done (core) | this | `Timecode` type with real SMPTE drop-frame for 29.97/59.94; `Sequence.start_timecode`; MCP `;` is DF (not synonym); monitor readout uses start offset |
-| **K-A13** Split A/V | ✅ done | this | `ops::split_av_link` unlinks full A/V group; timeline context **Split A/V** |
-| **K-C5** cache report | ✅ done (slice) | this | `media::summarize_cache` + media-pool **Cache…** collapsing report |
-| **K-E1** Rec.601 matrix UI | ✅ done (slice) | this | Vectorscope Rec.709 / Rec.601 switch (GPU path still 709; CPU matrix helper landed) |
+| **K-A12** Timecode | ✅ done (core) | `cb2a862` | `Timecode` type with real SMPTE drop-frame for 29.97/59.94; `Sequence.start_timecode`; MCP `;` is DF (not synonym); monitor readout uses start offset |
+| **K-A13** Split A/V | ✅ done | `cb2a862` | `ops::split_av_link` unlinks full A/V group; timeline context **Split A/V** |
+| **K-C5** cache report | ✅ done (slice) | `cb2a862` | `media::summarize_cache` + media-pool **Cache…** collapsing report |
+| **K-E1** Rec.601 matrix UI | ✅ done (slice) | `cb2a862` | Vectorscope Rec.709 / Rec.601 switch (GPU path still 709; CPU matrix helper landed) |
 
 **Not yet started (next bands):** K-A preview/spacer/duration dialog; K-C TagId registry + purge; K-D; E-2 consumers; legal-or-fixture-blocked G/D items.
 
