@@ -7517,7 +7517,16 @@ mod tests {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        assert_eq!(kinds.len(), 7);
+        // The manifest catalogue is the single source of truth (30 §2.7), so
+        // assert against it rather than a literal — a hardcoded count went stale
+        // the moment K-B16 bridged the raster kernels (7 → 44) and left this
+        // test red on the branch.
+        let catalogue = photonic_core::timeline::effect_manifest::manifests();
+        assert_eq!(kinds.len(), catalogue.len());
+        assert!(
+            kinds.len() >= 7,
+            "catalogue must not shrink below the 7 originally authored manifests"
+        );
     }
 
     /// Set up a clip carrying a single Gaussian-blur effect at index 0.

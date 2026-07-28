@@ -503,8 +503,13 @@ fn build_ffmpeg_args_accepts_windows_style_temp_audio_path() {
             channels: 2,
         }),
         out_path: PathBuf::from("/tmp/out.mp4"),
+        // K-F4/K-F5 job options; this case exercises the plain software path.
+        prefer_hardware: false,
+        encoder_speed: None,
+        raw_encoder_args: &[],
     };
-    let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(audio_path.as_path()));
+    let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(audio_path.as_path()))
+        .expect("build_ffmpeg_args");
     assert!(args.iter().any(|a| a == "pipe:0"));
     assert!(args.windows(2).any(|w| w == ["-map", "0:v"]));
     assert!(args.windows(2).any(|w| w == ["-map", "1:a"]));

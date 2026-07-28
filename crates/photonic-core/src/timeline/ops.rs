@@ -20,8 +20,8 @@ use super::clip::{
 use super::commands::{
     AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings,
 };
-use super::grade::Grade;
-use super::graph::NodeGraph;
+use super::grade::{Grade, GradeOpParams};
+use super::graph::{GraphOp, NodeGraph};
 use super::ids::*;
 use super::media::MediaBin;
 use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
@@ -159,24 +159,86 @@ pub fn set_asset_tags(
     })
 }
 
-/// K-C5: assets with zero timeline references (candidates for remove-unused).
+/// Every asset a grade stack names. Currently only `Lut3d` (07 §4), but this is
+/// the one place to extend when a grade op gains another asset-backed operand.
+fn collect_grade_asset_refs(g: &Grade, used: &mut std::collections::HashSet<AssetId>) {
+    // Counted regardless of `op.enabled` / `g.bypass`: a bypassed op still holds
+    // the reference, and re-enabling it must not find the LUT deleted.
+    for op in &g.ops {
+        if let GradeOpParams::Lut3d { asset, .. } = &op.params.base {
+            used.insert(*asset);
+        }
+    }
+}
+
+/// K-C5: assets with zero project references (candidates for remove-unused).
+///
+/// A clip source is **not** the only way to reference an asset, and treating it
+/// as such is a data-loss bug: an `AssetKind::Lut3d` is referenced solely by a
+/// `GradeOp::Lut3d`, never by a clip, so a clip-only scan reports every LUT in
+/// the project as unused. This walks all four reference classes — clip sources,
+/// grade stacks at each of the four scopes (35 §2), embedded graph grades, and
+/// the `MediaIn`/`Lut` graph ops.
+///
+/// The result is sorted so the removal batch is deterministic; the asset arena
+/// is a `HashMap` and would otherwise yield an arbitrary order per run.
 pub fn unused_assets(p: &TimelineProject) -> Vec<AssetId> {
     let mut used = std::collections::HashSet::new();
+
     for seq in p.sequences.values() {
+        // Master scope (35 §2).
+        if let Some(g) = &seq.master_grade {
+            collect_grade_asset_refs(g, &mut used);
+        }
         for track in seq.tracks() {
+            // Track scope.
+            if let Some(g) = &track.grade {
+                collect_grade_asset_refs(g, &mut used);
+            }
             for clip in &track.clips {
                 if let Some(id) = clip.source.asset() {
                     used.insert(id);
                 }
+                // Clip scope.
+                if let Some(g) = &clip.grade {
+                    collect_grade_asset_refs(g, &mut used);
+                }
             }
         }
     }
-    p.media
+
+    // Asset scope: a grade bound beneath every clip referencing that asset.
+    // Note this can keep a LUT alive for an otherwise-unused asset; the LUT then
+    // falls out on the next pass, once that asset is gone.
+    for asset in p.media.assets.values() {
+        if let Some(g) = &asset.grade {
+            collect_grade_asset_refs(g, &mut used);
+        }
+    }
+
+    // Node graphs are one arena (01 §8) — per-clip compositions and the project
+    // graph alike, so walking `p.graphs` covers both without resolving owners.
+    for graph in p.graphs.values() {
+        for node in graph.nodes.values() {
+            match &node.op {
+                GraphOp::MediaIn { asset, .. } | GraphOp::Lut { asset } => {
+                    used.insert(*asset);
+                }
+                GraphOp::Grade { grade } => collect_grade_asset_refs(grade, &mut used),
+                _ => {}
+            }
+        }
+    }
+
+    let mut unused: Vec<AssetId> = p
+        .media
         .assets
         .keys()
         .copied()
         .filter(|id| !used.contains(id))
-        .collect()
+        .collect();
+    unused.sort();
+    unused
 }
 
 /// K-C5: batch-remove every unused asset as one undoable step (caller wraps
@@ -2401,6 +2463,114 @@ mod tests {
 
         let removed = remove_unused_assets(doc.timeline.as_ref().unwrap());
         assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn unused_assets_counts_every_non_clip_reference_class() {
+        use super::super::grade::{GradeOp, GradeOpKind, GradeOpParams, LutInterp};
+        use super::super::graph::{GraphNode, GraphOp, NodeGraph};
+        use super::super::media::{AssetKind, AssetSource, MediaAsset};
+        use std::path::PathBuf;
+
+        let mut project = TimelineProject::new();
+
+        let mut new_asset = |kind: AssetKind, name: &str| {
+            let a = MediaAsset::new(
+                kind,
+                AssetSource::File {
+                    path: PathBuf::from(format!("/{name}")),
+                    rel_path: None,
+                },
+            );
+            let id = a.id;
+            project.media.insert(a);
+            id
+        };
+
+        // A LUT is referenced *only* by a grade op — never by a clip source — so
+        // a clip-only scan reported every one of these as unused and deleted it.
+        let lut_clip = new_asset(AssetKind::Lut3d, "clip.cube");
+        let lut_track = new_asset(AssetKind::Lut3d, "track.cube");
+        let lut_master = new_asset(AssetKind::Lut3d, "master.cube");
+        let lut_asset_scope = new_asset(AssetKind::Lut3d, "asset.cube");
+        let lut_graph_op = new_asset(AssetKind::Lut3d, "graph_op.cube");
+        let lut_graph_grade = new_asset(AssetKind::Lut3d, "graph_grade.cube");
+        let graph_media = new_asset(AssetKind::Video, "graph_media.mp4");
+        let clip_media = new_asset(AssetKind::Video, "clip.mp4");
+        let graded_asset = new_asset(AssetKind::Video, "graded.mp4");
+        let orphan = new_asset(AssetKind::Video, "orphan.mp4");
+
+        let lut_grade = |asset: AssetId| Grade {
+            ops: vec![GradeOp::new(
+                GradeOpKind::Lut3d,
+                GradeOpParams::Lut3d {
+                    asset,
+                    intensity: 1.0,
+                    interp: LutInterp::Trilinear,
+                },
+            )],
+            bypass: false,
+        };
+
+        let mut clip = Clip::new(ClipSource::Asset { asset: clip_media }, Tick(0), Tick(100));
+        clip.grade = Some(lut_grade(lut_clip));
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.clips.push(clip);
+        track.grade = Some(lut_grade(lut_track));
+        let mut seq = Sequence::new("S", FrameRate::FPS_30, 320, 180);
+        seq.video_tracks.push(track);
+        seq.master_grade = Some(lut_grade(lut_master));
+        project.insert_sequence(seq);
+
+        // Asset scope: a grade bound beneath every clip using `graded_asset`.
+        project.media.assets.get_mut(&graded_asset).unwrap().grade =
+            Some(lut_grade(lut_asset_scope));
+
+        // Graph arena: `MediaIn` / `Lut` name assets directly; `Grade` embeds a
+        // whole stack that can itself carry a `Lut3d`.
+        let (mut graph, _clip_in) = NodeGraph::new_clip_composition("g");
+        for op in [
+            GraphOp::MediaIn {
+                asset: graph_media,
+                time_source: Default::default(),
+            },
+            GraphOp::Lut {
+                asset: lut_graph_op,
+            },
+            GraphOp::Grade {
+                grade: lut_grade(lut_graph_grade),
+            },
+        ] {
+            let node = GraphNode::new(op);
+            graph.nodes.insert(node.id, node);
+        }
+        project.graphs.insert(graph.id, graph);
+
+        let unused = unused_assets(&project);
+
+        for (id, what) in [
+            (lut_clip, "clip grade LUT"),
+            (lut_track, "track grade LUT"),
+            (lut_master, "master grade LUT"),
+            (lut_asset_scope, "asset grade LUT"),
+            (lut_graph_op, "graph Lut op"),
+            (lut_graph_grade, "graph embedded grade LUT"),
+            (graph_media, "graph MediaIn"),
+            (clip_media, "clip source"),
+        ] {
+            assert!(!unused.contains(&id), "{what} must not be reported unused");
+        }
+
+        // `graded_asset` carries a grade but nothing references it, so it is
+        // genuinely unused — as is the plain orphan.
+        assert!(unused.contains(&graded_asset));
+        assert!(unused.contains(&orphan));
+        assert_eq!(unused.len(), 2);
+
+        // Deterministic order, so the removal batch does not vary per run.
+        let mut sorted = unused.clone();
+        sorted.sort();
+        assert_eq!(unused, sorted);
     }
 
     #[test]

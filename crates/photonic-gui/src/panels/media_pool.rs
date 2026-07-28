@@ -566,6 +566,12 @@ pub fn assets_in_bin(pool: &MediaPool, bin: Option<BinId>) -> Vec<&MediaAsset> {
 
 /// K-C2: how many timeline clips reference `asset` across all sequences
 /// (derived query — not stored). Pure over the project graph.
+///
+/// This is the `×N` / `ON TL` badge count — **clip** uses only. It is
+/// deliberately *not* the "is this asset unused" predicate: a LUT is referenced
+/// by a grade op and a graph node, never by a clip, so it scores 0 here while
+/// being very much in use. Use [`photonic_core::timeline::ops::unused_assets`]
+/// for anything that deletes.
 pub fn asset_usage_count(
     project: &photonic_core::timeline::TimelineProject,
     asset: AssetId,
@@ -574,10 +580,10 @@ pub fn asset_usage_count(
     for seq in project.sequences.values() {
         for track in seq.tracks() {
             for clip in &track.clips {
-                if matches!(
-                    &clip.source,
-                    photonic_core::timeline::ClipSource::Asset { asset: a } if *a == asset
-                ) {
+                // `source.asset()` covers `Asset` *and* `Vector` — a vector-doc
+                // clip is a timeline use of that asset just as much as a video
+                // one, and matching `Asset` alone under-counted it.
+                if clip.source.asset() == Some(asset) {
                     n += 1;
                 }
             }
@@ -711,12 +717,9 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             }
         }
         ui.separator();
-        let unused_n = project
-            .media
-            .assets
-            .keys()
-            .filter(|id| asset_usage_count(project, **id) == 0)
-            .count();
+        // Must be the same predicate the action applies, or the label lies about
+        // how many assets the button will delete.
+        let unused_n = photonic_core::timeline::ops::unused_assets(project).len();
         if ui
             .add_enabled(
                 unused_n > 0,
@@ -829,12 +832,20 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         .iter()
         .map(|a| (a.id, asset_usage_count(project, a.id)))
         .collect();
-    // Apply K-C2 filters (unused-only / min rating).
+    // Apply K-C2 filters (unused-only / min rating). "Unused" here means the
+    // same full reference scan Remove-unused deletes on — not the clip-only
+    // badge count, which would list every in-use LUT as unused.
     let min_r = ctx.media_ui.filter_min_rating;
     let unused_only = ctx.media_ui.filter_unused_only;
+    let unused_set: std::collections::HashSet<AssetId> = if unused_only {
+        photonic_core::timeline::ops::unused_assets(project)
+            .into_iter()
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     assets.retain(|a| {
-        let n = usage.get(&a.id).copied().unwrap_or(0);
-        if unused_only && n > 0 {
+        if unused_only && !unused_set.contains(&a.id) {
             return false;
         }
         if min_r > 0 {

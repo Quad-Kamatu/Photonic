@@ -282,8 +282,11 @@ impl Timecode {
         nominal_fps: i64,
     ) -> Option<i64> {
         let drop = if nominal_fps >= 60 { 4 } else { 2 };
-        // Invalid dropped numbers: :00 and :01 (or :00–:03) of non-10th minutes.
-        if m % 10 != 0 && f < drop {
+        // Invalid dropped numbers: :00 and :01 (or :00–:03) at second `:00` of a
+        // non-10th minute. Drop-frame skips those labels only at the minute
+        // boundary — every other second carries the full frame-number range, so
+        // `00:01:05;00` is valid and must parse.
+        if m % 10 != 0 && s == 0 && f < drop {
             return None;
         }
         let total_minutes = h * 60 + m;
@@ -385,6 +388,39 @@ mod tests {
             let back = Timecode::parse_to_tick(&tc.format(), fr).expect("parse");
             assert_eq!(fr.frame_at(back), n, "n={n} tc={}", tc.format());
         }
+    }
+
+    #[test]
+    fn drop_frame_round_trips_exhaustively_over_two_ten_minute_blocks() {
+        // The sampled round-trip above happens to pick only frames landing on
+        // minute 0/10 or `ff >= 2`, so it could not see a guard that rejected
+        // low frame numbers at seconds other than `:00`. Sweep every frame of
+        // two full 10-minute drop blocks instead — that covers every minute
+        // residue mod 10 and both sides of the block boundary.
+        for (fr, nominal) in [(FrameRate::FPS_29_97, 30i64), (FrameRate::FPS_59_94, 60)] {
+            let frames_per_10min = (nominal * 60 - if nominal >= 60 { 4 } else { 2 }) * 10
+                + if nominal >= 60 { 4 } else { 2 };
+            for n in 0..(frames_per_10min * 2) {
+                let tc = Timecode::from_frame_index(n, fr, true);
+                let back = Timecode::parse_to_tick(&tc.format(), fr)
+                    .unwrap_or_else(|| panic!("rejected valid DF label {} (n={n})", tc.format()));
+                assert_eq!(fr.frame_at(back), n, "n={n} tc={}", tc.format());
+            }
+        }
+    }
+
+    #[test]
+    fn drop_frame_rejects_only_the_skipped_minute_boundary_labels() {
+        let fr = FrameRate::FPS_29_97;
+        // Skipped: frames 00/01 at second :00 of a non-tenth minute.
+        assert!(Timecode::parse_to_tick("00:01:00;00", fr).is_none());
+        assert!(Timecode::parse_to_tick("00:01:00;01", fr).is_none());
+        // Not skipped: the same frame numbers one second later, and at the
+        // tenth minute where drop-frame does not skip at all.
+        assert!(Timecode::parse_to_tick("00:01:01;00", fr).is_some());
+        assert!(Timecode::parse_to_tick("00:01:05;01", fr).is_some());
+        assert!(Timecode::parse_to_tick("00:10:00;00", fr).is_some());
+        assert!(Timecode::parse_to_tick("00:01:00;02", fr).is_some());
     }
 
     #[test]
