@@ -76,7 +76,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 
 **Not yet started (next bands):** K-A preview chunks (K-A1) / marker depth / spacer / subclips / fixed playhead; K-B effect zones, presets, compare view, keyframe interchange, freeze frame, paste attributes; K-C TagId registry, clip-jobs, generators, purge, relink polish; K-D per-stream/stems/declick; K-E YUV scopes, audio spectrum, per-clip tap; K-F7; K-G1–G4; X-1/X-2/X-3 interop; legal-or-fixture-blocked G/D items.
 
-**Band-5 mini-specs** — 26 §19.1 requires one *accepted before code*, so these items were blocked on a document, not on effort. Four are now drafted and **await acceptance**; none authorizes code until accepted:
+**Band-5 mini-specs — the whole band is now drafted.** 26 §19.1 requires one *accepted before code*, so every one of these items was blocked on a document rather than on effort. All **14** are written and **await acceptance**; none authorizes code until accepted. K-B16, K-G6 and K-G5 are the band's already-implemented members.
 
 | Item | Mini-spec | Format impact | Gate |
 |---|---|---|---|
@@ -84,12 +84,29 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-A5** general/nested groups | [194](../../proposals/194-k-a5-general-and-nested-clip-groups.md) | additive in v5 | none; one product call on AvLink trim propagation |
 | **K-C1** clip-jobs framework | [195](../../proposals/195-k-c1-clip-jobs-framework.md) | additive in v5 | none; needs 28 §3.1 `PathPolicy`, which is specified but unimplemented |
 | **X-2** OTIO interchange | [196](../../proposals/196-x-2-opentimelineio-interchange.md) | none | none — Photonic-authored reader/writer, so no 23 §3.3 evidence record |
+| **K-B8** nested-subgraph masking | [197](../../proposals/197-k-b8-nested-subgraph-masking.md) | additive in v5 | none |
+| **K-B9** rotoscoping spline masks | [198](../../proposals/198-k-b9-rotoscoping-spline-masks.md) | additive in v5 | **algorithm/patent review** per 23 §11.1 — the one Band-5 item that keeps a hard pre-code gate |
+| **X-1** MLT XML / `.kdenlive` import | [199](../../proposals/199-x-1-mlt-xml-kdenlive-import.md) | none | none; published DTD only, Photonic-authored fixtures |
+| **X-3** EDL (+ AAF/FCPXML via X-2) | [200](../../proposals/200-x-3-edl-aaf-fcpxml.md) | none | none; ships no OTIO adapter runtime |
+| **K-C4** generator clips | [201](../../proposals/201-k-c4-generator-clips.md) | additive in v5 | **none — gate designed away.** Runtime synthesis from published standards bundles zero bytes, so 23 §7.2 never engages |
+| **K-C5** project archiving | [202](../../proposals/202-k-c5-project-archiving.md) | additive in v5 | none |
+| **K-G1** project profiles | [203](../../proposals/203-k-g1-project-profiles.md) | additive in v5 | none |
+| **K-G4** project templates | [204](../../proposals/204-k-g4-project-templates.md) | additive in v5 | **resolves S11** — proposes `<config>/Photonic/templates/` via the existing `crash_dir()`, and templates bundling no media bytes |
+| **K-G2** project notes | [205](../../proposals/205-k-g2-project-notes.md) | additive in v5 | none |
+| **K-G3** layout presets | [206](../../proposals/206-k-g3-layout-presets.md) | **none at all** — user preference, not a document property | none |
 
-Three findings from that drafting round are worth surfacing here because they contradict existing docs or code:
+### Findings from the mini-spec rounds
 
-- **K-A1:** the content hash encodes neither the eval canvas (`GpuEvaluator::evaluate` takes `canvas` as a *runtime* argument) nor media bytes (only `AssetId`). Both are harmless in-memory but would let a **disk** chunk be written at Draft resolution and served as Full, or survive a relink to different bytes. 33 §3.1's chunk key is insufficient as written.
+Drafting against real code surfaced defects and doc-vs-code contradictions. Recorded here so they are not lost in the proposals:
+
+- **A shipping wrong-pixels bug (K-B8 §2.3c).** `apply_grade_op_gpu` sizes from the *pool-bucketed* texture (`grade_gpu.rs:593`) while the CPU reference runs at logical size, and masked grade shaders evaluate the window against a full-quad uv. `TextureDesc::bucket` rounds up to 64, so 1080 → 1088 and a PowerWindow lands **0.741% off at 1920×1080**. `cpu_gpu_parity` cannot see it: its grade rows use `mask: None`, and its 8×8 canvas buckets to a *square* 64×64 where the error vanishes. Left as an `#[ignore]`d test plus a follow-up so the fix gets its own commit.
+- **`MaskRef` is dead data.** `GradeMask::RotoMatte` resolves to `None` (`photonic-render/src/grade.rs:494`), so Photonic today has no working way to mask part of a frame except a static elliptical power window inside a grade op.
+- **A third non-undoable document mutation.** 39 §1.6 names two violations of SPEC's "every document mutation, without exception, is undoable". `Document.workspaces` is a third — mutated directly in `panel_actions.rs:5919-5940` with no `Command` and no history entry.
+- **K-A1:** the content hash encodes neither the eval canvas (`GpuEvaluator::evaluate` takes `canvas` as a *runtime* argument) nor media bytes (only `AssetId`). Harmless in-memory, but would let a **disk** chunk be written at Draft resolution and served as Full, or survive a relink to different bytes. 33 §3.1's chunk key is insufficient as written.
 - **K-A5:** `TimelineCmd::apply` debug-asserts `Sequence::validate()` after *every* command and `Command::Batch` applies members one at a time — so a group move batched as per-clip commands transiently overlaps and panics in debug. Group fan-out must be single plural commands, not batches.
 - **K-A5:** 35 §3.5 claims AvLink trim propagation "is today's behaviour and must not regress". It is not — three places in the code deliberately do the opposite.
+- **K-G2:** 39 §1.2 specifies undo coalescing as time-bounded (500 ms gap, 5 s span). None of it exists — there is no clock in `history/stacks.rs`; coalescing is bounded only by pointer-down/pointer-up.
+- **K-G2/K-G3:** `AppPreferences::load` ends in `unwrap_or_default()`, and serde's `#[serde(default)]` covers a *missing* field, not one that fails to parse — so a downgrade after using any newly-added drawer discards **every** preference. Both specs adopt the same `#[serde(other)]` fix.
 
 ## 1. Authority and precedence
 
