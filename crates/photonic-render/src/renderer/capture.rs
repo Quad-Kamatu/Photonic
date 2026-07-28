@@ -854,7 +854,7 @@ mod offscreen_tests {
             .expect("png")
             .to_rgba8();
         let overlap = img.get_pixel(10, 10).0; // opaque blue over its own shadow
-        // Linear-light 50% over white → srgb_oetf(0.5) ≈ 188 (A-1, §4.5.4).
+                                               // Linear-light 50% over white → srgb_oetf(0.5) ≈ 188 (A-1, §4.5.4).
         assert!(
             (overlap[0] as i32 - 188).abs() < 16
                 && (overlap[1] as i32 - 188).abs() < 16

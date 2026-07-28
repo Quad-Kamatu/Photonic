@@ -60,9 +60,10 @@ pub fn resolve_export_job(
     project: &TimelineProject,
     job: &ExportJob,
 ) -> Result<ResolvedExportJob, ExportError> {
-    let seq = project.sequences.get(&job.sequence).ok_or_else(|| {
-        ExportError::Resolve(format!("sequence {} not found", job.sequence))
-    })?;
+    let seq = project
+        .sequences
+        .get(&job.sequence)
+        .ok_or_else(|| ExportError::Resolve(format!("sequence {} not found", job.sequence)))?;
     let seq_rate = seq.frame_rate;
     if seq.formats.is_empty() {
         return Err(ExportError::Resolve(format!(
@@ -248,10 +249,7 @@ pub fn run_export_job(
         let deadline = Instant::now() + Duration::from_secs(30);
         let frame = loop {
             if let Some(f) = session.latest_frame() {
-                let fresh = prev
-                    .as_ref()
-                    .map(|q| !Arc::ptr_eq(q, &f))
-                    .unwrap_or(true);
+                let fresh = prev.as_ref().map(|q| !Arc::ptr_eq(q, &f)).unwrap_or(true);
                 if fresh && f.time == snapped && f.sequence == seq_id {
                     break Some(f);
                 }

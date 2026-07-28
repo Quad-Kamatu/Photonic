@@ -3418,10 +3418,8 @@ mod tests {
                 .track_mut(edit_id)
                 .unwrap();
             // Existing clip sits at [100,100); prepend [0,100) to delete.
-            t.clips.insert(
-                0,
-                Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)),
-            );
+            t.clips
+                .insert(0, Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)));
         }
         let p = doc.timeline.as_ref().unwrap();
         let head = p.sequences[&seq_id].track(edit_id).unwrap().clips[0].id;

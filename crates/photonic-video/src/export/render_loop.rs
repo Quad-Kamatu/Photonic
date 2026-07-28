@@ -317,9 +317,9 @@ mod tests {
             }),
             out_path: out_path.clone(),
             colorimetry: Colorimetry::BT709_LIMITED,
-        prefer_hardware: false,
-        encoder_speed: None,
-        raw_encoder_args: vec![],
+            prefer_hardware: false,
+            encoder_speed: None,
+            raw_encoder_args: vec![],
         };
         let audio = vec![0.0f32; 48_000 / 10 * 2 * 5]; // 5 frames' worth of silence
         let cancel = AtomicBool::new(false);
@@ -369,9 +369,9 @@ mod tests {
             audio: None,
             out_path: out_path.clone(),
             colorimetry: Colorimetry::BT709_LIMITED,
-        prefer_hardware: false,
-        encoder_speed: None,
-        raw_encoder_args: vec![],
+            prefer_hardware: false,
+            encoder_speed: None,
+            raw_encoder_args: vec![],
         };
         let mut preset = preset;
         preset.audio = None;
@@ -408,9 +408,9 @@ mod tests {
             audio: None,
             out_path: out_path.clone(),
             colorimetry: Colorimetry::BT709_LIMITED,
-        prefer_hardware: false,
-        encoder_speed: None,
-        raw_encoder_args: vec![],
+            prefer_hardware: false,
+            encoder_speed: None,
+            raw_encoder_args: vec![],
         };
         let cancel = AtomicBool::new(false);
 

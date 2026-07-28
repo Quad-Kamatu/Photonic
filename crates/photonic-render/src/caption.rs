@@ -307,7 +307,10 @@ mod tests {
             word("\u{306F}"),
         ];
         let spans = build_caption_spans(&words);
-        assert!(spans.iter().all(|s| s.0 != " "), "no separator span expected");
+        assert!(
+            spans.iter().all(|s| s.0 != " "),
+            "no separator span expected"
+        );
         let joined: String = spans.iter().map(|s| s.0).collect();
         assert_eq!(joined, "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}");
     }

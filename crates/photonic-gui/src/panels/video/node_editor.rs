@@ -1022,8 +1022,7 @@ pub(crate) fn draw_node_canvas(
     // early — the frame must still paint (08 §6.1). This replaces the old
     // unconditional top-of-fn `key_pressed(Escape)`, which fired app-wide and
     // abandoned an in-flight wire instead of cancelling it.
-    if resp.has_focus()
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    if resp.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
     {
         let wire_in_flight = matches!(
             ui.data(|d| d.get_temp::<Interaction>(interaction_id())),

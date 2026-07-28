@@ -621,11 +621,17 @@ pub struct ClipEffect {
     pub kind: EffectKind,
     /// Stable manifest id. Empty (`EffectId::EMPTY`) in v4 files; backfilled from
     /// `kind` on load. An id with no manifest loads inert-and-preserved (§2.6).
-    #[serde(default = "ClipEffect::default_id", skip_serializing_if = "EffectId::is_empty")]
+    #[serde(
+        default = "ClipEffect::default_id",
+        skip_serializing_if = "EffectId::is_empty"
+    )]
     pub id: EffectId,
     /// Manifest schema version this effect's params conform to. 0 in v4 files;
     /// backfilled to the manifest's current version on load.
-    #[serde(default = "ClipEffect::default_version", skip_serializing_if = "is_zero_u16")]
+    #[serde(
+        default = "ClipEffect::default_version",
+        skip_serializing_if = "is_zero_u16"
+    )]
     pub version: u16,
     #[serde(default = "super::grade::default_true")]
     pub enabled: bool,
@@ -1219,15 +1225,19 @@ mod tests {
         let src: ClipSource = serde_json::from_str(raw).unwrap();
         assert!(src.is_unknown());
         assert_eq!(src.unknown_tag(), Some("holo_gen"));
-        assert_eq!(src.asset(), None, "unknown source references no known asset");
+        assert_eq!(
+            src.asset(),
+            None,
+            "unknown source references no known asset"
+        );
         // The whole object round-trips value-equal to the input.
-        let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&src).unwrap()).unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&src).unwrap()).unwrap();
         let orig: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert_eq!(back, orig);
 
         // Known source tags still resolve to their concrete variant.
-        let asset: ClipSource =
-            serde_json::from_str(r#"{"source":"adjustment"}"#).unwrap();
+        let asset: ClipSource = serde_json::from_str(r#"{"source":"adjustment"}"#).unwrap();
         assert!(!asset.is_unknown());
         assert!(matches!(asset, ClipSource::Adjustment));
     }

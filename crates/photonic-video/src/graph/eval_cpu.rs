@@ -203,8 +203,7 @@ fn eval_op(
             EffectKind::Unknown(tag) => {
                 // K-B16: unknown tags that name a raster-bridge id evaluate on
                 // the CPU oracle; other unknowns stay inert (39 §2.2).
-                crate::graph::raster_bridge::apply(tag.as_str(), &in0(), params)
-                    .unwrap_or_else(in0)
+                crate::graph::raster_bridge::apply(tag.as_str(), &in0(), params).unwrap_or_else(in0)
             }
             // `#[non_exhaustive]`: any future kind is inert until a kernel lands.
             _ => in0(),

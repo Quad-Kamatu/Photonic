@@ -1095,9 +1095,7 @@ impl PhotonicApp {
     /// When `to_bin` is true, also import the still into the media pool.
     pub(crate) fn extract_program_frame(&mut self, doc: &mut Document, to_bin: bool) {
         use photonic_core::timeline::{AssetKind, AssetSource, MediaAsset};
-        use photonic_video::export::{
-            default_extract_path, flatten_pixels, write_frame_png,
-        };
+        use photonic_video::export::{default_extract_path, flatten_pixels, write_frame_png};
         use photonic_video::graph::eval::read_texture_rgba16f;
 
         let Some(bridge) = self.engine.as_ref() else {
@@ -1683,8 +1681,12 @@ impl PhotonicApp {
             return;
         };
         let target = if let Some(&clip_id) = self.timeline_selection.first() {
-            seq.tracks()
-                .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).map(|_| (t.id, clip_id)))
+            seq.tracks().find_map(|t| {
+                t.clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|_| (t.id, clip_id))
+            })
         } else {
             interact::clip_at_playhead(seq, &self.timeline_selection, self.playhead)
         };
@@ -1811,8 +1813,12 @@ impl PhotonicApp {
             return;
         };
         let target = if let Some(&clip_id) = self.timeline_selection.first() {
-            seq.tracks()
-                .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).map(|_| (t.id, clip_id)))
+            seq.tracks().find_map(|t| {
+                t.clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|_| (t.id, clip_id))
+            })
         } else {
             interact::clip_at_playhead(seq, &self.timeline_selection, self.playhead)
         };

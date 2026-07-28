@@ -545,7 +545,11 @@ mod tests {
         };
         // 13 ideographs = 26 cells == budget → single cue.
         let cues = group_words_into_cues(&ja_words(13), &params);
-        assert_eq!(cues.len(), 1, "13 fullwidth chars (26 cells) must stay one cue");
+        assert_eq!(
+            cues.len(),
+            1,
+            "13 fullwidth chars (26 cells) must stay one cue"
+        );
         assert_eq!(cues[0].words.len(), 13);
         // 14 ideographs = 28 cells > budget → the 14th starts a new cue. The
         // trailing single-word cue cannot merge back (28 cells > 26 budget).

@@ -491,7 +491,11 @@ impl LutCache {
             };
             // Parse only when absent or the source path changed (relink) — reads
             // never happen per frame.
-            let stale = self.entries.get(id).map(|e| &e.path != path).unwrap_or(true);
+            let stale = self
+                .entries
+                .get(id)
+                .map(|e| &e.path != path)
+                .unwrap_or(true);
             if stale {
                 let table = std::fs::read_to_string(path)
                     .ok()
@@ -505,7 +509,12 @@ impl LutCache {
                     },
                 );
             }
-            if self.entries.get(id).and_then(|e| e.table.as_ref()).is_none() {
+            if self
+                .entries
+                .get(id)
+                .and_then(|e| e.table.as_ref())
+                .is_none()
+            {
                 self.failures.push(CompileDiagnostic {
                     message: format!(
                         "LUT asset {id} could not be loaded from {}; the grade op \
@@ -841,7 +850,9 @@ impl EngineThread {
             return;
         };
         let Some(media_asset) = project.media.assets.get(&asset) else {
-            self.fail(format!("EngineCmd::Probe({asset}): asset not in media pool"));
+            self.fail(format!(
+                "EngineCmd::Probe({asset}): asset not in media pool"
+            ));
             return;
         };
         let path = match &media_asset.source {
@@ -1167,11 +1178,8 @@ impl EngineThread {
                     let cut = Tick(seq.frame_rate.ticks_per_frame().0 * CUT_AHEAD_LEAD_FRAMES);
                     let graph_range =
                         crate::graph::source_range::graph_source_range(&compiled.graph, t);
-                    let lead = crate::playback::prefetch::combined_prefetch_lead(
-                        cut,
-                        graph_range,
-                        t,
-                    );
+                    let lead =
+                        crate::playback::prefetch::combined_prefetch_lead(cut, graph_range, t);
                     self.media.prefetch_upcoming(seq, t, lead, quality);
                 }
             }

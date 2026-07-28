@@ -46,7 +46,10 @@ fn code_only(src: &str) -> String {
 fn focus_nav_widgets_lock_their_keys() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/panels/video");
     let mut files = Vec::new();
-    for e in fs::read_dir(&root).expect("read video panels dir").flatten() {
+    for e in fs::read_dir(&root)
+        .expect("read video panels dir")
+        .flatten()
+    {
         let p = e.path();
         if p.extension().is_some_and(|x| x == "rs") {
             files.push(p);

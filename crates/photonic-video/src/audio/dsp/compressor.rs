@@ -3,8 +3,8 @@
 
 use photonic_core::timeline::{EffectParams, PropValue};
 
-use super::AudioDiscontinuity;
 use super::envelope::{EnvelopeCoeffs, EnvelopeFollower};
+use super::AudioDiscontinuity;
 use super::{db_to_linear, lin_to_db, DspUnit};
 use crate::audio::CHANNELS;
 

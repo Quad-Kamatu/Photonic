@@ -828,27 +828,17 @@ impl Evaluator {
                         logical_h,
                     );
                     self.gpu.device().poll(wgpu::Maintain::Wait);
-                    self.passes.high_pass_combine(
-                        &self.gpu,
-                        &src.texture,
-                        &blurred,
-                        target,
-                    );
+                    self.passes
+                        .high_pass_combine(&self.gpu, &src.texture, &blurred, target);
                 }
-                ("stylize.emboss", Some(src)) => self.passes.emboss(
-                    &self.gpu,
-                    &src.texture,
-                    target,
-                    logical_w,
-                    logical_h,
-                ),
-                ("stylize.find_edges", Some(src)) => self.passes.find_edges(
-                    &self.gpu,
-                    &src.texture,
-                    target,
-                    logical_w,
-                    logical_h,
-                ),
+                ("stylize.emboss", Some(src)) => {
+                    self.passes
+                        .emboss(&self.gpu, &src.texture, target, logical_w, logical_h)
+                }
+                ("stylize.find_edges", Some(src)) => {
+                    self.passes
+                        .find_edges(&self.gpu, &src.texture, target, logical_w, logical_h)
+                }
                 ("filter.median", Some(src)) => self.passes.median(
                     &self.gpu,
                     &src.texture,
@@ -972,7 +962,8 @@ impl Evaluator {
                     if contrast.abs() > 1e-6 {
                         knots[2][1] = (0.5 + contrast.clamp(-1.0, 1.0) * 0.25).clamp(0.05, 0.95);
                     }
-                    self.passes.curves_lut(&self.gpu, &src.texture, target, &knots);
+                    self.passes
+                        .curves_lut(&self.gpu, &src.texture, target, &knots);
                 }
                 ("blur.surface", Some(src)) => self.passes.surface_blur(
                     &self.gpu,
@@ -1401,7 +1392,12 @@ impl Passes {
         // Unsharp combine: `src + amount * (src - blurred)` (K-0.2).
         let sharpen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sharpen_bgl"),
-            entries: &[tex_entry(0), tex_entry(1), sampler_entry(2), uniform_entry(3)],
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                sampler_entry(2),
+                uniform_entry(3),
+            ],
         });
         let sharpen_src = format!(
             "{QUAD_VS}\n@group(0) @binding(0) var t_src: texture_2d<f32>;\n@group(0) @binding(1) var t_blur: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct S {{ amount: vec4<f32> }}\n@group(0) @binding(3) var<uniform> u: S;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let src = textureSample(t_src, s, i.uv);\n  let bl = textureSample(t_blur, s, i.uv);\n  return src + u.amount.x * (src - bl);\n}}\n"
@@ -1521,7 +1517,8 @@ impl Passes {
         let black_and_white_src = format!(
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct P {{ p: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: P;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var rgb = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ rgb = c.rgb / c.a; }}\n  var w = u.p.xyz;\n  let sum = w.x + w.y + w.z;\n  if (abs(sum) < 1e-6) {{ w = vec3<f32>(0.333333, 0.333333, 0.333333); }} else {{ w = w / sum; }}\n  let g = clamp(dot(rgb, w), 0.0, 1.0);\n  return vec4<f32>(g * c.a, g * c.a, g * c.a, c.a);\n}}\n"
         );
-        let black_and_white_pipeline = make_pipeline(device, &filter_bgl, &black_and_white_src, "fs");
+        let black_and_white_pipeline =
+            make_pipeline(device, &filter_bgl, &black_and_white_src, "fs");
 
         // Pinch / spherize: info = [amount, is_spherize, logical_w, logical_h]
         let pinch_src = format!(
@@ -1597,7 +1594,12 @@ impl Passes {
         // Glow composite: screen-add tinted glow over source.
         let glow_comp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("glow_comp_bgl"),
-            entries: &[tex_entry(0), tex_entry(1), sampler_entry(2), uniform_entry(3)],
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                sampler_entry(2),
+                uniform_entry(3),
+            ],
         });
         let glow_comp_src = format!(
             "{QUAD_VS}\n@group(0) @binding(0) var t_src: texture_2d<f32>;\n@group(0) @binding(1) var t_glow: texture_2d<f32>;\n@group(0) @binding(2) var s: sampler;\nstruct GC {{ tint: vec4<f32>, intensity: vec4<f32> }}\n@group(0) @binding(3) var<uniform> u: GC;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let src = textureSample(t_src, s, i.uv);\n  let g = textureSample(t_glow, s, i.uv);\n  let gr = g.r * u.tint.x * u.intensity.x;\n  let gg = g.g * u.tint.y * u.intensity.x;\n  let gb = g.b * u.tint.z * u.intensity.x;\n  let ga = clamp(g.a * u.intensity.x, 0.0, 1.0);\n  return vec4<f32>(\n    src.r + gr * max(1.0 - src.r, 0.0),\n    src.g + gg * max(1.0 - src.g, 0.0),\n    src.b + gb * max(1.0 - src.b, 0.0),\n    src.a + ga * (1.0 - src.a)\n  );\n}}\n"
@@ -1950,7 +1952,15 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        self.neighbourhood(gpu, &self.emboss_pipeline, src, target, 0.0, logical_w, logical_h);
+        self.neighbourhood(
+            gpu,
+            &self.emboss_pipeline,
+            src,
+            target,
+            0.0,
+            logical_w,
+            logical_h,
+        );
     }
 
     /// K-B16 find-edges — Sobel magnitude on straight luma.
@@ -1983,33 +1993,51 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        let r = if radius.is_finite() { radius.max(0.0) } else { 0.0 };
+        let r = if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            0.0
+        };
         if r < 0.5 {
             self.blit(gpu, src, target);
             return;
         }
-        self.neighbourhood(gpu, &self.median_pipeline, src, target, 1.0, logical_w, logical_h);
+        self.neighbourhood(
+            gpu,
+            &self.median_pipeline,
+            src,
+            target,
+            1.0,
+            logical_w,
+            logical_h,
+        );
     }
 
     /// Levels — `p = [in_black, in_white, gamma, out_black]` + out_white in p1.x.
-    fn levels(
-        &self,
-        gpu: &GpuContext,
-        src: &wgpu::Texture,
-        target: &wgpu::Texture,
-        p: [f32; 5],
-    ) {
+    fn levels(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, p: [f32; 5]) {
         let uniform = [p[0], p[1], p[2], p[3], p[4], 0.0, 0.0, 0.0];
         self.run_filter(gpu, &self.levels_pipeline, src, target, &uniform);
     }
 
-    fn posterize(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, levels: f32) {
+    fn posterize(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        levels: f32,
+    ) {
         let n = if levels.is_finite() {
             levels.clamp(2.0, 255.0)
         } else {
             4.0
         };
-        self.run_filter(gpu, &self.posterize_pipeline, src, target, &[n, 0.0, 0.0, 0.0]);
+        self.run_filter(
+            gpu,
+            &self.posterize_pipeline,
+            src,
+            target,
+            &[n, 0.0, 0.0, 0.0],
+        );
     }
 
     fn threshold(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, level: f32) {
@@ -2018,7 +2046,13 @@ impl Passes {
         } else {
             0.5
         };
-        self.run_filter(gpu, &self.threshold_pipeline, src, target, &[t, 0.0, 0.0, 0.0]);
+        self.run_filter(
+            gpu,
+            &self.threshold_pipeline,
+            src,
+            target,
+            &[t, 0.0, 0.0, 0.0],
+        );
     }
 
     fn desaturate(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture) {
@@ -2080,8 +2114,20 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        let b = if block.is_finite() { block.max(1.0) } else { 8.0 };
-        self.neighbourhood(gpu, &self.mosaic_pipeline, src, target, b, logical_w, logical_h);
+        let b = if block.is_finite() {
+            block.max(1.0)
+        } else {
+            8.0
+        };
+        self.neighbourhood(
+            gpu,
+            &self.mosaic_pipeline,
+            src,
+            target,
+            b,
+            logical_w,
+            logical_h,
+        );
     }
 
     fn motion_blur(
@@ -2154,7 +2200,13 @@ impl Passes {
         } else {
             0.0
         };
-        self.run_filter(gpu, &self.vibrance_pipeline, src, target, &[a, 0.0, 0.0, 0.0]);
+        self.run_filter(
+            gpu,
+            &self.vibrance_pipeline,
+            src,
+            target,
+            &[a, 0.0, 0.0, 0.0],
+        );
     }
 
     fn channel_mixer(
@@ -2185,18 +2237,8 @@ impl Passes {
         pts[0][0] = pts[0][0].clamp(0.0, 1.0);
         pts[4][0] = pts[4][0].clamp(0.0, 1.0);
         let uniform = [
-            pts[0][0],
-            pts[0][1],
-            pts[1][0],
-            pts[1][1],
-            pts[2][0],
-            pts[2][1],
-            pts[3][0],
-            pts[3][1],
-            pts[4][0],
-            pts[4][1],
-            0.0,
-            0.0,
+            pts[0][0], pts[0][1], pts[1][0], pts[1][1], pts[2][0], pts[2][1], pts[3][0], pts[3][1],
+            pts[4][0], pts[4][1], 0.0, 0.0,
         ];
         self.run_filter(gpu, &self.curves_lut_pipeline, src, target, &uniform);
     }
@@ -2261,7 +2303,15 @@ impl Passes {
         } else {
             0.0
         };
-        self.neighbourhood(gpu, &self.lens_blur_pipeline, src, target, r, logical_w, logical_h);
+        self.neighbourhood(
+            gpu,
+            &self.lens_blur_pipeline,
+            src,
+            target,
+            r,
+            logical_w,
+            logical_h,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2276,12 +2326,20 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        let amount = if amount.is_finite() { amount.max(0.0) } else { 0.0 };
+        let amount = if amount.is_finite() {
+            amount.max(0.0)
+        } else {
+            0.0
+        };
         if amount == 0.0 {
             self.blit(gpu, src, target);
             return;
         }
-        let radius = if radius.is_finite() { radius.max(0.0) } else { 1.0 };
+        let radius = if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            1.0
+        };
         let threshold = if threshold.is_finite() {
             threshold.clamp(0.0, 255.0)
         } else {
@@ -2397,7 +2455,11 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        let amp = if amplitude.is_finite() { amplitude } else { 0.0 };
+        let amp = if amplitude.is_finite() {
+            amplitude
+        } else {
+            0.0
+        };
         let wl = if wavelength.is_finite() {
             wavelength.max(1.0)
         } else {
@@ -2499,12 +2561,7 @@ impl Passes {
             &self.grain_pipeline,
             src,
             target,
-            &[
-                amount,
-                if mono { 1.0 } else { 0.0 },
-                seed,
-                0.0,
-            ],
+            &[amount, if mono { 1.0 } else { 0.0 }, seed, 0.0],
         );
     }
 
@@ -2548,13 +2605,7 @@ impl Passes {
         self.run_filter(gpu, &self.unpremultiply_pipeline, src, target, &[0.0; 4]);
     }
 
-    fn alpha_view(
-        &self,
-        gpu: &GpuContext,
-        src: &wgpu::Texture,
-        target: &wgpu::Texture,
-        mode: f32,
-    ) {
+    fn alpha_view(&self, gpu: &GpuContext, src: &wgpu::Texture, target: &wgpu::Texture, mode: f32) {
         self.run_filter(
             gpu,
             &self.alpha_view_pipeline,
@@ -2778,7 +2829,11 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        let sigma = if sigma.is_finite() { sigma.max(0.0) } else { 0.0 };
+        let sigma = if sigma.is_finite() {
+            sigma.max(0.0)
+        } else {
+            0.0
+        };
         if sigma < 0.5 {
             self.blit(gpu, src, target);
             return;
@@ -4361,7 +4416,9 @@ mod tests {
     /// A `SolidColor → Grade{Lut3d} → Output` graph carrying a resolved 2³ LUT
     /// that maps `c → 0.5·c` (a linear map, so trilinear reconstruction is exact
     /// on both the GPU sampler and the CPU reference).
-    fn lut_grade_graph(color: crate::graph::ir::LinearColor) -> crate::graph::compile::CompiledFrame {
+    fn lut_grade_graph(
+        color: crate::graph::ir::LinearColor,
+    ) -> crate::graph::compile::CompiledFrame {
         use photonic_render::grade::{ResolvedGradeOp, ResolvedGradePayload, ResolvedLut3d};
         let mut table = photonic_render::Lut3d::identity(2);
         for sample in &mut table.data {
@@ -4508,10 +4565,7 @@ mod tests {
         };
         for dir in PARITY_DIRS {
             for t in [0.25f32, 0.5, 0.75] {
-                let op = IrOp::PushMix {
-                    direction: dir,
-                    t,
-                };
+                let op = IrOp::PushMix { direction: dir, t };
                 assert_graph_gpu_matches_cpu(&transition_graph(op, inc, outg), 1e-3);
             }
         }

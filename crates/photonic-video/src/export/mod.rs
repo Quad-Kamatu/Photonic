@@ -27,7 +27,5 @@ pub mod offline_audio;
 pub mod presets;
 pub mod render_loop;
 
-pub use extract_frame::{
-    default_extract_path, flatten_pixels, write_frame_png, ExtractFrameError,
-};
+pub use extract_frame::{default_extract_path, flatten_pixels, write_frame_png, ExtractFrameError};
 pub use job_queue::{QueueJobId, QueueJobStatus, QueuedExport, RenderQueue};

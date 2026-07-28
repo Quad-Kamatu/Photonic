@@ -36,11 +36,7 @@ pub enum TokenStoreError {
 /// CSPRNG entropy in total. `uuid` is already a dependency, so this avoids
 /// pulling `rand` in for one call.
 pub fn generate_token() -> String {
-    format!(
-        "{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 /// `<config>/mcp_token` — `None` when no config dir resolves.
@@ -124,7 +120,8 @@ mod tests {
         for tok in [&a, &b] {
             assert_eq!(tok.len(), 64, "token must be 64 hex chars (256 bits)");
             assert!(
-                tok.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                tok.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "token must be lowercase hex: {tok}"
             );
         }
@@ -146,7 +143,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = scratch_path();
         write_token_to(&path, &generate_token()).expect("write");
-        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "token file must be owner-only");
         let _ = std::fs::remove_file(&path);
     }

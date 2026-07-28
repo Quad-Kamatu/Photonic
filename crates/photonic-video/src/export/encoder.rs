@@ -94,10 +94,7 @@ pub enum EncodeError {
         "hardware encoder requested for {codec:?} but none was detected in this \
          ffmpeg build (probed: {probed}). Availability is never inferred (23 §10.3)."
     )]
-    HardwareUnavailable {
-        codec: VideoCodec,
-        probed: String,
-    },
+    HardwareUnavailable { codec: VideoCodec, probed: String },
 }
 
 // ── Encoder capability probing (§3.4/§3.7) ───────────────────────────────────
@@ -1174,7 +1171,8 @@ mod tests {
         });
         let s = spec(&preset);
         let caps = caps_with(&["libvpx-vp9", "libopus"]);
-        let args = build_ffmpeg_args(&caps, &s, "yuva420p", Some(Path::new("/tmp/a.fifo"))).unwrap();
+        let args =
+            build_ffmpeg_args(&caps, &s, "yuva420p", Some(Path::new("/tmp/a.fifo"))).unwrap();
         assert!(args.windows(2).any(|w| w == ["-c:v", "libvpx-vp9"]));
         assert!(args.windows(2).any(|w| w == ["-auto-alt-ref", "0"]));
         assert!(args.windows(2).any(|w| w == ["-b:v", "0"]));
@@ -1214,7 +1212,8 @@ mod tests {
         });
         let s = spec(&preset);
         let caps = caps_with(&[]);
-        let args = build_ffmpeg_args(&caps, &s, "yuva444p", Some(Path::new("/tmp/a.fifo"))).unwrap();
+        let args =
+            build_ffmpeg_args(&caps, &s, "yuva444p", Some(Path::new("/tmp/a.fifo"))).unwrap();
         assert!(args.windows(2).any(|w| w == ["-c:v", "prores_ks"]));
         assert!(args.windows(2).any(|w| w == ["-profile:v", "4"]));
         assert!(args.windows(2).any(|w| w == ["-c:a", "pcm_s16le"]));

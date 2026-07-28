@@ -145,7 +145,10 @@ fn every_declared_pair_meets_wcag_aa() {
     let fm = frontmatter(&src);
     let cols = colors(fm);
     let rows = contrast_rows(&src);
-    assert!(!cols.is_empty(), "no colours parsed from DESIGN.md frontmatter");
+    assert!(
+        !cols.is_empty(),
+        "no colours parsed from DESIGN.md frontmatter"
+    );
     assert!(!rows.is_empty(), "no contrast rows parsed from DESIGN.md");
 
     let mut failures = Vec::new();

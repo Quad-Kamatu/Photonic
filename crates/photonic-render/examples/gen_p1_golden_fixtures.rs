@@ -62,7 +62,8 @@ fn main() {
 /// corpus. See [`title_asset`] / [`title_doc_asset`] for the stable node-id
 /// contract the acceptance-story scripts hardcode.
 fn write_video_fixtures() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../photonic-video/tests/fixtures");
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../photonic-video/tests/fixtures");
     for (name, doc) in [
         ("title_asset", title_asset()),
         ("title_doc_asset", title_doc_asset()),

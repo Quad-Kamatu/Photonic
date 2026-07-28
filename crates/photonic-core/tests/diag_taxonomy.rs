@@ -57,7 +57,10 @@ fn default_severity_matches_spec_table() {
         DiagCode::CompileUnsupportedBlendMode.default_severity(),
         Severity::Warning
     );
-    assert_eq!(DiagCode::RenderDeviceLost.default_severity(), Severity::Fatal);
+    assert_eq!(
+        DiagCode::RenderDeviceLost.default_severity(),
+        Severity::Fatal
+    );
     assert_eq!(
         DiagCode::ProjectMigrationFailed.default_severity(),
         Severity::Fatal
@@ -142,7 +145,11 @@ fn stored_diagnostic_is_the_first_occurrence() {
     let mut log = DiagnosticLog::new(16);
     let subj = Subject::Clip(ClipId::nil());
     log.record(Diagnostic::new(DiagCode::DecodeFrameDropped, subj, "first"));
-    log.record(Diagnostic::new(DiagCode::DecodeFrameDropped, subj, "second"));
+    log.record(Diagnostic::new(
+        DiagCode::DecodeFrameDropped,
+        subj,
+        "second",
+    ));
     // The message never churns under the user.
     assert_eq!(log.entries()[0].diagnostic.message, "first");
 }
@@ -182,8 +189,14 @@ fn revision_bumps_on_a_count_bump() {
 #[test]
 fn worst_picks_highest_severity() {
     let mut log = DiagnosticLog::new(16);
-    log.record(diag(DiagCode::DecodeFrameDropped, Subject::Clip(ClipId::nil()))); // Warning
-    log.record(diag(DiagCode::MediaNotFound, Subject::Asset(AssetId::nil()))); // Error
+    log.record(diag(
+        DiagCode::DecodeFrameDropped,
+        Subject::Clip(ClipId::nil()),
+    )); // Warning
+    log.record(diag(
+        DiagCode::MediaNotFound,
+        Subject::Asset(AssetId::nil()),
+    )); // Error
     log.record(diag(DiagCode::RenderDeviceLost, Subject::Engine)); // Fatal
     assert_eq!(
         log.worst().unwrap().diagnostic.code,
@@ -196,9 +209,12 @@ fn eviction_drops_lowest_severity_oldest_never_highest() {
     // Capacity 2. Insert a Fatal, then two Warnings on distinct subjects.
     let mut log = DiagnosticLog::new(2);
     log.record(diag(DiagCode::RenderDeviceLost, Subject::Engine)); // Fatal
-    log.record(diag(DiagCode::DecodeFrameDropped, Subject::Clip(ClipId::nil()))); // Warning
-                                                                                  // This overflows: the lowest-severity oldest (the Warning) is evicted,
-                                                                                  // never the Fatal.
+    log.record(diag(
+        DiagCode::DecodeFrameDropped,
+        Subject::Clip(ClipId::nil()),
+    )); // Warning
+        // This overflows: the lowest-severity oldest (the Warning) is evicted,
+        // never the Fatal.
     log.record(diag(DiagCode::AudioXrun, Subject::Track(TrackId::nil()))); // Warning
     let codes: Vec<DiagCode> = log.entries().iter().map(|e| e.diagnostic.code).collect();
     assert_eq!(log.entries().len(), 2);

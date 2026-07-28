@@ -538,12 +538,7 @@ fn grade_op_kind_cpu_gpu_parity() {
     for kind in KNOWN_GRADE_KINDS {
         let params = grade_params_for(kind).expect("known kind has a fixture");
         let compiled = graded_solid(single_op_grade(GradeOp::new(kind, params)));
-        assert_parity_solid(
-            &gpu,
-            &format!("grade/{kind:?}"),
-            &compiled.graph,
-            1e-3,
-        );
+        assert_parity_solid(&gpu, &format!("grade/{kind:?}"), &compiled.graph, 1e-3);
     }
 }
 

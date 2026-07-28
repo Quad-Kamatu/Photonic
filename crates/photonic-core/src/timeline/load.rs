@@ -114,7 +114,10 @@ fn flag_effect_stack(effects: &mut [ClipEffect], grade: Option<&mut Grade>) {
         if effect.inert {
             continue;
         }
-        flag_tracks(&mut effect.params.tracks, PropTargetKind::Effect(effect.kind));
+        flag_tracks(
+            &mut effect.params.tracks,
+            PropTargetKind::Effect(effect.kind),
+        );
     }
     if let Some(grade) = grade {
         for op in &mut grade.ops {
@@ -381,7 +384,10 @@ fn reject_corrupt_known_variants(project: &TimelineProject) -> Result<(), LoadEr
         for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
             for clip in &track.clips {
                 if let ClipSource::Unknown(map) = &clip.source {
-                    let tag = map.get("source").and_then(|v| v.as_str()).unwrap_or_default();
+                    let tag = map
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
                     if KNOWN_CLIP_SOURCE_TAGS.contains(&tag) {
                         return Err(LoadError::corrupt("ClipSource", tag));
                     }
@@ -497,7 +503,8 @@ fn finalize_effect_ids(project: &mut TimelineProject) {
                             if effect.version == 0 {
                                 effect.version = m.version;
                             } else if effect.version < m.version {
-                                if let Ok(v) = migrate(&effect.id, effect.version, &mut effect.params.base)
+                                if let Ok(v) =
+                                    migrate(&effect.id, effect.version, &mut effect.params.base)
                                 {
                                     effect.version = v;
                                 }
@@ -807,21 +814,31 @@ mod unknown_scan_tests {
 
         let mut graph = NodeGraph::new_project_graph("G1");
         let mut op_obj = serde_json::Map::new();
-        op_obj.insert("op".to_string(), serde_json::Value::String("caustics".to_string()));
+        op_obj.insert(
+            "op".to_string(),
+            serde_json::Value::String("caustics".to_string()),
+        );
         let node = GraphNode::new(GraphOp::Unknown(op_obj));
         let node_id = node.id;
         graph.nodes.insert(node.id, node);
         project.graphs.insert(graph.id, graph);
 
         let found = collect_unknown_variants(&project);
-        assert_eq!(found.len(), 2, "one finding per (enum, tag), not per occurrence");
+        assert_eq!(
+            found.len(),
+            2,
+            "one finding per (enum, tag), not per occurrence"
+        );
 
         let effect = found
             .iter()
             .find(|u| u.enum_name == "EffectKind")
             .expect("the shared unknown effect must be reported");
         assert_eq!(effect.tag, "film_look");
-        assert_eq!(effect.count, 3, "three clips share one unknown effect → count 3");
+        assert_eq!(
+            effect.count, 3,
+            "three clips share one unknown effect → count 3"
+        );
         assert_eq!(
             effect.first_site,
             UnknownSite::Effect {
@@ -848,9 +865,7 @@ mod unknown_scan_tests {
         let mut project = TimelineProject::new();
         let mut seq = Sequence::new("Seq 1", FrameRate::FPS_30, 1920, 1080);
         let mut track = Track::new(TrackKind::Video, "V1");
-        track
-            .clips
-            .push(Clip::new(source, Tick(0), Tick(500)));
+        track.clips.push(Clip::new(source, Tick(0), Tick(500)));
         seq.video_tracks.push(track);
         project.insert_sequence(seq);
         project
@@ -885,8 +900,7 @@ mod unknown_scan_tests {
     #[test]
     fn finalize_load_accepts_a_genuine_unknown_clip_source() {
         let src: ClipSource =
-            serde_json::from_value(serde_json::json!({"source":"holo_gen","seed":7}))
-                .unwrap();
+            serde_json::from_value(serde_json::json!({"source":"holo_gen","seed":7})).unwrap();
         let mut project = project_with_source(src);
         let report = finalize_load(&mut project).expect("a genuine unknown source loads");
         assert_eq!(report.unknown_variants.len(), 1);
@@ -906,14 +920,11 @@ mod unknown_scan_tests {
         assert!(bad.is_unknown() && bad.unknown_tag() == Some("exposure"));
 
         let mut project = project_with_source(ClipSource::Adjustment);
-        let clip = &mut project
-            .sequences
-            .values_mut()
-            .next()
-            .unwrap()
-            .video_tracks[0]
-            .clips[0];
-        let mut op = GradeOp::new(GradeOpKind::Exposure, GradeOpParams::Exposure { stops: 0.0 });
+        let clip = &mut project.sequences.values_mut().next().unwrap().video_tracks[0].clips[0];
+        let mut op = GradeOp::new(
+            GradeOpKind::Exposure,
+            GradeOpParams::Exposure { stops: 0.0 },
+        );
         op.params.base = bad;
         clip.grade = Some(Grade {
             ops: vec![op],
@@ -960,7 +971,10 @@ mod unknown_scan_tests {
             GraphOp::Switch,
         ];
         for op in graph_ops {
-            let tag = serde_json::to_value(&op).unwrap()["op"].as_str().unwrap().to_string();
+            let tag = serde_json::to_value(&op).unwrap()["op"]
+                .as_str()
+                .unwrap()
+                .to_string();
             assert!(
                 KNOWN_GRAPH_OP_TAGS.contains(&tag.as_str()),
                 "GraphOp tag {tag:?} missing from KNOWN_GRAPH_OP_TAGS"
@@ -972,11 +986,22 @@ mod unknown_scan_tests {
         for src in [
             ClipSource::Adjustment,
             ClipSource::SolidColor {
-                color: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                color: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
             },
         ] {
-            let tag = serde_json::to_value(&src).unwrap()["source"].as_str().unwrap().to_string();
-            assert!(KNOWN_CLIP_SOURCE_TAGS.contains(&tag.as_str()), "missing {tag:?}");
+            let tag = serde_json::to_value(&src).unwrap()["source"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                KNOWN_CLIP_SOURCE_TAGS.contains(&tag.as_str()),
+                "missing {tag:?}"
+            );
         }
 
         // GradeOpParams likewise.
@@ -1019,7 +1044,9 @@ mod load_repair_tests {
     /// An effect carrying one lane whose path cannot resolve for any scope.
     fn blur_with_unknown_lane(path: &str) -> ClipEffect {
         let mut eff = ClipEffect::new(EffectKind::Blur);
-        eff.params.tracks.push(PropertyTrack::new(PropPath::new(path)));
+        eff.params
+            .tracks
+            .push(PropertyTrack::new(PropPath::new(path)));
         eff
     }
 
@@ -1037,7 +1064,9 @@ mod load_repair_tests {
         project.insert_sequence(seq);
 
         let mut asset = MediaAsset::from_file(AssetKind::Video, "/tmp/a.mp4");
-        asset.effects.push(blur_with_unknown_lane("params.nope_asset"));
+        asset
+            .effects
+            .push(blur_with_unknown_lane("params.nope_asset"));
         project.media.insert(asset);
 
         flag_orphaned_property_tracks(&mut project);

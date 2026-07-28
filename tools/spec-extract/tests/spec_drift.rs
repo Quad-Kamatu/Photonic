@@ -39,8 +39,7 @@ fn gen_acceptance() -> PathBuf {
 fn real_index() -> &'static Path {
     static IDX: OnceLock<PathBuf> = OnceLock::new();
     IDX.get_or_init(|| {
-        let out =
-            std::env::temp_dir().join(format!("spec-index-{}.json", std::process::id()));
+        let out = std::env::temp_dir().join(format!("spec-index-{}.json", std::process::id()));
         let status = Command::new(env!("CARGO_BIN_EXE_spec-extract"))
             .arg("--root")
             .arg(repo_root())
@@ -110,12 +109,7 @@ fn each_historical_drift_is_caught() {
         let expected =
             std::fs::read_to_string(case.join("expected.txt")).expect("read expected.txt");
         let (code, stdout) = run(&index, &case, &case);
-        assert_eq!(
-            code,
-            1,
-            "{}: expected drift exit 1",
-            case.display()
-        );
+        assert_eq!(code, 1, "{}: expected drift exit 1", case.display());
         assert_eq!(
             stdout.replace('\\', "/"),
             expected.replace('\\', "/"),
@@ -141,7 +135,11 @@ fn anchored_blocks_are_compared_structurally() {
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
-    assert!(dirs.len() >= 6, "expected >= 6 anchored cases, found {}", dirs.len());
+    assert!(
+        dirs.len() >= 6,
+        "expected >= 6 anchored cases, found {}",
+        dirs.len()
+    );
 
     for case in dirs {
         let name = case.file_name().unwrap().to_string_lossy().to_string();
@@ -162,10 +160,19 @@ fn anchored_blocks_are_compared_structurally() {
         let stdout = String::from_utf8_lossy(&out.stdout).replace('\\', "/");
         let stderr = String::from_utf8_lossy(&out.stderr);
         if expected.trim().is_empty() {
-            assert_eq!(code, 0, "{name}: expected a passing block (exit 0)\n{stderr}");
-            assert!(stdout.trim().is_empty(), "{name}: expected no output, got:\n{stdout}");
+            assert_eq!(
+                code, 0,
+                "{name}: expected a passing block (exit 0)\n{stderr}"
+            );
+            assert!(
+                stdout.trim().is_empty(),
+                "{name}: expected no output, got:\n{stdout}"
+            );
         } else {
-            assert_eq!(code, 1, "{name}: expected structural drift (exit 1)\n{stderr}");
+            assert_eq!(
+                code, 1,
+                "{name}: expected structural drift (exit 1)\n{stderr}"
+            );
             assert_eq!(
                 stdout,
                 expected.replace('\\', "/"),
@@ -179,7 +186,10 @@ fn anchored_blocks_are_compared_structurally() {
 fn malformed_assertion_is_exit_2() {
     let case = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/cases/malformed");
     let (code, _) = run(&case.join("index.json"), &case, &case);
-    assert_eq!(code, 2, "an unknown assertion form must be exit 2, not a silent pass");
+    assert_eq!(
+        code, 2,
+        "an unknown assertion form must be exit 2, not a silent pass"
+    );
 }
 
 #[test]
@@ -271,7 +281,9 @@ fn acceptance_index_generation_is_deterministic() {
 
 /// Recursively collect `*.md` files under `dir`.
 fn md_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -316,8 +328,8 @@ fn ci_wires_the_drift_gate() {
     // Task 6 (ACC-40-06-08): the blocking drift gate lives in CI beside the MCP
     // doc gate. Deleting it fails this test. (The acceptance-index half of §6 is
     // gated on the ACC-* id assignment of task 7 and is not wired here.)
-    let ci = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
-        .expect("read ci.yml");
+    let ci =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
     assert!(
         ci.contains("check-spec-drift.py"),
         "ci.yml must run the spec-drift checker"

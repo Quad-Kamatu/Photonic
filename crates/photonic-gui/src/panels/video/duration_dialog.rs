@@ -74,9 +74,8 @@ fn parse_field(text: &str, rate: FrameRate, start_offset: Tick) -> Result<Tick, 
         }
         return Ok(Tick(frames.saturating_mul(rate.ticks_per_frame().0)));
     }
-    let parsed = Timecode::parse_to_tick(t, rate).ok_or_else(|| {
-        format!("could not parse `{t}` (use HH:MM:SS:FF or a frame count)")
-    })?;
+    let parsed = Timecode::parse_to_tick(t, rate)
+        .ok_or_else(|| format!("could not parse `{t}` (use HH:MM:SS:FF or a frame count)"))?;
     Ok(Tick(parsed.0.saturating_sub(start_offset.0).max(0)))
 }
 

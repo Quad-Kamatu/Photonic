@@ -85,10 +85,7 @@ fn geometry_graph(w: u32, h: u32) -> FrameGraph {
                 op: IrOp::Effect {
                     kind: EffectKind::Blur,
                     params: ResolvedParams {
-                        entries: vec![(
-                            PropPath::new("params.radius"),
-                            PropValue::Float(radius),
-                        )],
+                        entries: vec![(PropPath::new("params.radius"), PropValue::Float(radius))],
                     },
                 },
                 inputs: vec![(IrNodeId(0), OutPort::default())],

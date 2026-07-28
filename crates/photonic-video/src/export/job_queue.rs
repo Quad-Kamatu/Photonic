@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use photonic_core::timeline::{SequenceId, Tick, TimelineProject};
 
-use super::job::{run_export_job, resolve_export_job};
+use super::job::{resolve_export_job, run_export_job};
 use super::presets::ExportPreset;
 use super::render_loop::{ExportError, ExportEvent, ExportProgress};
 use crate::graph::eval::GpuContext;
@@ -29,17 +29,9 @@ pub struct QueueJobId(pub u64);
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueueJobStatus {
     Queued,
-    Running {
-        frame: u64,
-        total: u64,
-        fps: f32,
-    },
-    Done {
-        out_path: PathBuf,
-    },
-    Failed {
-        message: String,
-    },
+    Running { frame: u64, total: u64, fps: f32 },
+    Done { out_path: PathBuf },
+    Failed { message: String },
     Cancelled,
 }
 
@@ -183,11 +175,7 @@ impl RenderQueue {
 
     pub fn list(&self) -> Vec<QueuedExport> {
         let g = self.inner.lock().expect("render queue lock");
-        g.pending
-            .iter()
-            .chain(g.finished.iter())
-            .cloned()
-            .collect()
+        g.pending.iter().chain(g.finished.iter()).cloned().collect()
     }
 
     /// Stop the worker (best-effort). Used in tests / shutdown.
@@ -243,9 +231,7 @@ fn worker_main(
             }
         };
 
-        if job.cancel.load(Ordering::Relaxed)
-            || matches!(job.status, QueueJobStatus::Cancelled)
-        {
+        if job.cancel.load(Ordering::Relaxed) || matches!(job.status, QueueJobStatus::Cancelled) {
             let mut g = inner.lock().expect("render queue lock");
             let mut done = job;
             done.status = QueueJobStatus::Cancelled;
@@ -283,10 +269,7 @@ fn worker_main(
             &cancel,
             move |ev| {
                 if let ExportEvent::Progress(ExportProgress {
-                    frame,
-                    total,
-                    fps,
-                    ..
+                    frame, total, fps, ..
                 }) = ev
                 {
                     if let Ok(mut g) = progress_inner.lock() {
@@ -323,10 +306,10 @@ fn worker_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photonic_core::timeline::{FrameRate, Sequence, Track, TrackKind};
     use crate::export::presets::{
         Container, FrameRatePolicy, QualityMode, ResolutionSpec, VideoCodec, VideoEncodeSpec,
     };
+    use photonic_core::timeline::{FrameRate, Sequence, Track, TrackKind};
 
     fn video_only_preset() -> ExportPreset {
         ExportPreset {

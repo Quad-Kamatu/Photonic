@@ -178,8 +178,7 @@ impl PhotonicApp {
 
         let full = ui.max_rect();
         // Sequence tabs (17 G-17) sit above the zoom/snap mini-toolbar.
-        let tabs_rect =
-            egui::Rect::from_min_size(full.min, egui::vec2(full.width(), SEQ_TABS_H));
+        let tabs_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), SEQ_TABS_H));
         {
             let mut open_tabs = std::mem::take(&mut self.open_sequence_tabs);
             let mut breadcrumbs = std::mem::take(&mut self.nested_sequence_breadcrumbs);
@@ -551,9 +550,9 @@ impl PhotonicApp {
                 );
         }
         // K-A7: context-menu "Grab item" seeds a session via egui temp data.
-        if let Some((gseq, gtrack, gclip)) =
-            ui.data(|d| d.get_temp::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_a7_grab_request")))
-        {
+        if let Some((gseq, gtrack, gclip)) = ui.data(|d| {
+            d.get_temp::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_a7_grab_request"))
+        }) {
             ui.data_mut(|d| {
                 d.remove::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_a7_grab_request"));
             });
@@ -728,7 +727,8 @@ fn paint_grab_ghost(
     lanes_rect: egui::Rect,
     rows: &[tracks::TrackRow],
 ) {
-    let Some(track_rect) = lane_rect_for_track(rows, lanes_rect, view, session.preview_track) else {
+    let Some(track_rect) = lane_rect_for_track(rows, lanes_rect, view, session.preview_track)
+    else {
         return;
     };
     // Prefer live duration if the clip still exists (speed edits mid-grab are rare).
@@ -1972,10 +1972,7 @@ fn clip_context_menu(
         // Seed via the same session type as Shift+G; parent reads this through
         // a side-channel on PhotonicApp after the menu closes.
         ui.data_mut(|d| {
-            d.insert_temp(
-                egui::Id::new("k_a7_grab_request"),
-                (seq_id, track, clip),
-            );
+            d.insert_temp(egui::Id::new("k_a7_grab_request"), (seq_id, track, clip));
         });
         ui.close_menu();
     }

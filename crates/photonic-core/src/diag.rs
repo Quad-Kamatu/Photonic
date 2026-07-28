@@ -36,9 +36,7 @@ use std::fmt;
 ///
 /// Ordered `Info < Warning < Error < Fatal`, so the derived [`Ord`] picks the
 /// worst diagnostic in a set (used by [`DiagnosticLog::worst`]).
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Severity {
     /// Informational; the operation succeeded but the user should know.
     Info,
@@ -270,19 +268,35 @@ impl DiagCode {
     pub fn family(self) -> DiagFamily {
         use DiagCode::*;
         match self {
-            MediaNotFound | MediaUnreadable | MediaUnsupportedCodec | MediaProbeFailed
-            | MediaVariableFrameRate | MediaInterlaced | MediaNonSeekable => DiagFamily::Media,
+            MediaNotFound
+            | MediaUnreadable
+            | MediaUnsupportedCodec
+            | MediaProbeFailed
+            | MediaVariableFrameRate
+            | MediaInterlaced
+            | MediaNonSeekable => DiagFamily::Media,
             DecodeSidecarCrashed | DecodeSidecarTimeout | DecodeSeekFailed | DecodeFrameDropped => {
                 DiagFamily::Decode
             }
-            CompilePortTypeMismatch | CompileGraphCycle | CompileUnknownEffect
-            | CompileEffectUnavailableAtScope | CompileParamOutOfRange
-            | CompileTimeOffsetBudgetExceeded | CompileUnsupportedBlendMode => DiagFamily::Compile,
-            RenderDeviceLost | RenderOutOfMemory | RenderTextureTooLarge
+            CompilePortTypeMismatch
+            | CompileGraphCycle
+            | CompileUnknownEffect
+            | CompileEffectUnavailableAtScope
+            | CompileParamOutOfRange
+            | CompileTimeOffsetBudgetExceeded
+            | CompileUnsupportedBlendMode => DiagFamily::Compile,
+            RenderDeviceLost
+            | RenderOutOfMemory
+            | RenderTextureTooLarge
             | RenderAdapterCapabilityMissing => DiagFamily::Render,
-            ExportEncoderUnavailable | ExportEncoderFailed | ExportDiskFull | ExportPresetInvalid
+            ExportEncoderUnavailable
+            | ExportEncoderFailed
+            | ExportDiskFull
+            | ExportPresetInvalid
             | ExportLoudnessCeilingBreached => DiagFamily::Export,
-            AudioDeviceUnavailable | AudioXrun | AudioSampleRateMismatch
+            AudioDeviceUnavailable
+            | AudioXrun
+            | AudioSampleRateMismatch
             | AudioLatencyBudgetExceeded => DiagFamily::Audio,
             ProjectVersionTooNew | ProjectMigrationFailed | ProjectValidationFailed => {
                 DiagFamily::Project
@@ -300,10 +314,12 @@ impl DiagCode {
             // Advisory: the media plays, but a property is worth surfacing.
             MediaVariableFrameRate | MediaInterlaced | MediaNonSeekable => Severity::Info,
             // Degraded but the operation continued.
-            DecodeFrameDropped | AudioXrun | CompileUnsupportedBlendMode | CompileUnknownEffect
-            | CompileTimeOffsetBudgetExceeded | CompileEffectUnavailableAtScope => {
-                Severity::Warning
-            }
+            DecodeFrameDropped
+            | AudioXrun
+            | CompileUnsupportedBlendMode
+            | CompileUnknownEffect
+            | CompileTimeOffsetBudgetExceeded
+            | CompileEffectUnavailableAtScope => Severity::Warning,
             // Unrecoverable for the session.
             RenderDeviceLost | ProjectMigrationFailed => Severity::Fatal,
             // Everything else is a plain error for its subject.
@@ -319,35 +335,63 @@ impl DiagCode {
             MediaUnreadable => "The file exists but cannot be read; the clip shows offline media.",
             MediaUnsupportedCodec => "This codec is not supported; convert the media to use it.",
             MediaProbeFailed => "The media could not be inspected; its clip may misbehave.",
-            MediaVariableFrameRate => "Variable frame rate detected; timing is conformed to a constant rate.",
-            MediaInterlaced => "Interlaced media detected; fields are handled with a default deinterlacer.",
+            MediaVariableFrameRate => {
+                "Variable frame rate detected; timing is conformed to a constant rate."
+            }
+            MediaInterlaced => {
+                "Interlaced media detected; fields are handled with a default deinterlacer."
+            }
             MediaNonSeekable => "This media cannot be seeked; scrubbing and trimming may be slow.",
             DecodeSidecarCrashed => "The decoder crashed; affected frames render as black.",
             DecodeSidecarTimeout => "The decoder timed out; affected frames render as black.",
             DecodeSeekFailed => "Seeking failed; playback resumes from the nearest keyframe.",
             DecodeFrameDropped => "A frame was dropped to keep up; the preview may stutter.",
-            CompilePortTypeMismatch => "Incompatible node connection; the graph falls back to a passthrough.",
-            CompileGraphCycle => "The graph contains a cycle; the cyclic branch renders transparent.",
+            CompilePortTypeMismatch => {
+                "Incompatible node connection; the graph falls back to a passthrough."
+            }
+            CompileGraphCycle => {
+                "The graph contains a cycle; the cyclic branch renders transparent."
+            }
             CompileUnknownEffect => "This effect is not available; the clip renders without it.",
             CompileEffectUnavailableAtScope => "This effect is not valid here; it is skipped.",
             CompileParamOutOfRange => "A parameter was out of range and was clamped.",
-            CompileTimeOffsetBudgetExceeded => "The time-offset budget was exceeded; the offset was capped.",
-            CompileUnsupportedBlendMode => "This blend mode is not supported on this path; Normal is used.",
-            RenderDeviceLost => "The GPU device was lost; the session cannot continue and must be saved.",
-            RenderOutOfMemory => "The GPU ran out of memory; try a lower resolution or fewer effects.",
+            CompileTimeOffsetBudgetExceeded => {
+                "The time-offset budget was exceeded; the offset was capped."
+            }
+            CompileUnsupportedBlendMode => {
+                "This blend mode is not supported on this path; Normal is used."
+            }
+            RenderDeviceLost => {
+                "The GPU device was lost; the session cannot continue and must be saved."
+            }
+            RenderOutOfMemory => {
+                "The GPU ran out of memory; try a lower resolution or fewer effects."
+            }
             RenderTextureTooLarge => "A texture exceeds the device limit; reduce the resolution.",
-            RenderAdapterCapabilityMissing => "The GPU lacks a required capability; this feature is disabled.",
-            ExportEncoderUnavailable => "The chosen encoder is unavailable; pick another in Export settings.",
+            RenderAdapterCapabilityMissing => {
+                "The GPU lacks a required capability; this feature is disabled."
+            }
+            ExportEncoderUnavailable => {
+                "The chosen encoder is unavailable; pick another in Export settings."
+            }
             ExportEncoderFailed => "The encoder failed; the export did not complete.",
-            ExportDiskFull => "The disk filled up; the export did not complete and no partial file remains.",
+            ExportDiskFull => {
+                "The disk filled up; the export did not complete and no partial file remains."
+            }
             ExportPresetInvalid => "The export preset is invalid; fix it in Export settings.",
-            ExportLoudnessCeilingBreached => "The mix exceeds the loudness ceiling; audio was limited.",
+            ExportLoudnessCeilingBreached => {
+                "The mix exceeds the loudness ceiling; audio was limited."
+            }
             AudioDeviceUnavailable => "No audio device is available; playback is silent.",
             AudioXrun => "An audio buffer under-ran; you may hear a brief glitch.",
             AudioSampleRateMismatch => "The device sample rate differs; audio is resampled.",
             AudioLatencyBudgetExceeded => "Audio latency exceeded its budget; sync may drift.",
-            ProjectVersionTooNew => "This project was saved by a newer version; open it there or upgrade.",
-            ProjectMigrationFailed => "The project could not be migrated and cannot be opened safely.",
+            ProjectVersionTooNew => {
+                "This project was saved by a newer version; open it there or upgrade."
+            }
+            ProjectMigrationFailed => {
+                "The project could not be migrated and cannot be opened safely."
+            }
             ProjectValidationFailed => "The project failed validation; some data may be ignored.",
             SecurityPathNotPermitted => "That path is outside the permitted roots and was refused.",
             SecurityUnauthenticated => "The request was not authenticated and was refused.",
@@ -361,18 +405,19 @@ impl DiagCode {
         Some(match self {
             MediaNotFound | MediaUnreadable => RemedyKind::Relink,
             MediaUnsupportedCodec | MediaNonSeekable | MediaProbeFailed => RemedyKind::ConvertMedia,
-            DecodeSidecarCrashed | DecodeSidecarTimeout | DecodeSeekFailed | ExportEncoderFailed
-            | RenderDeviceLost => RemedyKind::Retry,
+            DecodeSidecarCrashed | DecodeSidecarTimeout | DecodeSeekFailed
+            | ExportEncoderFailed | RenderDeviceLost => RemedyKind::Retry,
             RenderOutOfMemory | RenderTextureTooLarge | RenderAdapterCapabilityMissing => {
                 RemedyKind::OpenSettings(SettingsPage::Gpu)
             }
             ExportEncoderUnavailable | ExportPresetInvalid => {
                 RemedyKind::OpenSettings(SettingsPage::Export)
             }
-            ExportLoudnessCeilingBreached | AudioDeviceUnavailable | AudioXrun
-            | AudioSampleRateMismatch | AudioLatencyBudgetExceeded => {
-                RemedyKind::OpenSettings(SettingsPage::Audio)
-            }
+            ExportLoudnessCeilingBreached
+            | AudioDeviceUnavailable
+            | AudioXrun
+            | AudioSampleRateMismatch
+            | AudioLatencyBudgetExceeded => RemedyKind::OpenSettings(SettingsPage::Audio),
             SecurityPathNotPermitted => RemedyKind::OpenSettings(SettingsPage::Media),
             // No automated remedy: informational codes, compile fallbacks the
             // user cannot act on directly, disk-full, and project/auth faults.

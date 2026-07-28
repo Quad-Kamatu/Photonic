@@ -56,10 +56,9 @@ pub fn render_export_audio(
         return Ok(Vec::new());
     }
 
-    let block_ticks = Tick(
-        ((BLOCK_FRAMES as i128 * TICKS_PER_SECOND as i128) / sample_rate as i128) as i64,
-    )
-    .max(Tick(1));
+    let block_ticks =
+        Tick(((BLOCK_FRAMES as i128 * TICKS_PER_SECOND as i128) / sample_rate as i128) as i64)
+            .max(Tick(1));
 
     let mut out_pcm = Vec::with_capacity(total_frames * CHANNELS);
     let mut block = vec![0f32; BLOCK_FRAMES * CHANNELS];
@@ -202,9 +201,7 @@ fn apply_loudness_gain(pcm: &mut [f32], sample_rate: u32, target: &LoudnessTarge
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photonic_core::timeline::{
-        FrameRate, MasterBus, Sequence, Track, TrackAudio, TrackKind,
-    };
+    use photonic_core::timeline::{FrameRate, MasterBus, Sequence, Track, TrackAudio, TrackKind};
 
     fn empty_audio_seq() -> (TimelineProject, SequenceId) {
         let mut project = TimelineProject::new();

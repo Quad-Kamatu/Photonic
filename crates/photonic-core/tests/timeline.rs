@@ -143,7 +143,10 @@ fn assert_batch_undo_roundtrip(doc: &Document, cmds: &[TimelineCmd]) {
             .expect("every implemented variant has an inverse");
         Command::Timeline(inv).apply(&mut d2);
     }
-    assert_eq!(d2.timeline, before, "batch inverse did not restore original");
+    assert_eq!(
+        d2.timeline, before,
+        "batch inverse did not restore original"
+    );
 
     let mut d3 = d2.clone();
     for cmd in cmds {
@@ -1315,7 +1318,7 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::SetAssetProxy { .. } => {}
         TimelineCmd::SetAssetMeta { .. } => {}
         TimelineCmd::SetAssetRating { .. } => {} // K-C2
-        TimelineCmd::SetAssetTags { .. } => {} // K-C2
+        TimelineCmd::SetAssetTags { .. } => {}   // K-C2
         TimelineCmd::SetGenerateProxiesOnImport { .. } => {}
         // Sequences / formats / tracks.
         TimelineCmd::AddSequence { .. } => {}

@@ -105,7 +105,11 @@ mod tests {
 
     #[test]
     fn badge_text_leads_with_code_then_message() {
-        let d = diag(DiagCode::ExportEncoderFailed, Severity::Error, "x264 exited 1");
+        let d = diag(
+            DiagCode::ExportEncoderFailed,
+            Severity::Error,
+            "x264 exited 1",
+        );
         let b = diag_badge(&d);
         assert_eq!(b.text, "ExportEncoderFailed — x264 exited 1");
     }

@@ -702,7 +702,8 @@ impl Mixer {
                     if let Some(fx) = self.track_fx.get_mut(&t) {
                         fx.reset_from(from_index, AudioDiscontinuity::GraphChanged);
                     }
-                    self.master_fx.reset_from(0, AudioDiscontinuity::GraphChanged);
+                    self.master_fx
+                        .reset_from(0, AudioDiscontinuity::GraphChanged);
                 }
                 None => self
                     .master_fx
@@ -836,7 +837,8 @@ impl Mixer {
             }
         }
         if let Some(i) = self.master_fx.sync(&master.fx_chain) {
-            self.master_fx.reset_from(i, AudioDiscontinuity::GraphChanged);
+            self.master_fx
+                .reset_from(i, AudioDiscontinuity::GraphChanged);
         }
         // Pre-pass sizes delay lines for the current chain shape. Units that
         // report 0 until first process (limiter lookahead) get 0 compensation
@@ -962,7 +964,8 @@ impl Mixer {
         // ── 31 §8 step 2: master fx chain. Already synced above; apply any
         //    wholesale reset a track graph change forced, then process. ──
         if master_needs_reset {
-            self.master_fx.reset_from(0, AudioDiscontinuity::GraphChanged);
+            self.master_fx
+                .reset_from(0, AudioDiscontinuity::GraphChanged);
         }
         self.master_fx
             .set_block_params(&master.fx_chain, block_start_tick);
@@ -1504,7 +1507,10 @@ mod tests {
             clips: vec![silent_clip_voice(&clip_audio, &mut src2)],
         }];
         mixer.render_block(Tick(0), &mut tracks2, &master, &mut out);
-        assert_eq!(mixer.track_fx[&id].rebuild_count, 2, "chain change -> rebuild");
+        assert_eq!(
+            mixer.track_fx[&id].rebuild_count, 2,
+            "chain change -> rebuild"
+        );
         assert_eq!(mixer.track_fx[&id].units.len(), 2);
     }
 
@@ -1573,10 +1579,7 @@ mod tests {
 
     // ── 31 §8 step 4: segment-boundary tail plumbing ────────────────────
 
-    fn ending_clip_voice<'a>(
-        audio: &'a ClipAudio,
-        source: &'a mut dyn PcmSource,
-    ) -> ClipVoice<'a> {
+    fn ending_clip_voice<'a>(audio: &'a ClipAudio, source: &'a mut dyn PcmSource) -> ClipVoice<'a> {
         let tick_per_sample = TICKS_PER_SECOND / SR as i64;
         ClipVoice {
             audio,

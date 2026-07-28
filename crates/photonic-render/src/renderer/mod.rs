@@ -2,12 +2,12 @@ use crate::{
     canvas::CanvasView,
     headless::ExportBackground,
     pipeline::{
-        blend_mode_index, coalesce_segments, create_blur_bgl, create_blur_pipeline,
-        create_blit_bgl, create_blit_pipeline, create_blur_pipeline_with_blend,
+        blend_mode_index, coalesce_segments, create_blit_bgl, create_blit_pipeline,
+        create_blur_bgl, create_blur_pipeline, create_blur_pipeline_with_blend,
         create_camera_bind_group_layout, create_composite_bgl, create_composite_pipeline,
-        create_fill_pipeline, create_fill_pipeline_with_blend,
-        draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform,
-        CompositeParams, DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
+        create_fill_pipeline, create_fill_pipeline_with_blend, draw_segments,
+        separable_blend_state, BlurBlend, BlurParams, CameraUniform, CompositeParams, DrawSegment,
+        Vertex, SEPARABLE_BLEND_MODES,
     },
     tessellator::tessellate_fill,
 };
@@ -629,8 +629,7 @@ impl PhotonicRenderer {
         // and the canvas matches the headless export path by construction.
         let scene_format = crate::pipeline::SCENE_FORMAT;
 
-        let fill_pipeline =
-            create_fill_pipeline(&device, scene_format, &camera_bgl, MSAA_SAMPLES);
+        let fill_pipeline = create_fill_pipeline(&device, scene_format, &camera_bgl, MSAA_SAMPLES);
         // One pipeline variant per separable blend mode, sharing the fill shader.
         let blend_pipelines: Vec<(BlendMode, wgpu::RenderPipeline)> = SEPARABLE_BLEND_MODES
             .iter()

@@ -154,11 +154,7 @@ mod tests {
             panic!("expected histogram");
         };
         assert_eq!(samples, 16);
-        let non_zero: Vec<_> = bins
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| **c > 0)
-            .collect();
+        let non_zero: Vec<_> = bins.iter().enumerate().filter(|(_, c)| **c > 0).collect();
         assert_eq!(non_zero.len(), 1);
         assert_eq!(*non_zero[0].1, 16);
     }
@@ -195,7 +191,12 @@ mod tests {
                 a: 1.0,
             },
         );
-        let AnalysisResult::Levels { mean, peak, samples } = analyze_levels(&img) else {
+        let AnalysisResult::Levels {
+            mean,
+            peak,
+            samples,
+        } = analyze_levels(&img)
+        else {
             panic!("expected levels");
         };
         assert_eq!(samples, 4);

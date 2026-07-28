@@ -195,9 +195,16 @@ mod tests {
     fn scriptio_continua_distributes_one_word_per_cluster() {
         // こんにちは — 5 hiragana clusters, one CaptionWord each, chronological,
         // last closes exactly at `end`.
-        let words = distribute_caption_words("\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}", Tick(0), Tick(500));
+        let words = distribute_caption_words(
+            "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}",
+            Tick(0),
+            Tick(500),
+        );
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(texts, vec!["\u{3053}", "\u{3093}", "\u{306B}", "\u{3061}", "\u{306F}"]);
+        assert_eq!(
+            texts,
+            vec!["\u{3053}", "\u{3093}", "\u{306B}", "\u{3061}", "\u{306F}"]
+        );
         assert_eq!(words[0].start, Tick(0));
         for pair in words.windows(2) {
             assert!(pair[0].end <= pair[1].start);
@@ -209,7 +216,8 @@ mod tests {
     fn mixed_latin_and_cjk_weights_by_cell_width() {
         // "Photonic は速い": tokens Photonic(8 cells), は(2), 速(2), い(2) = 14.
         // Over a 1400-tick span each cell is 100 ticks: Photonic ~800, 速 ~200.
-        let words = distribute_caption_words("Photonic \u{306F}\u{901F}\u{3044}", Tick(0), Tick(1400));
+        let words =
+            distribute_caption_words("Photonic \u{306F}\u{901F}\u{3044}", Tick(0), Tick(1400));
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(texts, vec!["Photonic", "\u{306F}", "\u{901F}", "\u{3044}"]);
         // Photonic (8/14 of 1400) = 800 ticks.
@@ -232,16 +240,18 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "\u{0E40}",           // เ
-                "\u{0E01}\u{0E34}",   // กิ (base + sara-i)
-                "\u{0E14}",           // ด
-                "\u{0E43}",           // ใ
-                "\u{0E2B}",           // ห
-                "\u{0E21}\u{0E48}",   // ม่ (base + mai-ek)
+                "\u{0E40}",         // เ
+                "\u{0E01}\u{0E34}", // กิ (base + sara-i)
+                "\u{0E14}",         // ด
+                "\u{0E43}",         // ใ
+                "\u{0E2B}",         // ห
+                "\u{0E21}\u{0E48}", // ม่ (base + mai-ek)
             ]
         );
         // No token is a lone combining mark.
-        assert!(words.iter().all(|w| w.text != "\u{0E34}" && w.text != "\u{0E48}"));
+        assert!(words
+            .iter()
+            .all(|w| w.text != "\u{0E34}" && w.text != "\u{0E48}"));
         assert_eq!(words.last().unwrap().end, Tick(600));
     }
 
@@ -251,7 +261,8 @@ mod tests {
         // ride with its word, not be dropped — these tokens ARE the caption
         // text, so a dropped stop would strip punctuation from every cue and
         // break sentence-break detection. (Regression for the tokenizer.)
-        let words = distribute_caption_words("Hello there. A test transcript.", Tick(0), Tick(1000));
+        let words =
+            distribute_caption_words("Hello there. A test transcript.", Tick(0), Tick(1000));
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(texts, vec!["Hello", "there.", "A", "test", "transcript."]);
         assert_eq!(words.last().unwrap().end, Tick(1000));

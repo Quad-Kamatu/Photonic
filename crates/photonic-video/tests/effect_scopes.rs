@@ -15,8 +15,8 @@
 //! `1 − rgb`), so "did this scope run?" reduces to "did the pixel move?".
 
 use photonic_core::timeline::{
-    Clip, ClipEffect, ClipSource, EffectKind, FrameRate, Sequence, SequenceId, TimelineProject,
-    Tick, Track, TrackKind,
+    Clip, ClipEffect, ClipSource, EffectKind, FrameRate, Sequence, SequenceId, Tick,
+    TimelineProject, Track, TrackKind,
 };
 use photonic_core::Color;
 use photonic_video::graph::eval_cpu::{evaluate, EmptyProvider};
@@ -39,8 +39,11 @@ fn render(decorate: impl FnOnce(&mut Sequence)) -> Image {
     let mut seq = Sequence::new("scope", FrameRate::FPS_30, W, H);
     let seq_id: SequenceId = seq.id;
     let mut v1 = Track::new(TrackKind::Video, "V1");
-    v1.clips
-        .push(Clip::new(ClipSource::SolidColor { color: RED }, Tick(0), Tick(1000)));
+    v1.clips.push(Clip::new(
+        ClipSource::SolidColor { color: RED },
+        Tick(0),
+        Tick(1000),
+    ));
     seq.video_tracks.push(v1);
     decorate(&mut seq);
     project.insert_sequence(seq);

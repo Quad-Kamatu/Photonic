@@ -200,8 +200,7 @@ pub(crate) fn export_view_model(
             cancel_enabled: false,
         },
         Some(s) => {
-            let percent =
-                (s.total > 0).then(|| (s.frame as f32 / s.total as f32).clamp(0.0, 1.0));
+            let percent = (s.total > 0).then(|| (s.frame as f32 / s.total as f32).clamp(0.0, 1.0));
             let label = if cancel_requested {
                 "Cancelling…"
             } else if s.total == 0 {
@@ -432,7 +431,10 @@ pub(crate) fn draw_export_dialog(
                         // progress view doesn't flash a stale "complete" before
                         // the engine publishes this job's first snapshot.
                         ctx.data_mut(|d| {
-                            d.insert_temp(export_status_id(), Option::<ExportProgressSnapshot>::None)
+                            d.insert_temp(
+                                export_status_id(),
+                                Option::<ExportProgressSnapshot>::None,
+                            )
                         });
                         launch = jobs;
                     }
@@ -537,7 +539,9 @@ fn draw_progress(ui: &mut egui::Ui, state: &mut DialogState) {
                 .show(ui, |ui| {
                     ui.colored_label(
                         ERROR,
-                        view.error.as_deref().unwrap_or("The export did not complete."),
+                        view.error
+                            .as_deref()
+                            .unwrap_or("The export did not complete."),
                     );
                 });
         }
@@ -1140,7 +1144,11 @@ fn draw_job_options(ui: &mut egui::Ui, state: &mut DialogState) {
                 };
             }
         });
-        ui.label(RichText::new("Raw encoder args (key=value …)").small().color(MUTED));
+        ui.label(
+            RichText::new("Raw encoder args (key=value …)")
+                .small()
+                .color(MUTED),
+        );
         ui.add(
             egui::TextEdit::singleline(&mut state.raw_encoder_args)
                 .hint_text("x265-params keyint=60 …")
@@ -1251,10 +1259,7 @@ fn default_output_path_tagged(preset: &ExportPreset, base: &str) -> std::path::P
         Container::ImageSequence => "%05d.png",
         Container::Apng => "apng.png",
     };
-    std::env::temp_dir().join(format!(
-        "{base}_{}.{ext}",
-        preset.name.replace(' ', "_")
-    ))
+    std::env::temp_dir().join(format!("{base}_{}.{ext}", preset.name.replace(' ', "_")))
 }
 
 fn default_output_path(preset: &ExportPreset, seq_name: &str) -> std::path::PathBuf {
@@ -1297,15 +1302,12 @@ mod tests {
     fn build_export_jobs_emits_one_per_checked_format() {
         let mut doc = Document::new("t", 100.0, 100.0);
         let mut project = photonic_core::timeline::TimelineProject::new();
-        let mut seq = photonic_core::timeline::Sequence::new(
-            "Seq",
-            FrameRate::FPS_30,
-            1920,
-            1080,
-        );
+        let mut seq = photonic_core::timeline::Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
         // Second format so multi-format has something to expand.
         seq.formats
-            .push(photonic_core::timeline::SequenceFormat::new("9:16", 1080, 1920));
+            .push(photonic_core::timeline::SequenceFormat::new(
+                "9:16", 1080, 1920,
+            ));
         let seq_id = seq.id;
         project.insert_sequence(seq);
         doc.timeline = Some(project);
@@ -1324,12 +1326,7 @@ mod tests {
         use photonic_core::timeline::Marker;
         let mut doc = Document::new("t", 100.0, 100.0);
         let mut project = photonic_core::timeline::TimelineProject::new();
-        let mut seq = photonic_core::timeline::Sequence::new(
-            "Seq",
-            FrameRate::FPS_30,
-            640,
-            360,
-        );
+        let mut seq = photonic_core::timeline::Sequence::new("Seq", FrameRate::FPS_30, 640, 360);
         let mut m1 = Marker::new(Tick(0), "Intro");
         m1.duration = Tick(TICKS_PER_SECOND as i64);
         let mut m2 = Marker::new(Tick(TICKS_PER_SECOND as i64 * 2), "Outro");

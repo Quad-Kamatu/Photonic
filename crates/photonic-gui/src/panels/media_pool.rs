@@ -757,10 +757,8 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             // Surface via the same status path as imports.
             // PropPanelCtx may not have set_import_status — use action-less toast via selection of label.
             ui.memory_mut(|m| {
-                m.data.insert_temp(
-                    egui::Id::new("media_cache_report"),
-                    lines.join("\n"),
-                );
+                m.data
+                    .insert_temp(egui::Id::new("media_cache_report"), lines.join("\n"));
             });
         }
     });
@@ -772,8 +770,7 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             ui.monospace(&report);
             if ui.button("Dismiss").clicked() {
                 ui.memory_mut(|m| {
-                    m.data
-                        .remove::<String>(egui::Id::new("media_cache_report"));
+                    m.data.remove::<String>(egui::Id::new("media_cache_report"));
                 });
             }
         });
@@ -1218,7 +1215,7 @@ mod tests {
     #[test]
     fn usage_count_counts_clip_refs() {
         use photonic_core::timeline::{
-            Clip, ClipSource, FrameRate, Sequence, TimelineProject, Track, TrackKind, Tick,
+            Clip, ClipSource, FrameRate, Sequence, Tick, TimelineProject, Track, TrackKind,
         };
         let mut project = TimelineProject::new();
         let id = AssetId::new();

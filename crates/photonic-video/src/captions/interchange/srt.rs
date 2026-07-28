@@ -142,8 +142,7 @@ mod tests {
         // A CJK cue is distributed one CaptionWord per grapheme cluster
         // (42 §6.5), but re-joining it for export must not fabricate spaces
         // between clusters — a space would be baked into the exported subtitle.
-        let input =
-            "1\n00:00:01,000 --> 00:00:03,000\n\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\n"; // こんにちは
+        let input = "1\n00:00:01,000 --> 00:00:03,000\n\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\n"; // こんにちは
         let (cues, _) = parse_srt(input).unwrap();
         assert_eq!(cues.len(), 1);
         assert!(cues[0].words.len() > 1, "CJK cue distributes per cluster");

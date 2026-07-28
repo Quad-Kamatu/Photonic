@@ -494,8 +494,8 @@ impl Sequence {
                 let direct = self.direct_group_members(node.id).len();
                 let children = self.child_groups(node.id).len();
                 let empty = direct == 0 && children == 0;
-                let singleton = node.kind == GroupKind::Normal
-                    && self.group_members(node.id).len() == 1;
+                let singleton =
+                    node.kind == GroupKind::Normal && self.group_members(node.id).len() == 1;
                 if empty || singleton {
                     Some(node.id)
                 } else {
@@ -534,22 +534,39 @@ impl Sequence {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     NoFormats(SequenceId),
-    NonPositiveDuration { track: TrackId, clip_start: Tick },
-    OverlapOrUnsorted { track: TrackId, at: Tick },
+    NonPositiveDuration {
+        track: TrackId,
+        clip_start: Tick,
+    },
+    OverlapOrUnsorted {
+        track: TrackId,
+        at: Tick,
+    },
     /// A group's parent chain does not terminate (35 §3).
-    GroupCycle { group: GroupId },
+    GroupCycle {
+        group: GroupId,
+    },
     /// A `Clip.group` or `GroupNode.parent` names a group absent from the
     /// sequence (35 §3).
-    UnknownGroup { group: GroupId },
+    UnknownGroup {
+        group: GroupId,
+    },
     /// A group with zero direct clip members and zero child groups (35 §3).
-    EmptyGroup { group: GroupId },
+    EmptyGroup {
+        group: GroupId,
+    },
     /// A `GroupKind::Normal` group with exactly one transitive member (35 §3).
-    SingletonNormalGroup { group: GroupId },
+    SingletonNormalGroup {
+        group: GroupId,
+    },
     /// A clip carries a `transition_out` while its outgoing edge is a hard cut —
     /// the next clip on the track is adjacent, no gap (01 §5). At a cut the
     /// incoming clip's `transition_in` owns the blend, so an outgoing fade is
     /// invalid. `clip_start` names the offending clip's timeline start.
-    TransitionOutAtCut { track: TrackId, clip_start: Tick },
+    TransitionOutAtCut {
+        track: TrackId,
+        clip_start: Tick,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -985,8 +1002,7 @@ mod tests {
         // [0,100) then an adjacent [100,50) — a hard cut. The first clip's
         // transition_out has no gap to fade into, so it must be rejected.
         let mut t = vid_track_with(vec![(0, 100), (100, 50)]);
-        t.clips[0].transition_out =
-            Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        t.clips[0].transition_out = Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
         let s = seq_with(t);
         assert!(matches!(
             s.validate(),
@@ -1000,8 +1016,7 @@ mod tests {
         // [0,100) then [150,50) — a 50-tick gap after the first clip, so its
         // transition_out fades into the gap and is valid.
         let mut t = vid_track_with(vec![(0, 100), (150, 50)]);
-        t.clips[0].transition_out =
-            Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        t.clips[0].transition_out = Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
         let s = seq_with(t);
         assert!(s.validate().is_ok());
     }
@@ -1011,8 +1026,7 @@ mod tests {
         use super::super::clip::{Transition, TransitionKind};
         // The only (hence last) clip fades into the end of the timeline — valid.
         let mut t = vid_track_with(vec![(0, 100)]);
-        t.clips[0].transition_out =
-            Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
+        t.clips[0].transition_out = Some(Transition::new(TransitionKind::CrossDissolve, Tick(10)));
         let s = seq_with(t);
         assert!(s.validate().is_ok());
     }
@@ -1179,7 +1193,10 @@ mod tests {
         assert_eq!(m.anchor, MarkerAnchor::Timecode);
         assert_eq!(m.category, None);
         // A clip-scoped marker is Content-anchored (§1.5).
-        assert_eq!(Marker::clip_scoped(Tick(0), "c").anchor, MarkerAnchor::Content);
+        assert_eq!(
+            Marker::clip_scoped(Tick(0), "c").anchor,
+            MarkerAnchor::Content
+        );
     }
 
     #[test]
@@ -1209,8 +1226,7 @@ mod tests {
         // A v5 file written by a later build may carry an anchor token this
         // build does not know; it must load as the inert `Unknown` arm, never
         // error (39 §2.2).
-        let json =
-            r#"{"id":"00000000-0000-0000-0000-000000000001","at":0,"name":"x","anchor":"content_relative_future"}"#;
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","at":0,"name":"x","anchor":"content_relative_future"}"#;
         let m: Marker = serde_json::from_str(json).unwrap();
         assert_eq!(m.anchor, MarkerAnchor::Unknown);
     }

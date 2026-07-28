@@ -6,8 +6,8 @@
 
 use photonic_core::timeline::{EffectParams, PropValue};
 
-use super::AudioDiscontinuity;
 use super::biquad::{BiquadCoeffs, BiquadState};
+use super::AudioDiscontinuity;
 use super::DspUnit;
 use crate::audio::CHANNELS;
 

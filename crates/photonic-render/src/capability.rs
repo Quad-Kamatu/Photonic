@@ -42,9 +42,9 @@ impl CapabilityRequirement {
             Self::Rgba16FloatFilterableRenderTarget => {
                 "GPU cannot use Rgba16Float as a filterable render target".to_string()
             }
-            Self::MaxTextureDimension2d { required } => format!(
-                "GPU max 2D texture dimension is below the required {required}"
-            ),
+            Self::MaxTextureDimension2d { required } => {
+                format!("GPU max 2D texture dimension is below the required {required}")
+            }
             Self::ComputeAndStorageTextures => {
                 "GPU lacks compute shaders with storage textures".to_string()
             }
@@ -105,11 +105,12 @@ pub fn floor_from_parts(
 ) -> CapabilityReport {
     let mut missing = Vec::new();
 
-    let rgba16_ok = rgba16.allowed_usages.contains(
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-    ) && rgba16
-        .flags
-        .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+    let rgba16_ok = rgba16
+        .allowed_usages
+        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+        && rgba16
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
     if !rgba16_ok {
         missing.push(CapabilityRequirement::Rgba16FloatFilterableRenderTarget);
     }

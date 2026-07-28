@@ -21,8 +21,8 @@ use photonic_core::timeline::scale::{
     TARGET_TRACKS_PER_SEQUENCE,
 };
 use photonic_core::timeline::{
-    AssetKind, Clip, ClipSource, FrameRate, MediaAsset, Sequence, SequenceId, Tick, TimelineProject,
-    Track, TrackKind, TICKS_PER_SECOND,
+    AssetKind, Clip, ClipSource, FrameRate, MediaAsset, Sequence, SequenceId, Tick,
+    TimelineProject, Track, TrackKind, TICKS_PER_SECOND,
 };
 use photonic_core::Color;
 use photonic_video::graph::compile::{compile, Quality};

@@ -424,8 +424,8 @@ fn ui_effects_browser_applies_manifest_to_clip() {
         );
         let effect = ClipEffect::from_manifest(id.clone()).expect("from_manifest");
         let project = doc.timeline.as_ref().unwrap();
-        let cmd = ops::add_effect(project, seq_id, track_id, clip_id, effect, None)
-            .expect("add_effect");
+        let cmd =
+            ops::add_effect(project, seq_id, track_id, clip_id, effect, None).expect("add_effect");
         history.execute_discrete(Command::Timeline(cmd), &mut doc);
     }
 
@@ -480,10 +480,7 @@ fn ui_sequence_tabs_create_and_duplicate() {
     assert_eq!(open_tabs.len(), 2);
     let second = *open_tabs.last().unwrap();
     assert_ne!(second, main_id);
-    assert_eq!(
-        doc.timeline.as_ref().unwrap().active_sequence,
-        Some(second)
-    );
+    assert_eq!(doc.timeline.as_ref().unwrap().active_sequence, Some(second));
     assert_eq!(doc.timeline.as_ref().unwrap().sequences.len(), 2);
 
     ops_bridge::duplicate_sequence_tab(&mut doc, &mut history, main_id, &mut open_tabs);

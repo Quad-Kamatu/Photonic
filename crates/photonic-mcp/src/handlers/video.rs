@@ -2156,8 +2156,7 @@ pub async fn list_effect_kinds(_state: &AppState, _args: ListEffectKindsArgs) ->
             })
         })
         .collect();
-    ToolResult::text(format!("{} effect(s)", out.len()))
-        .with_data(json!({ "effect_kinds": out }))
+    ToolResult::text(format!("{} effect(s)", out.len())).with_data(json!({ "effect_kinds": out }))
 }
 
 // ─── Keyframes (10 §3.7) ─────────────────────────────────────────────────────
@@ -4028,11 +4027,10 @@ pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> Tool
         range,
         options: Default::default(),
     };
-    let resolved =
-        match photonic_video::export::job::resolve_export_job(&project, &job) {
-            Ok(r) => r,
-            Err(e) => return err_code("ExportResolveFailed", e.to_string()),
-        };
+    let resolved = match photonic_video::export::job::resolve_export_job(&project, &job) {
+        Ok(r) => r,
+        Err(e) => return err_code("ExportResolveFailed", e.to_string()),
+    };
     let out_path = job.output.clone();
     let (out_w, out_h) = resolved.out_size;
     let total_frames = resolved.total_frames;
@@ -7556,7 +7554,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(r.is_error, Some(true), "unknown path must be refused: {r:?}");
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "unknown path must be refused: {r:?}"
+        );
     }
 
     #[tokio::test]
@@ -7574,7 +7576,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(r.is_error, Some(true), "out-of-range must be refused: {r:?}");
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "out-of-range must be refused: {r:?}"
+        );
     }
 
     #[tokio::test]
@@ -7591,7 +7597,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(r.is_error, Some(true), "kind mismatch must be refused: {r:?}");
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "kind mismatch must be refused: {r:?}"
+        );
     }
 
     #[tokio::test]

@@ -55,7 +55,9 @@ fn is_comment(line: &str) -> bool {
 }
 
 fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -102,7 +104,11 @@ fn keyboard_handling_is_not_gated_on_pointer_or_global_focus() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rs_files(&root, &mut files);
-    assert!(!files.is_empty(), "no sources found under {}", root.display());
+    assert!(
+        !files.is_empty(),
+        "no sources found under {}",
+        root.display()
+    );
 
     let mut violations = Vec::new();
     for path in &files {
@@ -134,7 +140,11 @@ fn lint_catches_helper_indirection() {
         let captured = keyboard_captured(ui);\n\
         let d_pressed = !captured && ui.input(|i| i.key_pressed(egui::Key::D));\n";
     let hits = scan_source(fixture);
-    assert_eq!(hits.len(), 1, "expected exactly one violation, got {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one violation, got {hits:?}"
+    );
     assert_eq!(hits[0].1, "keyboard_captured(");
 }
 

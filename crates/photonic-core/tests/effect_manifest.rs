@@ -9,7 +9,7 @@
 
 use photonic_core::timeline::{
     Clip, ClipEffect, ClipSource, EffectId, EffectKind, EffectParams, FrameRate, PropValue,
-    Sequence, TimelineProject, Tick, Track, TrackKind, UnknownTag,
+    Sequence, Tick, TimelineProject, Track, TrackKind, UnknownTag,
 };
 use photonic_core::Document;
 use serde_json::Value;
@@ -41,7 +41,15 @@ fn doc_with_effect(effect: ClipEffect) -> Document {
 
 /// The single effect of a loaded one-clip document.
 fn only_effect(doc: &Document) -> &ClipEffect {
-    &doc.timeline.as_ref().unwrap().sequences.values().next().unwrap().video_tracks[0].clips[0]
+    &doc.timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .values()
+        .next()
+        .unwrap()
+        .video_tracks[0]
+        .clips[0]
         .effects[0]
 }
 
@@ -55,10 +63,17 @@ fn clip_effect_v4_json_loads_and_backfills_id() {
     // The v4 wire shape carries no id/version (both skipped at their sentinels).
     let json = doc.to_json().unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
-    let fx = &v["timeline"]["sequences"].as_object().unwrap().values().next().unwrap()
-        ["video_tracks"][0]["clips"][0]["effects"][0];
+    let fx = &v["timeline"]["sequences"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()["video_tracks"][0]["clips"][0]["effects"][0];
     assert!(fx.get("id").is_none(), "v4 shape must not carry an id");
-    assert!(fx.get("version").is_none(), "v4 shape must not carry a version");
+    assert!(
+        fx.get("version").is_none(),
+        "v4 shape must not carry a version"
+    );
 
     // Loading backfills id and version from the legacy kind.
     let loaded = Document::from_json(&json).expect("v4 effect loads");
@@ -88,8 +103,15 @@ fn unknown_effect_id_loads_inert_and_params_preserved() {
 
     assert!(fx.inert, "an unknown-manifest effect must load inert");
     assert!(!fx.enabled, "an inert effect is disabled");
-    assert_eq!(fx.id.as_str(), "future.thing", "the unknown id is preserved");
-    assert_eq!(fx.params.base, params_before, "params must be left untouched");
+    assert_eq!(
+        fx.id.as_str(),
+        "future.thing",
+        "the unknown id is preserved"
+    );
+    assert_eq!(
+        fx.params.base, params_before,
+        "params must be left untouched"
+    );
 }
 
 /// The idempotence half of §2.6: once loaded inert, re-serializing and reloading
@@ -109,7 +131,10 @@ fn unknown_effect_id_reserializes_unchanged() {
     let y = Document::from_json(&x).unwrap().to_json().unwrap();
     let vx: Value = serde_json::from_str(&x).unwrap();
     let vy: Value = serde_json::from_str(&y).unwrap();
-    assert_eq!(vy, vx, "loading an inert effect and re-saving must be byte-identical");
+    assert_eq!(
+        vy, vx,
+        "loading an inert effect and re-saving must be byte-identical"
+    );
 }
 
 /// A newer build may author an explicit id for one of the seven known effects;

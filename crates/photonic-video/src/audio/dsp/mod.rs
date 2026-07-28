@@ -435,7 +435,10 @@ mod factory_tests {
             fx.process(48_000, &mut block, None);
             let lat = fx.latency_samples();
             if k == AudioFxKind::Limiter {
-                assert!(lat > 0, "limiter should report lookahead latency, got {lat}");
+                assert!(
+                    lat > 0,
+                    "limiter should report lookahead latency, got {lat}"
+                );
             } else {
                 assert_eq!(lat, 0, "{k:?} should report zero latency, got {lat}");
             }

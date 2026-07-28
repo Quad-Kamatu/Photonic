@@ -363,10 +363,18 @@ const LEVELS_PARAMS: &[ParamSpec] = &[
     pf("params.out_black", Some((0.0, 1.0)), UiHint::Slider),
     pf_def("params.out_white", 1.0, Some((0.0, 1.0)), UiHint::Slider),
 ];
-const POSTERIZE_PARAMS: &[ParamSpec] =
-    &[pf_def("params.levels", 4.0, Some((2.0, 255.0)), UiHint::Slider)];
-const THRESHOLD_PARAMS: &[ParamSpec] =
-    &[pf_def("params.level", 0.5, Some((0.0, 1.0)), UiHint::Slider)];
+const POSTERIZE_PARAMS: &[ParamSpec] = &[pf_def(
+    "params.levels",
+    4.0,
+    Some((2.0, 255.0)),
+    UiHint::Slider,
+)];
+const THRESHOLD_PARAMS: &[ParamSpec] = &[pf_def(
+    "params.level",
+    0.5,
+    Some((0.0, 1.0)),
+    UiHint::Slider,
+)];
 const HUE_SAT_PARAMS: &[ParamSpec] = &[
     pf("params.hue", Some((-180.0, 180.0)), UiHint::Angle),
     pf("params.saturation", Some((-1.0, 1.0)), UiHint::Slider),
@@ -389,8 +397,12 @@ const BW_PARAMS: &[ParamSpec] = &[
     pf_def("params.wg", 0.587, Some((0.0, 1.0)), UiHint::Slider),
     pf_def("params.wb", 0.114, Some((0.0, 1.0)), UiHint::Slider),
 ];
-const MOSAIC_PARAMS: &[ParamSpec] =
-    &[pf_def("params.block", 8.0, Some((1.0, 256.0)), UiHint::Slider)];
+const MOSAIC_PARAMS: &[ParamSpec] = &[pf_def(
+    "params.block",
+    8.0,
+    Some((1.0, 256.0)),
+    UiHint::Slider,
+)];
 const GRAIN_PARAMS: &[ParamSpec] = &[
     pf_def("params.amount", 0.1, Some((0.0, 1.0)), UiHint::Slider),
     pf_def("params.monochrome", 1.0, Some((0.0, 1.0)), UiHint::Slider),
@@ -400,8 +412,12 @@ const VIGNETTE_PARAMS: &[ParamSpec] = &[
     pf_def("params.amount", -0.5, Some((-1.0, 1.0)), UiHint::Slider),
     pf_def("params.feather", 0.5, Some((0.0, 1.0)), UiHint::Slider),
 ];
-const CA_PARAMS: &[ParamSpec] =
-    &[pf_def("params.amount", 2.0, Some((-64.0, 64.0)), UiHint::Slider)];
+const CA_PARAMS: &[ParamSpec] = &[pf_def(
+    "params.amount",
+    2.0,
+    Some((-64.0, 64.0)),
+    UiHint::Slider,
+)];
 const CLARITY_PARAMS: &[ParamSpec] = &[pf("params.amount", Some((-1.0, 1.0)), UiHint::Slider)];
 /// Multi-point RGB curve: up to 5 knots (x,y in 0..1) plus optional contrast
 /// pivot. Identity defaults; non-zero contrast overrides the middle knot.
@@ -423,7 +439,12 @@ const PHOTO_FILTER_PARAMS: &[ParamSpec] = &[
     pf_def("params.g", 0.5, Some((0.0, 1.0)), UiHint::Slider),
     pf_def("params.b", 0.2, Some((0.0, 1.0)), UiHint::Slider),
     pf_def("params.density", 0.25, Some((0.0, 1.0)), UiHint::Slider),
-    pf_def("params.preserve_luminosity", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def(
+        "params.preserve_luminosity",
+        1.0,
+        Some((0.0, 1.0)),
+        UiHint::Slider,
+    ),
 ];
 const COLOR_BALANCE_PARAMS: &[ParamSpec] = &[
     pf("params.shadows_r", Some((-1.0, 1.0)), UiHint::Slider),
@@ -435,7 +456,12 @@ const COLOR_BALANCE_PARAMS: &[ParamSpec] = &[
     pf("params.highlights_r", Some((-1.0, 1.0)), UiHint::Slider),
     pf("params.highlights_g", Some((-1.0, 1.0)), UiHint::Slider),
     pf("params.highlights_b", Some((-1.0, 1.0)), UiHint::Slider),
-    pf_def("params.preserve_luminosity", 1.0, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def(
+        "params.preserve_luminosity",
+        1.0,
+        Some((0.0, 1.0)),
+        UiHint::Slider,
+    ),
 ];
 const SURFACE_BLUR_PARAMS: &[ParamSpec] = &[
     pf_def("params.radius", 2.0, Some((0.0, 64.0)), UiHint::Slider),
@@ -446,8 +472,12 @@ const SMART_SHARPEN_PARAMS: &[ParamSpec] = &[
     pf_def("params.radius", 1.0, Some((0.0, 100.0)), UiHint::Slider),
     pf("params.threshold", Some((0.0, 255.0)), UiHint::Slider),
 ];
-const REDUCE_NOISE_PARAMS: &[ParamSpec] =
-    &[pf_def("params.strength", 0.5, Some((0.0, 1.0)), UiHint::Slider)];
+const REDUCE_NOISE_PARAMS: &[ParamSpec] = &[pf_def(
+    "params.strength",
+    0.5,
+    Some((0.0, 1.0)),
+    UiHint::Slider,
+)];
 const DUST_PARAMS: &[ParamSpec] = &[
     pf_def("params.radius", 1.0, Some((0.0, 16.0)), UiHint::Slider),
     pf_def("params.threshold", 16.0, Some((0.0, 255.0)), UiHint::Slider),
@@ -455,7 +485,12 @@ const DUST_PARAMS: &[ParamSpec] = &[
 const PINCH_PARAMS: &[ParamSpec] = &[pf("params.amount", Some((-1.0, 1.0)), UiHint::Slider)];
 const RIPPLE_PARAMS: &[ParamSpec] = &[
     pf_def("params.amplitude", 4.0, Some((-64.0, 64.0)), UiHint::Slider),
-    pf_def("params.wavelength", 16.0, Some((1.0, 512.0)), UiHint::Slider),
+    pf_def(
+        "params.wavelength",
+        16.0,
+        Some((1.0, 512.0)),
+        UiHint::Slider,
+    ),
 ];
 const PERSPECTIVE_PARAMS: &[ParamSpec] = &[
     pf("params.tl_x", Some((-1.0, 2.0)), UiHint::Slider),
@@ -467,8 +502,7 @@ const PERSPECTIVE_PARAMS: &[ParamSpec] = &[
     pf("params.bl_x", Some((-1.0, 2.0)), UiHint::Slider),
     pf_def("params.bl_y", 1.0, Some((-1.0, 2.0)), UiHint::Slider),
 ];
-const ALPHA_VIEW_PARAMS: &[ParamSpec] =
-    &[pf("params.mode", Some((0.0, 2.0)), UiHint::Slider)]; // 0=alpha,1=premul,2=straight
+const ALPHA_VIEW_PARAMS: &[ParamSpec] = &[pf("params.mode", Some((0.0, 2.0)), UiHint::Slider)]; // 0=alpha,1=premul,2=straight
 const DROP_SHADOW_PARAMS: &[ParamSpec] = &[
     pf_def("params.x", 4.0, Some((-200.0, 200.0)), UiHint::Slider),
     pf_def("params.y", 4.0, Some((-200.0, 200.0)), UiHint::Slider),
@@ -1067,11 +1101,7 @@ impl std::error::Error for MigrationError {}
 /// version, chaining `from → from+1 → …`. A gap in the chain is a
 /// [`MigrationError::NoPath`], never a silent skip. An id with no manifest is a
 /// no-op (returns `from` unchanged — the caller marks it inert).
-pub fn migrate(
-    id: &EffectId,
-    from: u16,
-    params: &mut EffectParams,
-) -> Result<u16, MigrationError> {
+pub fn migrate(id: &EffectId, from: u16, params: &mut EffectParams) -> Result<u16, MigrationError> {
     let target = match manifest(id.clone()) {
         Some(m) => m.version,
         None => return Ok(from),
@@ -1108,7 +1138,10 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "manifest ids must be unique");
         let mut sorted = ids.clone();
         sorted.sort_unstable();
-        assert_eq!(ids, sorted, "manifest ids must be stored sorted (spec §2.1)");
+        assert_eq!(
+            ids, sorted,
+            "manifest ids must be stored sorted (spec §2.1)"
+        );
     }
 
     #[test]
@@ -1163,7 +1196,12 @@ mod tests {
                     );
                 }
                 // Display::IDENTITY unless a manifest opts out (all v1 do not).
-                assert_eq!(p.display, Display::IDENTITY, "{} uses non-identity display", p.path);
+                assert_eq!(
+                    p.display,
+                    Display::IDENTITY,
+                    "{} uses non-identity display",
+                    p.path
+                );
             }
         }
     }
@@ -1182,9 +1220,9 @@ mod tests {
                 "{id}: manifest and seed disagree on param count"
             );
             for spec in m.params {
-                let got = seeded.get(spec.path).unwrap_or_else(|| {
-                    panic!("{id}: seed missing manifest param {}", spec.path)
-                });
+                let got = seeded
+                    .get(spec.path)
+                    .unwrap_or_else(|| panic!("{id}: seed missing manifest param {}", spec.path));
                 assert_eq!(
                     *got, spec.default,
                     "{id} {}: seed value != manifest default",
@@ -1199,7 +1237,12 @@ mod tests {
         for m in MANIFESTS {
             let mut params = EffectParams::new();
             let reached = migrate(&m.id, 1, &mut params).expect("v1 chain is a no-op");
-            assert_eq!(reached, m.version, "{}: chain must reach current version", m.id.as_str());
+            assert_eq!(
+                reached,
+                m.version,
+                "{}: chain must reach current version",
+                m.id.as_str()
+            );
         }
     }
 
@@ -1215,7 +1258,8 @@ mod tests {
                 (mig.forward)(&mut p);
                 backward(&mut p);
                 assert_eq!(
-                    p, original,
+                    p,
+                    original,
                     "backward∘forward must be identity for {} {}→{}",
                     mig.id.as_str(),
                     mig.from,
@@ -1230,6 +1274,10 @@ mod tests {
         let id = EffectId::new("future.thing".to_string());
         assert!(manifest(id.clone()).is_none());
         let mut p = EffectParams::new();
-        assert_eq!(migrate(&id, 3, &mut p), Ok(3), "unknown id migrate is a no-op");
+        assert_eq!(
+            migrate(&id, 3, &mut p),
+            Ok(3),
+            "unknown id migrate is a no-op"
+        );
     }
 }

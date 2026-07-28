@@ -109,7 +109,8 @@ pub fn is_scriptio_continua_cluster(cluster: &str) -> bool {
 /// the two must not be conflated, an ASCII semicolon must never end a cue.
 #[must_use]
 pub fn is_sentence_terminator(c: char) -> bool {
-    matches!(c,
+    matches!(
+        c,
         '.' | '!' | '?'
         // CJK full-width
         | '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{FF0E}'
@@ -134,10 +135,19 @@ pub fn strip_trailing_closing_punctuation(s: &str) -> &str {
 
 /// Closing punctuation stripped by [`strip_trailing_closing_punctuation`].
 fn is_closing_punctuation(c: char) -> bool {
-    matches!(c,
-        '"' | '\'' | ')' | ']' | '}'
-        | '\u{00BB}' | '\u{201D}' | '\u{2019}' | '\u{203A}'
-        | '\u{300D}' | '\u{300F}' | '\u{FF09}'
+    matches!(
+        c,
+        '"' | '\''
+            | ')'
+            | ']'
+            | '}'
+            | '\u{00BB}'
+            | '\u{201D}'
+            | '\u{2019}'
+            | '\u{203A}'
+            | '\u{300D}'
+            | '\u{300F}'
+            | '\u{FF09}'
     )
 }
 
@@ -166,8 +176,11 @@ mod tests {
             ("The quick brown fox.", 20), // ASCII sentence == char count
             ("\u{65E5}\u{672C}\u{8A9E}", 6), // 日本語 — 3 wide ideographs
             ("\u{D55C}\u{AD6D}\u{C5B4}", 6), // 한국어 — 3 wide Hangul syllables
-            ("AB\u{65E5}", 4),               // mixed: A(1) B(1) 日(2)
-            ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}", 2), // 👨‍👩‍👧‍👦 ZWJ == one wide cluster
+            ("AB\u{65E5}", 4),            // mixed: A(1) B(1) 日(2)
+            (
+                "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}",
+                2,
+            ), // 👨‍👩‍👧‍👦 ZWJ == one wide cluster
         ];
         for (s, want) in cases {
             assert_eq!(cell_width(s), *want, "cell_width({s:?})");
@@ -198,7 +211,11 @@ mod tests {
             '.', '!', '?', '\u{3002}', '\u{FF01}', '\u{FF1F}', '\u{FF0E}', '\u{061F}', '\u{06D4}',
             '\u{0964}', '\u{0965}', '\u{037E}', '\u{00B7}', '\u{104B}', '\u{104F}',
         ] {
-            assert!(is_sentence_terminator(c), "expected terminator: U+{:04X}", c as u32);
+            assert!(
+                is_sentence_terminator(c),
+                "expected terminator: U+{:04X}",
+                c as u32
+            );
         }
         // ASCII ';' is NOT a terminator (it is U+003B, not U+037E).
         assert!(!is_sentence_terminator(';'));
@@ -228,8 +245,9 @@ mod tests {
 
     #[test]
     fn scriptio_continua_membership() {
-        for c in ['\u{4E00}', '\u{3042}', '\u{30A2}', '\u{0E01}', '\u{0EC0}', '\u{1780}', '\u{1000}']
-        {
+        for c in [
+            '\u{4E00}', '\u{3042}', '\u{30A2}', '\u{0E01}', '\u{0EC0}', '\u{1780}', '\u{1000}',
+        ] {
             assert!(is_scriptio_continua(c), "U+{:04X}", c as u32);
         }
         for c in ['A', '1', '\u{0623}', '\u{05D0}', ' '] {
@@ -290,7 +308,7 @@ mod tests {
             ("ar", "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", 5),  // مرحبا 5×1
             ("he", "\u{05E9}\u{05DC}\u{05D5}\u{05DD}", 4),          // שלום 4×1
             ("hi", "\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}", 3), // नमस्ते (स्ते is one cluster)
-            ("th", "\u{0E40}\u{0E01}\u{0E34}\u{0E14}", 3),          // เกิด
+            ("th", "\u{0E40}\u{0E01}\u{0E34}\u{0E14}", 3),                 // เกิด
             (
                 "emoji-zwj",
                 "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}",

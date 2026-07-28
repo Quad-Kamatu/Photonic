@@ -148,7 +148,10 @@ async fn no_cors_headers_on_any_response() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
-    for header in ["access-control-allow-origin", "access-control-allow-credentials"] {
+    for header in [
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+    ] {
         assert!(
             res.headers().get(header).is_none(),
             "{header} must never be emitted"

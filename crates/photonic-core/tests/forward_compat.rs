@@ -48,7 +48,12 @@ fn base_doc() -> Document {
     let mut vtrack = Track::new(TrackKind::Video, "V1");
     let mut c1 = Clip::new(
         ClipSource::SolidColor {
-            color: photonic_core::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            color: photonic_core::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
         },
         Tick(0),
         Tick(1000),
@@ -68,7 +73,9 @@ fn base_doc() -> Document {
     let mut ta = TrackAudio::new();
     ta.fx_chain.push(AudioFxUnit::new(AudioFxKind::Eq));
     atrack.audio = Some(ta);
-    atrack.clips.push(Clip::new(ClipSource::Adjustment, Tick(0), Tick(2000)));
+    atrack
+        .clips
+        .push(Clip::new(ClipSource::Adjustment, Tick(0), Tick(2000)));
 
     sequence.video_tracks.push(vtrack);
     sequence.audio_tracks.push(atrack);
@@ -145,7 +152,10 @@ fn extract_unknown_subtrees(json: &str) -> Vec<(&'static str, Value)> {
         let seq = only_sequence(&mut v);
         let clip = &seq["video_tracks"][0]["clips"][0];
         out.push(("source", clip["source"].clone()));
-        out.push(("grade_base", clip["grade"]["ops"][0]["params"]["base"].clone()));
+        out.push((
+            "grade_base",
+            clip["grade"]["ops"][0]["params"]["base"].clone(),
+        ));
         out.push((
             "audiofx_kind",
             seq["audio_tracks"][0]["audio"]["fx_chain"][0]["kind"].clone(),
@@ -195,7 +205,10 @@ fn newer_build_document_loads_and_preserves_all_unknown_variants() {
         ("TransitionKind", UNKNOWN_TRANSITION),
     ];
     want.sort();
-    assert_eq!(got, want, "must report all six unknown variants exactly once");
+    assert_eq!(
+        got, want,
+        "must report all six unknown variants exactly once"
+    );
     for u in &report.unknown_variants {
         assert_eq!(u.count, 1, "each unknown appears once in this document");
     }
@@ -247,7 +260,10 @@ fn known_variant_with_malformed_field_is_rejected_not_swallowed() {
     // variant.
     let src: ClipSource =
         serde_json::from_value(json!({ "source": "solid_color", "color": "NOT-A-COLOR" })).unwrap();
-    assert!(src.is_unknown(), "serde layer degrades a malformed known source to Unknown");
+    assert!(
+        src.is_unknown(),
+        "serde layer degrades a malformed known source to Unknown"
+    );
     assert_eq!(src.unknown_tag(), Some("solid_color"));
     assert!(!matches!(src, ClipSource::SolidColor { .. }));
 }
@@ -275,8 +291,8 @@ fn unknown_source_clip_survives_a_move_edit() {
     use photonic_core::history::Command;
     Command::Timeline(cmd).apply(&mut doc);
 
-    let moved_start = doc.timeline.as_ref().unwrap().sequences[&seq_id].video_tracks[0].clips[0]
-        .start;
+    let moved_start =
+        doc.timeline.as_ref().unwrap().sequences[&seq_id].video_tracks[0].clips[0].start;
     assert_ne!(moved_start, orig_start, "the edit actually moved the clip");
 
     // Save; the unknown source subtree is byte-for-value identical to the input.
@@ -286,5 +302,9 @@ fn unknown_source_clip_survives_a_move_edit() {
         .find(|(k, _)| *k == "source")
         .unwrap()
         .1;
-    assert_eq!(src_after, unknown_source(), "the edit must not touch the unknown source");
+    assert_eq!(
+        src_after,
+        unknown_source(),
+        "the edit must not touch the unknown source"
+    );
 }

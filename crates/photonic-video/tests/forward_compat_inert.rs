@@ -71,10 +71,15 @@ fn unknown_clip_source_lowers_to_transparent_placeholder() {
     // Placeholder = a fully transparent SolidColor (alpha 0) — the exact node
     // `Builder::transparent` emits for a missing/offline asset. A normal opaque
     // clip never produces a transparent source, so this is unambiguous.
-    let has_placeholder = out.graph.nodes.iter().any(|n| {
-        matches!(&n.op, IrOp::SolidColor { color } if color.a == 0.0)
-    });
-    assert!(has_placeholder, "unknown source must render a transparent placeholder");
+    let has_placeholder = out
+        .graph
+        .nodes
+        .iter()
+        .any(|n| matches!(&n.op, IrOp::SolidColor { color } if color.a == 0.0));
+    assert!(
+        has_placeholder,
+        "unknown source must render a transparent placeholder"
+    );
 
     // The diagnostic names the verbatim tag exactly once — never guessed away.
     let hits: Vec<_> = out
@@ -82,7 +87,12 @@ fn unknown_clip_source_lowers_to_transparent_placeholder() {
         .iter()
         .filter(|d| d.message.contains("placeholder") && d.message.contains(UNKNOWN_SOURCE))
         .collect();
-    assert_eq!(hits.len(), 1, "one placeholder diagnostic naming the tag, got {:?}", out.diagnostics);
+    assert_eq!(
+        hits.len(),
+        1,
+        "one placeholder diagnostic naming the tag, got {:?}",
+        out.diagnostics
+    );
 }
 
 #[test]
@@ -91,7 +101,9 @@ fn unknown_clip_effect_lowers_to_an_inert_effect_marker() {
     let tk = add_video_track(&mut project, seq_id);
     let mut clip = solid(Color::BLACK, 0, 1000);
     clip.effects
-        .push(ClipEffect::new(EffectKind::Unknown(UnknownTag::intern(UNKNOWN_EFFECT))));
+        .push(ClipEffect::new(EffectKind::Unknown(UnknownTag::intern(
+            UNKNOWN_EFFECT,
+        ))));
     project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
         .clips
         .push(clip);
@@ -106,7 +118,10 @@ fn unknown_clip_effect_lowers_to_an_inert_effect_marker() {
         _ => None,
     });
     let kind = unknown_effect.expect("an Effect node is present for the unknown effect");
-    assert!(kind.is_unknown(), "the effect kind is the preserved Unknown, not a guess");
+    assert!(
+        kind.is_unknown(),
+        "the effect kind is the preserved Unknown, not a guess"
+    );
     assert_eq!(kind.unknown_tag().unwrap().as_str(), UNKNOWN_EFFECT);
 }
 
@@ -118,7 +133,12 @@ fn unknown_transition_renders_as_a_hard_cut() {
     // Two adjacent clips; the second transitions IN from the first.
     clips.push(solid(Color::BLACK, 0, 100));
     let mut incoming = solid(
-        Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        },
         100,
         100,
     );
@@ -141,7 +161,9 @@ fn unknown_transition_renders_as_a_hard_cut() {
         .count();
     assert_eq!(cut, 1, "one hard-cut diagnostic, got {:?}", out.diagnostics);
     assert!(
-        !out.diagnostics.iter().any(|d| d.message.contains("cross-dissolve")),
+        !out.diagnostics
+            .iter()
+            .any(|d| d.message.contains("cross-dissolve")),
         "an unknown transition must not be guessed into a dissolve",
     );
 
@@ -153,7 +175,10 @@ fn unknown_transition_renders_as_a_hard_cut() {
     );
     for p in &img.pixels {
         for (c, &v) in p[..3].iter().enumerate() {
-            assert!((v - 1.0).abs() < 1e-4, "hard cut shows incoming white, channel {c} = {v}");
+            assert!(
+                (v - 1.0).abs() < 1e-4,
+                "hard cut shows incoming white, channel {c} = {v}"
+            );
         }
     }
 }
@@ -178,8 +203,14 @@ fn unknown_graph_op_lowers_to_passthrough_of_its_primary_input() {
         name: "comp".into(),
         nodes,
         edges: vec![
-            GraphEdge { from: (ci, OutPort::PRIMARY), to: (un, InPort::PRIMARY) },
-            GraphEdge { from: (un, OutPort::PRIMARY), to: (ou, InPort::PRIMARY) },
+            GraphEdge {
+                from: (ci, OutPort::PRIMARY),
+                to: (un, InPort::PRIMARY),
+            },
+            GraphEdge {
+                from: (un, OutPort::PRIMARY),
+                to: (ou, InPort::PRIMARY),
+            },
         ],
         output: ou,
         ui: std::collections::HashMap::new(),
@@ -187,7 +218,16 @@ fn unknown_graph_op_lowers_to_passthrough_of_its_primary_input() {
     let gid = graph.id;
     project.graphs.insert(gid, graph);
 
-    let mut clip = solid(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }, 0, 1000);
+    let mut clip = solid(
+        Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+        0,
+        1000,
+    );
     clip.composition = Some(gid);
     project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
         .clips
@@ -202,17 +242,30 @@ fn unknown_graph_op_lowers_to_passthrough_of_its_primary_input() {
         .iter()
         .filter(|d| d.message.contains("passthrough") && d.node == Some(un))
         .count();
-    assert_eq!(passthrough, 1, "one node-anchored passthrough diagnostic, got {:?}", out.diagnostics);
+    assert_eq!(
+        passthrough, 1,
+        "one node-anchored passthrough diagnostic, got {:?}",
+        out.diagnostics
+    );
 
     // Passthrough means the clip's own source survives to the Output — no Effect
     // node was fabricated for the unknown op (it was NOT guessed into a filter).
     assert!(
-        out.graph.nodes.iter().any(|n| matches!(&n.op, IrOp::SolidColor { color } if color.r > 0.5)),
+        out.graph
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.op, IrOp::SolidColor { color } if color.r > 0.5)),
         "the host clip's source passes through the unknown op unchanged",
     );
     assert!(
-        !out.graph.nodes.iter().any(|n| matches!(n.op, IrOp::Effect { .. })),
+        !out.graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, IrOp::Effect { .. })),
         "an unknown graph op must not be lowered to a guessed Effect pass",
     );
-    assert!(out.graph.output.is_some(), "the composition still produces an Output");
+    assert!(
+        out.graph.output.is_some(),
+        "the composition still produces an Output"
+    );
 }

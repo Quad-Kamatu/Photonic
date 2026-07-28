@@ -433,7 +433,10 @@ mod tests {
 
     #[test]
     fn field_order_parsing() {
-        assert_eq!(parse_field_order(Some("progressive")), ScanType::Progressive);
+        assert_eq!(
+            parse_field_order(Some("progressive")),
+            ScanType::Progressive
+        );
         assert_eq!(parse_field_order(Some("tt")), ScanType::InterlacedTopFirst);
         assert_eq!(parse_field_order(Some("tb")), ScanType::InterlacedTopFirst);
         assert_eq!(

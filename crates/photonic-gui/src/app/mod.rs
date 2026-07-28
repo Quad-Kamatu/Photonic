@@ -3893,16 +3893,17 @@ impl PhotonicApp {
                         // Single job: the existing engine export path (progress
                         // on EngineStatus.export).
                         if let Some(bridge) = self.engine.as_ref() {
-                            bridge.session().send(photonic_video::EngineCmd::Export(
-                                Box::new(jobs.into_iter().next().unwrap()),
-                            ));
+                            bridge
+                                .session()
+                                .send(photonic_video::EngineCmd::Export(Box::new(
+                                    jobs.into_iter().next().unwrap(),
+                                )));
                         }
                     } else if let Some(bridge) = self.engine.as_ref() {
                         // Multi-format / marker multi-export (K-F1/F2): freeze
                         // the project and drain via the shared render queue.
                         if let Ok(tools) = photonic_video::media::ffmpeg_locate::locate() {
-                            self.render_queue
-                                .ensure_worker(bridge.gpu().clone(), tools);
+                            self.render_queue.ensure_worker(bridge.gpu().clone(), tools);
                             if let Some(project) = doc.timeline.clone() {
                                 for job in jobs {
                                     let label = job
@@ -3910,11 +3911,7 @@ impl PhotonicApp {
                                         .file_name()
                                         .map(|s| s.to_string_lossy().into_owned())
                                         .unwrap_or_else(|| "export".into());
-                                    let _ = self.render_queue.enqueue(
-                                        label,
-                                        project.clone(),
-                                        job,
-                                    );
+                                    let _ = self.render_queue.enqueue(label, project.clone(), job);
                                 }
                                 // Surface the queue inspector when multi-job lands.
                                 self.render_queue_panel_open = true;

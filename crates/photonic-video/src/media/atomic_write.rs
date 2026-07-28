@@ -115,7 +115,10 @@ mod tests {
         let data = b"exact contents \x00\x01\x02";
         write_atomic(&out, data).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), data);
-        assert!(!staging_path(&out).exists(), ".part must not survive success");
+        assert!(
+            !staging_path(&out).exists(),
+            ".part must not survive success"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

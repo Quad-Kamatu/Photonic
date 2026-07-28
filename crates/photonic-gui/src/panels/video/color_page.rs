@@ -74,7 +74,13 @@ fn section_header(ui: &mut Ui, text: &str) {
 /// interior points stay strictly between their neighbours, and y is clamped to
 /// `[0, 1]`. Extracted so the keyboard path is unit-testable without an egui
 /// context (41 §9 step 1).
-pub(crate) fn nudge_point(points: &[(f32, f32)], i: usize, dx: f32, dy: f32, step: f32) -> (f32, f32) {
+pub(crate) fn nudge_point(
+    points: &[(f32, f32)],
+    i: usize,
+    dx: f32,
+    dy: f32,
+    step: f32,
+) -> (f32, f32) {
     let mut p = points[i];
     if i != 0 && i != points.len() - 1 {
         let lo = points[i - 1].0 + 1e-3;
@@ -1434,7 +1440,11 @@ fn draw_vectorscope_guides(ui: &Ui, painter: &egui::Painter, rect: Rect) {
     // 100% outer circle + 75% broadcast-safe box (square inscribed at 0.75 radius).
     painter.circle_stroke(center, r100, stroke_soft);
     let box75 = Rect::from_center_size(center, vec2(r75 * 2.0 * 0.7071, r75 * 2.0 * 0.7071));
-    painter.rect_stroke(box75, 0.0, Stroke::new(0.8, Color32::from_rgb(0x90, 0x90, 0x70)));
+    painter.rect_stroke(
+        box75,
+        0.0,
+        Stroke::new(0.8, Color32::from_rgb(0x90, 0x90, 0x70)),
+    );
     // Fainter 100% box for the full legal box.
     let box100 = Rect::from_center_size(center, vec2(r100 * 2.0 * 0.7071, r100 * 2.0 * 0.7071));
     painter.rect_stroke(box100, 0.0, stroke_soft);
@@ -1444,14 +1454,8 @@ fn draw_vectorscope_guides(ui: &Ui, painter: &egui::Painter, rect: Rect) {
     let q_ang = 33.0_f32.to_radians();
     let i_dir = vec2(i_ang.cos(), -i_ang.sin());
     let q_dir = vec2(q_ang.cos(), -q_ang.sin());
-    painter.line_segment(
-        [center - i_dir * r100, center + i_dir * r100],
-        stroke_i,
-    );
-    painter.line_segment(
-        [center - q_dir * r100, center + q_dir * r100],
-        stroke_q,
-    );
+    painter.line_segment([center - i_dir * r100, center + i_dir * r100], stroke_i);
+    painter.line_segment([center - q_dir * r100, center + q_dir * r100], stroke_q);
     // Tiny labels near the rim.
     let i_label = center + i_dir * (r100 * 0.92);
     let q_label = center + q_dir * (r100 * 0.92);

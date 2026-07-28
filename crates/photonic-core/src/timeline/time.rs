@@ -155,10 +155,7 @@ impl FrameRate {
     /// True when this rate uses SMPTE drop-frame labelling (29.97 / 59.94 only).
     #[inline]
     pub fn is_drop_frame_rate(&self) -> bool {
-        matches!(
-            (self.num, self.den),
-            (30000, 1001) | (60000, 1001)
-        )
+        matches!((self.num, self.den), (30000, 1001) | (60000, 1001))
     }
 }
 
@@ -258,8 +255,7 @@ impl Timecode {
         let s: i64 = parts[2].parse().ok()?;
         let ff: i64 = ff_str.parse().ok()?;
         let nominal = rate.nominal_fps();
-        if h < 0 || m < 0 || s < 0 || ff < 0 || m >= 60 || s >= 60 || nominal < 1 || ff >= nominal
-        {
+        if h < 0 || m < 0 || s < 0 || ff < 0 || m >= 60 || s >= 60 || nominal < 1 || ff >= nominal {
             return None;
         }
         if drop && !rate.is_drop_frame_rate() {

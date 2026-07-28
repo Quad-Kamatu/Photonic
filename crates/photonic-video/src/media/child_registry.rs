@@ -188,7 +188,10 @@ impl ChildRegistry {
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // `kill(pid, 0)` returns 0 if we may signal it, ESRCH if it is gone.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    unsafe {
+        libc::kill(pid as libc::pid_t, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 #[cfg(not(unix))]
@@ -258,7 +261,13 @@ pub fn arm_parent_death_signal(command: &mut std::process::Command) {
     // async-signal-safe and touches no allocator/lock state.
     unsafe {
         command.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+            libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGKILL as libc::c_ulong,
+                0,
+                0,
+                0,
+            );
             Ok(())
         });
     }
@@ -285,7 +294,10 @@ mod tests {
 
     #[test]
     fn registry_name_pid_round_trips() {
-        assert_eq!(pid_from_registry_name("photonic-children-99.json"), Some(99));
+        assert_eq!(
+            pid_from_registry_name("photonic-children-99.json"),
+            Some(99)
+        );
         assert_eq!(pid_from_registry_name("photonic-children-.json"), None);
         assert_eq!(pid_from_registry_name("something-else.json"), None);
     }

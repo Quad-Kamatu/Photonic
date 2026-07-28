@@ -36,8 +36,8 @@ use photonic_core::raster::warp::{perspective, pinch, ripple, spherize};
 use photonic_core::timeline::effect_manifest::{manifest, EffectId, OperandSpace};
 use photonic_core::RasterImage;
 
-use crate::contract::ResolvedParams;
 use super::ops::Image;
+use crate::contract::ResolvedParams;
 
 /// Stable EffectId strings this bridge can evaluate on CPU.
 pub const BRIDGED_IDS: &[&str] = &[
@@ -369,21 +369,13 @@ fn dispatch_util(id: &str, input: &Image, params: &ResolvedParams) -> Option<Ima
             f("params.x", 4.0),
             f("params.y", 4.0),
             f("params.radius", 3.0).max(0.0),
-            [
-                f("params.r", 0.0),
-                f("params.g", 0.0),
-                f("params.b", 0.0),
-            ],
+            [f("params.r", 0.0), f("params.g", 0.0), f("params.b", 0.0)],
             f("params.opacity", 0.5).clamp(0.0, 1.0),
         )),
         "util.outline" => Some(util_outline(
             input,
             f("params.thickness", 2.0).max(0.0),
-            [
-                f("params.r", 1.0),
-                f("params.g", 1.0),
-                f("params.b", 1.0),
-            ],
+            [f("params.r", 1.0), f("params.g", 1.0), f("params.b", 1.0)],
             f("params.opacity", 1.0).clamp(0.0, 1.0),
         )),
         _ => None,
@@ -804,7 +796,10 @@ mod tests {
 
     #[test]
     fn transfer_space_for_levels() {
-        assert_eq!(operand_space("color.levels"), OperandSpace::TransferStraight);
+        assert_eq!(
+            operand_space("color.levels"),
+            OperandSpace::TransferStraight
+        );
         assert_eq!(operand_space("blur.box"), OperandSpace::LinearStraight);
     }
 
@@ -946,10 +941,7 @@ mod tests {
         let back = raster_to_image(&r, OperandSpace::TransferStraight);
         for (a, b) in img.pixels.iter().zip(back.pixels.iter()) {
             for c in 0..4 {
-                assert!(
-                    (a[c] - b[c]).abs() < 0.02,
-                    "channel {c}: {a:?} vs {b:?}"
-                );
+                assert!((a[c] - b[c]).abs() < 0.02, "channel {c}: {a:?} vs {b:?}");
             }
         }
     }

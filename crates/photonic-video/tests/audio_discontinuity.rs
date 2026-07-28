@@ -42,20 +42,32 @@ impl PcmSource for ConstSource {
 
 fn gate_unit(threshold_db: f64, hold_ms: f64, release_ms: f64, range_db: f64) -> AudioFxUnit {
     let mut u = AudioFxUnit::new(AudioFxKind::Gate);
-    u.params.base.set("params.threshold_db", PropValue::Float(threshold_db));
+    u.params
+        .base
+        .set("params.threshold_db", PropValue::Float(threshold_db));
     u.params.base.set("params.attack_ms", PropValue::Float(1.0));
-    u.params.base.set("params.hold_ms", PropValue::Float(hold_ms));
-    u.params.base.set("params.release_ms", PropValue::Float(release_ms));
-    u.params.base.set("params.range_db", PropValue::Float(range_db));
+    u.params
+        .base
+        .set("params.hold_ms", PropValue::Float(hold_ms));
+    u.params
+        .base
+        .set("params.release_ms", PropValue::Float(release_ms));
+    u.params
+        .base
+        .set("params.range_db", PropValue::Float(range_db));
     u
 }
 
 fn comp_unit(threshold_db: f64, ratio: f64, release_ms: f64) -> AudioFxUnit {
     let mut u = AudioFxUnit::new(AudioFxKind::Compressor);
-    u.params.base.set("params.threshold_db", PropValue::Float(threshold_db));
+    u.params
+        .base
+        .set("params.threshold_db", PropValue::Float(threshold_db));
     u.params.base.set("params.ratio", PropValue::Float(ratio));
     u.params.base.set("params.attack_ms", PropValue::Float(5.0));
-    u.params.base.set("params.release_ms", PropValue::Float(release_ms));
+    u.params
+        .base
+        .set("params.release_ms", PropValue::Float(release_ms));
     u.params.base.set("params.makeup_db", PropValue::Float(0.0));
     u
 }
@@ -102,8 +114,8 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 
 const LOUD: f32 = 0.5; // -6 dBFS, opens the gate / drives the compressor
 const QUIET: f32 = 0.02; // -34 dBFS, below both thresholds
-// The track fader's equal-power center pan applies -3 dB (× 1/√2) per channel,
-// so a "unity" pass-through of a QUIET DC signal emerges at this level.
+                         // The track fader's equal-power center pan applies -3 dB (× 1/√2) per channel,
+                         // so a "unity" pass-through of a QUIET DC signal emerges at this level.
 const UNITY_PROBE: f32 = QUIET * std::f32::consts::FRAC_1_SQRT_2;
 
 /// §9 item 5, the two halves that matter most: `ClipBoundary` resets the
@@ -124,20 +136,51 @@ fn clip_boundary_resets_track_gate_but_not_master_compressor() {
     for _ in 0..40 {
         render_one(&mut m_cb, &gate_track, &empty_master, id, &clip_audio, LOUD);
     }
-    m_cb.notify_discontinuity(MixerDiscontinuity::ClipBoundary { track: id, at: Tick(0) });
-    let cb_probe = render_one(&mut m_cb, &gate_track, &empty_master, id, &clip_audio, QUIET);
+    m_cb.notify_discontinuity(MixerDiscontinuity::ClipBoundary {
+        track: id,
+        at: Tick(0),
+    });
+    let cb_probe = render_one(
+        &mut m_cb,
+        &gate_track,
+        &empty_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     // A fresh gate on the same quiet probe.
     let mut m_fresh = Mixer::new(SR);
-    let fresh_probe = render_one(&mut m_fresh, &gate_track, &empty_master, id, &clip_audio, QUIET);
+    let fresh_probe = render_one(
+        &mut m_fresh,
+        &gate_track,
+        &empty_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     // Control: loud then the probe with NO discontinuity — the gate is still
     // held open, so the probe passes. Guards against the reset being vacuous.
     let mut m_hold = Mixer::new(SR);
     for _ in 0..40 {
-        render_one(&mut m_hold, &gate_track, &empty_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut m_hold,
+            &gate_track,
+            &empty_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
-    let held_probe = render_one(&mut m_hold, &gate_track, &empty_master, id, &clip_audio, QUIET);
+    let held_probe = render_one(
+        &mut m_hold,
+        &gate_track,
+        &empty_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     assert!(
         max_abs_diff(&cb_probe, &fresh_probe) < 1e-6,
@@ -162,16 +205,40 @@ fn clip_boundary_resets_track_gate_but_not_master_compressor() {
     for _ in 0..60 {
         render_one(&mut c_cb, &empty_track, &comp_master, id, &clip_audio, LOUD);
     }
-    c_cb.notify_discontinuity(MixerDiscontinuity::ClipBoundary { track: id, at: Tick(0) });
-    let cb_comp = render_one(&mut c_cb, &empty_track, &comp_master, id, &clip_audio, QUIET);
+    c_cb.notify_discontinuity(MixerDiscontinuity::ClipBoundary {
+        track: id,
+        at: Tick(0),
+    });
+    let cb_comp = render_one(
+        &mut c_cb,
+        &empty_track,
+        &comp_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     // Seek DOES reset the compressor: the quiet probe then passes ~unity.
     let mut c_seek = Mixer::new(SR);
     for _ in 0..60 {
-        render_one(&mut c_seek, &empty_track, &comp_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut c_seek,
+            &empty_track,
+            &comp_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
     c_seek.notify_discontinuity(MixerDiscontinuity::Seek { to: Tick(0) });
-    let seek_comp = render_one(&mut c_seek, &empty_track, &comp_master, id, &clip_audio, QUIET);
+    let seek_comp = render_one(
+        &mut c_seek,
+        &empty_track,
+        &comp_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     assert!(
         peak(&cb_comp) < peak(&seek_comp) * 0.8,
@@ -200,19 +267,54 @@ fn seek_resets_both_track_and_master() {
 
     let mut m_seek = Mixer::new(SR);
     for _ in 0..60 {
-        render_one(&mut m_seek, &gate_track, &comp_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut m_seek,
+            &gate_track,
+            &comp_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
     m_seek.notify_discontinuity(MixerDiscontinuity::Seek { to: Tick(0) });
-    let seek_probe = render_one(&mut m_seek, &gate_track, &comp_master, id, &clip_audio, QUIET);
+    let seek_probe = render_one(
+        &mut m_seek,
+        &gate_track,
+        &comp_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     let mut m_fresh = Mixer::new(SR);
-    let fresh_probe = render_one(&mut m_fresh, &gate_track, &comp_master, id, &clip_audio, QUIET);
+    let fresh_probe = render_one(
+        &mut m_fresh,
+        &gate_track,
+        &comp_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     let mut m_hold = Mixer::new(SR);
     for _ in 0..60 {
-        render_one(&mut m_hold, &gate_track, &comp_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut m_hold,
+            &gate_track,
+            &comp_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
-    let held_probe = render_one(&mut m_hold, &gate_track, &comp_master, id, &clip_audio, QUIET);
+    let held_probe = render_one(
+        &mut m_hold,
+        &gate_track,
+        &comp_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     assert!(
         max_abs_diff(&seek_probe, &fresh_probe) < 1e-6,
@@ -248,24 +350,52 @@ fn graph_changed_from_index_resets_downstream_only() {
     // from_index = 1: Gate(0) survives (held open), Compressor(1) is reset.
     let mut m_from1 = Mixer::new(SR);
     for _ in 0..60 {
-        render_one(&mut m_from1, &fx_track, &empty_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut m_from1,
+            &fx_track,
+            &empty_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
     m_from1.notify_discontinuity(MixerDiscontinuity::GraphChanged {
         track: Some(id),
         from_index: 1,
     });
-    let from1 = render_one(&mut m_from1, &fx_track, &empty_master, id, &clip_audio, QUIET);
+    let from1 = render_one(
+        &mut m_from1,
+        &fx_track,
+        &empty_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     // from_index = 0: Gate(0) is reset too — it closes on the quiet probe.
     let mut m_from0 = Mixer::new(SR);
     for _ in 0..60 {
-        render_one(&mut m_from0, &fx_track, &empty_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut m_from0,
+            &fx_track,
+            &empty_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
     m_from0.notify_discontinuity(MixerDiscontinuity::GraphChanged {
         track: Some(id),
         from_index: 0,
     });
-    let from0 = render_one(&mut m_from0, &fx_track, &empty_master, id, &clip_audio, QUIET);
+    let from0 = render_one(
+        &mut m_from0,
+        &fx_track,
+        &empty_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
 
     // Unit 0 (gate) survived at from_index 1: the probe passes. At from_index 0
     // the gate is closed and the probe is crushed.
@@ -291,13 +421,27 @@ fn graph_changed_from_index_resets_downstream_only() {
     let comp_master = master_with(vec![comp_unit(-20.0, 8.0, 2000.0)]);
     let mut m_master = Mixer::new(SR);
     for _ in 0..60 {
-        render_one(&mut m_master, &empty_track, &comp_master, id, &clip_audio, LOUD);
+        render_one(
+            &mut m_master,
+            &empty_track,
+            &comp_master,
+            id,
+            &clip_audio,
+            LOUD,
+        );
     }
     m_master.notify_discontinuity(MixerDiscontinuity::GraphChanged {
         track: Some(id),
         from_index: 0,
     });
-    let master_probe = render_one(&mut m_master, &empty_track, &comp_master, id, &clip_audio, QUIET);
+    let master_probe = render_one(
+        &mut m_master,
+        &empty_track,
+        &comp_master,
+        id,
+        &clip_audio,
+        QUIET,
+    );
     assert!(
         peak(&master_probe) > UNITY_PROBE * 0.9,
         "GraphChanged {{ Some, .. }} must reset the master compressor too: probe \

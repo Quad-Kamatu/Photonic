@@ -10,7 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -70,7 +72,10 @@ fn no_interact_size_below_wcag_floor() {
     }
 
     // The scanner must actually be matching something, or the guard is vacuous.
-    assert!(seen > 0, "no `interact_size = vec2(..)` assignments found to lint");
+    assert!(
+        seen > 0,
+        "no `interact_size = vec2(..)` assignments found to lint"
+    );
     assert!(
         violations.is_empty(),
         "interactive hit-target below the 24px floor (41 §5 R-9):\n  {}",

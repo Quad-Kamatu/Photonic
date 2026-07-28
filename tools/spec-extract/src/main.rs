@@ -35,9 +35,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn default_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
 fn run() -> Result<(), String> {
@@ -49,14 +47,10 @@ fn run() -> Result<(), String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--root" => {
-                root = Some(PathBuf::from(
-                    args.next().ok_or("--root needs a value")?,
-                ));
+                root = Some(PathBuf::from(args.next().ok_or("--root needs a value")?));
             }
             "--out" => {
-                out_path = Some(PathBuf::from(
-                    args.next().ok_or("--out needs a value")?,
-                ));
+                out_path = Some(PathBuf::from(args.next().ok_or("--out needs a value")?));
             }
             "--stdin-fragment" => stdin_fragment = true,
             other => return Err(format!("unknown argument: {other}")),
@@ -70,8 +64,8 @@ fn run() -> Result<(), String> {
             .read_to_string(&mut src)
             .map_err(|e| format!("stdin read error: {e}"))?;
         let item = index::index_fragment(&src)?;
-        let json = serde_json::to_string_pretty(&item)
-            .map_err(|e| format!("serialize error: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&item).map_err(|e| format!("serialize error: {e}"))?;
         emit(out_path.as_deref(), &json)?;
         return Ok(());
     }
@@ -107,8 +101,7 @@ fn run() -> Result<(), String> {
     }
 
     let idx = Index::new(items);
-    let json = serde_json::to_string_pretty(&idx)
-        .map_err(|e| format!("serialize error: {e}"))?;
+    let json = serde_json::to_string_pretty(&idx).map_err(|e| format!("serialize error: {e}"))?;
     emit(out_path.as_deref(), &json)
 }
 

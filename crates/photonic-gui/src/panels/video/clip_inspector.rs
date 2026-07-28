@@ -849,16 +849,16 @@ fn draw_effects_section(
                         .rect_stroke(drop_rect, 3.0, egui::Stroke::new(1.5, ACCENT));
                     if ui.input(|i| i.pointer.any_released()) {
                         egui::DragAndDrop::clear_payload(ui.ctx());
-                        let effect = photonic_core::timeline::ClipEffect::from_manifest(
-                            payload.id.clone(),
-                        )
-                        .or_else(|| {
-                            // Fallback for a payload whose id this build no longer
-                            // knows (shouldn't happen for MANIFESTS-driven drags).
-                            payload.id.legacy_kind().map(
-                                photonic_core::timeline::ClipEffect::new,
-                            )
-                        });
+                        let effect =
+                            photonic_core::timeline::ClipEffect::from_manifest(payload.id.clone())
+                                .or_else(|| {
+                                    // Fallback for a payload whose id this build no longer
+                                    // knows (shouldn't happen for MANIFESTS-driven drags).
+                                    payload
+                                        .id
+                                        .legacy_kind()
+                                        .map(photonic_core::timeline::ClipEffect::new)
+                                });
                         if let Some(effect) = effect {
                             if let Ok(cmd) =
                                 ops::add_effect(project, seq, track, clip.id, effect, None)

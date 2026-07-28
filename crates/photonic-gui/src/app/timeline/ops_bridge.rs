@@ -594,14 +594,7 @@ pub fn ripple_trim(
     // common Shift+edge drag). Core already fans out to sync-locked tracks.
     if new.start == c.start {
         let new_boundary = new.start + new.duration;
-        if let Ok(cmds) = ops::ripple_trim(
-            p,
-            seq,
-            track,
-            clip,
-            ops::ClipEdge::End,
-            new_boundary,
-        ) {
+        if let Ok(cmds) = ops::ripple_trim(p, seq, track, clip, ops::ClipEdge::End, new_boundary) {
             commit_group(history, doc, cmds);
             return;
         }

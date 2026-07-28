@@ -1134,11 +1134,7 @@ impl PhotonicApp {
             draw_safe_area_guides(&content_painter, video_rect);
         }
         if self.monitor_comp_grid > 0 {
-            draw_composition_grid(
-                &content_painter,
-                video_rect,
-                self.monitor_comp_grid,
-            );
+            draw_composition_grid(&content_painter, video_rect, self.monitor_comp_grid);
         }
 
         // Reframe transform handles (04 §3.3, 05 §4.2, CAP-012) — real, undoable
@@ -1749,7 +1745,10 @@ fn scrub_x_to_tick(x: f32, left: f32, width: f32, end: Tick, fr: FrameRate) -> T
 
 /// K-E3 composition grids: rule of thirds (`mode=1`) or golden ratio (`mode=2`).
 fn draw_composition_grid(painter: &egui::Painter, video_rect: egui::Rect, mode: u8) {
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(220, 220, 220, 90));
+    let stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgba_unmultiplied(220, 220, 220, 90),
+    );
     let (fx, fy) = match mode {
         2 => (0.382_f32, 0.618_f32), // golden section
         _ => (1.0 / 3.0, 2.0 / 3.0), // thirds

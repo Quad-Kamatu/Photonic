@@ -214,14 +214,7 @@ pub fn invert(input: &Image) -> Image {
                 ]
             })
             .unwrap_or([0.0, 0.0, 0.0]);
-        *o = repremultiply(
-            [
-                1.0 - straight[0],
-                1.0 - straight[1],
-                1.0 - straight[2],
-            ],
-            a,
-        );
+        *o = repremultiply([1.0 - straight[0], 1.0 - straight[1], 1.0 - straight[2]], a);
     }
     out
 }
@@ -264,12 +257,16 @@ fn deinterlace_one_field(input: &Image, field_order: FieldOrder) -> Image {
         for x in 0..w {
             let a = input.pixel(x, y_prev);
             let b = input.pixel(x, y_next);
-            out.set(x, y as u32, [
-                (a[0] + b[0]) * 0.5,
-                (a[1] + b[1]) * 0.5,
-                (a[2] + b[2]) * 0.5,
-                (a[3] + b[3]) * 0.5,
-            ]);
+            out.set(
+                x,
+                y as u32,
+                [
+                    (a[0] + b[0]) * 0.5,
+                    (a[1] + b[1]) * 0.5,
+                    (a[2] + b[2]) * 0.5,
+                    (a[3] + b[3]) * 0.5,
+                ],
+            );
         }
     }
     out
@@ -287,12 +284,16 @@ fn deinterlace_linear_blend(input: &Image) -> Image {
             let a = input.pixel(x, y0);
             let b = input.pixel(x, y1);
             let c = input.pixel(x, y2);
-            out.set(x, y1, [
-                (a[0] + b[0] * 2.0 + c[0]) * 0.25,
-                (a[1] + b[1] * 2.0 + c[1]) * 0.25,
-                (a[2] + b[2] * 2.0 + c[2]) * 0.25,
-                (a[3] + b[3] * 2.0 + c[3]) * 0.25,
-            ]);
+            out.set(
+                x,
+                y1,
+                [
+                    (a[0] + b[0] * 2.0 + c[0]) * 0.25,
+                    (a[1] + b[1] * 2.0 + c[1]) * 0.25,
+                    (a[2] + b[2] * 2.0 + c[2]) * 0.25,
+                    (a[3] + b[3] * 2.0 + c[3]) * 0.25,
+                ],
+            );
         }
     }
     out
@@ -632,10 +633,7 @@ pub fn mask_shape(
             ];
             let d = [uv[0] - center[0], uv[1] - center[1]];
             // Rotate the offset into the ellipse's local frame (by −rotation).
-            let rd = [
-                d[0] * cos_r - d[1] * sin_r,
-                d[0] * sin_r + d[1] * cos_r,
-            ];
+            let rd = [d[0] * cos_r - d[1] * sin_r, d[0] * sin_r + d[1] * cos_r];
             let e = [
                 if size[0].abs() > ALPHA_EPS {
                     rd[0] / size[0]
@@ -733,7 +731,13 @@ fn sweep_coord(dir: WipeDirection, x: u32, y: u32, w: u32, h: u32) -> f32 {
 /// `t == 1` returns `incoming`. Premultiplied linear is closed under linear
 /// interpolation, so the blend is a plain componentwise lerp (no fringing). The
 /// WGSL twin is `eval::Passes::wipe`.
-pub fn wipe(incoming: &Image, outgoing: &Image, dir: WipeDirection, softness: f32, t: f32) -> Image {
+pub fn wipe(
+    incoming: &Image,
+    outgoing: &Image,
+    dir: WipeDirection,
+    softness: f32,
+    t: f32,
+) -> Image {
     let w = incoming.width.max(outgoing.width);
     let h = incoming.height.max(outgoing.height);
     let mut out = Image::new(w, h);
@@ -1095,13 +1099,31 @@ mod tests {
     #[test]
     fn luma_key_drops_darks_and_keeps_brights() {
         // Bright opaque white (luma 1) with threshold 0.5 → fully kept.
-        let bright = solid(2, 2, LinearColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+        let bright = solid(
+            2,
+            2,
+            LinearColor {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
         let kept = luma_key(&bright, 0.5, 0.1, false);
         for p in &kept.pixels {
             assert!((p[3] - 1.0).abs() < 1e-6, "bright kept, a={}", p[3]);
         }
         // Dark opaque (luma 0) → keyed out (alpha 0, premult rgb 0 too).
-        let dark = solid(2, 2, LinearColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 });
+        let dark = solid(
+            2,
+            2,
+            LinearColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
         let dropped = luma_key(&dark, 0.5, 0.1, false);
         for p in &dropped.pixels {
             assert!(p[3].abs() < 1e-6, "dark dropped, a={}", p[3]);
@@ -1117,13 +1139,31 @@ mod tests {
     fn chroma_key_drops_the_key_colour_and_keeps_far_colours() {
         // Key on pure green (already linear here). A green pixel → keyed out.
         let key = [0.0, 1.0, 0.0];
-        let green = solid(2, 2, LinearColor { r: 0.0, g: 1.0, b: 0.0, a: 1.0 });
+        let green = solid(
+            2,
+            2,
+            LinearColor {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
         let dropped = chroma_key(&green, key, 0.2, 0.1, 0.0);
         for p in &dropped.pixels {
             assert!(p[3].abs() < 1e-6, "green keyed out, a={}", p[3]);
         }
         // A red pixel is far from green → kept (alpha unchanged).
-        let red = solid(2, 2, LinearColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+        let red = solid(
+            2,
+            2,
+            LinearColor {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
         let kept = chroma_key(&red, key, 0.2, 0.1, 0.0);
         for p in &kept.pixels {
             assert!((p[3] - 1.0).abs() < 1e-6, "red kept, a={}", p[3]);
@@ -1135,14 +1175,27 @@ mod tests {
         // A greenish pixel (green dominant) kept but with heavy spill suppression
         // pulls green down toward the mean of red/blue.
         let key = [0.0, 1.0, 0.0];
-        let spilled = solid(1, 1, LinearColor { r: 0.2, g: 0.8, b: 0.2, a: 1.0 });
+        let spilled = solid(
+            1,
+            1,
+            LinearColor {
+                r: 0.2,
+                g: 0.8,
+                b: 0.2,
+                a: 1.0,
+            },
+        );
         // Low tolerance: the colour distance to green sits outside the key radius,
         // so the pixel is KEPT — letting the spill-suppression result be observed.
         let out = chroma_key(&spilled, key, 0.1, 0.05, 1.0);
         let p = out.pixels[0];
         // a≈1, so straight ≈ premult. Green should have dropped to ≈ mean(0.2,0.2)=0.2.
         assert!((p[3] - 1.0).abs() < 1e-4, "kept, a={}", p[3]);
-        assert!((p[1] - 0.2).abs() < 1e-3, "green suppressed to mean, g={}", p[1]);
+        assert!(
+            (p[1] - 0.2).abs() < 1e-3,
+            "green suppressed to mean, g={}",
+            p[1]
+        );
         assert!((p[0] - 0.2).abs() < 1e-3, "red untouched, r={}", p[0]);
     }
 
@@ -1235,9 +1288,17 @@ mod tests {
         // far corner is outside → transparent.
         let m = mask_shape(32, 32, [0.5, 0.5], [0.3, 0.3], 0.0, 0.05);
         let center = m.pixel(16, 16);
-        assert!((center[3] - 1.0).abs() < 1e-4, "center opaque, a={}", center[3]);
+        assert!(
+            (center[3] - 1.0).abs() < 1e-4,
+            "center opaque, a={}",
+            center[3]
+        );
         let corner = m.pixel(0, 0);
-        assert!(corner[3].abs() < 1e-4, "corner transparent, a={}", corner[3]);
+        assert!(
+            corner[3].abs() < 1e-4,
+            "corner transparent, a={}",
+            corner[3]
+        );
         // Premultiplied white inside: rgb == alpha.
         for c in 0..3 {
             assert!((center[c] - center[3]).abs() < 1e-6, "premult white ch{c}");
@@ -1258,8 +1319,18 @@ mod tests {
     }
 
     // ── Directional wipe / push transitions (K-0.4) ──────────────────────────
-    const RED: LinearColor = LinearColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
-    const BLUE: LinearColor = LinearColor { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+    const RED: LinearColor = LinearColor {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    const BLUE: LinearColor = LinearColor {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
     const DIRS: [WipeDirection; 4] = [
         WipeDirection::LeftToRight,
         WipeDirection::RightToLeft,
@@ -1289,8 +1360,16 @@ mod tests {
         let incoming = solid(8, 1, RED);
         let outgoing = solid(8, 1, BLUE);
         let out = wipe(&incoming, &outgoing, WipeDirection::LeftToRight, 0.0, 0.5);
-        assert_eq!(out.pixel(0, 0), [1.0, 0.0, 0.0, 1.0], "left edge is incoming");
-        assert_eq!(out.pixel(7, 0), [0.0, 0.0, 1.0, 1.0], "right edge is outgoing");
+        assert_eq!(
+            out.pixel(0, 0),
+            [1.0, 0.0, 0.0, 1.0],
+            "left edge is incoming"
+        );
+        assert_eq!(
+            out.pixel(7, 0),
+            [0.0, 0.0, 1.0, 1.0],
+            "right edge is outgoing"
+        );
     }
 
     /// The push endpoints are bit-exact for every direction: `t == 0` is outgoing,
@@ -1314,8 +1393,16 @@ mod tests {
         let incoming = solid(8, 1, RED);
         let outgoing = solid(8, 1, BLUE);
         let out = push(&incoming, &outgoing, WipeDirection::LeftToRight, 0.5);
-        assert_eq!(out.pixel(0, 0), [1.0, 0.0, 0.0, 1.0], "left edge is incoming");
-        assert_eq!(out.pixel(7, 0), [0.0, 0.0, 1.0, 1.0], "right edge is outgoing");
+        assert_eq!(
+            out.pixel(0, 0),
+            [1.0, 0.0, 0.0, 1.0],
+            "left edge is incoming"
+        );
+        assert_eq!(
+            out.pixel(7, 0),
+            [0.0, 0.0, 1.0, 1.0],
+            "right edge is outgoing"
+        );
     }
 }
 
@@ -1357,6 +1444,9 @@ mod deinterlace_tests {
         assert_eq!(out.pixel(1, 0), [1.0, 1.0, 1.0, 1.0]);
         // Odd row reconstructed from even neighbours → white.
         let o = out.pixel(1, 1);
-        assert!((o[0] - 1.0).abs() < 1e-5, "odd row should match field: {o:?}");
+        assert!(
+            (o[0] - 1.0).abs() < 1e-5,
+            "odd row should match field: {o:?}"
+        );
     }
 }

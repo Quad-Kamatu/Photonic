@@ -50,7 +50,7 @@ use photonic_core::layer::BlendMode;
 use photonic_core::timeline::{
     self, AnchorSpace, AnimProps, AssetKind, CaptionAnim, CaptionCue, CaptionStyle, CaptionTrack,
     CaptionWord, Clip, ClipEffect, ClipId, ClipSource, ClipTransform, EaseCurve, EffectKind,
-    FrameRate, Grade, GradeOp, EffectParams, GradeOpKind, GradeOpParams, GraphId, GraphNode,
+    EffectParams, FrameRate, Grade, GradeOp, GradeOpKind, GradeOpParams, GraphId, GraphNode,
     GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode, LutInterp, NodeGraph, PropPath,
     PropSet, PropTargetKind, PropValue, Ratio, ScanType, Sequence, SequenceFormat, SequenceId,
     SpeedMap, TextClipContent, TimelineProject, TransitionKind,
@@ -350,8 +350,15 @@ pub fn compile_with_luts(
     // the final-look surface). Master keyframes are sequence-relative, so evaluate
     // the stack at `tick`, not any clip-relative offset.
     // TODO(30 §2.3): gate on the master stack's Applicability once a manifest type exists.
-    let program = program
-        .map(|p| apply_stack(&mut b, &seq.master_effects, seq.master_grade.as_ref(), p, tick));
+    let program = program.map(|p| {
+        apply_stack(
+            &mut b,
+            &seq.master_effects,
+            seq.master_grade.as_ref(),
+            p,
+            tick,
+        )
+    });
 
     // Step 5: caption overlay (enabled caption tracks with a cue covering t).
     let program = splice_captions(&mut b, seq, format, tick, program);
@@ -539,7 +546,13 @@ fn fold_sequence(
         if matches!(clip.source, ClipSource::Adjustment) {
             if let Some(below) = acc {
                 let dt = tick - clip.start;
-                acc = Some(apply_stack(b, &clip.effects, clip.grade.as_ref(), below, dt));
+                acc = Some(apply_stack(
+                    b,
+                    &clip.effects,
+                    clip.grade.as_ref(),
+                    below,
+                    dt,
+                ));
             }
             continue;
         }
@@ -621,7 +634,13 @@ fn fold_sequence(
         // the accumulator itself. Track keyframes are sequence-relative (`tick`).
         // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
         let image = apply_stack(b, &track.effects, track.grade.as_ref(), image, tick);
-        acc = Some(fold_over(b, acc, image, opacity * track.opacity, track.blend));
+        acc = Some(fold_over(
+            b,
+            acc,
+            image,
+            opacity * track.opacity,
+            track.blend,
+        ));
     }
     acc
 }
@@ -1146,7 +1165,11 @@ fn build_clip_chain(
     // correct an asset-level one. Keyframes share the clip-relative `dt` domain.
     // Only `Asset`/`Vector` clips reference an asset; others have no asset stack.
     // TODO(30 §2.3): gate on the asset stack's Applicability once a manifest type exists.
-    let source = match clip.source.asset().and_then(|a| project.media.assets.get(&a)) {
+    let source = match clip
+        .source
+        .asset()
+        .and_then(|a| project.media.assets.get(&a))
+    {
         Some(asset) => apply_stack(b, &asset.effects, asset.grade.as_ref(), source, dt),
         None => source,
     };
@@ -2293,7 +2316,9 @@ fn reveal_text(text: &str, anim: CaptionAnim, w: &CaptionWord, tick: Tick) -> St
     let f = ((tick - w.start).0 as f32 / span).clamp(0.0, 1.0);
     let total = photonic_core::text_metrics::graphemes(text).count();
     let n = (total as f32 * f).floor() as usize;
-    photonic_core::text_metrics::graphemes(text).take(n).collect()
+    photonic_core::text_metrics::graphemes(text)
+        .take(n)
+        .collect()
 }
 
 fn lerp_color(a: Color, b: Color, f: f32) -> Color {
@@ -2908,7 +2933,10 @@ mod tests {
         let steps = ["h", "he", "hel", "hell", "hello"];
         for (i, want) in steps.iter().enumerate() {
             let tick = Tick(((i + 1) as i64) * 100);
-            assert_eq!(reveal_text("hello", CaptionAnim::Typewriter, &w, tick), *want);
+            assert_eq!(
+                reveal_text("hello", CaptionAnim::Typewriter, &w, tick),
+                *want
+            );
         }
     }
 
@@ -2950,7 +2978,11 @@ mod tests {
     fn reveal_non_typewriter_returns_full_text() {
         let text = "\u{65E5}\u{672C}\u{8A9E}";
         let w = caption_word(text, 0, 300);
-        for anim in [CaptionAnim::None, CaptionAnim::FadeWords, CaptionAnim::SlideUp] {
+        for anim in [
+            CaptionAnim::None,
+            CaptionAnim::FadeWords,
+            CaptionAnim::SlideUp,
+        ] {
             for step in 0..=6 {
                 assert_eq!(reveal_text(text, anim, &w, Tick(step * 50)), text);
             }
@@ -3192,7 +3224,9 @@ mod tests {
             let tk = add_video_track(&mut project, seq_id);
             let mut clip = solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0);
             let mut eff = photonic_core::timeline::ClipEffect::new(EffectKind::Blur);
-            eff.params.base.set("params.radius", PropValue::Float(radius));
+            eff.params
+                .base
+                .set("params.radius", PropValue::Float(radius));
             clip.effects.push(eff);
             project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
                 .clips
@@ -4069,9 +4103,10 @@ mod tests {
     /// live transition / fade mix (plain fully-opaque folds never emit one here,
     /// since the test clips all sit at track/clip opacity 1).
     fn has_fractional_merge(graph: &FrameGraph) -> bool {
-        graph.nodes.iter().any(|n| {
-            matches!(n.op, IrOp::Merge { opacity, .. } if opacity > 0.0 && opacity < 1.0)
-        })
+        graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, IrOp::Merge { opacity, .. } if opacity > 0.0 && opacity < 1.0))
     }
 
     /// Content hash of the graph's `Output` node — the whole render subtree's
@@ -4208,7 +4243,11 @@ mod tests {
             .iter()
             .find(|d| d.code == Some(CompileCode::TransitionHandleClipped))
             .unwrap();
-        assert_eq!(d.severity, DiagSeverity::Warning, "suppression is a Warning");
+        assert_eq!(
+            d.severity,
+            DiagSeverity::Warning,
+            "suppression is a Warning"
+        );
     }
 
     /// An outgoing asset with no probe is of unknown length — never clamped, so the
@@ -4439,7 +4478,10 @@ mod tests {
         let inner_format = SequenceFormat::new("16:9", 1080, 1920);
         let want = clip_transform_matrix(&reframe, &outer_format);
         let unwanted = clip_transform_matrix(&reframe, &inner_format);
-        assert_ne!(want, unwanted, "the two formats must disagree for a real test");
+        assert_ne!(
+            want, unwanted,
+            "the two formats must disagree for a real test"
+        );
         // The inner clip's reframe transform was resolved against the OUTER format.
         assert!(
             out.graph
@@ -4455,7 +4497,8 @@ mod tests {
     fn inner_with_caption(name: &str) -> Sequence {
         let mut inner = Sequence::new(name, FrameRate::FPS_30, 4, 4);
         let mut v = Track::new(TrackKind::Video, "V1");
-        v.clips.push(solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0));
+        v.clips
+            .push(solid_clip(Color::BLACK, 0, Tick::from_seconds(2).0));
         inner.video_tracks.push(v);
         inner.caption_tracks.push(wordpop_track()); // cue [0, 200)
         inner
@@ -4696,8 +4739,22 @@ mod tests {
     fn nest_past_inner_end_holds_last_frame() {
         let (project, outer_id, _nest) = shortened_nest();
         // Two ticks well past the inner's 2s content: both hold the same last frame.
-        let a = compile(&project, outer_id, 0, Tick::from_seconds(3), Quality::FULL, None);
-        let b = compile(&project, outer_id, 0, Tick::from_seconds(4), Quality::FULL, None);
+        let a = compile(
+            &project,
+            outer_id,
+            0,
+            Tick::from_seconds(3),
+            Quality::FULL,
+            None,
+        );
+        let b = compile(
+            &project,
+            outer_id,
+            0,
+            Tick::from_seconds(4),
+            Quality::FULL,
+            None,
+        );
         assert_eq!(
             output_hash(&a.graph),
             output_hash(&b.graph),
@@ -4706,19 +4763,39 @@ mod tests {
         // The held frame is the inner's LAST rendered frame — green, not red or
         // transparent (which is what a raw past-the-end lookup would give).
         let held = render4(&a.graph);
-        assert!(held[1] > 0.9 && held[0] < 0.1, "held last frame is green: {held:?}");
+        assert!(
+            held[1] > 0.9 && held[0] < 0.1,
+            "held last frame is green: {held:?}"
+        );
 
         // A tick inside the inner content renders the earlier (red) frame — proving
         // the tail hold is not simply the whole nest reading one colour.
-        let mid = compile(&project, outer_id, 0, Tick(Tick::from_seconds(1).0 / 2), Quality::FULL, None);
+        let mid = compile(
+            &project,
+            outer_id,
+            0,
+            Tick(Tick::from_seconds(1).0 / 2),
+            Quality::FULL,
+            None,
+        );
         let midpx = render4(&mid.graph);
-        assert!(midpx[0] > 0.9 && midpx[1] < 0.1, "mid content is red: {midpx:?}");
+        assert!(
+            midpx[0] > 0.9 && midpx[1] < 0.1,
+            "mid content is red: {midpx:?}"
+        );
     }
 
     #[test]
     fn nest_past_inner_end_warns_once() {
         let (project, outer_id, nest_id) = shortened_nest();
-        let out = compile(&project, outer_id, 0, Tick::from_seconds(3), Quality::FULL, None);
+        let out = compile(
+            &project,
+            outer_id,
+            0,
+            Tick::from_seconds(3),
+            Quality::FULL,
+            None,
+        );
         let coded: Vec<_> = out
             .diagnostics
             .iter()
@@ -4732,22 +4809,21 @@ mod tests {
     #[test]
     fn nest_shortening_does_not_change_layout() {
         let (project, outer_id, nest_id) = shortened_nest();
-        let before = project
-            .sequences
-            .get(&outer_id)
-            .unwrap()
-            .video_tracks[0]
+        let before = project.sequences.get(&outer_id).unwrap().video_tracks[0]
             .clips
             .iter()
             .find(|c| c.id == nest_id)
             .map(|c| (c.start, c.duration))
             .unwrap();
-        let _ = compile(&project, outer_id, 0, Tick::from_seconds(3), Quality::FULL, None);
-        let after = project
-            .sequences
-            .get(&outer_id)
-            .unwrap()
-            .video_tracks[0]
+        let _ = compile(
+            &project,
+            outer_id,
+            0,
+            Tick::from_seconds(3),
+            Quality::FULL,
+            None,
+        );
+        let after = project.sequences.get(&outer_id).unwrap().video_tracks[0]
             .clips
             .iter()
             .find(|c| c.id == nest_id)
@@ -4775,12 +4851,23 @@ mod tests {
         let (mut project, seq_id) = asset_clip_seq(FrameRate::FPS_24, AssetId::new());
         let aid = video_asset_rate(&mut project, FrameRate::FPS_30);
         let tk = add_video_track(&mut project, seq_id);
-        let clip = Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4));
+        let clip = Clip::new(
+            ClipSource::Asset { asset: aid },
+            Tick(0),
+            Tick::from_seconds(4),
+        );
         let cid = clip.id;
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
             .push(clip);
-        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            Tick::from_seconds(1),
+            Quality::FULL,
+            None,
+        );
         let coded: Vec<_> = out
             .diagnostics
             .iter()
@@ -4798,8 +4885,19 @@ mod tests {
         let tk = add_video_track(&mut project, seq_id);
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
-            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
-        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+            .push(Clip::new(
+                ClipSource::Asset { asset: aid },
+                Tick(0),
+                Tick::from_seconds(4),
+            ));
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            Tick::from_seconds(1),
+            Quality::FULL,
+            None,
+        );
         assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
     }
 
@@ -4811,8 +4909,19 @@ mod tests {
         let tk = add_video_track(&mut project, seq_id);
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
-            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
-        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+            .push(Clip::new(
+                ClipSource::Asset { asset: aid },
+                Tick(0),
+                Tick::from_seconds(4),
+            ));
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            Tick::from_seconds(1),
+            Quality::FULL,
+            None,
+        );
         assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
     }
 
@@ -4826,8 +4935,19 @@ mod tests {
         let tk = add_video_track(&mut project, seq_id);
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
-            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
-        let out = compile(&project, seq_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+            .push(Clip::new(
+                ClipSource::Asset { asset: aid },
+                Tick(0),
+                Tick::from_seconds(4),
+            ));
+        let out = compile(
+            &project,
+            seq_id,
+            0,
+            Tick::from_seconds(1),
+            Quality::FULL,
+            None,
+        );
         assert_eq!(count_code(&out, CompileCode::FrameRateConformed), 0);
     }
 
@@ -4840,14 +4960,20 @@ mod tests {
         let tk = add_video_track(&mut project, seq_id);
         project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
             .clips
-            .push(Clip::new(ClipSource::Asset { asset: aid }, Tick(0), Tick::from_seconds(4)));
+            .push(Clip::new(
+                ClipSource::Asset { asset: aid },
+                Tick(0),
+                Tick::from_seconds(4),
+            ));
         let decode = |q: Quality| -> (Tick, bool) {
             compile(&project, seq_id, 0, Tick::from_seconds(1), q, None)
                 .graph
                 .nodes
                 .iter()
                 .find_map(|n| match &n.op {
-                    IrOp::DecodeVideo { src_time, proxy, .. } => Some((*src_time, *proxy)),
+                    IrOp::DecodeVideo {
+                        src_time, proxy, ..
+                    } => Some((*src_time, *proxy)),
                     _ => None,
                 })
                 .expect("decode node present")
@@ -4893,7 +5019,14 @@ mod tests {
         }
         project.insert_sequence(outer);
 
-        let out = compile(&project, outer_id, 0, Tick::from_seconds(1), Quality::FULL, None);
+        let out = compile(
+            &project,
+            outer_id,
+            0,
+            Tick::from_seconds(1),
+            Quality::FULL,
+            None,
+        );
         // The one inner source evaluates ONCE, not ten times.
         let sources = out
             .graph
@@ -4901,7 +5034,10 @@ mod tests {
             .iter()
             .filter(|n| matches!(n.op, IrOp::SolidColor { .. } | IrOp::DecodeVideo { .. }))
             .count();
-        assert_eq!(sources, 1, "the shared inner source is one node, got {sources}");
+        assert_eq!(
+            sources, 1,
+            "the shared inner source is one node, got {sources}"
+        );
         // Every fold Merge shares the same deduped nest subtree as its top input.
         let tops: Vec<IrNodeId> = out
             .graph
@@ -4975,7 +5111,10 @@ mod tests {
             .iter()
             .filter(|n| matches!(n.op, IrOp::SolidColor { .. }))
             .count();
-        assert_eq!(solids, 2, "different source times ⇒ two distinct inner sources");
+        assert_eq!(
+            solids, 2,
+            "different source times ⇒ two distinct inner sources"
+        );
     }
 
     // ── K-0.5: LUT provider threading ────────────────────────────────────────
@@ -5021,8 +5160,15 @@ mod tests {
 
         let table = std::sync::Arc::new(photonic_render::Lut3d::identity(2));
         let stub = StubLut(table);
-        let with =
-            compile_with_luts(&project, seq_id, 0, Tick(0), Quality::FULL, None, Some(&stub));
+        let with = compile_with_luts(
+            &project,
+            seq_id,
+            0,
+            Tick(0),
+            Quality::FULL,
+            None,
+            Some(&stub),
+        );
         let grade = with
             .graph
             .nodes

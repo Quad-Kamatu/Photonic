@@ -263,7 +263,10 @@ mod tests {
     #[test]
     fn theme_matches_design_md() {
         let c = design_colors();
-        let tok = |name: &str| *c.get(name).unwrap_or_else(|| panic!("missing token {name}"));
+        let tok = |name: &str| {
+            *c.get(name)
+                .unwrap_or_else(|| panic!("missing token {name}"))
+        };
 
         let dark = build_dark_theme();
         assert_eq!(rgb(dark.override_text_color.unwrap()), tok("on-surface"));

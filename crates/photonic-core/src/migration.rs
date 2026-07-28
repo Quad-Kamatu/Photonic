@@ -519,9 +519,16 @@ mod tests {
         assert_eq!(run_migrations(&mut v, 5).unwrap(), 5);
 
         let seq = &v["timeline"]["sequences"]["s"];
-        let vgroup = seq["video_tracks"][0]["clips"][0]["group"].as_str().unwrap();
-        let agroup = seq["audio_tracks"][0]["clips"][0]["group"].as_str().unwrap();
-        assert_eq!(vgroup, agroup, "both clips must bind to the same AvLink group");
+        let vgroup = seq["video_tracks"][0]["clips"][0]["group"]
+            .as_str()
+            .unwrap();
+        let agroup = seq["audio_tracks"][0]["clips"][0]["group"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            vgroup, agroup,
+            "both clips must bind to the same AvLink group"
+        );
 
         let groups = seq["groups"].as_object().unwrap();
         assert_eq!(groups.len(), 1, "one distinct link_group → one group node");
@@ -547,9 +554,16 @@ mod tests {
         assert_eq!(run_migrations(&mut v, 5).unwrap(), 5);
 
         let seq = &v["timeline"]["sequences"]["s"];
-        let g0 = seq["video_tracks"][0]["clips"][0]["group"].as_str().unwrap();
-        let g1 = seq["video_tracks"][0]["clips"][1]["group"].as_str().unwrap();
-        assert_ne!(g0, g1, "distinct link_groups must not collapse into one group");
+        let g0 = seq["video_tracks"][0]["clips"][0]["group"]
+            .as_str()
+            .unwrap();
+        let g1 = seq["video_tracks"][0]["clips"][1]["group"]
+            .as_str()
+            .unwrap();
+        assert_ne!(
+            g0, g1,
+            "distinct link_groups must not collapse into one group"
+        );
         // A clip with no link_group is left ungrouped.
         assert!(seq["video_tracks"][0]["clips"][2].get("group").is_none());
         assert_eq!(seq["groups"].as_object().unwrap().len(), 2);

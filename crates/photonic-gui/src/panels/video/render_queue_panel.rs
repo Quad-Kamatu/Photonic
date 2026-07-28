@@ -12,11 +12,7 @@ const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x56, 0xCF);
 const ERROR: Color32 = Color32::from_rgb(0xF8, 0x71, 0x71);
 
 /// Floating "Render Queue" window. `open` is session state on PhotonicApp.
-pub(crate) fn draw_render_queue_panel(
-    ctx: &egui::Context,
-    open: &mut bool,
-    queue: &RenderQueue,
-) {
+pub(crate) fn draw_render_queue_panel(ctx: &egui::Context, open: &mut bool, queue: &RenderQueue) {
     if !*open {
         return;
     }
@@ -61,8 +57,7 @@ pub(crate) fn draw_render_queue_panel(
                                 |ui| {
                                     let can_cancel = matches!(
                                         job.status,
-                                        QueueJobStatus::Queued
-                                            | QueueJobStatus::Running { .. }
+                                        QueueJobStatus::Queued | QueueJobStatus::Running { .. }
                                     );
                                     if ui
                                         .add_enabled(can_cancel, egui::Button::new("Cancel"))
@@ -85,11 +80,9 @@ pub(crate) fn draw_render_queue_panel(
                                 };
                                 ui.add(egui::ProgressBar::new(p).show_percentage());
                                 ui.label(
-                                    RichText::new(format!(
-                                        "Frame {frame}/{total} · {fps:.1} fps"
-                                    ))
-                                    .small()
-                                    .color(MUTED),
+                                    RichText::new(format!("Frame {frame}/{total} · {fps:.1} fps"))
+                                        .small()
+                                        .color(MUTED),
                                 );
                                 // Keep the panel live while jobs run.
                                 ui.ctx().request_repaint();

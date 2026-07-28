@@ -197,10 +197,7 @@ async fn as1_social_clip_mcp_and_gui_arms_agree() {
     assert_eq!(mcp_seq.formats.len(), 2, "MCP arm: 16:9 + 9:16 formats");
     assert_eq!(mcp_seq.active_format, 1, "MCP arm: 9:16 is active");
     assert_eq!(
-        (
-            mcp_seq.formats[1].width,
-            mcp_seq.formats[1].height
-        ),
+        (mcp_seq.formats[1].width, mcp_seq.formats[1].height),
         (1080, 1920),
         "MCP arm: the active format is portrait 9:16"
     );

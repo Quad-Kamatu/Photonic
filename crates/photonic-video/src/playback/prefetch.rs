@@ -67,11 +67,7 @@ pub fn lead_from_source_range(range: FrameRange, playhead: Tick) -> Tick {
 }
 
 /// Combine the fixed cut-ahead lead with the E-1 graph-driven window.
-pub fn combined_prefetch_lead(
-    cut_ahead: Tick,
-    source_range: FrameRange,
-    playhead: Tick,
-) -> Tick {
+pub fn combined_prefetch_lead(cut_ahead: Tick, source_range: FrameRange, playhead: Tick) -> Tick {
     let from_graph = lead_from_source_range(source_range, playhead);
     Tick(cut_ahead.0.max(from_graph.0))
 }

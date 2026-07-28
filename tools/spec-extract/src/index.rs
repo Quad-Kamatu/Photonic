@@ -136,9 +136,9 @@ fn field_names(fields: &syn::Fields) -> Vec<String> {
             .iter()
             .map(|f| f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default())
             .collect(),
-        syn::Fields::Unnamed(unnamed) => (0..unnamed.unnamed.len())
-            .map(|i| i.to_string())
-            .collect(),
+        syn::Fields::Unnamed(unnamed) => {
+            (0..unnamed.unnamed.len()).map(|i| i.to_string()).collect()
+        }
         syn::Fields::Unit => Vec::new(),
     }
 }
@@ -380,8 +380,7 @@ pub fn index_file(root: &Path, path: &Path, out: &mut Vec<Item>) -> Result<(), S
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("{rel}: read error: {e}"))?;
+    let src = std::fs::read_to_string(path).map_err(|e| format!("{rel}: read error: {e}"))?;
     let file = syn::parse_file(&src).map_err(|e| {
         let span = e.span();
         format!("{rel}:{}: parse error: {e}", span.start().line)
@@ -401,8 +400,7 @@ pub fn index_file(root: &Path, path: &Path, out: &mut Vec<Item>) -> Result<(), S
 /// Parse ONE item from a source fragment (used by `--stdin-fragment`, which the
 /// anchored-block checker in §3.1 pipes each `spec-source` block through).
 pub fn index_fragment(src: &str) -> Result<Item, String> {
-    let item: syn::Item =
-        syn::parse_str(src).map_err(|e| format!("fragment parse error: {e}"))?;
+    let item: syn::Item = syn::parse_str(src).map_err(|e| format!("fragment parse error: {e}"))?;
     let mut out = Vec::new();
     collect_items(&[item], "<stdin>", "", "", &[], &mut out);
     out.into_iter()
