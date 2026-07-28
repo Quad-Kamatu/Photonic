@@ -395,8 +395,8 @@ The "newer, minor" row is the one most products get wrong: silently loading and 
 
 Validation rejections (`finalize_load`'s overlap/unsorted check) surface as `Project::ValidationFailed` **naming the offending clip**, not as an opaque failure.
 
-- **Done:** the timeline field landed additively at v3 and `CURRENT_FORMAT_VERSION` is now **4** (`document.rs:110`); `docs/format-versions.md` documents v1–v4, including the v3→v4 `anchor_space` migration described in §5.
-<!-- spec-assert: const photonic_core::document::CURRENT_FORMAT_VERSION == 4 -->
+- **Done:** the timeline field landed additively at v3 and `CURRENT_FORMAT_VERSION` is now **5** (`document.rs:117`); `docs/format-versions.md` documents v1–v5, including the v3→v4 `anchor_space` migration described in §5 and the nine-change `V4ToV5` step (35).
+<!-- spec-assert: const photonic_core::document::CURRENT_FORMAT_VERSION == 5 -->
 <!-- SD-3 (27 §3): historically drifted "bump 2 → 3"; the const is machine-pinned here so a further bump without a doc edit reds the drift gate. -->
 
 

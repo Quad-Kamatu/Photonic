@@ -422,25 +422,52 @@ fn snapshot_on_revision_edit_is_visible_in_next_compile() {
     session.shutdown();
 }
 
-// ── 4. Export/Probe stubs surface NotImplemented on status ───────────────────
+// ── 4. An unserviceable EngineCmd surfaces a real diagnostic on status ───────
+//
+// This test used to assert that `Probe` answered "not implemented", pinning
+// the pre-K-0.8 stub. K-0.8 implemented `EngineCmd::Probe` (probe file →
+// `set_asset_meta` + content hash) and K-0.1 implemented `Export`, so that
+// assertion had been false for many commits — it just never ran, because CI
+// was gated to `main` and this branch never opened a PR.
+//
+// The contract worth pinning now is the one that outlives the stubs: a command
+// the engine genuinely cannot service must surface an informative error on
+// `EngineStatus.last_error` rather than being dropped silently. `Export`'s own
+// success path is covered by `tests/export_engine_cmd.rs`; this covers the
+// error channel.
 
 #[test]
-fn export_and_probe_are_stubbed_not_implemented() {
+fn unserviceable_engine_cmd_surfaces_an_error_on_status() {
     let gpu = gpu_or_skip!();
+    // Empty project, so no timeline snapshot ever reaches the engine thread —
+    // a Probe for an asset that does not exist cannot be serviced.
     let doc = doc_with_project(TimelineProject::new(), 16.0, 16.0);
     let history = Arc::new(Mutex::new(CommandHistory::new(8)));
     let engine = VideoEngine::new(gpu);
     let session = engine.open_session(doc, history);
 
-    session.send(EngineCmd::Probe(photonic_core::timeline::AssetId::new()));
+    let unknown = photonic_core::timeline::AssetId::new();
+    session.send(EngineCmd::Probe(unknown));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let status = session.status();
         if let Some(err) = &status.last_error {
-            assert!(err.contains("not implemented"), "stub error: {err}");
+            assert!(
+                !err.contains("not implemented"),
+                "Probe is implemented since K-0.8; a 'not implemented' error \
+                 means the command regressed to a stub: {err}"
+            );
+            assert!(
+                !err.trim().is_empty(),
+                "the surfaced error must say something actionable"
+            );
             break;
         }
-        assert!(Instant::now() < deadline, "Probe stub surfaced on status");
+        assert!(
+            Instant::now() < deadline,
+            "an unserviceable Probe must surface on EngineStatus.last_error, \
+             not be dropped silently"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     session.shutdown();

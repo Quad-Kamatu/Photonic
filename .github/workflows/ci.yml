@@ -2,7 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Long-lived feature branches must be gated too. Before this, CI only ran
+    # on push-to-main and on `pull_request`; because no PR was ever opened for
+    # `feat/video-editor-module`, 238 commits landed without a single CI run
+    # (a test file stopped compiling for several commits and nobody noticed).
+    # `feat/**` matches nested names like `feat/video-editor-module`.
+    branches:
+      - main
+      - 'feat/**'
   pull_request:
   schedule:
     # Nightly, 03:00 UTC. Only the video-nightly job below runs on this
@@ -32,7 +39,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Matrix width is scoped by trigger, deliberately:
+        #
+        #   * branch pushes (feat/**)  -> ubuntu-latest only
+        #   * push to main + every PR  -> full ubuntu/windows/macos matrix
+        #
+        # Rationale: the point of gating feature-branch pushes is to catch
+        # "does it still compile / do the tests still pass" fast, and that
+        # signal is ~100% captured by one OS. The macOS runner bills at 10x
+        # and Windows at 2x a Linux minute, and this workspace's per-OS cost
+        # is dominated by the ffmpeg install + a cold wgpu/egui build — so a
+        # 3-OS matrix on every intermediate commit of a 238-commit branch is
+        # ~13x the minutes for near-zero extra signal. Genuinely
+        # platform-specific breakage (MSVC/schannel, Cocoa/Metal, path
+        # handling) is still caught before anything merges, because the full
+        # matrix runs on the PR and again on push to main.
+        #
+        # If a feature branch needs the wide matrix early, open a draft PR —
+        # `pull_request` gets full coverage.
+        # (kept on one line: GHA re-parses this string as an expression, so
+        # no YAML folding surprises)
+        os: ${{ (github.event_name == 'push' && github.ref != 'refs/heads/main') && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,9 +113,21 @@ jobs:
     # Skip on the nightly schedule trigger — see build-test's comment above.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # Blocking: `cargo fmt --all --check` is enforced (the tree is now
-    # rustfmt-clean). clippy runs but warnings are not denied yet (~50 in the
-    # backlog) — add `-D warnings` to enforce once those are cleared.
+    # `cargo fmt --all --check` is BLOCKING — that is the intended policy and
+    # it stays. What the old comment here claimed ("the tree is now
+    # rustfmt-clean") was not true: because this workflow never ran on
+    # `feat/**` pushes, formatting drifted unchecked on that branch (13+ files
+    # in photonic-core alone), so the first CI run on the branch would have
+    # red-lighted on fmt alone. The tree is being reconciled with
+    # `cargo fmt --all` as part of enabling this gate; if this step fails,
+    # the fix is to run `cargo fmt --all` locally and commit the result, not
+    # to relax the gate. Pinned toolchain note: fmt output is stable-channel
+    # dependent, so `dtolnay/rust-toolchain@stable` below must match what
+    # contributors run locally (rustfmt 1.9.0-stable / rustc 1.96 at the time
+    # of writing).
+    #
+    # clippy runs but warnings are not denied yet (~50 in the backlog) — add
+    # `-D warnings` to enforce once those are cleared.
     steps:
       - uses: actions/checkout@v4
 
@@ -145,6 +184,103 @@ jobs:
 
       - name: cargo-deny
         run: cargo deny check
+
+  acceptance-stories:
+    name: QA-1 acceptance stories (AS-1/2/3, advisory)
+    # Same trigger scope as build-test: every push (main + feat/**) and every
+    # PR, never on the nightly cron.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    #
+    # ── NON-BLOCKING ── TODO(QA-1): flip `continue-on-error` to false once the
+    # blockers below are cleared. Do not treat a green tick on this job as
+    # evidence the stories passed — read the step log.
+    #
+    # Blocker 1 (interface): CLEARED. `scripts/run-acceptance-stories.sh` is
+    #   the single documented entry point and is called directly below; the
+    #   placeholder glue that used to live here is gone. Verified on a GPU box:
+    #   all three stories pass 32/32 steps, "0 skipped, 0 failed", runner exit
+    #   0 — and its failure paths are proven too (dead server → SERVER-FAIL
+    #   exit 1; live-but-wrong server → 8 failed, exit 1).
+    #
+    # Blocker 2 (environment): GitHub's ubuntu-latest has no GPU. The scripts
+    #   use the adapter-skip convention (docs/specs/video-editor/
+    #   11-testing-phasing.md §3.4), so engine-backed steps SKIP rather than
+    #   FAIL without an adapter — which means a "pass" here can be mostly
+    #   skips. Mesa/lavapipe is installed below to give wgpu a software
+    #   Vulkan adapter; until the log shows the engine steps actually running
+    #   (not skipping), this job is coverage theatre and must stay advisory.
+    #
+    #   The scripts now expose `--strict` / `PHOTONIC_AS_STRICT=1`, which
+    #   promotes an environment skip to a failure. It is deliberately left
+    #   OFF here: per the flag's own docstring it is for a runner that IS
+    #   supposed to have a GPU + ffmpeg, and ubuntu-latest is not. Flip
+    #   PHOTONIC_AS_STRICT to '1' in the step env *at the same time* as
+    #   dropping continue-on-error, once this job moves to a GPU-capable
+    #   runner — the two changes are a pair, and either alone is wrong
+    #   (strict on a GPU-less runner = always red; blocking without strict =
+    #   green runs that verified nothing).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same system deps as build-test (photonic-app links winit/wgpu/egui/rfd
+      # even in --headless mode) + ffmpeg/ffprobe, which the stories need for
+      # media import and for verifying exported files.
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libgtk-3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev \
+            ffmpeg
+
+      # Software Vulkan (lavapipe) so wgpu can enumerate an adapter on a
+      # GPU-less runner; see Blocker 2 above. Advisory: if this does not
+      # produce a usable adapter the stories just SKIP their engine steps.
+      - name: Install software Vulkan adapter (lavapipe)
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary || echo "no Vulkan adapter — engine steps will SKIP"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # `scripts/run-acceptance-stories.sh` owns the whole recipe: it builds
+      # photonic-app, then per story picks a free ephemeral port, starts its own
+      # headless server, waits for `/mcp` to answer a real `initialize`, runs
+      # the story, and tears the server down. One server PER story is load-
+      # bearing, not tidiness — the MCP surface mutates a single in-process
+      # document, so a shared server would let AS-2 inherit AS-1's sequences.
+      - name: Run AS-1 / AS-2 / AS-3 acceptance stories
+        # Debug build on purpose: compile time dominates here, and the work a
+        # release build would speed up (engine rendering) is exactly what SKIPs
+        # on a GPU-less runner. Add --release together with --strict when this
+        # job moves to a GPU-capable runner.
+        run: |
+          scripts/run-acceptance-stories.sh \
+            --log-dir "${RUNNER_TEMP}/as-logs" \
+            --out-dir "${RUNNER_TEMP}/as-exports"
+
+      # The per-story server logs are the only way to tell a real pass from a
+      # run that skipped every engine step (Blocker 2). Upload them always, and
+      # AS-2's deliverable exports with them.
+      - name: Upload acceptance-story logs and exports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-stories
+          path: |
+            ${{ runner.temp }}/as-logs
+            ${{ runner.temp }}/as-exports
+          if-no-files-found: warn
 
   preflight-gate:
     name: PDF/X-1a preflight gate

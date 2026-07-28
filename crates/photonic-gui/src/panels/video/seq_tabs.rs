@@ -44,7 +44,8 @@ pub(crate) fn sync_open_tabs(doc: &Document, open_tabs: &mut Vec<SequenceId>) {
 /// Sequence tab strip for the timeline panel header.
 ///
 /// - Click a tab → activate that sequence (undoable `SetActiveSequence`).
-/// - ✕ on a non-last tab → close it (session-only; sequence stays in project).
+/// - The close icon (`egui_phosphor::regular::X`) on a non-last tab → close it
+///   (session-only; the sequence stays in the project).
 /// - **+** → create a new empty sequence (undoable) and pin/activate it.
 /// - Right-click → Duplicate / Rename.
 pub(crate) fn draw_seq_tabs(
@@ -114,7 +115,9 @@ pub(crate) fn draw_seq_tabs(
         if put_label(
             ui,
             r,
-            RichText::new(format!("↑ {crumb_text}")).small().color(MUTED),
+            RichText::new(format!("↑ {crumb_text}"))
+                .small()
+                .color(MUTED),
         )
         .on_hover_text("Click to pop nested sequence breadcrumb")
         .clicked()
@@ -122,10 +125,7 @@ pub(crate) fn draw_seq_tabs(
             if let Some(parent) = breadcrumbs.pop() {
                 // Drop mut borrow of open_tabs path: activate parent.
                 let cmd = ops::set_active_sequence(project, Some(parent));
-                history.execute_discrete(
-                    photonic_core::history::Command::Timeline(cmd),
-                    doc,
-                );
+                history.execute_discrete(photonic_core::history::Command::Timeline(cmd), doc);
                 if !open_tabs.contains(&parent) {
                     open_tabs.push(parent);
                 }
@@ -151,8 +151,7 @@ pub(crate) fn draw_seq_tabs(
         } else {
             ui.visuals().widgets.inactive.bg_fill
         };
-        ui.painter()
-            .rect_filled(tab_rect, 3.0, fill);
+        ui.painter().rect_filled(tab_rect, 3.0, fill);
 
         let label_rect =
             egui::Rect::from_min_size(tab_rect.min + egui::vec2(4.0, 0.0), egui::vec2(label_w, bh));
@@ -214,10 +213,7 @@ pub(crate) fn draw_seq_tabs(
             if let Some(&next) = open_tabs.first() {
                 if let Some(project) = doc.timeline.as_ref() {
                     let cmd = ops::set_active_sequence(project, Some(next));
-                    history.execute_discrete(
-                        photonic_core::history::Command::Timeline(cmd),
-                        doc,
-                    );
+                    history.execute_discrete(photonic_core::history::Command::Timeline(cmd), doc);
                 }
             }
         }

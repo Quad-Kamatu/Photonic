@@ -170,10 +170,17 @@ class Skip(Exception):
 
 
 class Runner:
-    def __init__(self):
+    def __init__(self, strict: bool = False):
         self.total = 0
         self.failed = 0
         self.skipped = 0
+        # `--strict` / PHOTONIC_AS_STRICT=1: treat an environment skip as a
+        # failure. Without it, a runner with no GPU adapter and no ffmpeg
+        # skips every step that actually renders or encodes anything and
+        # still exits 0 — a green CI run that verified nothing. CI gates on
+        # a machine that IS supposed to have a GPU + ffmpeg must pass
+        # `--strict` so a silently-degraded runner fails loudly instead.
+        self.strict = strict
 
     def step(self, name: str, fn) -> Any:
         """Run one step, print its PASS/FAIL/SKIP line, and return whatever
@@ -183,6 +190,10 @@ class Runner:
         try:
             result = fn()
         except Skip as e:
+            if self.strict:
+                self.failed += 1
+                print(f"[FAIL] {name}: {e} (skip promoted to failure by --strict)")
+                return None
             self.skipped += 1
             print(f"[SKIP] {name}: {e}")
             return None
@@ -274,10 +285,18 @@ def main() -> int:
         help="Persist the AV1/H.264 exports to this directory instead of an "
         "auto-deleted temp dir (the two deliverable acceptance videos).",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=os.environ.get("PHOTONIC_AS_STRICT") == "1",
+        help="Fail (rather than skip) on an environment gap — no GPU adapter, "
+        "no ffmpeg/ffprobe. Use in CI so a degraded runner can't report a "
+        "green run that verified nothing. [env: PHOTONIC_AS_STRICT=1]",
+    )
     args = parser.parse_args()
 
     client = Client(args.url)
-    run = Runner()
+    run = Runner(strict=args.strict)
     state: dict[str, Any] = {}
 
     def s_connect():

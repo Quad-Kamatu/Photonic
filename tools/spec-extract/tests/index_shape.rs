@@ -36,6 +36,36 @@ fn items(json: &Value) -> &Vec<Value> {
     json["items"].as_array().expect("items array")
 }
 
+/// Ground truth for a `pub const` in `photonic-core/src/document.rs`, read
+/// straight from the source: `(1-based line, value literal)`.
+///
+/// Deliberately a dumb text scan rather than a second parser — if it agreed
+/// with the extractor by sharing its logic it would prove nothing.
+fn const_ground_truth(name: &str) -> (usize, String) {
+    let path = repo_root()
+        .join("crates")
+        .join("photonic-core")
+        .join("src")
+        .join("document.rs");
+    let src = std::fs::read_to_string(&path).expect("read document.rs");
+    let needle = format!("pub const {name}");
+    for (i, line) in src.lines().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix(&needle) else {
+            continue;
+        };
+        let value = rest
+            .split('=')
+            .nth(1)
+            .expect("const has an initialiser")
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        return (i + 1, value);
+    }
+    panic!("no `pub const {name}` in {}", path.display());
+}
+
 fn find<'a>(items: &'a [Value], file: &str, name: &str) -> &'a Value {
     items
         .iter()
@@ -55,16 +85,20 @@ fn indexes_const_enum_and_fields_in_order() {
         "crates/photonic-core/src/document.rs",
         "CURRENT_FORMAT_VERSION",
     );
+    // This test proves the *extractor* reports the const faithfully, so both
+    // the value and the line are derived from the source rather than pinned to
+    // literals. Hardcoding them made this test stale twice over — the constant
+    // moved to a new line and bumped v4→v5, and because CI never ran on the
+    // feature branch nobody saw it go red. Pinning the literal version number
+    // is the job of 01-data-model.md's `spec-assert`, which check-spec-drift.py
+    // evaluates; duplicating that pin here only doubles the maintenance.
+    let (want_line, want_value) = const_ground_truth("CURRENT_FORMAT_VERSION");
     assert_eq!(ver["kind"], "Const", "kind of CURRENT_FORMAT_VERSION");
-    assert_eq!(ver["value"], "4", "value of CURRENT_FORMAT_VERSION");
-    assert_eq!(ver["line"], 110, "line of CURRENT_FORMAT_VERSION");
+    assert_eq!(ver["value"], want_value, "value of CURRENT_FORMAT_VERSION");
+    assert_eq!(ver["line"], want_line, "line of CURRENT_FORMAT_VERSION");
 
     // (b) EngineCmd enum in session.rs, variants in exact declaration order.
-    let cmd = find(
-        items,
-        "crates/photonic-video/src/session.rs",
-        "EngineCmd",
-    );
+    let cmd = find(items, "crates/photonic-video/src/session.rs", "EngineCmd");
     assert_eq!(cmd["kind"], "Enum", "kind of EngineCmd");
     let variant_names: Vec<String> = cmd["variants"]
         .as_array()
@@ -88,6 +122,11 @@ fn indexes_const_enum_and_fields_in_order() {
             "SeekSource",
             "InvalidateRange",
             "Export",
+            // Landed with K-0.1's export progress/cancel wiring. Kept as a
+            // literal list on purpose: unlike the const's line number, the
+            // variant set only changes when someone edits the enum, and that
+            // is exactly the event this assertion should make them notice.
+            "CancelExport",
             "Probe",
             "Shutdown",
         ],
