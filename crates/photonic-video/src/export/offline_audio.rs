@@ -4,8 +4,14 @@
 //! interactive playback (PA-10), then optionally applies a constant
 //! [`LoudnessTarget`] gain (two-pass: measure integrated LUFS + true peak,
 //! then scale — never a time-varying compressor).
+//!
+//! The measurement half is **E-2** (32 §2 / 31 §5): it runs as
+//! [`analysis::analyze_loudness`], is keyed by the PCM content hash and cached,
+//! so the "analyse → cache → apply" shape 31 §6.2 mandates is the actual code
+//! shape here, and a re-render of unchanged audio skips the measurement pass.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use photonic_core::timeline::{
     AssetSource, Clip, ClipAudio, ClipId, ClipSource, SequenceId, Tick, TimelineProject,
@@ -14,9 +20,9 @@ use photonic_core::timeline::{
 
 use super::presets::LoudnessTarget;
 use super::render_loop::ExportError;
-use crate::audio::dsp::loudness::{integrated_lufs, true_peak_dbtp};
 use crate::audio::mixer::{ClipVoice, Mixer, PcmSource, TrackVoice};
 use crate::audio::{BLOCK_FRAMES, CHANNELS};
+use crate::graph::analysis::{self, AnalysisCache, AnalysisResult};
 use crate::media::ffmpeg_locate::FfmpegTools;
 use crate::playback::FfmpegPcmSource;
 
@@ -146,7 +152,11 @@ pub fn render_export_audio(
     }
 
     if let Some(target) = loudness {
-        apply_loudness_gain(&mut out_pcm, sample_rate, target);
+        // Analyse (cached, E-2) → apply. Two statements, in that order, because
+        // 31 §6.2 says the measurement is a job and the gain is what the render
+        // consumes.
+        let measured = measure_loudness_cached(&out_pcm, sample_rate);
+        apply_loudness_gain(&mut out_pcm, &measured, target);
     }
     Ok(out_pcm)
 }
@@ -159,19 +169,71 @@ fn ticks_to_frames(duration: Tick, sample_rate: u32) -> usize {
     n.max(0) as usize
 }
 
-/// Two-pass offline loudness (31 §6.2): measure integrated LUFS, compute a
-/// constant gain to hit `target.integrated_lufs`, then reduce the gain if it
-/// would breach `true_peak_dbtp`. Silence (non-finite LUFS) is left untouched.
-fn apply_loudness_gain(pcm: &mut [f32], sample_rate: u32, target: &LoudnessTarget) {
+/// Bound on the shared measurement cache. Each entry is a handful of bytes and
+/// one export contributes one entry, so this is a leak guard rather than a
+/// working-set policy; on overflow the whole map is dropped (a re-measure, not
+/// a wrong answer). A byte-budgeted LRU belongs with 32 §5.2's budget work.
+const MAX_CACHED_MEASUREMENTS: usize = 64;
+
+/// Process-wide loudness measurement cache (31 §6.2 step 4: "cache the
+/// measurement by content hash so a re-render is free"). Export jobs are
+/// separate invocations, so a job-scoped cache could never hit; the reuse this
+/// exists for is *the same range exported again* — a preset change, a retry, a
+/// second container — which must not re-run K-weighting over the whole mix.
+fn shared_loudness_cache() -> &'static Mutex<AnalysisCache> {
+    static CACHE: OnceLock<Mutex<AnalysisCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(AnalysisCache::new()))
+}
+
+/// Measure `pcm` through the E-2 substrate, reusing a cached verdict when the
+/// content hash hits.
+///
+/// The lock is taken twice and never held across the measurement, so two
+/// concurrent exports of *different* audio do not serialise on each other (the
+/// worst case is a duplicated measurement of identical audio, which is correct,
+/// just not free). A poisoned mutex degrades to measuring uncached rather than
+/// failing the export.
+fn measure_loudness_cached(pcm: &[f32], sample_rate: u32) -> AnalysisResult {
+    let key = analysis::loudness_key(pcm, sample_rate);
+    if let Some(hit) = shared_loudness_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+    {
+        return hit;
+    }
+    let measured = analysis::analyze_loudness(pcm, sample_rate);
+    if let Ok(mut cache) = shared_loudness_cache().lock() {
+        if cache.len() >= MAX_CACHED_MEASUREMENTS {
+            cache.clear();
+        }
+        cache.insert(key, measured.clone());
+    }
+    measured
+}
+
+/// Second pass of 31 §6.2: turn an [`AnalysisResult::Loudness`] into a constant
+/// gain that hits `target.integrated_lufs`, reduced if it would breach
+/// `true_peak_dbtp`. Pure in the measurement — it never touches the DSP itself,
+/// which is what makes the cached and uncached paths provably identical.
+/// Silence (non-finite LUFS) is left untouched.
+fn apply_loudness_gain(pcm: &mut [f32], measured: &AnalysisResult, target: &LoudnessTarget) {
     if pcm.is_empty() {
         return;
     }
-    let measured = integrated_lufs(pcm, sample_rate);
+    let AnalysisResult::Loudness {
+        integrated_lufs: measured,
+        true_peak_dbtp: peak,
+        ..
+    } = *measured
+    else {
+        debug_assert!(false, "loudness gain needs an AnalysisResult::Loudness");
+        return;
+    };
     if !measured.is_finite() {
         return;
     }
     let mut gain_db = f64::from(target.integrated_lufs) - measured;
-    let peak = true_peak_dbtp(pcm, sample_rate);
     let peak_after = peak as f64 + gain_db;
     if peak_after > f64::from(target.true_peak_dbtp) {
         // Pull the gain down so true peak lands on the ceiling; report via
@@ -201,6 +263,7 @@ fn apply_loudness_gain(pcm: &mut [f32], sample_rate: u32, target: &LoudnessTarge
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::dsp::loudness::{integrated_lufs, true_peak_dbtp};
     use photonic_core::timeline::{FrameRate, MasterBus, Sequence, Track, TrackAudio, TrackKind};
 
     fn empty_audio_seq() -> (TimelineProject, SequenceId) {
@@ -227,14 +290,60 @@ mod tests {
         assert!(pcm.iter().all(|&s| s == 0.0));
     }
 
+    /// Stereo 997 Hz tone at `amp`, the buffer both loudness tests measure.
+    fn tone(amp: f32, seconds: f64, fs: u32) -> Vec<f32> {
+        let frames = (fs as f64 * seconds) as usize;
+        let mut pcm = vec![0.0f32; frames * CHANNELS];
+        for f in 0..frames {
+            let s = (2.0 * std::f64::consts::PI * 997.0 * f as f64 / fs as f64).sin() as f32 * amp;
+            for c in 0..CHANNELS {
+                pcm[f * CHANNELS + c] = s;
+            }
+        }
+        pcm
+    }
+
+    /// Measure-then-apply, as one call, the way `render_export_audio` does it.
+    fn normalize(pcm: &mut [f32], fs: u32, target: &LoudnessTarget) {
+        let measured = measure_loudness_cached(pcm, fs);
+        apply_loudness_gain(pcm, &measured, target);
+    }
+
+    /// The pre-E-2 implementation, transcribed verbatim from the two-pass
+    /// `apply_loudness_gain` this change replaced (git 8b6e572, offline_audio.rs
+    /// :165-199) — the oracle for "re-plumbing, not a retune".
+    fn legacy_apply_loudness_gain(pcm: &mut [f32], sample_rate: u32, target: &LoudnessTarget) {
+        use crate::audio::dsp::loudness::{integrated_lufs, true_peak_dbtp};
+        if pcm.is_empty() {
+            return;
+        }
+        let measured = integrated_lufs(pcm, sample_rate);
+        if !measured.is_finite() {
+            return;
+        }
+        let mut gain_db = f64::from(target.integrated_lufs) - measured;
+        let peak = true_peak_dbtp(pcm, sample_rate);
+        let peak_after = peak as f64 + gain_db;
+        if peak_after > f64::from(target.true_peak_dbtp) {
+            gain_db = f64::from(target.true_peak_dbtp) - peak as f64;
+        }
+        let g = 10f64.powf(gain_db / 20.0) as f32;
+        if (g - 1.0).abs() < 1e-6 {
+            return;
+        }
+        for s in pcm.iter_mut() {
+            *s *= g;
+        }
+    }
+
     #[test]
     fn apply_loudness_on_silence_is_noop() {
-        let mut pcm = vec![0.0f32; 48_000 * 2];
+        let mut pcm = vec![0.0f32; 48_000 * CHANNELS];
         let target = LoudnessTarget {
             integrated_lufs: -14.0,
             true_peak_dbtp: -1.0,
         };
-        apply_loudness_gain(&mut pcm, 48_000, &target);
+        normalize(&mut pcm, 48_000, &target);
         assert!(pcm.iter().all(|&s| s == 0.0));
     }
 
@@ -242,27 +351,175 @@ mod tests {
     fn apply_loudness_raises_a_quiet_tone_toward_target() {
         // 1 kHz stereo sine at low amplitude for 1 s @ 48 kHz.
         let fs = 48_000u32;
-        let frames = fs as usize;
-        let mut pcm = vec![0.0f32; frames * 2];
-        let amp = 0.05f32;
-        for f in 0..frames {
-            let s = (2.0 * std::f64::consts::PI * 997.0 * f as f64 / fs as f64).sin() as f32 * amp;
-            pcm[f * 2] = s;
-            pcm[f * 2 + 1] = s;
-        }
+        let mut pcm = tone(0.05, 1.0, fs);
         let before = integrated_lufs(&pcm, fs);
         assert!(before.is_finite() && before < -20.0, "before={before}");
         let target = LoudnessTarget {
             integrated_lufs: -23.0,
             true_peak_dbtp: -1.0,
         };
-        apply_loudness_gain(&mut pcm, fs, &target);
+        normalize(&mut pcm, fs, &target);
         let after = integrated_lufs(&pcm, fs);
         // Should land near −23 LUFS (within ~1.5 LU of measurement noise).
         assert!(
             (after - (-23.0)).abs() < 1.5,
             "after={after}, before={before}"
         );
+    }
+
+    /// E-2 re-plumbing must not move a single sample: the substrate-routed path
+    /// and the pre-E-2 two-pass must agree **bit for bit**, on a gain-limited
+    /// case, a ceiling-limited case, and silence.
+    #[test]
+    fn e2_routed_loudness_is_bit_identical_to_the_legacy_two_pass() {
+        /// Which arm of 31 §6.2 a case is meant to exercise.
+        #[derive(Debug, PartialEq)]
+        enum Branch {
+            /// Gain set purely by the LUFS delta.
+            Lufs,
+            /// Gain pulled back to honour the true-peak ceiling.
+            Ceiling,
+            /// Non-finite measurement — buffer left untouched.
+            Silent,
+        }
+        let fs = 48_000u32;
+        let broadcast = LoudnessTarget {
+            integrated_lufs: -23.0,
+            true_peak_dbtp: -1.0,
+        };
+        let streaming = LoudnessTarget {
+            integrated_lufs: -14.0,
+            true_peak_dbtp: -1.0,
+        };
+        // High crest factor: quiet enough to want a big boost, peaky enough
+        // that the boost would breach the ceiling.
+        let mut clicky = tone(0.02, 1.0, fs);
+        for f in (0..fs as usize).step_by(4_800) {
+            for c in 0..CHANNELS {
+                clicky[f * CHANNELS + c] = 0.95;
+            }
+        }
+        let cases: [(&str, Vec<f32>, LoudnessTarget, Branch); 3] = [
+            ("quiet tone", tone(0.05, 1.0, fs), broadcast, Branch::Lufs),
+            ("peaky clicks", clicky, streaming, Branch::Ceiling),
+            (
+                "silence",
+                vec![0.0f32; fs as usize * CHANNELS],
+                streaming,
+                Branch::Silent,
+            ),
+        ];
+        for (name, source, target, expected) in cases {
+            let mut legacy = source.clone();
+            legacy_apply_loudness_gain(&mut legacy, fs, &target);
+            let mut routed = source.clone();
+            normalize(&mut routed, fs, &target);
+            assert_eq!(routed.len(), legacy.len(), "{name}: length");
+            assert!(
+                routed
+                    .iter()
+                    .zip(&legacy)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{name}: E-2 path diverged from the legacy two-pass"
+            );
+            // …and the case really did exercise the branch it claims to, with
+            // the branch condition derived from the measurement, not asserted
+            // as a literal.
+            let peak = true_peak_dbtp(&source, fs);
+            let lufs = integrated_lufs(&source, fs);
+            let branch = if !lufs.is_finite() {
+                Branch::Silent
+            } else if peak as f64 + (f64::from(target.integrated_lufs) - lufs)
+                > f64::from(target.true_peak_dbtp)
+            {
+                Branch::Ceiling
+            } else {
+                Branch::Lufs
+            };
+            assert_eq!(branch, expected, "{name}: lufs={lufs} peak={peak}");
+            if expected == Branch::Silent {
+                assert_eq!(routed, source, "{name}: silence must be untouched");
+            } else {
+                assert_ne!(routed, source, "{name}: gain should have moved samples");
+            }
+        }
+    }
+
+    /// The measurement is cached on the **real export path**: poisoning the
+    /// shared cache under the buffer's content key changes what the export
+    /// consumes, which is only possible if the second call never re-measured.
+    #[test]
+    fn export_measurement_hits_the_shared_analysis_cache() {
+        let fs = 48_000u32;
+        // A buffer no other test in this process produces (marker sample).
+        let mut pcm = tone(0.037_913_1, 0.6, fs);
+        pcm[0] = f32::from_bits(0x3ecc_cccd);
+        let key = analysis::loudness_key(&pcm, fs);
+
+        let first = measure_loudness_cached(&pcm, fs);
+        assert_eq!(first, analysis::analyze_loudness(&pcm, fs));
+        assert_eq!(
+            shared_loudness_cache().lock().unwrap().get(key).cloned(),
+            Some(first.clone()),
+            "first measurement should have been cached under its content key"
+        );
+
+        let poison = AnalysisResult::Loudness {
+            integrated_lufs: -60.0,
+            true_peak_dbtp: -30.0,
+            frames: 1,
+            sample_rate: fs,
+        };
+        shared_loudness_cache()
+            .lock()
+            .unwrap()
+            .insert(key, poison.clone());
+        assert_eq!(
+            measure_loudness_cached(&pcm, fs),
+            poison,
+            "second export of the same audio re-ran the measurement pass"
+        );
+
+        // The poisoned verdict is what the gain is computed from, proving the
+        // export consumes the cache rather than the DSP.
+        let target = LoudnessTarget {
+            integrated_lufs: -14.0,
+            true_peak_dbtp: -1.0,
+        };
+        let mut routed = pcm.clone();
+        normalize(&mut routed, fs, &target);
+        let mut expected = pcm.clone();
+        apply_loudness_gain(&mut expected, &poison, &target);
+        assert!(routed
+            .iter()
+            .zip(&expected)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+
+        shared_loudness_cache().lock().unwrap().insert(key, first);
+    }
+
+    /// End-to-end through the export entry point: a loudness target on a silent
+    /// sequence stays silent, and the range's measurement lands in the cache.
+    #[test]
+    fn render_export_audio_with_loudness_target_caches_its_measurement() {
+        let (project, sid) = empty_audio_seq();
+        let target = LoudnessTarget {
+            integrated_lufs: -14.0,
+            true_peak_dbtp: -1.0,
+        };
+        let pcm = render_export_audio(
+            &project,
+            sid,
+            Tick(0),
+            Tick(TICKS_PER_SECOND),
+            None,
+            Some(&target),
+        )
+        .unwrap();
+        assert_eq!(pcm.len(), 48_000 * CHANNELS);
+        assert!(pcm.iter().all(|&s| s == 0.0), "silence must stay silent");
+        let key = analysis::loudness_key(&pcm, 48_000);
+        assert!(shared_loudness_cache().lock().unwrap().get(key).is_some());
     }
 
     #[test]

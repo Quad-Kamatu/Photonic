@@ -1644,6 +1644,8 @@ impl PhotonicApp {
             "video.step_forward",
             "video.prev_edit_point",
             "video.next_edit_point",
+            "video.prev_snap",
+            "video.next_snap",
             "video.set_in",
             "video.set_out",
             "video.split_at_playhead",

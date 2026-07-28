@@ -27,6 +27,9 @@ use egui_phosphor::regular as ph;
 // reached via the `clip` submodule directly, same precedent as
 // `app/timeline/mod.rs`'s `use photonic_core::timeline::clip::LinkGroupId`.
 use photonic_core::timeline::clip::SpeedKey;
+// `VfxOwner` (K-B1/K-B2 effect-stack scope) isn't re-exported at `timeline::`
+// root either — same precedent as `SpeedKey` above.
+use photonic_core::timeline::commands::VfxOwner;
 use photonic_core::timeline::{
     ops, prop_registry, Clip, ClipId, EffectKind, PropTargetKind, PropValue, Ratio, SequenceId,
     SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition, TransitionKind,
@@ -739,6 +742,66 @@ fn effect_label(effect: &photonic_core::timeline::ClipEffect) -> String {
     }
 }
 
+/// Which of the four effect stacks (26 §10 K-B1/K-B2, 35 §2) the Effects
+/// section is editing. Session-only UI state, parked in egui temp memory
+/// rather than `VideoPanelUi` — same idiom `node_editor.rs` uses for its
+/// per-graph view state, and it keeps this story inside `panels/video/`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum FxScopeTab {
+    #[default]
+    Clip,
+    Track,
+    Master,
+    Asset,
+}
+
+fn fx_scope_id() -> egui::Id {
+    egui::Id::new("clip_inspector_fx_scope")
+}
+
+/// The asset a clip inherits an effect stack from (K-B2), if it has one.
+/// `Adjustment` / `SolidColor` / `Text` / nested-sequence clips have no bin
+/// asset, so the Asset tab is unavailable for them.
+fn clip_asset(clip: &Clip) -> Option<photonic_core::timeline::AssetId> {
+    match clip.source {
+        photonic_core::timeline::ClipSource::Asset { asset }
+        | photonic_core::timeline::ClipSource::Vector { asset } => Some(asset),
+        _ => None,
+    }
+}
+
+fn owner_for(tab: FxScopeTab, seq: SequenceId, track: TrackId, clip: &Clip) -> Option<VfxOwner> {
+    match tab {
+        FxScopeTab::Clip => Some(VfxOwner::Clip(clip.id)),
+        FxScopeTab::Track => Some(VfxOwner::Track(track)),
+        FxScopeTab::Master => Some(VfxOwner::Master(seq)),
+        FxScopeTab::Asset => clip_asset(clip).map(VfxOwner::Asset),
+    }
+}
+
+/// One line of orientation per scope — which stack the rows below belong to and
+/// where it sits in the evaluation order (35 §2: asset → clip → track → master).
+fn scope_hint(tab: FxScopeTab, project: &TimelineProject, track: TrackId, clip: &Clip) -> String {
+    match tab {
+        FxScopeTab::Clip => format!("This clip only — \"{}\".", clip.name),
+        FxScopeTab::Track => {
+            let name = project
+                .sequences
+                .values()
+                .find_map(|s| s.track(track))
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+            format!("Every clip on track \"{name}\", after they fold together.")
+        }
+        FxScopeTab::Master => {
+            "The whole sequence, after all tracks are merged. Applied last.".to_string()
+        }
+        FxScopeTab::Asset => {
+            "Every timeline instance of this media, before the clip's own stack.".to_string()
+        }
+    }
+}
+
 fn draw_effects_section(
     ui: &mut Ui,
     project: &TimelineProject,
@@ -751,16 +814,57 @@ fn draw_effects_section(
         .default_open(true)
         .id_salt("clip_inspector_effects")
         .show(ui, |ui| {
+            let mut tab: FxScopeTab = ui.data(|d| d.get_temp(fx_scope_id())).unwrap_or_default();
+            let has_asset = clip_asset(clip).is_some();
+            ui.horizontal_wrapped(|ui| {
+                for (t, label) in [
+                    (FxScopeTab::Clip, "Clip"),
+                    (FxScopeTab::Track, "Track"),
+                    (FxScopeTab::Master, "Master"),
+                    (FxScopeTab::Asset, "Asset"),
+                ] {
+                    let enabled = t != FxScopeTab::Asset || has_asset;
+                    let resp = ui.add_enabled(enabled, egui::SelectableLabel::new(tab == t, label));
+                    if resp.clicked() {
+                        tab = t;
+                    }
+                    if t == FxScopeTab::Asset && !has_asset {
+                        resp.on_hover_text(
+                            "This clip has no bin asset (adjustment / title / solid).",
+                        );
+                    }
+                }
+            });
+            if tab == FxScopeTab::Asset && !has_asset {
+                tab = FxScopeTab::Clip;
+            }
+            ui.data_mut(|d| d.insert_temp(fx_scope_id(), tab));
+            ui.label(
+                RichText::new(scope_hint(tab, project, track, clip))
+                    .color(MUTED)
+                    .small(),
+            );
+
+            let Some(owner) = owner_for(tab, seq, track, clip) else {
+                return;
+            };
+            let Ok(stack) = ops::effect_stack(project, owner) else {
+                ui.label(RichText::new("Stack unavailable.").color(MUTED).small());
+                return;
+            };
+
             let drop_rect = ui.available_rect_before_wrap();
-            for i in 0..clip.effects.len() {
-                let effect = &clip.effects[i];
-                ui.push_id(("clip_effect_row", clip.id, i), |ui| {
+            for i in 0..stack.len() {
+                let effect = &stack[i];
+                ui.push_id(("fx_row", scope_salt(owner), i), |ui| {
                     ui.horizontal(|ui| {
                         let mut enabled = effect.enabled;
                         if ui.checkbox(&mut enabled, "").changed() {
-                            let mut new_clip = clip.clone();
-                            new_clip.effects[i].enabled = enabled;
-                            set_clip_discrete(project, seq, track, new_clip, action);
+                            let mut new_effect = effect.clone();
+                            new_effect.enabled = enabled;
+                            if let Ok(cmd) = ops::set_effect_scoped(project, owner, i, new_effect) {
+                                *action = Some(PanelAction::ClipEditDiscrete(cmd));
+                            }
                         }
                         let name = effect_label(effect);
                         let label = if enabled {
@@ -777,30 +881,23 @@ fn draw_effects_section(
                             .on_hover_text("Move up")
                             .clicked()
                         {
-                            if let Ok(cmd) = ops::reorder_effects(
+                            if let Ok(cmd) = ops::reorder_effects_scoped(
                                 project,
-                                seq,
-                                track,
-                                clip.id,
-                                swapped_order(clip.effects.len(), i, i - 1),
+                                owner,
+                                swapped_order(stack.len(), i, i - 1),
                             ) {
                                 *action = Some(PanelAction::ClipEditDiscrete(cmd));
                             }
                         }
                         if ui
-                            .add_enabled(
-                                i + 1 < clip.effects.len(),
-                                egui::Button::new("\u{2193}").small(),
-                            )
+                            .add_enabled(i + 1 < stack.len(), egui::Button::new("\u{2193}").small())
                             .on_hover_text("Move down")
                             .clicked()
                         {
-                            if let Ok(cmd) = ops::reorder_effects(
+                            if let Ok(cmd) = ops::reorder_effects_scoped(
                                 project,
-                                seq,
-                                track,
-                                clip.id,
-                                swapped_order(clip.effects.len(), i, i + 1),
+                                owner,
+                                swapped_order(stack.len(), i, i + 1),
                             ) {
                                 *action = Some(PanelAction::ClipEditDiscrete(cmd));
                             }
@@ -810,33 +907,36 @@ fn draw_effects_section(
                             .on_hover_text("Remove effect")
                             .clicked()
                         {
-                            if let Ok(cmd) = ops::remove_effect(project, seq, track, clip.id, i) {
+                            if let Ok(cmd) = ops::remove_effect_scoped(project, owner, i) {
                                 *action = Some(PanelAction::ClipEditDiscrete(cmd));
                             }
                         }
                     });
                     egui::CollapsingHeader::new("params")
-                        .id_salt(("clip_effect_params", clip.id, i))
+                        .id_salt(("fx_params", scope_salt(owner), i))
                         .default_open(false)
                         .show(ui, |ui| {
-                            draw_effect_params(ui, project, seq, track, clip, i, action);
+                            draw_effect_params(ui, project, owner, effect, i, action);
                         });
                 });
             }
-            if clip.effects.is_empty() {
-                ui.label(
-                    RichText::new(
-                        "No effects — drag one from the Effects browser, or double-click it \
-                         there to apply to this clip.",
-                    )
-                    .color(MUTED)
-                    .small(),
-                );
+            if stack.is_empty() {
+                // Only the clip stack has the double-click shortcut (the
+                // Effects browser applies to the *clip selection*); every scope
+                // accepts a drag onto this section.
+                let hint = if tab == FxScopeTab::Clip {
+                    "No effects — drag one from the Effects browser, or double-click it \
+                     there to apply to this clip."
+                } else {
+                    "No effects — drag one from the Effects browser onto this section."
+                };
+                ui.label(RichText::new(hint).color(MUTED).small());
             }
 
             // Drop target for an Effects-browser drag (13 §6.3: "the Clip
             // Inspector's effects-stack section" is a valid drop target,
-            // mirroring the media-pool → timeline `AssetDrag` idiom).
+            // mirroring the media-pool → timeline `AssetDrag` idiom). The drop
+            // lands on whichever scope tab is showing.
             if let Some(payload) =
                 egui::DragAndDrop::payload::<super::effects_browser::EffectDrag>(ui.ctx())
             {
@@ -860,9 +960,7 @@ fn draw_effects_section(
                                         .map(photonic_core::timeline::ClipEffect::new)
                                 });
                         if let Some(effect) = effect {
-                            if let Ok(cmd) =
-                                ops::add_effect(project, seq, track, clip.id, effect, None)
-                            {
+                            if let Ok(cmd) = ops::add_effect_scoped(project, owner, effect, None) {
                                 *action = Some(PanelAction::ClipEditDiscrete(cmd));
                             }
                         }
@@ -870,6 +968,13 @@ fn draw_effects_section(
                 }
             }
         });
+}
+
+/// A stable per-scope egui id seed, so switching tabs does not collide widget
+/// ids between two stacks that happen to have the same row count. `VfxOwner`
+/// is `Hash`, so it is its own salt — this exists only to name the intent.
+fn scope_salt(owner: VfxOwner) -> VfxOwner {
+    owner
 }
 
 /// The `new_order` permutation `reorder_effects` expects: swap the elements
@@ -880,22 +985,24 @@ fn swapped_order(len: usize, a: usize, b: usize) -> Vec<usize> {
     order
 }
 
+/// Static (non-keyframed) param editor for one stacked effect at any scope.
+/// Writes a `SetEffect` command — the one carrier that works for clip, track,
+/// master and asset stacks alike (a track stack has no `SetClipProp`-style
+/// whole-owner snapshot to ride).
 fn draw_effect_params(
     ui: &mut Ui,
     project: &TimelineProject,
-    seq: SequenceId,
-    track: TrackId,
-    clip: &Clip,
+    owner: VfxOwner,
+    effect: &photonic_core::timeline::ClipEffect,
     effect_idx: usize,
     action: &mut Option<PanelAction>,
 ) {
-    let effect = &clip.effects[effect_idx];
     let entries = prop_registry::entries(PropTargetKind::Effect(effect.kind));
     if entries.is_empty() {
         ui.label(RichText::new("No parameters.").color(MUTED).small());
         return;
     }
-    egui::Grid::new(("clip_effect_params_grid", clip.id, effect_idx))
+    egui::Grid::new(("fx_params_grid", scope_salt(owner), effect_idx))
         .num_columns(2)
         .spacing([4.0, 2.0])
         .show(ui, |ui| {
@@ -944,9 +1051,14 @@ fn draw_effect_params(
                     }
                 }
                 if let Some(v) = new_value {
-                    let mut new_clip = clip.clone();
-                    new_clip.effects[effect_idx].params.base.set(entry.path, v);
-                    set_clip_coalesced(project, seq, track, new_clip, action);
+                    let mut new_effect = effect.clone();
+                    new_effect.params.base.set(entry.path, v);
+                    // Coalesced: a drag on one param is one undo unit
+                    // (`TimelineCmd::coalesce` merges same owner + index).
+                    if let Ok(cmd) = ops::set_effect_scoped(project, owner, effect_idx, new_effect)
+                    {
+                        *action = Some(PanelAction::ClipEditCoalesced(cmd));
+                    }
                 }
                 ui.end_row();
             }
@@ -1136,6 +1248,124 @@ mod tests {
         assert_eq!(swapped_order(4, 1, 2), vec![0, 2, 1, 3]);
         assert_eq!(swapped_order(3, 0, 2), vec![2, 1, 0]);
         assert_eq!(swapped_order(1, 0, 0), vec![0]);
+    }
+
+    /// The scope tabs resolve to the right owner, and the Asset tab is only
+    /// offered for a clip that actually has a bin asset (K-B2).
+    #[test]
+    fn scope_tabs_resolve_to_the_right_owner() {
+        use photonic_core::timeline::{AssetId, ClipSource};
+
+        let seq = SequenceId::new();
+        let track = TrackId::new();
+        let asset = AssetId::new();
+        let media_clip = Clip::new(ClipSource::Asset { asset }, Tick(0), Tick(1000));
+        assert_eq!(clip_asset(&media_clip), Some(asset));
+        assert_eq!(
+            owner_for(FxScopeTab::Clip, seq, track, &media_clip),
+            Some(VfxOwner::Clip(media_clip.id))
+        );
+        assert_eq!(
+            owner_for(FxScopeTab::Track, seq, track, &media_clip),
+            Some(VfxOwner::Track(track))
+        );
+        assert_eq!(
+            owner_for(FxScopeTab::Master, seq, track, &media_clip),
+            Some(VfxOwner::Master(seq))
+        );
+        assert_eq!(
+            owner_for(FxScopeTab::Asset, seq, track, &media_clip),
+            Some(VfxOwner::Asset(asset))
+        );
+
+        // An adjustment clip has no bin asset: the Asset tab has no owner.
+        let adj = Clip::new(ClipSource::Adjustment, Tick(0), Tick(1000));
+        assert_eq!(clip_asset(&adj), None);
+        assert_eq!(owner_for(FxScopeTab::Asset, seq, track, &adj), None);
+        assert_eq!(
+            owner_for(FxScopeTab::Clip, seq, track, &adj),
+            Some(VfxOwner::Clip(adj.id))
+        );
+    }
+
+    /// The panel's four buttons (add / remove / reorder / param) all build a
+    /// real `ops::*_scoped` command against a track stack, and each is one
+    /// undoable step whose inverse restores the exact prior stack. This is the
+    /// same code path `draw_effects_section` runs; the widget layer above it is
+    /// what egui owns.
+    #[test]
+    fn track_scope_panel_actions_build_undoable_commands() {
+        use photonic_core::history::Command;
+        use photonic_core::timeline::time::FrameRate;
+        use photonic_core::timeline::{ClipEffect, ClipSource, Sequence, TimelineProject, Track};
+        use photonic_core::Document;
+
+        let mut project = TimelineProject::new();
+        let mut sequence = Sequence::new("S", FrameRate::FPS_30, 1920, 1080);
+        let mut vtrack = Track::new(TrackKind::Video, "V1");
+        vtrack
+            .clips
+            .push(Clip::new(ClipSource::Adjustment, Tick(0), Tick(100)));
+        let track_id = vtrack.id;
+        sequence.video_tracks.push(vtrack);
+        project.insert_sequence(sequence);
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+
+        let owner = VfxOwner::Track(track_id);
+        for kind in [EffectKind::Blur, EffectKind::Sharpen] {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd = ops::add_effect_scoped(p, owner, ClipEffect::new(kind), None).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        assert_eq!(
+            ops::effect_stack(doc.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // "Move up" on row 1 — the panel's `swapped_order` permutation.
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = ops::reorder_effects_scoped(p, owner, swapped_order(2, 1, 0)).unwrap();
+        let inverse = cmd.inverse(&doc).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+        assert_eq!(
+            ops::effect_stack(doc.timeline.as_ref().unwrap(), owner).unwrap()[0].kind,
+            EffectKind::Sharpen
+        );
+        Command::Timeline(inverse).apply(&mut doc);
+        assert_eq!(
+            ops::effect_stack(doc.timeline.as_ref().unwrap(), owner).unwrap()[0].kind,
+            EffectKind::Blur
+        );
+
+        // The enable checkbox and the param grid both go through SetEffect.
+        let p = doc.timeline.as_ref().unwrap();
+        let mut off = ops::effect_stack(p, owner).unwrap()[0].clone();
+        off.enabled = false;
+        let cmd = ops::set_effect_scoped(p, owner, 0, off).unwrap();
+        let inverse = cmd.inverse(&doc).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+        assert!(!ops::effect_stack(doc.timeline.as_ref().unwrap(), owner).unwrap()[0].enabled);
+        Command::Timeline(inverse).apply(&mut doc);
+        assert!(ops::effect_stack(doc.timeline.as_ref().unwrap(), owner).unwrap()[0].enabled);
+
+        // The "×" button.
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = ops::remove_effect_scoped(p, owner, 0).unwrap();
+        let inverse = cmd.inverse(&doc).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+        assert_eq!(
+            ops::effect_stack(doc.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .len(),
+            1
+        );
+        Command::Timeline(inverse).apply(&mut doc);
+        let stack = ops::effect_stack(doc.timeline.as_ref().unwrap(), owner).unwrap();
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].kind, EffectKind::Blur, "re-inserted at index 0");
     }
 
     #[test]

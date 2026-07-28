@@ -15,7 +15,7 @@ mod revision_contract;
 mod stacks;
 mod tree;
 
-pub use tree::{HistoryGraphNode, HistoryTree};
+pub use tree::{HistoryEntryKind, HistoryGraphNode, HistoryTree};
 
 #[cfg(test)]
 mod tests {

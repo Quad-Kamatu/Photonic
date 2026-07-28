@@ -695,6 +695,72 @@ pub struct SetEffectParamArgs {
     pub value: PropValue,
 }
 
+/// Which of the four video effect stacks an `effect_stack` call addresses
+/// (26 §10 K-B1/K-B2, 35 §2). Deliberately the same vocabulary as
+/// `photonic_core::timeline::commands::VfxOwner`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectScopeArg {
+    Clip,
+    Track,
+    Master,
+    Asset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectStackOp {
+    List,
+    Add,
+    Remove,
+    Reorder,
+    SetParam,
+    SetGrade,
+}
+
+/// One verb for every scope of the video effect stack. `clip` is included so a
+/// single tool covers all four scopes; the older clip-only `add_effect` /
+/// `remove_effect` / `reorder_effects` / `set_effect_param` tools remain as the
+/// unchanged clip-shaped shorthand.
+#[derive(Debug, Deserialize)]
+pub struct EffectStackArgs {
+    pub scope: EffectScopeArg,
+    pub op: EffectStackOp,
+    /// `scope=clip`.
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    /// `scope=track`.
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    /// `scope=master`; defaults to the active sequence.
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+    /// `scope=asset`.
+    #[serde(default)]
+    pub asset_id: Option<AssetId>,
+    /// `op=add`: stable manifest id (preferred, see `list_effect_kinds`).
+    #[serde(default)]
+    pub effect_id: Option<String>,
+    /// `op=add`: legacy `EffectKind` tag, used when `effect_id` is absent.
+    #[serde(default)]
+    pub kind: Option<photonic_core::timeline::EffectKind>,
+    /// `op=add` insert position (default: append); `op=remove`/`set_param` index.
+    #[serde(default)]
+    pub index: Option<usize>,
+    /// `op=reorder`: a permutation of `0..len`.
+    #[serde(default)]
+    pub new_order: Option<Vec<usize>>,
+    /// `op=set_param`: a registry `PropPath` (e.g. `"params.radius"`), or the
+    /// literal `"enabled"` to toggle the effect itself.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub value: Option<PropValue>,
+    /// `op=set_grade`: a `Grade` object, or `null` to clear it.
+    #[serde(default)]
+    pub grade: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ListEffectKindsArgs {}
 

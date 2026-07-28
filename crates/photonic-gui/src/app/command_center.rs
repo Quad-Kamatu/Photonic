@@ -210,6 +210,8 @@ impl PhotonicApp {
             // once they do — it's marked for the orchestrator).
             "video.prev_edit_point" => self.timeline_prev_edit_point(doc),
             "video.next_edit_point" => self.timeline_next_edit_point(doc),
+            "video.prev_snap" => self.timeline_prev_snap(doc),
+            "video.next_snap" => self.timeline_next_snap(doc),
             "video.split_at_playhead" => self.timeline_split_at_playhead(doc, history),
             // ── Clip editing (NLE parity QW-1 / QW-3 / QW-4) ──────────────────
             // Delete/ripple-delete/copy/cut/paste of the timeline selection and

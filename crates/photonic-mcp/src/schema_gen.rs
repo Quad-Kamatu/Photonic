@@ -5521,6 +5521,29 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "effect_stack",
+            "description": "Edit any of the four video effect stacks (26 §10 K-B1/K-B2): a timeline `clip`, a whole `track`, the sequence `master`, or a bin `asset` (inherited by every instance of that media). Evaluation order is asset -> clip -> track -> master. `op=list` is read-only; `add`/`remove`/`reorder`/`set_param`/`set_grade` are each one undo step. The clip-only add_effect/remove_effect/reorder_effects/set_effect_param tools remain as shorthand for scope=clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "enum": ["clip","track","master","asset"] },
+                    "op": { "type": "string", "enum": ["list","add","remove","reorder","set_param","set_grade"] },
+                    "clip_id": { "type": "string", "description": "Required for scope=clip." },
+                    "track_id": { "type": "string", "description": "Required for scope=track." },
+                    "sequence_id": { "type": "string", "description": "scope=master; defaults to the active sequence." },
+                    "asset_id": { "type": "string", "description": "Required for scope=asset." },
+                    "effect_id": { "type": "string", "description": "op=add: stable manifest id (see list_effect_kinds), e.g. \"blur.gaussian\"." },
+                    "kind": { "type": "string", "enum": effect_kind_enum, "description": "op=add: legacy EffectKind tag, used only when effect_id is absent." },
+                    "index": { "type": "integer", "description": "op=add insert position (default: append); op=remove / op=set_param target index." },
+                    "new_order": { "type": "array", "items": { "type": "integer" }, "description": "op=reorder: a permutation of 0..len." },
+                    "path": { "type": "string", "description": "op=set_param: a registry PropPath (e.g. \"params.radius\"), or the literal \"enabled\"." },
+                    "value": { "type": "object", "description": "op=set_param: PropValue - {\"t\":\"float\",\"v\":number} | {\"t\":\"vec2\",\"v\":[number,number]} | {\"t\":\"color\",\"v\":{\"r\":n,\"g\":n,\"b\":n,\"a\":n}} | {\"t\":\"bool\",\"v\":boolean} | {\"t\":\"enum\",\"v\":integer}" },
+                    "grade": { "type": "object", "description": "op=set_grade: a Grade object (07 §1), or null to clear." }
+                },
+                "required": ["scope","op"]
+            }
+        },
+        {
             "name": "list_effect_kinds",
             "description": "Registry introspection sourced from the effect manifest catalogue (spec 30 §2.7). Returns `effect_kinds`: one entry per manifest with `id`, `version`, `name`, `category`, `arity`, the legacy `kind` tag, and a `params` table (each `{path, kind, default, range, animatable, ui, group, display}`) — lets an agent discover effects and their param ranges without guessing.",
             "inputSchema": { "type": "object", "properties": {} }

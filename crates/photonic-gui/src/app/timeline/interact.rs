@@ -269,42 +269,173 @@ pub(crate) fn snap_and_quantize(
     frame_rate.snap(snapped)
 }
 
-/// Build the snap-candidate list for a drag on `track`, excluding `moving`'s own
-/// edges, in the priority order 04 §2.5 mandates: same-track edges → other-track
-/// edges → playhead → markers.
+/// Accumulates snap targets in priority order, dropping exact duplicates so a
+/// low-priority restatement of a tick can never displace the higher-priority one
+/// [`nearest_snap`] would have picked, and negatives (a target before the
+/// sequence start is unreachable).
+#[derive(Default)]
+struct SnapAccum {
+    out: Vec<Tick>,
+    seen: std::collections::HashSet<Tick>,
+}
+
+impl SnapAccum {
+    fn push(&mut self, t: Tick) {
+        if t.0 >= 0 && self.seen.insert(t) {
+            self.out.push(t);
+        }
+    }
+}
+
+/// Push every keyframe of `c`, projected to sequence time, into `acc`.
+///
+/// A keyframe's `at` is clip-relative (`clip.start + at` is its sequence tick —
+/// the same convention the keyframe editor's `playhead_local` inverts), so a
+/// lane entry outside `[0, duration]` is currently trimmed off the clip and is
+/// not a visible target. Orphaned lanes (01 §6.2) are skipped: they are retained
+/// but neither evaluated nor drawn, so they must not attract a drag.
+fn push_clip_keyframes(acc: &mut SnapAccum, c: &Clip) {
+    let lanes = c
+        .transform
+        .tracks
+        .iter()
+        .chain(c.effects.iter().flat_map(|e| e.params.tracks.iter()))
+        .chain(
+            c.grade
+                .iter()
+                .flat_map(|g| g.ops.iter().flat_map(|o| o.params.tracks.iter())),
+        )
+        .chain(c.audio.iter().flat_map(|a| a.params.tracks.iter()));
+    for lane in lanes {
+        if lane.orphaned {
+            continue;
+        }
+        for kf in &lane.keyframes {
+            if kf.at.0 >= 0 && kf.at <= c.duration {
+                acc.push(c.start + kf.at);
+            }
+        }
+    }
+}
+
+/// Collect every snap target of `seq` in priority order (26 K-A4).
+///
+/// `focus` is the `(track, clip)` a drag is operating on: that track's edges
+/// lead the ordering, and everything belonging to the moving clip (its edges,
+/// its clip markers, its keyframes) is excluded because it travels *with* the
+/// drag. `None` collects the whole sequence with no bias — the navigation view.
+///
+/// `playhead` is optional for the same reason: "jump to the next snap" must not
+/// treat the position it is jumping *from* as a target.
+fn collect_snap_targets(
+    seq: &Sequence,
+    focus: Option<(TrackId, ClipId)>,
+    playhead: Option<Tick>,
+) -> SnapAccum {
+    let focus_track = focus.map(|(t, _)| t);
+    let moving = focus.map(|(_, c)| c);
+    let mut acc = SnapAccum::default();
+    // 1. Same-track clip edges.
+    if let Some(t) = focus_track.and_then(|id| seq.track(id)) {
+        for c in &t.clips {
+            if Some(c.id) != moving {
+                acc.push(c.start);
+                acc.push(c.end());
+            }
+        }
+    }
+    // 2. Other-track clip edges.
+    for t in seq.tracks() {
+        if Some(t.id) == focus_track {
+            continue;
+        }
+        for c in &t.clips {
+            if Some(c.id) == moving {
+                continue;
+            }
+            acc.push(c.start);
+            acc.push(c.end());
+        }
+    }
+    // 3. Playhead.
+    if let Some(p) = playhead {
+        acc.push(p);
+    }
+    // 4. Sequence markers — Kdenlive's "guides". A ranged marker contributes
+    //    two targets, start and end (35 §1.6).
+    for m in &seq.markers {
+        acc.push(m.at);
+        if m.is_range() {
+            acc.push(m.end());
+        }
+    }
+    // 5. Zone in/out: the sequence work range used for preview + export.
+    if let Some((zin, zout)) = seq.work_range {
+        acc.push(zin);
+        acc.push(zout);
+    }
+    // 6. Clip markers, projected to sequence time (35 §1.6). Same range rule as
+    //    sequence markers; a marker trimmed off the clip is not a target.
+    for t in seq.tracks() {
+        for c in &t.clips {
+            if Some(c.id) == moving {
+                continue;
+            }
+            for m in &c.markers {
+                if m.at.0 < 0 || m.at > c.duration {
+                    continue;
+                }
+                acc.push(c.marker_sequence_tick(m));
+                if m.is_range() && m.end() <= c.duration {
+                    acc.push(c.start + m.end());
+                }
+            }
+        }
+    }
+    // 7. Keyframes.
+    for t in seq.tracks() {
+        for c in &t.clips {
+            if Some(c.id) == moving {
+                continue;
+            }
+            push_clip_keyframes(&mut acc, c);
+        }
+    }
+    // 8. Sequence start. Last on purpose: when tick 0 is also a clip edge it has
+    //    already been recorded at its real priority, so this only matters for an
+    //    otherwise empty head of the timeline.
+    acc.push(Tick::ZERO);
+    acc
+}
+
+/// Build the snap-candidate list for a drag on `track`, excluding everything
+/// that belongs to `moving` (it moves with the drag), in the priority order
+/// 04 §2.5 mandates, extended by the targets 26 K-A4 requires:
+///
+/// 1. same-track clip edges → 2. clip edges on every other track →
+/// 3. playhead → 4. sequence markers/guides (both ends of a ranged marker) →
+/// 5. zone in/out (the work range) → 6. clip markers → 7. keyframes →
+/// 8. sequence start.
+///
+/// Deterministic and duplicate-free: computed once at drag-start, and equal
+/// ticks collapse to their highest-priority occurrence.
 pub(crate) fn build_snap_candidates(
     seq: &Sequence,
     track: TrackId,
     moving: ClipId,
     playhead: Tick,
 ) -> Vec<Tick> {
-    let mut out = Vec::new();
-    // 1. Same-track clip edges.
-    if let Some(t) = seq.track(track) {
-        for c in &t.clips {
-            if c.id != moving {
-                out.push(c.start);
-                out.push(c.end());
-            }
-        }
-    }
-    // 2. Other-track clip edges.
-    for t in seq.tracks() {
-        if t.id == track {
-            continue;
-        }
-        for c in &t.clips {
-            out.push(c.start);
-            out.push(c.end());
-        }
-    }
-    // 3. Playhead.
-    out.push(playhead);
-    // 4. Markers.
-    for m in &seq.markers {
-        out.push(m.at);
-    }
-    out
+    collect_snap_targets(seq, Some((track, moving)), Some(playhead)).out
+}
+
+/// Every snap target in `seq`, ascending and deduped — the navigation view of
+/// the set [`build_snap_candidates`] ranks (26 K-A4 Previous/Next Snap). The
+/// playhead is deliberately absent: it is where the jump starts, not a target.
+#[allow(dead_code)] // consumed by the not-yet-wired prev/next-snap commands
+pub(crate) fn snap_points(seq: &Sequence) -> Vec<Tick> {
+    let mut v = collect_snap_targets(seq, None, None).out;
+    v.sort_unstable();
+    v
 }
 
 /// Resolve a drag-start into its gesture kind and the *primary* clip the gesture
@@ -874,6 +1005,193 @@ mod tests {
         let play_idx = cands.iter().position(|t| *t == Tick(42)).unwrap();
         let edge_idx = cands.iter().position(|t| *t == Tick(150)).unwrap();
         assert!(edge_idx < play_idx);
+    }
+
+    /// A sequence exercising every 26 K-A4 snap tier at a distinct tick, so a
+    /// membership or ordering assertion names exactly one tier.
+    ///
+    /// Returns `(sequence, focus track, moving clip)`.
+    fn snap_fixture() -> (Sequence, TrackId, ClipId) {
+        use photonic_core::timeline::{
+            ClipAudio, ClipEffect, EffectKind, Interp, Keyframe, Marker, PropValue, Track,
+        };
+
+        // V1 — the focus track: the dragged clip plus one neighbour that carries
+        // a point and a ranged clip marker.
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        let mut moving = Clip::new(ClipSource::Adjustment, Tick(1000), Tick(200));
+        let moving_id = moving.id;
+        // Everything below belongs to the dragged clip and travels with it.
+        moving
+            .markers
+            .push(Marker::clip_scoped(Tick(50), "on moving"));
+        moving
+            .transform
+            .track_mut(&"transform.opacity".into())
+            .insert_keyframe(Keyframe::new(
+                Tick(60),
+                PropValue::Float(1.0),
+                Interp::Linear,
+            ));
+
+        let mut neighbour = Clip::new(ClipSource::Adjustment, Tick(2000), Tick(300));
+        neighbour
+            .markers
+            .push(Marker::clip_scoped(Tick(100), "point"));
+        let mut ranged = Marker::clip_scoped(Tick(200), "ranged");
+        ranged.duration = Tick(50);
+        neighbour.markers.push(ranged);
+        // An orphaned lane is retained but never evaluated or drawn (01 §6.2).
+        let orphan = neighbour.transform.track_mut(&"transform.gone".into());
+        orphan.orphaned = true;
+        orphan.insert_keyframe(Keyframe::new(
+            Tick(280),
+            PropValue::Float(0.0),
+            Interp::Linear,
+        ));
+        v1.clips.push(moving);
+        v1.clips.push(neighbour);
+        let track_id = v1.id;
+
+        // V2 — another track, carrying keyframes on three different lane owners.
+        let mut v2 = Track::new(TrackKind::Video, "V2");
+        let mut other = Clip::new(ClipSource::Adjustment, Tick(5000), Tick(400));
+        let lane = other.transform.track_mut(&"transform.opacity".into());
+        lane.insert_keyframe(Keyframe::new(
+            Tick(100),
+            PropValue::Float(0.5),
+            Interp::Linear,
+        ));
+        // Trimmed off the clip (`at` past the out point) → not a visible target.
+        lane.insert_keyframe(Keyframe::new(
+            Tick(9999),
+            PropValue::Float(0.0),
+            Interp::Linear,
+        ));
+        let mut audio = ClipAudio::new();
+        audio
+            .params
+            .track_mut(&"gain_db".into())
+            .insert_keyframe(Keyframe::new(
+                Tick(200),
+                PropValue::Float(-3.0),
+                Interp::Linear,
+            ));
+        other.audio = Some(audio);
+        let mut fx = ClipEffect::new(EffectKind::Blur);
+        fx.params
+            .track_mut(&"radius".into())
+            .insert_keyframe(Keyframe::new(
+                Tick(300),
+                PropValue::Float(4.0),
+                Interp::Linear,
+            ));
+        other.effects.push(fx);
+        v2.clips.push(other);
+
+        let mut s = Sequence::new("s", FrameRate::FPS_30, 1920, 1080);
+        s.video_tracks.push(v1);
+        s.video_tracks.push(v2);
+        // Guides: one point, one ranged (two targets).
+        s.markers.push(Marker::new(Tick(8000), "guide"));
+        let mut ranged_guide = Marker::new(Tick(9000), "ranged guide");
+        ranged_guide.duration = Tick(500);
+        s.markers.push(ranged_guide);
+        s.work_range = Some((Tick(11_000), Tick(12_000)));
+        (s, track_id, moving_id)
+    }
+
+    #[test]
+    fn snap_candidates_cover_every_k_a4_tier_in_priority_order() {
+        let (s, track, moving) = snap_fixture();
+        let cands = build_snap_candidates(&s, track, moving, Tick(7000));
+        let idx = |t: i64| {
+            cands
+                .iter()
+                .position(|c| *c == Tick(t))
+                .unwrap_or_else(|| panic!("missing snap target {t}: {cands:?}"))
+        };
+
+        // Every tier is present …
+        let same_track_edge = idx(2000);
+        let other_track_edge = idx(5000);
+        let playhead = idx(7000);
+        let guide = idx(8000);
+        let ranged_guide_end = idx(9500);
+        let zone_in = idx(11_000);
+        let clip_marker = idx(2100);
+        let clip_marker_end = idx(2250);
+        let transform_keyframe = idx(5100);
+        let sequence_start = idx(0);
+        // … including the second half of each pair.
+        idx(2300); // same-track edge (neighbour out)
+        idx(5400); // other-track edge
+        idx(9000); // ranged guide start
+        idx(12_000); // zone out
+        idx(2200); // ranged clip-marker start
+        idx(5200); // audio-lane keyframe
+        idx(5300); // effect-lane keyframe
+
+        // … in the documented priority order.
+        assert!(same_track_edge < other_track_edge);
+        assert!(other_track_edge < playhead);
+        assert!(playhead < guide);
+        assert!(guide < ranged_guide_end);
+        assert!(ranged_guide_end < zone_in);
+        assert!(zone_in < clip_marker);
+        assert!(clip_marker < clip_marker_end);
+        assert!(clip_marker_end < transform_keyframe);
+        assert!(transform_keyframe < sequence_start);
+
+        // The dragged clip contributes nothing: not its edges, not its clip
+        // marker, not its keyframe — they all move with the drag.
+        for absent in [Tick(1000), Tick(1200), Tick(1050), Tick(1060)] {
+            assert!(!cands.contains(&absent), "{absent:?} moves with the drag");
+        }
+        // A keyframe trimmed off its clip is not a target (5000 + 9999), nor is
+        // an orphaned lane's keyframe (2000 + 280).
+        assert!(!cands.contains(&Tick(14_999)), "trimmed-off keyframe");
+        assert!(!cands.contains(&Tick(2280)), "orphaned lane keyframe");
+    }
+
+    #[test]
+    fn snap_candidates_dedupe_and_keep_the_highest_priority_occurrence() {
+        use photonic_core::timeline::Marker;
+        let (mut s, track, moving) = snap_fixture();
+        // Restate two ticks that are already clip edges as a guide and a zone.
+        s.markers.push(Marker::new(Tick(5400), "on a clip edge"));
+        s.work_range = Some((Tick(2000), Tick(5400)));
+        let cands = build_snap_candidates(&s, track, moving, Tick(5400));
+        for t in [Tick(2000), Tick(5400)] {
+            assert_eq!(
+                cands.iter().filter(|c| **c == t).count(),
+                1,
+                "{t:?} restated by a lower tier must not be listed twice"
+            );
+        }
+        // The surviving entry is the high-priority one: 2000 is a same-track
+        // edge, so it still outranks every other-track edge.
+        let same_track = cands.iter().position(|c| *c == Tick(2000)).unwrap();
+        let other_track = cands.iter().position(|c| *c == Tick(5000)).unwrap();
+        assert!(same_track < other_track);
+    }
+
+    #[test]
+    fn snap_points_are_sorted_deduped_and_unbiased() {
+        let (s, _track, _moving) = snap_fixture();
+        let pts = snap_points(&s);
+        assert!(
+            pts.windows(2).all(|w| w[0] < w[1]),
+            "ascending and deduped: {pts:?}"
+        );
+        assert_eq!(pts.first(), Some(&Tick::ZERO), "sequence start leads");
+        // No clip is excluded here — navigation has no moving clip, so the
+        // fixture's dragged clip contributes its edges, marker and keyframe.
+        for t in [Tick(1000), Tick(1200), Tick(1050), Tick(1060)] {
+            assert!(pts.contains(&t), "{t:?} missing from navigation targets");
+        }
+        // The playhead is where a jump starts, never a target of its own.
+        assert!(!pts.contains(&Tick(7000)));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use super::clip::{
     TextClipContent,
 };
 use super::commands::{
-    AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings,
+    AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings, VfxOwner,
 };
 use super::grade::{Grade, GradeOpParams};
 use super::graph::{GraphOp, NodeGraph};
@@ -1468,6 +1468,186 @@ pub fn set_keyframe_interp(
 }
 
 // ── Effects ─────────────────────────────────────────────────────────────────
+//
+// Four scopes (26 §10 K-B1/K-B2, 35 §2): clip, track, master, asset. The
+// `*_scoped` ops are the general form; the four clip-shaped wrappers below are
+// kept because every existing GUI/MCP call site is clip-shaped and their
+// `(seq, track, clip)` triple additionally *validates* that the clip really
+// lives on that track of that sequence — a check the id-addressed scoped form
+// cannot make.
+//
+// NOT gated on manifest `Applicability` (30 §2.3) yet, deliberately: every one
+// of the manifests in `effect_manifest::MANIFESTS` currently declares
+// `Applicability::CLIP_ONLY`, so gating here today would refuse *every*
+// track/master/asset add and make K-B1/K-B2 unreachable. The catalogue has to
+// declare real per-effect scopes first (`effect_manifest.rs`); the refusal then
+// belongs here, next to the other pre-command validations, and in
+// `photonic-video`'s `graph::compile` where the five `TODO(30 §2.3)` markers
+// sit.
+
+/// Read the effect stack a [`VfxOwner`] names, or the owner-shaped `EditError`
+/// when it does not resolve.
+pub fn effect_stack<'a>(
+    p: &'a TimelineProject,
+    owner: VfxOwner,
+) -> Result<&'a [ClipEffect], EditError> {
+    match owner {
+        VfxOwner::Clip(c) => Ok(&find_clip_anywhere(p, c)
+            .ok_or(EditError::NoClip(c))?
+            .effects),
+        VfxOwner::Track(t) => Ok(&find_track_anywhere(p, t)
+            .ok_or(EditError::NoTrack(t))?
+            .effects),
+        VfxOwner::Master(s) => Ok(&p
+            .sequences
+            .get(&s)
+            .ok_or(EditError::NoSequence(s))?
+            .master_effects),
+        VfxOwner::Asset(a) => Ok(&p.media.assets.get(&a).ok_or(EditError::NoAsset(a))?.effects),
+    }
+}
+
+/// Read the grade slot a [`VfxOwner`] names (35 §2).
+pub fn scope_grade(p: &TimelineProject, owner: VfxOwner) -> Result<Option<&Grade>, EditError> {
+    match owner {
+        VfxOwner::Clip(c) => Ok(find_clip_anywhere(p, c)
+            .ok_or(EditError::NoClip(c))?
+            .grade
+            .as_ref()),
+        VfxOwner::Track(t) => Ok(find_track_anywhere(p, t)
+            .ok_or(EditError::NoTrack(t))?
+            .grade
+            .as_ref()),
+        VfxOwner::Master(s) => Ok(p
+            .sequences
+            .get(&s)
+            .ok_or(EditError::NoSequence(s))?
+            .master_grade
+            .as_ref()),
+        VfxOwner::Asset(a) => Ok(p
+            .media
+            .assets
+            .get(&a)
+            .ok_or(EditError::NoAsset(a))?
+            .grade
+            .as_ref()),
+    }
+}
+
+fn find_clip_anywhere(p: &TimelineProject, id: ClipId) -> Option<&Clip> {
+    p.sequences.values().find_map(|s| {
+        s.video_tracks
+            .iter()
+            .chain(s.audio_tracks.iter())
+            .find_map(|t| t.clips.iter().find(|c| c.id == id))
+    })
+}
+
+fn find_track_anywhere(p: &TimelineProject, id: TrackId) -> Option<&Track> {
+    p.sequences.values().find_map(|s| {
+        s.video_tracks
+            .iter()
+            .chain(s.audio_tracks.iter())
+            .find(|t| t.id == id)
+    })
+}
+
+/// Insert an effect into any scope's stack. One call → one command → one undo
+/// unit, whose inverse is the position-preserving `RemoveEffect` at the same
+/// index (so undo restores exact stack order, not just membership).
+pub fn add_effect_scoped(
+    p: &TimelineProject,
+    owner: VfxOwner,
+    effect: ClipEffect,
+    index: Option<usize>,
+) -> Result<TimelineCmd, EditError> {
+    let len = effect_stack(p, owner)?.len();
+    let idx = index.unwrap_or(len).min(len);
+    Ok(TimelineCmd::AddEffect {
+        owner,
+        index: idx,
+        effect: Box::new(effect),
+    })
+}
+
+pub fn remove_effect_scoped(
+    p: &TimelineProject,
+    owner: VfxOwner,
+    index: usize,
+) -> Result<TimelineCmd, EditError> {
+    let effect = effect_stack(p, owner)?
+        .get(index)
+        .ok_or(EditError::IndexOutOfRange)?
+        .clone();
+    Ok(TimelineCmd::RemoveEffect {
+        owner,
+        index,
+        effect: Box::new(effect),
+    })
+}
+
+/// `new_order[i]` is the index (in the current stack) of the effect that ends
+/// up at position `i` — a gather permutation, same convention as the clip form.
+pub fn reorder_effects_scoped(
+    p: &TimelineProject,
+    owner: VfxOwner,
+    new_order: Vec<usize>,
+) -> Result<TimelineCmd, EditError> {
+    let len = effect_stack(p, owner)?.len();
+    if new_order.len() != len || !is_permutation(&new_order, len) {
+        return Err(EditError::IndexOutOfRange);
+    }
+    Ok(TimelineCmd::ReorderEffects {
+        owner,
+        old_order: (0..len).collect(),
+        new_order,
+    })
+}
+
+/// Replace one stacked effect (enable/disable, static param edit) at any scope.
+pub fn set_effect_scoped(
+    p: &TimelineProject,
+    owner: VfxOwner,
+    index: usize,
+    new: ClipEffect,
+) -> Result<TimelineCmd, EditError> {
+    let old = effect_stack(p, owner)?
+        .get(index)
+        .ok_or(EditError::IndexOutOfRange)?
+        .clone();
+    Ok(TimelineCmd::SetEffect {
+        owner,
+        index,
+        old: Box::new(old),
+        new: Box::new(new),
+    })
+}
+
+pub fn set_grade_scoped(
+    p: &TimelineProject,
+    owner: VfxOwner,
+    new: Option<Grade>,
+) -> Result<TimelineCmd, EditError> {
+    let old = scope_grade(p, owner)?.cloned();
+    Ok(TimelineCmd::SetGrade {
+        owner,
+        old: old.map(Box::new),
+        new: new.map(Box::new),
+    })
+}
+
+/// True when `order` is a permutation of `0..len` — a reorder that dropped or
+/// duplicated a slot would silently lose an effect on apply.
+fn is_permutation(order: &[usize], len: usize) -> bool {
+    let mut seen = vec![false; len];
+    for &i in order {
+        match seen.get_mut(i) {
+            Some(slot) if !*slot => *slot = true,
+            _ => return false,
+        }
+    }
+    true
+}
 
 pub fn add_effect(
     p: &TimelineProject,
@@ -1479,15 +1659,8 @@ pub fn add_effect(
 ) -> Result<TimelineCmd, EditError> {
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
-    let c = clip(t, clip_id)?;
-    let idx = index.unwrap_or(c.effects.len()).min(c.effects.len());
-    Ok(TimelineCmd::AddEffect {
-        seq: id,
-        track: track_id,
-        clip: clip_id,
-        index: idx,
-        effect: Box::new(effect),
-    })
+    clip(t, clip_id)?;
+    add_effect_scoped(p, VfxOwner::Clip(clip_id), effect, index)
 }
 
 pub fn remove_effect(
@@ -1499,19 +1672,8 @@ pub fn remove_effect(
 ) -> Result<TimelineCmd, EditError> {
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
-    let c = clip(t, clip_id)?;
-    let effect = c
-        .effects
-        .get(index)
-        .ok_or(EditError::IndexOutOfRange)?
-        .clone();
-    Ok(TimelineCmd::RemoveEffect {
-        seq: id,
-        track: track_id,
-        clip: clip_id,
-        index,
-        effect: Box::new(effect),
-    })
+    clip(t, clip_id)?;
+    remove_effect_scoped(p, VfxOwner::Clip(clip_id), index)
 }
 
 pub fn reorder_effects(
@@ -1523,18 +1685,8 @@ pub fn reorder_effects(
 ) -> Result<TimelineCmd, EditError> {
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
-    let c = clip(t, clip_id)?;
-    if new_order.len() != c.effects.len() {
-        return Err(EditError::IndexOutOfRange);
-    }
-    let old_order: Vec<usize> = (0..c.effects.len()).collect();
-    Ok(TimelineCmd::ReorderEffects {
-        seq: id,
-        track: track_id,
-        clip: clip_id,
-        old_order,
-        new_order,
-    })
+    clip(t, clip_id)?;
+    reorder_effects_scoped(p, VfxOwner::Clip(clip_id), new_order)
 }
 
 pub fn set_grade(
@@ -1546,14 +1698,8 @@ pub fn set_grade(
 ) -> Result<TimelineCmd, EditError> {
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
-    let c = clip(t, clip_id)?;
-    Ok(TimelineCmd::SetGrade {
-        seq: id,
-        track: track_id,
-        clip: clip_id,
-        old: c.grade.clone().map(Box::new),
-        new: new.map(Box::new),
-    })
+    clip(t, clip_id)?;
+    set_grade_scoped(p, VfxOwner::Clip(clip_id), new)
 }
 
 // ── Compositions (08 §4) ────────────────────────────────────────────────────
@@ -2363,6 +2509,7 @@ pub fn extract_edit(
 
 #[cfg(test)]
 mod tests {
+    use super::super::effect_kind::EffectKind;
     use super::super::time::FrameRate;
     use super::*;
     use crate::document::Document;
@@ -3948,5 +4095,384 @@ mod tests {
         let cmd = set_generate_proxies_on_import(p, false);
         Command::Timeline(cmd).apply(&mut doc);
         assert!(!doc.timeline.as_ref().unwrap().settings.generate_proxies);
+    }
+
+    // ── K-B1 / K-B2: track, master and asset effect stacks ───────────────────
+
+    /// A fixture with all four scopes populated: one asset, one sequence, one
+    /// video track, one clip on it that references the asset.
+    fn scoped_fixture() -> (Document, SequenceId, TrackId, ClipId, AssetId) {
+        use super::super::media::{AssetKind, AssetSource, MediaAsset};
+
+        let mut project = TimelineProject::new();
+        let asset = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: std::path::PathBuf::from("/a.mp4"),
+                rel_path: None,
+            },
+        );
+        let asset_id = asset.id;
+        project.media.insert(asset);
+
+        let mut sequence = Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
+        let mut vtrack = Track::new(TrackKind::Video, "V1");
+        let c = Clip::new(ClipSource::Asset { asset: asset_id }, Tick(0), Tick(100));
+        let clip_id = c.id;
+        vtrack.clips.push(c);
+        let track_id = vtrack.id;
+        sequence.video_tracks.push(vtrack);
+        let seq_id = sequence.id;
+        project.insert_sequence(sequence);
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+        (doc, seq_id, track_id, clip_id, asset_id)
+    }
+
+    fn owners(seq: SequenceId, track: TrackId, clip: ClipId, asset: AssetId) -> Vec<VfxOwner> {
+        vec![
+            VfxOwner::Clip(clip),
+            VfxOwner::Track(track),
+            VfxOwner::Master(seq),
+            VfxOwner::Asset(asset),
+        ]
+    }
+
+    fn fx(kind: EffectKind) -> ClipEffect {
+        ClipEffect::new(kind)
+    }
+
+    /// Add/remove/reorder/set on every scope: each is one command, and each
+    /// command's inverse restores the exact prior stack (order included).
+    #[test]
+    fn scoped_effect_ops_are_one_undo_unit_at_every_scope() {
+        let (doc, seq, track, clip, asset) = scoped_fixture();
+        for owner in owners(seq, track, clip, asset) {
+            let mut d = doc.clone();
+
+            // add ×3
+            for kind in [EffectKind::Blur, EffectKind::Sharpen, EffectKind::Invert] {
+                let p = d.timeline.as_ref().unwrap();
+                let cmd = add_effect_scoped(p, owner, fx(kind), None).unwrap();
+                assert_undo_roundtrip(&d, &cmd);
+                Command::Timeline(cmd).apply(&mut d);
+            }
+            let stack = effect_stack(d.timeline.as_ref().unwrap(), owner).unwrap();
+            assert_eq!(stack.len(), 3, "{owner:?}");
+            assert_eq!(stack[0].kind, EffectKind::Blur, "{owner:?}");
+            assert_eq!(stack[2].kind, EffectKind::Invert, "{owner:?}");
+
+            // reorder (rotate) — undo must restore exact order, not membership
+            let p = d.timeline.as_ref().unwrap();
+            let cmd = reorder_effects_scoped(p, owner, vec![2, 0, 1]).unwrap();
+            assert_undo_roundtrip(&d, &cmd);
+            Command::Timeline(cmd).apply(&mut d);
+            let kinds: Vec<EffectKind> = effect_stack(d.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .iter()
+                .map(|e| e.kind)
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![EffectKind::Invert, EffectKind::Blur, EffectKind::Sharpen],
+                "{owner:?}"
+            );
+
+            // set (disable the middle one)
+            let p = d.timeline.as_ref().unwrap();
+            let mut edited = effect_stack(p, owner).unwrap()[1].clone();
+            edited.enabled = false;
+            let cmd = set_effect_scoped(p, owner, 1, edited).unwrap();
+            assert_undo_roundtrip(&d, &cmd);
+            Command::Timeline(cmd).apply(&mut d);
+            assert!(!effect_stack(d.timeline.as_ref().unwrap(), owner).unwrap()[1].enabled);
+
+            // remove from the middle — the inverse must re-insert *at index 1*
+            let p = d.timeline.as_ref().unwrap();
+            let cmd = remove_effect_scoped(p, owner, 1).unwrap();
+            assert_undo_roundtrip(&d, &cmd);
+            Command::Timeline(cmd).apply(&mut d);
+            let kinds: Vec<EffectKind> = effect_stack(d.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .iter()
+                .map(|e| e.kind)
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![EffectKind::Invert, EffectKind::Sharpen],
+                "{owner:?}"
+            );
+        }
+    }
+
+    /// The four stacks are independent — editing one never touches another.
+    #[test]
+    fn scoped_stacks_do_not_alias() {
+        let (mut doc, seq, track, clip, asset) = scoped_fixture();
+        for owner in owners(seq, track, clip, asset) {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd = add_effect_scoped(p, owner, fx(EffectKind::Blur), None).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        for owner in owners(seq, track, clip, asset) {
+            assert_eq!(effect_stack(p, owner).unwrap().len(), 1, "{owner:?}");
+        }
+        // Remove the track one only.
+        let cmd = remove_effect_scoped(p, VfxOwner::Track(track), 0).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+        let p = doc.timeline.as_ref().unwrap();
+        assert!(effect_stack(p, VfxOwner::Track(track)).unwrap().is_empty());
+        assert_eq!(effect_stack(p, VfxOwner::Clip(clip)).unwrap().len(), 1);
+        assert_eq!(effect_stack(p, VfxOwner::Master(seq)).unwrap().len(), 1);
+        assert_eq!(effect_stack(p, VfxOwner::Asset(asset)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scoped_grade_roundtrips_at_every_scope() {
+        let (doc, seq, track, clip, asset) = scoped_fixture();
+        for owner in owners(seq, track, clip, asset) {
+            let mut d = doc.clone();
+            let p = d.timeline.as_ref().unwrap();
+            assert!(scope_grade(p, owner).unwrap().is_none(), "{owner:?}");
+            let cmd = set_grade_scoped(p, owner, Some(Grade::new())).unwrap();
+            assert_undo_roundtrip(&d, &cmd);
+            Command::Timeline(cmd).apply(&mut d);
+            assert!(scope_grade(d.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .is_some());
+
+            // …and clearing it back to neutral is also one undoable step.
+            let p = d.timeline.as_ref().unwrap();
+            let cmd = set_grade_scoped(p, owner, None).unwrap();
+            assert_undo_roundtrip(&d, &cmd);
+            Command::Timeline(cmd).apply(&mut d);
+            assert!(scope_grade(d.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    /// A missing owner is refused before a command exists, with the error that
+    /// names the missing thing.
+    #[test]
+    fn scoped_ops_reject_unknown_owners_and_bad_indices() {
+        let (doc, seq, track, clip, asset) = scoped_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+
+        let ghost_clip = ClipId::new();
+        let ghost_track = TrackId::new();
+        let ghost_seq = SequenceId::new();
+        let ghost_asset = AssetId::new();
+        assert_eq!(
+            add_effect_scoped(p, VfxOwner::Clip(ghost_clip), fx(EffectKind::Blur), None),
+            Err(EditError::NoClip(ghost_clip))
+        );
+        assert_eq!(
+            add_effect_scoped(p, VfxOwner::Track(ghost_track), fx(EffectKind::Blur), None),
+            Err(EditError::NoTrack(ghost_track))
+        );
+        assert_eq!(
+            add_effect_scoped(p, VfxOwner::Master(ghost_seq), fx(EffectKind::Blur), None),
+            Err(EditError::NoSequence(ghost_seq))
+        );
+        assert_eq!(
+            add_effect_scoped(p, VfxOwner::Asset(ghost_asset), fx(EffectKind::Blur), None),
+            Err(EditError::NoAsset(ghost_asset))
+        );
+
+        for owner in owners(seq, track, clip, asset) {
+            assert_eq!(
+                remove_effect_scoped(p, owner, 0),
+                Err(EditError::IndexOutOfRange)
+            );
+            assert_eq!(
+                set_effect_scoped(p, owner, 0, fx(EffectKind::Blur)),
+                Err(EditError::IndexOutOfRange)
+            );
+            // Wrong length, and (with the right length) a non-permutation.
+            assert_eq!(
+                reorder_effects_scoped(p, owner, vec![0]),
+                Err(EditError::IndexOutOfRange)
+            );
+        }
+
+        // A same-length order that duplicates a slot would drop an effect.
+        let mut d = doc.clone();
+        for kind in [EffectKind::Blur, EffectKind::Sharpen] {
+            let p = d.timeline.as_ref().unwrap();
+            let cmd = add_effect_scoped(p, VfxOwner::Track(track), fx(kind), None).unwrap();
+            Command::Timeline(cmd).apply(&mut d);
+        }
+        assert_eq!(
+            reorder_effects_scoped(
+                d.timeline.as_ref().unwrap(),
+                VfxOwner::Track(track),
+                vec![0, 0]
+            ),
+            Err(EditError::IndexOutOfRange)
+        );
+    }
+
+    /// `index` places the effect: stacks are ordered, so insert-at-0 must go to
+    /// the head at every scope (an appended-only stack would silently reorder
+    /// the render on undo).
+    #[test]
+    fn scoped_add_honours_index() {
+        let (mut doc, _seq, track, _clip, _asset) = scoped_fixture();
+        let owner = VfxOwner::Track(track);
+        for kind in [EffectKind::Blur, EffectKind::Sharpen] {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd = add_effect_scoped(p, owner, fx(kind), None).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = add_effect_scoped(p, owner, fx(EffectKind::Invert), Some(0)).unwrap();
+        assert_undo_roundtrip(&doc, &cmd);
+        Command::Timeline(cmd).apply(&mut doc);
+        let kinds: Vec<EffectKind> = effect_stack(doc.timeline.as_ref().unwrap(), owner)
+            .unwrap()
+            .iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![EffectKind::Invert, EffectKind::Blur, EffectKind::Sharpen]
+        );
+
+        // Out-of-range index clamps to the tail rather than failing.
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = add_effect_scoped(p, owner, fx(EffectKind::Glow), Some(99)).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+        assert_eq!(
+            effect_stack(doc.timeline.as_ref().unwrap(), owner)
+                .unwrap()
+                .last()
+                .unwrap()
+                .kind,
+            EffectKind::Glow
+        );
+    }
+
+    /// The clip-shaped wrappers still validate the `(seq, track, clip)` triple
+    /// and produce the same clip-scoped command as the general form.
+    #[test]
+    fn clip_wrappers_delegate_to_the_scoped_form() {
+        let (doc, seq, track, clip, _asset) = scoped_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            add_effect(p, seq, track, clip, fx(EffectKind::Blur), None).unwrap(),
+            add_effect_scoped(p, VfxOwner::Clip(clip), fx(EffectKind::Blur), None).unwrap(),
+        );
+        assert_eq!(
+            set_grade(p, seq, track, clip, Some(Grade::new())).unwrap(),
+            set_grade_scoped(p, VfxOwner::Clip(clip), Some(Grade::new())).unwrap(),
+        );
+        // Wrong track for that clip is still rejected by the wrapper.
+        let other = Track::new(TrackKind::Video, "V2");
+        let other_id = other.id;
+        let mut d = doc.clone();
+        d.timeline
+            .as_mut()
+            .unwrap()
+            .sequences
+            .get_mut(&seq)
+            .unwrap()
+            .video_tracks
+            .push(other);
+        assert_eq!(
+            add_effect(
+                d.timeline.as_ref().unwrap(),
+                seq,
+                other_id,
+                clip,
+                fx(EffectKind::Blur),
+                None
+            ),
+            Err(EditError::NoClip(clip))
+        );
+    }
+
+    /// A scoped stack survives a save/load round-trip (additive serde, 35 §2).
+    #[test]
+    fn scoped_stacks_survive_serde_roundtrip() {
+        let (mut doc, seq, track, clip, asset) = scoped_fixture();
+        for owner in owners(seq, track, clip, asset) {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd = add_effect_scoped(p, owner, fx(EffectKind::Blur), None).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd = set_grade_scoped(p, owner, Some(Grade::new())).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let json = serde_json::to_string(project).unwrap();
+        let back: TimelineProject = serde_json::from_str(&json).unwrap();
+        assert_eq!(&back, project);
+        for owner in owners(seq, track, clip, asset) {
+            assert_eq!(effect_stack(&back, owner).unwrap().len(), 1, "{owner:?}");
+            assert!(scope_grade(&back, owner).unwrap().is_some(), "{owner:?}");
+        }
+    }
+
+    /// The commands themselves round-trip through serde (they cross the MCP
+    /// boundary and the history journal as data).
+    #[test]
+    fn scoped_effect_commands_serde_roundtrip() {
+        let (doc, seq, track, clip, asset) = scoped_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        for owner in owners(seq, track, clip, asset) {
+            let cmd = add_effect_scoped(p, owner, fx(EffectKind::Blur), None).unwrap();
+            let json = serde_json::to_string(&cmd).unwrap();
+            let back: TimelineCmd = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, cmd, "{owner:?}");
+        }
+    }
+
+    /// A slider drag on a stacked effect coalesces into ONE undo unit that
+    /// keeps the gesture's original before-state; a different index or a
+    /// different scope never merges.
+    #[test]
+    fn set_effect_coalesces_per_owner_and_index() {
+        let (mut doc, _seq, track, clip, _asset) = scoped_fixture();
+        for _ in 0..2 {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd =
+                add_effect_scoped(p, VfxOwner::Track(track), fx(EffectKind::Blur), None).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let owner = VfxOwner::Track(track);
+
+        let mut a = effect_stack(p, owner).unwrap()[0].clone();
+        a.enabled = false;
+        let first = set_effect_scoped(p, owner, 0, a).unwrap();
+        let mut b = effect_stack(p, owner).unwrap()[0].clone();
+        b.enabled = true;
+        b.params.base.entries.push((
+            PropPath::new("params.radius"),
+            super::super::anim::PropValue::Float(0.25),
+        ));
+        let second = set_effect_scoped(p, owner, 0, b.clone()).unwrap();
+
+        let merged = TimelineCmd::coalesce(&first, &second).expect("same owner+index merges");
+        match (&merged, &first) {
+            (
+                TimelineCmd::SetEffect { old, new, .. },
+                TimelineCmd::SetEffect { old: first_old, .. },
+            ) => {
+                assert_eq!(old, first_old, "the anchor's before-state is kept");
+                assert_eq!(**new, b, "the incoming after-state is adopted");
+            }
+            _ => panic!("expected SetEffect"),
+        }
+
+        // Different index / different scope: no merge.
+        let other_index = set_effect_scoped(p, owner, 1, fx(EffectKind::Blur)).unwrap();
+        assert!(TimelineCmd::coalesce(&first, &other_index).is_none());
+        let other_scope =
+            set_effect_scoped(p, VfxOwner::Clip(clip), 0, fx(EffectKind::Blur)).unwrap_err();
+        assert_eq!(other_scope, EditError::IndexOutOfRange);
     }
 }

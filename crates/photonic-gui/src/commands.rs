@@ -81,6 +81,17 @@ impl KeyBinding {
         }
     }
 
+    /// Alt + key, no primary modifier, e.g. Alt+Left.
+    pub const fn alt(key: egui::Key) -> Self {
+        Self {
+            key,
+            ctrl: false,
+            shift: false,
+            alt: true,
+            command: false,
+        }
+    }
+
     /// True if this binding fires for the given live modifier state. Ctrl and Cmd
     /// are interchangeable (primary). Shift/Alt must match exactly.
     pub fn matches(&self, m: egui::Modifiers) -> bool {
@@ -411,6 +422,18 @@ pub static REGISTRY: &[CommandDef] = &[
         id: "video.next_edit_point",
         label: "Next Edit Point",
         default: Some(KeyBinding::shift(Key::ArrowRight)),
+    },
+    // K-A4: jump the playhead between snap targets (clip edges, markers, zone
+    // in/out, keyframes, sequence start) rather than only between edit points.
+    CommandDef {
+        id: "video.prev_snap",
+        label: "Previous Snap Point",
+        default: Some(KeyBinding::alt(Key::ArrowLeft)),
+    },
+    CommandDef {
+        id: "video.next_snap",
+        label: "Next Snap Point",
+        default: Some(KeyBinding::alt(Key::ArrowRight)),
     },
     CommandDef {
         id: "video.set_in",

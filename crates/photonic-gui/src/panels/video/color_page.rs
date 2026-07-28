@@ -1438,15 +1438,21 @@ fn draw_vectorscope_guides(ui: &Ui, painter: &egui::Painter, rect: Rect) {
     let stroke_q = Stroke::new(1.0, Color32::from_rgb(0x70, 0xB0, 0xE8)); // cool Q
 
     // 100% outer circle + 75% broadcast-safe box (square inscribed at 0.75 radius).
+    // A square inscribed in a circle of radius r has side 2r/√2, so the factor is
+    // exactly FRAC_1_SQRT_2 — spelled out rather than as a 0.7071 literal, which
+    // clippy::approx_constant rejects (deny-by-default, and CI's lint job is
+    // blocking).
+    const INSCRIBED: f32 = std::f32::consts::FRAC_1_SQRT_2;
     painter.circle_stroke(center, r100, stroke_soft);
-    let box75 = Rect::from_center_size(center, vec2(r75 * 2.0 * 0.7071, r75 * 2.0 * 0.7071));
+    let box75 = Rect::from_center_size(center, vec2(r75 * 2.0 * INSCRIBED, r75 * 2.0 * INSCRIBED));
     painter.rect_stroke(
         box75,
         0.0,
         Stroke::new(0.8, Color32::from_rgb(0x90, 0x90, 0x70)),
     );
     // Fainter 100% box for the full legal box.
-    let box100 = Rect::from_center_size(center, vec2(r100 * 2.0 * 0.7071, r100 * 2.0 * 0.7071));
+    let box100 =
+        Rect::from_center_size(center, vec2(r100 * 2.0 * INSCRIBED, r100 * 2.0 * INSCRIBED));
     painter.rect_stroke(box100, 0.0, stroke_soft);
 
     // I-line (≈123°) — skin tones; Q-line is perpendicular (≈33°).

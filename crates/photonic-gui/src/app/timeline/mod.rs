@@ -767,6 +767,7 @@ fn paint_grab_ghost(
 /// `timeline_zoom_in`/`timeline_zoom_out`/`timeline_zoom_fit`/
 /// `timeline_toggle_snap`/`timeline_playhead_home`/`timeline_playhead_end`/
 /// `timeline_prev_edit_point`/`timeline_next_edit_point`/
+/// `timeline_prev_snap`/`timeline_next_snap`/
 /// `timeline_split_at_playhead`.
 #[allow(dead_code)]
 impl PhotonicApp {
@@ -823,6 +824,32 @@ impl PhotonicApp {
     pub(crate) fn timeline_next_edit_point(&mut self, doc: &Document) {
         if let Some(s) = active_sequence(doc) {
             let pts = edit_points(s);
+            if let Some(next) = pts.iter().find(|t| **t > self.playhead) {
+                self.playhead = *next;
+            }
+        }
+    }
+
+    /// Jump to the previous snap point (`Alt+←`, `video.prev_snap`, 26 K-A4).
+    ///
+    /// Snap *navigation* walks the same target set a drag snaps to
+    /// ([`interact::snap_points`]) — a superset of the edit points
+    /// `timeline_prev_edit_point` walks, since it also includes zone in/out,
+    /// clip markers and keyframes. It moves only the playhead, so there is
+    /// nothing to undo.
+    pub(crate) fn timeline_prev_snap(&mut self, doc: &Document) {
+        if let Some(s) = active_sequence(doc) {
+            let pts = interact::snap_points(s);
+            if let Some(prev) = pts.iter().rev().find(|t| **t < self.playhead) {
+                self.playhead = *prev;
+            }
+        }
+    }
+
+    /// Jump to the next snap point (`Alt+→`, `video.next_snap`, 26 K-A4).
+    pub(crate) fn timeline_next_snap(&mut self, doc: &Document) {
+        if let Some(s) = active_sequence(doc) {
+            let pts = interact::snap_points(s);
             if let Some(next) = pts.iter().find(|t| **t > self.playhead) {
                 self.playhead = *next;
             }

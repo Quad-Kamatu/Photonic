@@ -68,6 +68,9 @@ use photonic_video::captions;
 // re-export yet (core-timeline's territory, not this story's) — reached via
 // the fully-qualified submodule path instead.
 use photonic_core::timeline::clip::{SpeedKey, TextClipContent};
+// K-B1/K-B2 effect-stack scope — same "not in the curated re-export yet" note
+// as `SpeedKey` above.
+use photonic_core::timeline::commands::VfxOwner;
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -2051,6 +2054,69 @@ fn param_spec_json(p: &photonic_core::timeline::ParamSpec) -> serde_json::Value 
     })
 }
 
+/// Write one param (or the literal path `"enabled"`) into a stacked effect,
+/// with the manifest-driven validation of spec 30 §2.7: resolve the effect's
+/// manifest, look up the `ParamSpec` by path, and refuse — never clamp — on an
+/// unknown path, a value-kind mismatch, or an out-of-range value. A freshly
+/// added effect carries `EffectId::EMPTY` until save, so fall back to its
+/// kind's stable id; an inert / unknown-id effect has no manifest and refuses
+/// every param write.
+///
+/// Shared by `set_effect_param` (clip stacks) and `effect_stack`
+/// (track/master/asset stacks) so the two surfaces cannot drift apart on which
+/// writes are legal.
+fn write_effect_param(
+    effect: &mut photonic_core::timeline::ClipEffect,
+    path: &str,
+    value: photonic_core::timeline::PropValue,
+) -> Result<(), String> {
+    if path == "enabled" {
+        return match value {
+            photonic_core::timeline::PropValue::Bool(b) => {
+                effect.enabled = b;
+                Ok(())
+            }
+            _ => Err("path \"enabled\" requires a bool value".to_string()),
+        };
+    }
+    use photonic_core::timeline::effect_manifest;
+    let effect_id = if effect.id.is_empty() {
+        effect.kind.effect_id()
+    } else {
+        effect.id.clone()
+    };
+    let Some(manifest) = effect_manifest::manifest(effect_id.clone()) else {
+        return Err(format!(
+            "effect id {:?} has no manifest in this build; param writes are refused",
+            effect_id.as_str()
+        ));
+    };
+    let Some(spec) = manifest.params.iter().find(|p| p.path == path) else {
+        return Err(format!(
+            "unknown param path {:?} for effect {:?}",
+            path,
+            effect_id.as_str()
+        ));
+    };
+    if !param_kind_accepts(spec.kind, &value) {
+        return Err(format!(
+            "param {:?} expects a {} value, got {:?}",
+            path,
+            param_kind_label(spec.kind),
+            value.kind()
+        ));
+    }
+    if let (Some((lo, hi)), photonic_core::timeline::PropValue::Float(v)) = (spec.range, value) {
+        if !(lo..=hi).contains(&v) {
+            return Err(format!(
+                "param {path:?} value {v} is outside range {lo}..={hi} (refused, not clamped)"
+            ));
+        }
+    }
+    effect.params.base.set(path, value);
+    Ok(())
+}
+
 pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> ToolResult {
     tracing::debug!(
         "tool: set_effect_param {} [{}]",
@@ -2072,56 +2138,8 @@ pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> Too
     let Some(effect) = new_clip.effects.get_mut(args.effect_index) else {
         return ToolResult::error(format!("effect index {} out of range", args.effect_index));
     };
-    if args.path == "enabled" {
-        match args.value {
-            photonic_core::timeline::PropValue::Bool(b) => effect.enabled = b,
-            _ => return ToolResult::error("path \"enabled\" requires a bool value"),
-        }
-    } else {
-        // Manifest-driven validation (spec 30 §2.7): resolve the effect's
-        // manifest, look up the `ParamSpec` by path, and refuse — never clamp —
-        // on unknown path, value-kind mismatch, or an out-of-range value. A
-        // freshly-added effect carries `EffectId::EMPTY` until save, so fall back
-        // to its kind's stable id; an inert / unknown-id effect has no manifest
-        // and refuses every param write.
-        use photonic_core::timeline::effect_manifest;
-        let effect_id = if effect.id.is_empty() {
-            effect.kind.effect_id()
-        } else {
-            effect.id.clone()
-        };
-        let Some(manifest) = effect_manifest::manifest(effect_id.clone()) else {
-            return ToolResult::error(format!(
-                "effect id {:?} has no manifest in this build; param writes are refused",
-                effect_id.as_str()
-            ));
-        };
-        let Some(spec) = manifest.params.iter().find(|p| p.path == args.path) else {
-            return ToolResult::error(format!(
-                "unknown param path {:?} for effect {:?}",
-                args.path,
-                effect_id.as_str()
-            ));
-        };
-        if !param_kind_accepts(spec.kind, &args.value) {
-            return ToolResult::error(format!(
-                "param {:?} expects a {} value, got {:?}",
-                args.path,
-                param_kind_label(spec.kind),
-                args.value.kind()
-            ));
-        }
-        if let (Some((lo, hi)), photonic_core::timeline::PropValue::Float(v)) =
-            (spec.range, args.value)
-        {
-            if !(lo..=hi).contains(&v) {
-                return ToolResult::error(format!(
-                    "param {:?} value {v} is outside range {lo}..={hi} (refused, not clamped)",
-                    args.path
-                ));
-            }
-        }
-        effect.params.base.set(args.path.as_str(), args.value);
+    if let Err(e) = write_effect_param(effect, args.path.as_str(), args.value) {
+        return ToolResult::error(e);
     }
     match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
         Ok(cmd) => {
@@ -2130,6 +2148,202 @@ pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> Too
         }
         Err(e) => map_edit_error(e),
     }
+}
+
+// ─── Scoped effect stacks — track / master / asset (26 §10 K-B1/K-B2) ────────
+
+/// Resolve the [`VfxOwner`] an `effect_stack` call names, or the refusal to
+/// send back. `master` defaults to the active sequence, mirroring the audio
+/// master bus's "active sequence" rule (09 §10) while still allowing an
+/// explicit `sequence_id`.
+fn resolve_vfx_owner(
+    project: &TimelineProject,
+    args: &EffectStackArgs,
+) -> Result<VfxOwner, ToolResult> {
+    match args.scope {
+        EffectScopeArg::Clip => {
+            let Some(clip) = args.clip_id else {
+                return Err(ToolResult::error("scope=clip requires clip_id"));
+            };
+            if locate_clip(project, clip).is_none() {
+                return Err(ToolResult::error(format!("clip {clip} not found")));
+            }
+            Ok(VfxOwner::Clip(clip))
+        }
+        EffectScopeArg::Track => {
+            let Some(track) = args.track_id else {
+                return Err(ToolResult::error("scope=track requires track_id"));
+            };
+            if locate_track(project, track).is_none() {
+                return Err(ToolResult::error(format!("track {track} not found")));
+            }
+            Ok(VfxOwner::Track(track))
+        }
+        EffectScopeArg::Master => {
+            let seq = match args.sequence_id.or(project.active_sequence) {
+                Some(s) => s,
+                None => {
+                    return Err(ToolResult::error(
+                        "scope=master requires sequence_id (no active sequence)",
+                    ))
+                }
+            };
+            if !project.sequences.contains_key(&seq) {
+                return Err(ToolResult::error(format!("sequence {seq} not found")));
+            }
+            Ok(VfxOwner::Master(seq))
+        }
+        EffectScopeArg::Asset => {
+            let Some(asset) = args.asset_id else {
+                return Err(ToolResult::error("scope=asset requires asset_id"));
+            };
+            if !project.media.assets.contains_key(&asset) {
+                return Err(ToolResult::error(format!("asset {asset} not found")));
+            }
+            Ok(VfxOwner::Asset(asset))
+        }
+    }
+}
+
+/// JSON projection of one stacked effect, the shape `effect_stack op=list`
+/// returns and the shape an agent needs to address the next call by index.
+fn stacked_effect_json(i: usize, e: &photonic_core::timeline::ClipEffect) -> serde_json::Value {
+    let params: Vec<_> = e
+        .params
+        .base
+        .entries
+        .iter()
+        .map(|(path, v)| json!({ "path": path.as_str(), "value": v }))
+        .collect();
+    json!({
+        "index": i,
+        "id": e.id.as_str(),
+        "kind": e.kind,
+        "enabled": e.enabled,
+        "inert": e.inert,
+        "params": params,
+    })
+}
+
+/// The one automatable verb for the four video effect stacks (26 §10
+/// K-B1/K-B2). `add`/`remove`/`reorder`/`set_param`/`set_grade` are each a
+/// single undoable step; `list` is read-only.
+pub async fn effect_stack(state: &AppState, args: EffectStackArgs) -> ToolResult {
+    tracing::debug!("tool: effect_stack {:?} {:?}", args.scope, args.op);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let owner = match resolve_vfx_owner(project, &args) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    let stack = match ops::effect_stack(project, owner) {
+        Ok(s) => s,
+        Err(e) => return map_edit_error(e),
+    };
+
+    let cmd = match args.op {
+        EffectStackOp::List => {
+            let effects: Vec<_> = stack
+                .iter()
+                .enumerate()
+                .map(|(i, e)| stacked_effect_json(i, e))
+                .collect();
+            let graded = ops::scope_grade(project, owner)
+                .ok()
+                .flatten()
+                .map(|g| serde_json::to_value(g).unwrap_or(serde_json::Value::Null));
+            return ToolResult::text(format!("{} effect(s)", effects.len())).with_data(json!({
+                "scope": format!("{:?}", args.scope).to_lowercase(),
+                "effects": effects,
+                "grade": graded,
+            }));
+        }
+        EffectStackOp::Add => {
+            // Prefer the stable manifest id (the full K-B16 catalogue); fall
+            // back to the seven legacy kinds so the older vocabulary still
+            // works.
+            let effect = match (&args.effect_id, args.kind) {
+                (Some(id), _) => {
+                    let eid = photonic_core::timeline::EffectId::new(id.clone());
+                    match photonic_core::timeline::ClipEffect::from_manifest(eid) {
+                        Some(e) => e,
+                        None => {
+                            return ToolResult::error(format!(
+                                "unknown effect_id {id:?} — see list_effect_kinds"
+                            ))
+                        }
+                    }
+                }
+                (None, Some(kind)) => photonic_core::timeline::ClipEffect::new(kind),
+                (None, None) => {
+                    return ToolResult::error("op=add requires effect_id (or legacy kind)")
+                }
+            };
+            match ops::add_effect_scoped(project, owner, effect, args.index) {
+                Ok(c) => c,
+                Err(e) => return map_edit_error(e),
+            }
+        }
+        EffectStackOp::Remove => {
+            let Some(index) = args.index else {
+                return ToolResult::error("op=remove requires index");
+            };
+            match ops::remove_effect_scoped(project, owner, index) {
+                Ok(c) => c,
+                Err(e) => return map_edit_error(e),
+            }
+        }
+        EffectStackOp::Reorder => {
+            let Some(new_order) = args.new_order.clone() else {
+                return ToolResult::error("op=reorder requires new_order");
+            };
+            match ops::reorder_effects_scoped(project, owner, new_order) {
+                Ok(c) => c,
+                Err(e) => return map_edit_error(e),
+            }
+        }
+        EffectStackOp::SetParam => {
+            let (Some(index), Some(path), Some(value)) =
+                (args.index, args.path.clone(), args.value)
+            else {
+                return ToolResult::error("op=set_param requires index, path and value");
+            };
+            let Some(effect) = stack.get(index) else {
+                return ToolResult::error(format!("effect index {index} out of range"));
+            };
+            let mut new_effect = effect.clone();
+            if let Err(e) = write_effect_param(&mut new_effect, path.as_str(), value) {
+                return ToolResult::error(e);
+            }
+            match ops::set_effect_scoped(project, owner, index, new_effect) {
+                Ok(c) => c,
+                Err(e) => return map_edit_error(e),
+            }
+        }
+        EffectStackOp::SetGrade => {
+            let new_grade: Option<Grade> = match args.grade.clone() {
+                None | Some(serde_json::Value::Null) => None,
+                Some(v) => match serde_json::from_value::<Grade>(v) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        return ToolResult::error(format!(
+                            "invalid grade object: {e} — see 07 §1 for the Grade serde shape"
+                        ))
+                    }
+                },
+            };
+            match ops::set_grade_scoped(project, owner, new_grade) {
+                Ok(c) => c,
+                Err(e) => return map_edit_error(e),
+            }
+        }
+    };
+    let label = cmd.description();
+    history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    ToolResult::text(label)
 }
 
 pub async fn list_effect_kinds(_state: &AppState, _args: ListEffectKindsArgs) -> ToolResult {
@@ -6699,6 +6913,255 @@ mod tests {
         .await;
         assert_ne!(r.is_error, Some(true), "insert_clip: {r:?}");
         data(&r)["clip_id"].clone()
+    }
+
+    // ── effect_stack: track / master / asset scopes (26 §10 K-B1/K-B2) ───────
+
+    /// Every scope round-trips through the real dispatch path: add → list →
+    /// reorder → set_param → remove, each one undo step, and undo restores the
+    /// exact prior stack.
+    #[tokio::test]
+    async fn effect_stack_edits_every_scope_and_undoes() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "video").await;
+        let clip_id = insert_solid_clip(&state, &track_id, 0, 300).await;
+
+        let tmp =
+            std::env::temp_dir().join(format!("photonic_mcp_fxstack_{}.mp4", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, b"fx stack test bytes").unwrap();
+        let r = call(
+            &state,
+            "import_media",
+            json!({ "paths": [tmp.to_string_lossy()] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "import_media: {r:?}");
+        let asset_id = data(&r)["assets"][0]["asset_id"].clone();
+        let _ = std::fs::remove_file(&tmp);
+
+        let scopes = [
+            json!({ "scope": "clip", "clip_id": clip_id }),
+            json!({ "scope": "track", "track_id": track_id }),
+            json!({ "scope": "master", "sequence_id": seq_id }),
+            json!({ "scope": "asset", "asset_id": asset_id }),
+        ];
+
+        for base in scopes {
+            let with = |extra: Value| {
+                let mut v = base.clone();
+                let (Value::Object(o), Value::Object(e)) = (&mut v, extra) else {
+                    unreachable!()
+                };
+                o.extend(e);
+                v
+            };
+
+            for kind in ["blur", "sharpen", "invert"] {
+                let r = call(
+                    &state,
+                    "effect_stack",
+                    with(json!({ "op": "add", "kind": kind })),
+                )
+                .await;
+                assert_ne!(r.is_error, Some(true), "add {base}: {r:?}");
+            }
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            let effects = data(&r)["effects"].as_array().cloned().unwrap_or_default();
+            assert_eq!(effects.len(), 3, "list {base}: {r:?}");
+            assert_eq!(effects[0]["kind"], json!("blur"));
+            assert_eq!(effects[2]["kind"], json!("invert"));
+
+            // Reorder, then undo it — the exact prior order must come back.
+            let r = call(
+                &state,
+                "effect_stack",
+                with(json!({ "op": "reorder", "new_order": [2, 0, 1] })),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "reorder {base}: {r:?}");
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            let kinds: Vec<Value> = data(&r)["effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["kind"].clone())
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![json!("invert"), json!("blur"), json!("sharpen")]
+            );
+
+            let r = call(&state, "undo", json!({})).await;
+            assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            let kinds: Vec<Value> = data(&r)["effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["kind"].clone())
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![json!("blur"), json!("sharpen"), json!("invert")],
+                "undo must restore the exact prior order, {base}"
+            );
+
+            // set_param: toggle `enabled`, then a real manifest param.
+            let r = call(
+                &state,
+                "effect_stack",
+                with(json!({
+                    "op": "set_param", "index": 0,
+                    "path": "enabled", "value": { "t": "bool", "v": false }
+                })),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "set_param enabled {base}: {r:?}");
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            assert_eq!(data(&r)["effects"][0]["enabled"], json!(false));
+
+            // remove the middle entry
+            let r = call(
+                &state,
+                "effect_stack",
+                with(json!({ "op": "remove", "index": 1 })),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "remove {base}: {r:?}");
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            let kinds: Vec<Value> = data(&r)["effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["kind"].clone())
+                .collect();
+            assert_eq!(kinds, vec![json!("blur"), json!("invert")]);
+
+            // set_grade at this scope, then clear it.
+            let r = call(
+                &state,
+                "effect_stack",
+                with(json!({ "op": "set_grade", "grade": { "ops": [] } })),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "set_grade {base}: {r:?}");
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            assert!(!data(&r)["grade"].is_null(), "grade should be set {base}");
+            let r = call(
+                &state,
+                "effect_stack",
+                with(json!({ "op": "set_grade", "grade": null })),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "clear grade {base}: {r:?}");
+            let r = call(&state, "effect_stack", with(json!({ "op": "list" }))).await;
+            assert!(
+                data(&r)["grade"].is_null(),
+                "grade should be cleared {base}"
+            );
+        }
+    }
+
+    /// The four stacks are independent: a track-scoped add never lands on the
+    /// clip that sits on that track (the bug this scope enum exists to prevent).
+    #[tokio::test]
+    async fn effect_stack_scopes_do_not_leak_into_each_other() {
+        let state = test_state();
+        let (seq_id, track_id) = create_seq_and_track(&state, "video").await;
+        let clip_id = insert_solid_clip(&state, &track_id, 0, 300).await;
+
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "track", "op": "add", "track_id": track_id, "kind": "blur" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+
+        let r = call(&state, "get_clip", json!({ "clip_id": clip_id })).await;
+        let clip_effects = data(&r)["effects"].as_array().cloned().unwrap_or_default();
+        assert!(
+            clip_effects.is_empty(),
+            "a track effect must not land on the clip: {clip_effects:?}"
+        );
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "master", "op": "list", "sequence_id": seq_id }),
+        )
+        .await;
+        assert_eq!(data(&r)["effects"].as_array().unwrap().len(), 0);
+    }
+
+    /// Refusals: a missing owner id, an unknown owner, a bad index and a bad
+    /// param value are all reported, and none of them mutates the document.
+    #[tokio::test]
+    async fn effect_stack_refuses_bad_requests() {
+        let state = test_state();
+        let (_seq_id, track_id) = create_seq_and_track(&state, "video").await;
+
+        for (args, why) in [
+            (
+                json!({ "scope": "track", "op": "add", "kind": "blur" }),
+                "no track_id",
+            ),
+            (
+                json!({ "scope": "asset", "op": "list", "asset_id": "00000000-0000-0000-0000-000000000000" }),
+                "unknown asset",
+            ),
+            (
+                json!({ "scope": "track", "op": "remove", "track_id": track_id, "index": 0 }),
+                "index out of range on an empty stack",
+            ),
+            (
+                json!({ "scope": "track", "op": "reorder", "track_id": track_id }),
+                "reorder without new_order",
+            ),
+            (
+                json!({ "scope": "track", "op": "add", "track_id": track_id }),
+                "add without effect_id or kind",
+            ),
+        ] {
+            let r = call(&state, "effect_stack", args.clone()).await;
+            assert_eq!(r.is_error, Some(true), "should refuse ({why}): {r:?}");
+        }
+
+        // A param outside its manifest range is refused, not clamped.
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "track", "op": "add", "track_id": track_id, "effect_id": "blur.gaussian" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add by manifest id: {r:?}");
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({
+                "scope": "track", "op": "set_param", "track_id": track_id, "index": 0,
+                "path": "params.radius", "value": { "t": "float", "v": 9999.0 }
+            }),
+        )
+        .await;
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "out-of-range param must refuse: {r:?}"
+        );
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({
+                "scope": "track", "op": "set_param", "track_id": track_id, "index": 0,
+                "path": "params.nope", "value": { "t": "float", "v": 1.0 }
+            }),
+        )
+        .await;
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "unknown param path must refuse: {r:?}"
+        );
     }
 
     // ── Unit test: resolve_tick precedence (design rule 3) ──────────────────

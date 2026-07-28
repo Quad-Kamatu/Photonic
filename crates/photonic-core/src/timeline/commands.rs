@@ -135,6 +135,37 @@ pub enum FxOwner {
     Master,
 }
 
+/// Owner of a **video** effect stack / grade (26 §10 K-B1/K-B2, 35 §2).
+///
+/// The deliberate mirror of [`FxOwner`] — one vocabulary for "which stack",
+/// not two. Video carries two scopes audio has none of: a timeline clip and a
+/// bin asset. `Master` names its sequence explicitly (audio's master bus
+/// resolves through `active_sequence`; a video master stack is per-sequence and
+/// must stay addressable while another sequence is active, e.g. from MCP).
+///
+/// Ordering of the four stacks at evaluation time (35 §2, applied by
+/// `photonic-video`'s `graph::compile`): asset → clip → track → master.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VfxOwner {
+    Clip(ClipId),
+    Track(TrackId),
+    Master(SequenceId),
+    Asset(AssetId),
+}
+
+impl VfxOwner {
+    /// Scope noun for undo labels — "Add **track** effect".
+    pub fn scope_noun(&self) -> &'static str {
+        match self {
+            VfxOwner::Clip(_) => "clip",
+            VfxOwner::Track(_) => "track",
+            VfxOwner::Master(_) => "master",
+            VfxOwner::Asset(_) => "asset",
+        }
+    }
+}
+
 /// Which clip fade edge (09 §10).
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -558,31 +589,48 @@ pub enum TimelineCmd {
         old: Interp,
         new: Interp,
     },
+    /// Insert into a video effect stack at any of the four scopes
+    /// ([`VfxOwner`]). Was clip-only (`seq`/`track`/`clip`) before K-B1/K-B2;
+    /// the owner is the whole address, and `apply` resolves it by id exactly as
+    /// the clip-only form already did (the old `seq`/`track` fields were
+    /// unread context).
+    ///
+    /// Document data is unaffected (`Clip.effects` is unchanged and still
+    /// round-trips), but this *is* a shape change for the four effect commands
+    /// as they appear in a `.photon` file's embedded `photon_history`. History
+    /// restore is best-effort by design (`photon_file::load_photon` drops a
+    /// schema-mismatched snapshot and still opens the document), so a `.photon`
+    /// written by a pre-K-B1 build opens with its undo stack dropped rather
+    /// than corrupted.
     AddEffect {
-        seq: SequenceId,
-        track: TrackId,
-        clip: ClipId,
+        owner: VfxOwner,
         index: usize,
         effect: Box<ClipEffect>,
     },
     RemoveEffect {
-        seq: SequenceId,
-        track: TrackId,
-        clip: ClipId,
+        owner: VfxOwner,
         index: usize,
         effect: Box<ClipEffect>,
     },
     ReorderEffects {
-        seq: SequenceId,
-        track: TrackId,
-        clip: ClipId,
+        owner: VfxOwner,
         old_order: Vec<usize>,
         new_order: Vec<usize>,
     },
+    /// Replace one stacked effect in place (enable/disable, static param edit).
+    /// The clip-scope equivalent used to ride `SetClipProp`'s whole-clip
+    /// snapshot; track/master/asset stacks have no such carrier
+    /// (`TrackSettings` deliberately excludes `effects`), so one scope-generic
+    /// command serves all four and keeps a slider drag coalescing into a single
+    /// undo unit.
+    SetEffect {
+        owner: VfxOwner,
+        index: usize,
+        old: Box<ClipEffect>,
+        new: Box<ClipEffect>,
+    },
     SetGrade {
-        seq: SequenceId,
-        track: TrackId,
-        clip: ClipId,
+        owner: VfxOwner,
         old: Option<Box<Grade>>,
         new: Option<Box<Grade>>,
     },
@@ -682,6 +730,34 @@ fn find_track_mut(proj: &mut TimelineProject, track: TrackId) -> Option<&mut Tra
         }
     }
     None
+}
+
+/// The video effect stack a [`VfxOwner`] names (26 §10 K-B1/K-B2). `None` when
+/// the owner no longer resolves — the same "silently skip a stale target"
+/// discipline every other `apply_in` arm uses.
+fn effect_stack_mut<'a>(
+    proj: &'a mut TimelineProject,
+    owner: &VfxOwner,
+) -> Option<&'a mut Vec<ClipEffect>> {
+    match owner {
+        VfxOwner::Clip(c) => find_clip_mut(proj, *c).map(|c| &mut c.effects),
+        VfxOwner::Track(t) => find_track_mut(proj, *t).map(|t| &mut t.effects),
+        VfxOwner::Master(s) => proj.sequences.get_mut(s).map(|s| &mut s.master_effects),
+        VfxOwner::Asset(a) => proj.media.assets.get_mut(a).map(|a| &mut a.effects),
+    }
+}
+
+/// The grade slot a [`VfxOwner`] names (35 §2).
+fn grade_slot_mut<'a>(
+    proj: &'a mut TimelineProject,
+    owner: &VfxOwner,
+) -> Option<&'a mut Option<Grade>> {
+    match owner {
+        VfxOwner::Clip(c) => find_clip_mut(proj, *c).map(|c| &mut c.grade),
+        VfxOwner::Track(t) => find_track_mut(proj, *t).map(|t| &mut t.grade),
+        VfxOwner::Master(s) => proj.sequences.get_mut(s).map(|s| &mut s.master_grade),
+        VfxOwner::Asset(a) => proj.media.assets.get_mut(a).map(|a| &mut a.grade),
+    }
 }
 
 fn find_clip_in_track(
@@ -1571,6 +1647,10 @@ impl TimelineCmd {
             TimelineCmd::SetGrade { old, new, .. } => {
                 old.as_ref().map_or(0, json_len) + new.as_ref().map_or(0, json_len)
             }
+            TimelineCmd::AddEffect { effect, .. } | TimelineCmd::RemoveEffect { effect, .. } => {
+                json_len(effect)
+            }
+            TimelineCmd::SetEffect { old, new, .. } => json_len(old) + json_len(new),
             TimelineCmd::AddGraph { graph } | TimelineCmd::RemoveGraph { graph } => json_len(graph),
             _ => 64,
         }
@@ -1619,10 +1699,19 @@ impl TimelineCmd {
             TimelineCmd::SetKeyframe { .. } => "Set keyframe".into(),
             TimelineCmd::RemoveKeyframe { .. } => "Remove keyframe".into(),
             TimelineCmd::SetKeyframeInterp { .. } => "Set easing".into(),
-            TimelineCmd::AddEffect { .. } => "Add effect".into(),
-            TimelineCmd::RemoveEffect { .. } => "Remove effect".into(),
-            TimelineCmd::ReorderEffects { .. } => "Reorder effects".into(),
-            TimelineCmd::SetGrade { .. } => "Edit grade".into(),
+            TimelineCmd::AddEffect { owner, .. } => {
+                format!("Add {} effect", owner.scope_noun())
+            }
+            TimelineCmd::RemoveEffect { owner, .. } => {
+                format!("Remove {} effect", owner.scope_noun())
+            }
+            TimelineCmd::ReorderEffects { owner, .. } => {
+                format!("Reorder {} effects", owner.scope_noun())
+            }
+            TimelineCmd::SetEffect { owner, .. } => {
+                format!("Edit {} effect", owner.scope_noun())
+            }
+            TimelineCmd::SetGrade { owner, .. } => format!("Edit {} grade", owner.scope_noun()),
             TimelineCmd::AddGraph { .. } => "Add composition".into(),
             TimelineCmd::RemoveGraph { .. } => "Remove composition".into(),
             TimelineCmd::SetClipComposition { .. } => "Set composition".into(),
@@ -1961,33 +2050,41 @@ impl TimelineCmd {
                 }
             }
             TimelineCmd::AddEffect {
-                clip,
+                owner,
                 index,
                 effect,
-                ..
             } => {
-                if let Some(c) = find_clip_mut(p, *clip) {
-                    let i = (*index).min(c.effects.len());
-                    c.effects.insert(i, (**effect).clone());
+                if let Some(stack) = effect_stack_mut(p, owner) {
+                    let i = (*index).min(stack.len());
+                    stack.insert(i, (**effect).clone());
                 }
             }
-            TimelineCmd::RemoveEffect { clip, index, .. } => {
-                if let Some(c) = find_clip_mut(p, *clip) {
-                    if *index < c.effects.len() {
-                        c.effects.remove(*index);
+            TimelineCmd::RemoveEffect { owner, index, .. } => {
+                if let Some(stack) = effect_stack_mut(p, owner) {
+                    if *index < stack.len() {
+                        stack.remove(*index);
                     }
                 }
             }
             TimelineCmd::ReorderEffects {
-                clip, new_order, ..
+                owner, new_order, ..
             } => {
-                if let Some(c) = find_clip_mut(p, *clip) {
-                    reorder(&mut c.effects, new_order);
+                if let Some(stack) = effect_stack_mut(p, owner) {
+                    reorder(stack, new_order);
                 }
             }
-            TimelineCmd::SetGrade { clip, new, .. } => {
-                if let Some(c) = find_clip_mut(p, *clip) {
-                    c.grade = new.as_ref().map(|g| (**g).clone());
+            TimelineCmd::SetEffect {
+                owner, index, new, ..
+            } => {
+                if let Some(stack) = effect_stack_mut(p, owner) {
+                    if let Some(slot) = stack.get_mut(*index) {
+                        *slot = (**new).clone();
+                    }
+                }
+            }
+            TimelineCmd::SetGrade { owner, new, .. } => {
+                if let Some(slot) = grade_slot_mut(p, owner) {
+                    *slot = new.as_ref().map(|g| (**g).clone());
                 }
             }
             TimelineCmd::AddGraph { graph } => {
@@ -2339,56 +2436,45 @@ impl TimelineCmd {
                 new: *old,
             },
             TimelineCmd::AddEffect {
-                seq,
-                track,
-                clip,
+                owner,
                 index,
                 effect,
             } => TimelineCmd::RemoveEffect {
-                seq: *seq,
-                track: *track,
-                clip: *clip,
+                owner: *owner,
                 index: *index,
                 effect: effect.clone(),
             },
             TimelineCmd::RemoveEffect {
-                seq,
-                track,
-                clip,
+                owner,
                 index,
                 effect,
             } => TimelineCmd::AddEffect {
-                seq: *seq,
-                track: *track,
-                clip: *clip,
+                owner: *owner,
                 index: *index,
                 effect: effect.clone(),
             },
             TimelineCmd::ReorderEffects {
-                seq,
-                track,
-                clip,
-                new_order,
-                ..
+                owner, new_order, ..
             } => TimelineCmd::ReorderEffects {
-                seq: *seq,
-                track: *track,
-                clip: *clip,
+                owner: *owner,
                 // Undo a gather-permutation with its inverse, not by swapping the
                 // (identity) old_order — see `inverse_perm`.
                 old_order: new_order.clone(),
                 new_order: inverse_perm(new_order),
             },
-            TimelineCmd::SetGrade {
-                seq,
-                track,
-                clip,
+            TimelineCmd::SetEffect {
+                owner,
+                index,
                 old,
                 new,
-            } => TimelineCmd::SetGrade {
-                seq: *seq,
-                track: *track,
-                clip: *clip,
+            } => TimelineCmd::SetEffect {
+                owner: *owner,
+                index: *index,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::SetGrade { owner, old, new } => TimelineCmd::SetGrade {
+                owner: *owner,
                 old: new.clone(),
                 new: old.clone(),
             },
@@ -2544,6 +2630,27 @@ impl TimelineCmd {
                 path: path.clone(),
                 old: *old,
                 new: *incoming,
+            }),
+            // One slider drag on a stacked effect (any scope) is one undo unit:
+            // keep the anchor's before-state, adopt the incoming after-state.
+            (
+                SetEffect {
+                    owner,
+                    index,
+                    old,
+                    new: _,
+                },
+                SetEffect {
+                    owner: o2,
+                    index: i2,
+                    new: incoming,
+                    ..
+                },
+            ) if owner == o2 && index == i2 => Some(SetEffect {
+                owner: *owner,
+                index: *index,
+                old: old.clone(),
+                new: incoming.clone(),
             }),
             (GraphEdit(a), GraphEdit(b)) => GraphCmd::coalesce(a, b).map(GraphEdit),
             (AudioEdit(a), AudioEdit(b)) => AudioCmd::coalesce(a, b).map(AudioEdit),

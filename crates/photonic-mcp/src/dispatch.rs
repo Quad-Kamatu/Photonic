@@ -2431,6 +2431,16 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::set_effect_param(state, a).await,
             ))
         }
+        "effect_stack" => {
+            let a: EffectStackArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            let readonly = a.op == EffectStackOp::List;
+            let res = handlers::video::effect_stack(state, a).await;
+            Ok(if readonly {
+                ToolOutput::readonly(res)
+            } else {
+                ToolOutput::mutating(res)
+            })
+        }
         "list_effect_kinds" => {
             let a: ListEffectKindsArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(

@@ -1350,6 +1350,7 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::AddEffect { .. } => {}
         TimelineCmd::RemoveEffect { .. } => {}
         TimelineCmd::ReorderEffects { .. } => {}
+        TimelineCmd::SetEffect { .. } => {} // K-B1/K-B2 scoped stack param edit
         TimelineCmd::SetGrade { .. } => {}
         // Graphs / compositions.
         TimelineCmd::AddGraph { .. } => {}
