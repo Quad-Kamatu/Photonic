@@ -1136,11 +1136,17 @@ impl Evaluator {
             // through to the passthrough blit below.
             IrOp::Grade { ops } if !ops.is_empty() => match inputs.first() {
                 Some(src) => {
+                    // `src.texture` is pool-bucketed (dims rounded up to 64), so
+                    // the logical frame size has to be passed explicitly or a
+                    // power-window mask lands on the bucket edge instead of the
+                    // picture edge — the same logical-vs-physical split
+                    // `Transform2D` above already threads.
                     let graded = photonic_render::apply_grade_stack_gpu(
                         self.gpu.device(),
                         self.gpu.queue(),
                         &src.texture,
                         ops,
+                        (logical_w, logical_h),
                     );
                     self.passes.blit(&self.gpu, &graded, target);
                 }

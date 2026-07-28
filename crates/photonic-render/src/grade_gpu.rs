@@ -128,10 +128,20 @@ fn smoothstep1(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 // Power-window weight at normalized coord (x,y). center.xy, size.xy in `c`;
-// rotation, softness in `p`. `rect` != 0 → rectangle (Chebyshev) else ellipse.
+// rotation, softness in `p.xy`; `p.zw` is the physical→logical uv scale.
+// `rect` != 0 → rectangle (Chebyshev) else ellipse.
+//
+// `x`/`y` arrive normalized against the RENDER TARGET, which is a pool-bucketed
+// texture whose dimensions are rounded up to a multiple of 64 — so uv 1.0 is the
+// edge of the bucket, not the edge of the picture. The CPU reference
+// (`apply_grade_cpu`) normalizes against the LOGICAL frame instead, so without
+// `p.zw` the two disagree for any frame whose size is not a multiple of 64:
+// 1920x1080 buckets to 1920x1088 and the window lands 0.741% off vertically.
+// Scaling here rather than pre-scaling center/size on the CPU keeps the rotation
+// in logical space — with a per-axis scale, a rotated ellipse would shear.
 fn window_weight(x: f32, y: f32, c: vec4<f32>, p: vec4<f32>, rect: u32, invert: u32) -> f32 {
-    let dx = x - c.x;
-    let dy = y - c.y;
+    let dx = x * p.z - c.x;
+    let dy = y * p.w - c.y;
     let sn = sin(p.x);
     let cs = cos(p.x);
     let xl = dx * cs + dy * sn;
@@ -419,14 +429,20 @@ pub(crate) fn expanded_lut3d_shader() -> String {
 
 // ── run one op as a full-screen pass ────────────────────────────────────────
 
-fn mask_fields(mask: Option<&ResolvedMask>) -> ([u32; 3], [f32; 4], [f32; 4]) {
+/// Mask uniform slots. `uv_scale` converts a render-target-normalized uv into a
+/// logical-frame-normalized one (see `window_weight`); it rides in the two spare
+/// floats of the `p` vector so no uniform layout changes.
+fn mask_fields(mask: Option<&ResolvedMask>, uv_scale: [f32; 2]) -> ([u32; 3], [f32; 4], [f32; 4]) {
     match mask {
         Some(m) => (
             [1, m.rectangle as u32, m.invert as u32],
             [m.center[0], m.center[1], m.size[0], m.size[1]],
-            [m.rotation, m.softness, 0.0, 0.0],
+            [m.rotation, m.softness, uv_scale[0], uv_scale[1]],
         ),
-        None => ([0, 0, 0], [0.0; 4], [0.0; 4]),
+        // Unmasked: every shader gates its `window_weight` call on the has-mask
+        // flag, so these are inert — but carry an identity scale rather than
+        // zeros so a future unguarded read cannot collapse the frame to a point.
+        None => ([0, 0, 0], [0.0; 4], [0.0, 0.0, 1.0, 1.0]),
     }
 }
 
@@ -584,18 +600,27 @@ fn run_pass(
 /// a fresh output texture. A fresh pipeline/bind-group is built per call — the
 /// engine (P3+) will hold persistent pipelines; this mirrors
 /// `convert_yuv_planes_to_working`'s per-call contract.
+/// `logical` is the picture size in pixels, which is NOT the texture size when
+/// the input comes from the bucketed texture pool. Power-window masks are
+/// normalized against it, matching `apply_grade_cpu`'s `width`/`height`. Pass
+/// the texture's own dimensions when there is no separate logical size.
 pub fn apply_grade_op_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     input: &wgpu::Texture,
     op: &ResolvedGradeOp,
+    logical: (u32, u32),
 ) -> wgpu::Texture {
     let w = input.width();
     let h = input.height();
     let out = new_working(device, w, h);
     let in_view = input.create_view(&Default::default());
     let samp = linear_sampler(device);
-    let (mflag, mc, mp) = mask_fields(op.mask.as_ref());
+    let uv_scale = [
+        w as f32 / logical.0.max(1) as f32,
+        h as f32 / logical.1.max(1) as f32,
+    ];
+    let (mflag, mc, mp) = mask_fields(op.mask.as_ref(), uv_scale);
 
     match &op.payload {
         ResolvedGradePayload::Curves(c) => {
@@ -897,16 +922,19 @@ fn math_uniform(
 
 /// Apply an entire resolved stack, ping-ponging between working textures. A
 /// fresh owned texture is always returned; the caller retains `input`.
+/// `logical` is the picture size, not the (possibly pool-bucketed) texture size
+/// — see [`apply_grade_op_gpu`].
 pub fn apply_grade_stack_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     input: &wgpu::Texture,
     ops: &[ResolvedGradeOp],
+    logical: (u32, u32),
 ) -> wgpu::Texture {
     let mut cur: Option<wgpu::Texture> = None;
     for op in ops {
         let src = cur.as_ref().unwrap_or(input);
-        let next = apply_grade_op_gpu(device, queue, src, op);
+        let next = apply_grade_op_gpu(device, queue, src, op, logical);
         cur = Some(next);
     }
     match cur {
@@ -1180,6 +1208,201 @@ mod tests {
         out
     }
 
+    /// A `w`x`h` texture of one premultiplied colour.
+    fn solid_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        w: u32,
+        h: u32,
+        rgba: [f32; 4],
+    ) -> wgpu::Texture {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("solid_in"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut data: Vec<u8> = Vec::with_capacity((w * h * 8) as usize);
+        for _ in 0..(w * h) {
+            for c in rgba {
+                data.extend_from_slice(&f32_to_f16_bits(c).to_le_bytes());
+            }
+        }
+        queue.write_texture(
+            tex.as_image_copy(),
+            &data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 8),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        tex
+    }
+
+    /// Full 2D readback, row-padded to the 256-byte copy alignment.
+    fn readback_rgba16_2d(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tex: &wgpu::Texture,
+        w: u32,
+        h: u32,
+    ) -> Vec<f32> {
+        let bpr = align256(w * 8);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rb2d"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        let raw = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                for c in 0..4 {
+                    let o = y * bpr as usize + x * 8 + c * 2;
+                    out.push(f16_to_f32(u16::from_le_bytes([raw[o], raw[o + 1]])));
+                }
+            }
+        }
+        drop(raw);
+        staging.unmap();
+        out
+    }
+
+    /// A power-window mask must be normalized against the LOGICAL frame, not the
+    /// pool-bucketed render target.
+    ///
+    /// `photonic-video`'s texture pool rounds each dimension up to a multiple of
+    /// 64 (`TextureDesc::bucket`, pinned by `pool.rs`'s `desc(100,100).bucket()
+    /// == (128,128)`), so a graded frame is rendered into a texture larger than
+    /// the picture. The shader's full-quad uv therefore reaches 1.0 at the
+    /// BUCKET edge while `apply_grade_cpu` normalizes at the PICTURE edge — so
+    /// before the `uv_scale` fix a masked grade disagreed between the two
+    /// evaluators for any frame whose size is not a multiple of 64 (0.741%
+    /// vertically at 1920x1080, and 28% at the 100->128 case used here).
+    ///
+    /// `cpu_gpu_parity`'s sweep cannot catch this: its grade rows use
+    /// `mask: None`, and its 8x8 canvas buckets to a *square* 64x64 where the
+    /// two axes scale identically and a centred window stays centred.
+    #[test]
+    fn masked_grade_normalizes_the_window_against_the_logical_frame() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter — skipping logical-frame mask parity test");
+            return;
+        };
+        // Deliberately non-square so a swapped or shared axis scale is caught:
+        // 100 -> 128 and 200 -> 256 are different ratios in x and y.
+        const LOG_W: u32 = 100;
+        const LOG_H: u32 = 200;
+        const PHYS_W: u32 = 128;
+        const PHYS_H: u32 = 256;
+
+        let grey = [0.5, 0.5, 0.5, 1.0];
+        let input = solid_texture(&device, &queue, PHYS_W, PHYS_H, grey);
+        let op = ResolvedGradeOp {
+            payload: ResolvedGradePayload::Exposure { stops: 1.5 },
+            mask: Some(ResolvedMask {
+                rectangle: false,
+                center: [0.5, 0.5],
+                // Hard-edged and well inside the frame, so the in/out boundary
+                // falls where a mis-scaled uv would visibly move it.
+                size: [0.25, 0.25],
+                rotation: 0.0,
+                softness: 0.0,
+                invert: false,
+            }),
+        };
+
+        let out = apply_grade_op_gpu(&device, &queue, &input, &op, (LOG_W, LOG_H));
+        let got = readback_rgba16_2d(&device, &queue, &out, PHYS_W, PHYS_H);
+
+        let mut want: Vec<f32> = Vec::with_capacity((LOG_W * LOG_H * 4) as usize);
+        for _ in 0..(LOG_W * LOG_H) {
+            want.extend_from_slice(&grey);
+        }
+        apply_grade_cpu(&mut want, LOG_W, LOG_H, std::slice::from_ref(&op));
+
+        let mut worst = 0.0f32;
+        let mut differing = 0usize;
+        for y in 0..LOG_H as usize {
+            for x in 0..LOG_W as usize {
+                let g = got[(y * PHYS_W as usize + x) * 4];
+                let w = want[(y * LOG_W as usize + x) * 4];
+                let d = (g - w).abs();
+                if d > 2e-3 {
+                    differing += 1;
+                }
+                worst = worst.max(d);
+            }
+        }
+        assert!(
+            worst < 2e-3,
+            "masked grade must match the CPU reference over the logical frame: \
+             worst delta {worst}, {differing} of {} pixels differ",
+            LOG_W * LOG_H
+        );
+
+        // The fixture must be able to fail: grading the same input as though the
+        // bucket WERE the picture is the pre-fix behaviour, and it must not
+        // agree with the CPU reference. Without this, a mask that silently
+        // stopped applying would also pass the assertion above.
+        let wrong = apply_grade_op_gpu(&device, &queue, &input, &op, (PHYS_W, PHYS_H));
+        let wrong_px = readback_rgba16_2d(&device, &queue, &wrong, PHYS_W, PHYS_H);
+        let mut wrong_worst = 0.0f32;
+        for y in 0..LOG_H as usize {
+            for x in 0..LOG_W as usize {
+                let g = wrong_px[(y * PHYS_W as usize + x) * 4];
+                let w = want[(y * LOG_W as usize + x) * 4];
+                wrong_worst = wrong_worst.max((g - w).abs());
+            }
+        }
+        assert!(
+            wrong_worst > 1e-2,
+            "regression fixture is inert: normalizing against the bucket should \
+             visibly disagree with the CPU reference, but worst delta was only \
+             {wrong_worst}"
+        );
+    }
+
     /// Opaque parity (α == 1): the default the per-op cases use.
     fn assert_gpu_matches_cpu(op: ResolvedGradeOp, n: u32) {
         assert_gpu_matches_cpu_alpha(op, n, false, 2e-3);
@@ -1198,7 +1421,9 @@ mod tests {
         } else {
             gradient_texture(&device, &queue, n)
         };
-        let out = apply_grade_op_gpu(&device, &queue, &input, &op);
+        // This fixture builds its texture directly rather than from the pool, so
+        // logical size == texture size.
+        let out = apply_grade_op_gpu(&device, &queue, &input, &op, (n, 1));
         let got = readback_rgba16(&device, &queue, &out, n);
 
         let mut want = if alpha_ramp {
