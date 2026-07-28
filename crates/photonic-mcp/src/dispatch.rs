@@ -2441,6 +2441,12 @@ pub(crate) async fn dispatch_tool_inner(
                 ToolOutput::mutating(res)
             })
         }
+        "paste_attributes" => {
+            let a: PasteAttributesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::paste_attributes(state, a).await,
+            ))
+        }
         "list_effect_kinds" => {
             let a: ListEffectKindsArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(

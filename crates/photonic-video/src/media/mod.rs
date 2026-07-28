@@ -16,6 +16,8 @@ pub mod keyframe_index;
 pub mod poster;
 pub mod probe;
 pub mod proxy;
+/// Still-image decode sizing + the `(asset, size)`-keyed still cache (26 K-C8).
+pub mod stills;
 /// Clip thumbnails + waveform loading, sidecar-cached (spec 15, NLE parity 10).
 pub mod thumbnails;
 
@@ -34,6 +36,7 @@ pub use proxy::{
     generate_proxy, proxy_cache_dir, proxy_cache_path, resolve_decode_input,
     should_auto_generate_proxy, validate_attach, AttachError, AttachValidation, ProxyError,
 };
+pub use stills::{resample_linear_premult, still_target_size, StillCache, StillKey};
 pub use thumbnails::{
     DecodeThumbnailSource, RgbaThumb, ThumbHandle, ThumbnailCache, ThumbnailConfig,
     ThumbnailDecodeSpec, ThumbnailSource, WaveformCache, WaveformSource,

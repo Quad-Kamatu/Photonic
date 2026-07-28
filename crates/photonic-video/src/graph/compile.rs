@@ -211,10 +211,72 @@ impl CompileDiagnostic {
 
 /// The result of a compile: the graph plus any diagnostics (never black-frames
 /// silently — a failed splice falls back to the default chain and records why).
+///
+/// `program_tap` / `clip_taps` are the K-E2 scope readback points (03 §3.6,
+/// 07 §5). They are **indices into `graph`, not extra nodes**: every tap is a
+/// node the program evaluation already renders, so reading one costs no extra
+/// evaluation (see [`ScopeTapPoint`]).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct CompiledFrame {
     pub graph: FrameGraph,
     pub diagnostics: Vec<CompileDiagnostic>,
+    /// The folded program after the master stack and **before** `CaptionOverlay`
+    /// (03 §3.6). `None` for an empty sequence / an asset peek.
+    pub program_tap: Option<IrNodeId>,
+    /// Every clip lowered into this frame, at its post-`Grade` node — the clip's
+    /// own texture before the track fold (07 §5). Clips whose span does not cover
+    /// the compiled tick, or that fold away (disabled track, zero opacity), are
+    /// absent: that absence IS the 13 §10.2 "playhead is not over the clip"
+    /// fallback signal. A `Vec` and not a `HashMap` because a compiled frame
+    /// holds a handful of clips and this is per-frame hot-path allocation.
+    pub clip_taps: Vec<(ClipId, IrNodeId)>,
+}
+
+/// Which texture the scopes read (K-E2 / 03 §3.6, reconciled with 07 §5's
+/// per-clip-with-fallback wording by 27 A-7).
+///
+/// Both variants name a node the frame graph *already contains*, so switching
+/// the tap never adds a render pass — the tap is a lookup of an intermediate
+/// result the program evaluation produced anyway.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ScopeTapPoint {
+    /// Sequence output, post-master-grade, **pre-`CaptionOverlay`** (03 §3.6).
+    /// The fallback 07 §5 / 13 §10.2 mandate when no clip is selected — and
+    /// deliberately not the *presented* frame, which is post-caption and so
+    /// measures burnt-in caption pixels the colourist is not grading.
+    #[default]
+    Program,
+    /// The named clip's texture after its own `Grade`, before the track fold
+    /// (07 §5). Falls back to [`ScopeTapPoint::Program`] when the clip is not in
+    /// this frame.
+    Clip(ClipId),
+}
+
+impl CompiledFrame {
+    /// Resolve `point` to an IR node, or `None` when this frame has no such tap
+    /// (empty program, or a clip the playhead is not over). Callers own the
+    /// fallback policy; [`CompiledFrame::resolve_tap`] applies the 13 §10.2 one.
+    pub fn tap(&self, point: ScopeTapPoint) -> Option<IrNodeId> {
+        match point {
+            ScopeTapPoint::Program => self.program_tap,
+            ScopeTapPoint::Clip(id) => self
+                .clip_taps
+                .iter()
+                .find(|(c, _)| *c == id)
+                .map(|(_, n)| *n),
+        }
+    }
+
+    /// [`CompiledFrame::tap`] with the 13 §10.2 fallback applied: a clip tap that
+    /// this frame does not carry degrades to the program tap rather than going
+    /// blank. Returns the point actually used, so the UI can say which one it is
+    /// ("Program" vs the clip's name) instead of silently lying.
+    pub fn resolve_tap(&self, point: ScopeTapPoint) -> Option<(ScopeTapPoint, IrNodeId)> {
+        if let Some(node) = self.tap(point) {
+            return Some((point, node));
+        }
+        self.program_tap.map(|n| (ScopeTapPoint::Program, n))
+    }
 }
 
 /// Soft cap on distinct `TimeOffset` values per composition (02 §2 step 7 /
@@ -270,6 +332,10 @@ pub fn compile_asset_peek(
             vec![],
         ),
     };
+    // K-E2: an asset peek has no clips and no fold, so its only readback point is
+    // the decoded source itself. Recording it keeps the scopes panel usable while
+    // the monitor is on a source peek (24 §3) instead of going "no signal".
+    b.program_tap = Some(src);
     let output = b.push(IrOp::Output { w, h }, vec![(src, OutPort::default())]);
     b.finish(Some(output))
 }
@@ -360,6 +426,15 @@ pub fn compile_with_luts(
         )
     });
 
+    // K-E2 / 03 §3.6: the program scope tap is taken HERE — after the master
+    // grade, before `CaptionOverlay`. Captions are authored in final display
+    // colour (03 §3.6) and burning them into the measured signal is exactly the
+    // defect 26 K-E2 names. The project-graph splice below is likewise excluded
+    // because it lands after captions, so "before CaptionOverlay" and "after the
+    // project graph" are not simultaneously satisfiable — the spec's stated
+    // boundary (03 §3.6) wins.
+    b.program_tap = program;
+
     // Step 5: caption overlay (enabled caption tracks with a cue covering t).
     let program = splice_captions(&mut b, seq, format, tick, program);
 
@@ -399,6 +474,10 @@ struct Builder<'a> {
     /// Parsed-LUT provider (K-0.5), threaded so `Grade` `Lut3d` ops resolve to a
     /// real table. `None` = no provider (LUT ops resolve inert → identity).
     luts: Option<&'a dyn LutProvider>,
+    /// K-E2 scope taps: each lowered clip's post-`Grade` node (07 §5).
+    clip_taps: Vec<(ClipId, IrNodeId)>,
+    /// K-E2: the folded program before `CaptionOverlay` (03 §3.6).
+    program_tap: Option<IrNodeId>,
 }
 
 impl<'a> Builder<'a> {
@@ -409,6 +488,8 @@ impl<'a> Builder<'a> {
             diagnostics: Vec::new(),
             view_index: HashMap::new(),
             luts: None,
+            clip_taps: Vec::new(),
+            program_tap: None,
         }
     }
 
@@ -484,6 +565,8 @@ impl<'a> Builder<'a> {
                 output,
             },
             diagnostics: self.diagnostics,
+            program_tap: self.program_tap,
+            clip_taps: self.clip_taps,
         }
     }
 }
@@ -1186,6 +1269,11 @@ fn build_clip_chain(
     // Clip scope (35 §2.4): the clip's own effects/grade, clip-relative keyframes.
     // TODO(30 §2.3): gate on the clip stack's Applicability once a manifest type exists.
     cur = apply_stack(b, &clip.effects, clip.grade.as_ref(), cur, dt);
+    // K-E2 / 07 §5: this node — post-`Grade`, pre-fold — is the per-clip scope
+    // tap. Recorded for every lowered clip (including clips inside a nest, which
+    // reach here through `fold_sequence`'s recursion), so no second compile is
+    // needed to answer `get_scopes(clip, at)`.
+    b.clip_taps.push((clip.id, cur));
     Some((cur, opacity))
 }
 

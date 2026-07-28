@@ -12,7 +12,8 @@
 //! caller to wrap in a single `Command::Batch`, mirroring the existing
 //! `GroupNodes` batching idiom.
 
-use super::anim::{Interp, Keyframe, PropPath, PropertyTrack};
+use super::anim::{AnimProps, Interp, Keyframe, PropPath, PropertyTrack};
+use super::audio::ClipAudio;
 use super::clip::{
     Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, MulticamAngle, MulticamGroup,
     TextClipContent,
@@ -1700,6 +1701,242 @@ pub fn set_grade(
     let t = track(s, track_id)?;
     clip(t, clip_id)?;
     set_grade_scoped(p, VfxOwner::Clip(clip_id), new)
+}
+
+// ── Paste Attributes (26 §10 K-B15) ─────────────────────────────────────────
+//
+// "Make these ten shots look like that one." Copies the *look-carrying* half of
+// a clip onto one or more already-existing clips, leaving every clip's identity
+// and timing alone. Deliberately NOT the clip clipboard (`edit.copy` /
+// `video.paste`), which lays down whole new clips.
+//
+// WHAT IS CARRIED, and why exactly this set:
+//
+//   effects   `Clip::effects`  — the stack itself, the headline of the verb.
+//   grade     `Clip::grade`    — 07's colour pipeline, the other half of "look".
+//   transform `Clip::transform` — pos/scale/rotation/anchor/opacity, keyframes
+//             included.
+//   audio     `Clip::audio`    — gain, fades, channel map.
+//
+// WHAT IS NOT, and why (each exclusion is a "a paste that silently moves a clip
+// is a bug" call):
+//
+//   start / duration / source / source_in / id / name  — identity and timing.
+//   speed      `SpeedMap` decides *which source frames* fill the slot. Pasting
+//              it silently changes what media the target shows, which is a
+//              timing edit wearing a look edit's clothes. 26 §10 K-B15's own
+//              selector list stops at `{effects, grade, transform, audio}`.
+//   reframe    Per-`SequenceFormat` transform override (CAP-012). Argued for —
+//              it is transform data — but excluded twice over: 26 §10 K-B15's
+//              selector list does not name it, and `Clip::reframe` is a
+//              `HashMap<usize, _>` that a `SetClipProp` CANNOT round-trip
+//              today (`TimelineCmd` is an internally-tagged enum, and serde's
+//              content buffer will not coerce a JSON string map key back to
+//              `usize`), so carrying it would mint commands the history
+//              journal cannot reload. That defect already bites
+//              `set_clip_reframe`; it is filed separately rather than papered
+//              over here. Consequence to know: after a transform paste the
+//              target keeps its OWN per-format overrides.
+//   composition A per-clip `GraphId` into the shared graph arena; carrying it
+//              would alias two clips onto one graph, and deep-cloning it is
+//              `paste_composition`'s job (08 §4), not this verb's.
+//   transitions `Sequence::validate_transitions` REJECTS a `transition_out` at
+//              a hard cut, so a pasted transition really could break the
+//              sequence invariant `TimelineCmd::apply` debug-asserts after
+//              every command. Excluding them is what makes the multi-target
+//              paste safe as a plain `Command::Batch` (see below).
+//   enabled / color_label / markers / group / link_group / multicam — per-clip
+//              organisation and identity, not look.
+//
+// ONE UNDO UNIT: `paste_clip_attributes` returns one `SetClipProp` per target
+// for the caller to wrap in a single `Command::Batch`. `Command::Batch` applies
+// its members one at a time and `TimelineCmd::apply` debug-asserts
+// `Sequence::validate()` after each, so a batched multi-clip edit is only safe
+// if every intermediate state is valid. It is here, provably: `validate()`
+// inspects clip durations, per-track ordering/overlap, transitions and the
+// group tree — and the attribute set above touches NONE of those fields.
+// `paste_attributes_batch_never_breaks_the_sequence_invariant` pins that.
+
+/// The look-carrying half of a [`Clip`] (26 §10 K-B15) — everything
+/// [`paste_clip_attributes`] can transfer, and nothing that identifies or times
+/// a clip. Detached from the source clip so a GUI clipboard can hold it across
+/// edits (and so the LUT-asset check below is meaningful even for a stale one).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipAttributes {
+    pub effects: Vec<ClipEffect>,
+    pub grade: Option<Grade>,
+    pub transform: AnimProps<ClipTransform>,
+    pub audio: Option<ClipAudio>,
+}
+
+impl ClipAttributes {
+    /// Snapshot the pasteable attributes of `clip`.
+    pub fn of(clip: &Clip) -> Self {
+        ClipAttributes {
+            effects: clip.effects.clone(),
+            grade: clip.grade.clone(),
+            transform: clip.transform.clone(),
+            audio: clip.audio.clone(),
+        }
+    }
+}
+
+/// Which attribute families a paste transfers (26 §10 K-B15's selector flags).
+/// A `false` flag leaves the target's own value completely untouched — it is
+/// not "paste the default", it is "do not touch".
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AttrSelector {
+    pub effects: bool,
+    pub grade: bool,
+    /// `Clip::transform` only — `Clip::reframe` is deliberately not carried
+    /// (see the module comment above this section).
+    pub transform: bool,
+    pub audio: bool,
+}
+
+impl AttrSelector {
+    /// Everything — the default a bare "Paste Attributes" means.
+    pub const ALL: AttrSelector = AttrSelector {
+        effects: true,
+        grade: true,
+        transform: true,
+        audio: true,
+    };
+    /// Kdenlive's narrower "Paste Effects".
+    pub const EFFECTS_ONLY: AttrSelector = AttrSelector {
+        effects: true,
+        grade: false,
+        transform: false,
+        audio: false,
+    };
+
+    /// True when no family is selected — the paste can only be a no-op.
+    pub fn is_empty(&self) -> bool {
+        !(self.effects || self.grade || self.transform || self.audio)
+    }
+}
+
+impl Default for AttrSelector {
+    fn default() -> Self {
+        AttrSelector::ALL
+    }
+}
+
+/// Read one clip's pasteable attributes by id, from anywhere in the project.
+pub fn clip_attributes(p: &TimelineProject, clip: ClipId) -> Result<ClipAttributes, EditError> {
+    let c = find_clip_anywhere(p, clip).ok_or(EditError::NoClip(clip))?;
+    Ok(ClipAttributes::of(c))
+}
+
+/// `(sequence, track, clip)` for a clip id, searched across every sequence —
+/// the address `SetClipProp` needs, which [`find_clip_anywhere`] cannot give.
+fn locate_clip_anywhere(p: &TimelineProject, id: ClipId) -> Option<(SequenceId, TrackId, &Clip)> {
+    p.sequences.values().find_map(|s| {
+        s.video_tracks
+            .iter()
+            .chain(s.audio_tracks.iter())
+            .find_map(|t| t.clips.iter().find(|c| c.id == id).map(|c| (s.id, t.id, c)))
+    })
+}
+
+/// Every `AssetId` a grade references (today: `Lut3d`). 26 §10 K-B15's
+/// watch-out — a pasted grade must not leave the target pointing at a LUT the
+/// project does not have.
+fn grade_asset_refs(g: &Grade) -> Vec<AssetId> {
+    g.ops
+        .iter()
+        .filter_map(|op| match &op.params.base {
+            GradeOpParams::Lut3d { asset, .. } => Some(*asset),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **Paste Attributes** (26 §10 K-B15): stamp `attrs` onto each of `targets`,
+/// filtered by `sel`. Returns one [`TimelineCmd::SetClipProp`] per target that
+/// actually changes, for the caller to wrap in ONE `Command::Batch` — pasting
+/// onto N clips is one user verb and must be one undo step.
+///
+/// Timing is untouched by construction: each command is the target's own clip
+/// with only the selected attribute families replaced.
+///
+/// Rejects (atomically — no partial paste, the whole call returns `Err`):
+/// * [`EditError::NoClip`] — a target id that is not in the project.
+/// * [`EditError::NoAsset`] — the grade carries a `Lut3d` whose asset is absent
+///   from this project (a clipboard outliving a `remove_asset`).
+///
+/// Audio fades are clamped to each target's own duration: an `AudioFade` longer
+/// than its clip never reaches unity gain (`mixer::shape_gain` divides by
+/// `fade.duration`), so copying a 2s fade onto a 1s shot would quietly duck it
+/// for its whole length.
+pub fn paste_clip_attributes(
+    p: &TimelineProject,
+    attrs: &ClipAttributes,
+    targets: &[ClipId],
+    sel: AttrSelector,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    if sel.grade {
+        if let Some(g) = attrs.grade.as_ref() {
+            for a in grade_asset_refs(g) {
+                if !p.media.assets.contains_key(&a) {
+                    return Err(EditError::NoAsset(a));
+                }
+            }
+        }
+    }
+
+    // Resolve every target first so an unknown id fails before any command is
+    // built — a paste that lands on nine of ten selected clips is worse than a
+    // paste that refuses.
+    let mut resolved: Vec<(SequenceId, TrackId, Clip)> = Vec::with_capacity(targets.len());
+    let mut seen: Vec<ClipId> = Vec::with_capacity(targets.len());
+    for &t in targets {
+        let (s, tr, c) = locate_clip_anywhere(p, t).ok_or(EditError::NoClip(t))?;
+        if seen.contains(&t) {
+            continue; // a duplicated id in the selection is one paste, not two
+        }
+        seen.push(t);
+        resolved.push((s, tr, c.clone()));
+    }
+    if sel.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut cmds = Vec::with_capacity(resolved.len());
+    for (seq_id, track_id, old) in resolved {
+        let mut new = old.clone();
+        if sel.effects {
+            new.effects = attrs.effects.clone();
+        }
+        if sel.grade {
+            new.grade = attrs.grade.clone();
+        }
+        if sel.transform {
+            new.transform = attrs.transform.clone();
+        }
+        if sel.audio {
+            new.audio = attrs.audio.clone().map(|mut a| {
+                for fade in [&mut a.fade_in, &mut a.fade_out] {
+                    if let Some(f) = fade.as_mut() {
+                        if f.duration > new.duration {
+                            f.duration = new.duration;
+                        }
+                    }
+                }
+                a
+            });
+        }
+        if new == old {
+            continue; // no-op target: keep it out of the undo step entirely
+        }
+        cmds.push(TimelineCmd::SetClipProp {
+            seq: seq_id,
+            track: track_id,
+            old: Box::new(old),
+            new: Box::new(new),
+        });
+    }
+    Ok(cmds)
 }
 
 // ── Compositions (08 §4) ────────────────────────────────────────────────────
@@ -4474,5 +4711,552 @@ mod tests {
         let other_scope =
             set_effect_scoped(p, VfxOwner::Clip(clip), 0, fx(EffectKind::Blur)).unwrap_err();
         assert_eq!(other_scope, EditError::IndexOutOfRange);
+    }
+
+    // ── Paste Attributes (26 §10 K-B15) ─────────────────────────────────────
+
+    /// Two video tracks, four clips, and a source clip loaded with one of every
+    /// pasteable family: two effects, a grade carrying a `Lut3d` asset ref, a
+    /// non-default animated transform, a per-format `reframe` override (which
+    /// must NOT travel), and
+    /// clip audio whose `fade_in` is deliberately LONGER than one target clip.
+    /// Every target's timing differs from the source's so "timing untouched" is
+    /// a claim the assertions can actually falsify.
+    #[allow(clippy::type_complexity)]
+    fn paste_attr_fixture() -> (
+        Document,
+        SequenceId,
+        (TrackId, TrackId),
+        (ClipId, ClipId, ClipId, ClipId),
+        AssetId,
+    ) {
+        use super::super::audio::{AudioFade, ChannelMap, ClipAudio, ClipAudioParams, FadeShape};
+        use super::super::grade::{GradeOpKind, GradeOpParams, LutInterp};
+        use super::super::media::{AssetKind, AssetSource, MediaAsset};
+
+        let mut project = TimelineProject::new();
+        let media = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: std::path::PathBuf::from("/a.mp4"),
+                rel_path: None,
+            },
+        );
+        let media_id = media.id;
+        project.media.insert(media);
+        let lut = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: std::path::PathBuf::from("/look.cube"),
+                rel_path: None,
+            },
+        );
+        let lut_id = lut.id;
+        project.media.insert(lut);
+
+        let src_of = |start: i64, dur: i64| {
+            Clip::new(
+                ClipSource::Asset { asset: media_id },
+                Tick(start),
+                Tick(dur),
+            )
+        };
+
+        // Source: V1 @ 0..100, fully dressed.
+        let mut src = src_of(0, 100);
+        src.name = "source".into();
+        src.effects = vec![fx(EffectKind::Blur), fx(EffectKind::Sharpen)];
+        src.grade = Some(Grade {
+            ops: vec![super::super::grade::GradeOp::new(
+                GradeOpKind::Lut3d,
+                GradeOpParams::Lut3d {
+                    asset: lut_id,
+                    intensity: 0.75,
+                    interp: LutInterp::Tetrahedral,
+                },
+            )],
+            bypass: false,
+        });
+        src.transform.base.opacity = 0.5;
+        src.transform.base.scale_x = 2.0;
+        let mut opacity_track = PropertyTrack::new("transform.opacity");
+        opacity_track.keyframes.push(Keyframe::new(
+            Tick(0),
+            crate::timeline::PropValue::Float(0.5),
+            Interp::Linear,
+        ));
+        src.transform.tracks.push(opacity_track);
+        src.reframe.insert(
+            1,
+            ClipTransform {
+                x: 42.0,
+                ..ClipTransform::default()
+            },
+        );
+        src.audio = Some(ClipAudio {
+            params: AnimProps::new(ClipAudioParams { gain_db: -6.0 }),
+            // 90 ticks: longer than target `b` below (80), shorter than the rest.
+            fade_in: Some(AudioFade {
+                duration: Tick(90),
+                shape: FadeShape::EqualPower,
+            }),
+            fade_out: None,
+            channel_map: ChannelMap::MonoDownmix,
+        });
+        let src_id = src.id;
+
+        // Targets: differing starts, durations and source_ins.
+        let mut a = src_of(200, 150);
+        a.name = "a".into();
+        a.source_in = Tick(7);
+        let a_id = a.id;
+        let mut b = src_of(0, 80);
+        b.name = "b".into();
+        b.source_in = Tick(11);
+        let b_id = b.id;
+        let mut c = src_of(400, 60);
+        c.name = "c".into();
+        c.source_in = Tick(13);
+        let c_id = c.id;
+
+        let mut sequence = Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
+        sequence
+            .formats
+            .push(SequenceFormat::new("Vertical", 1080, 1920));
+        let mut v1 = Track::new(TrackKind::Video, "V1");
+        v1.clips.push(src);
+        v1.clips.push(a);
+        let v1_id = v1.id;
+        let mut v2 = Track::new(TrackKind::Video, "V2");
+        v2.clips.push(b);
+        v2.clips.push(c);
+        let v2_id = v2.id;
+        sequence.video_tracks.push(v1);
+        sequence.video_tracks.push(v2);
+        let seq_id = sequence.id;
+        project.insert_sequence(sequence);
+
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+        (
+            doc,
+            seq_id,
+            (v1_id, v2_id),
+            (src_id, a_id, b_id, c_id),
+            lut_id,
+        )
+    }
+
+    fn clip_by_id(d: &Document, id: ClipId) -> Clip {
+        let p = d.timeline.as_ref().unwrap();
+        locate_clip_anywhere(p, id)
+            .unwrap_or_else(|| panic!("clip {id} vanished"))
+            .2
+            .clone()
+    }
+
+    /// The headline: the look transfers in full, and NOTHING that identifies or
+    /// times a clip moves. Each "unchanged" assertion is paired with a check
+    /// that the source really did differ, so the test cannot pass vacuously.
+    #[test]
+    fn paste_attributes_carries_the_look_and_never_the_timing() {
+        let (doc, _seq, _tracks, (src, a, b, c), _lut) = paste_attr_fixture();
+        let source = clip_by_id(&doc, src);
+        let before: Vec<Clip> = [a, b, c].iter().map(|&i| clip_by_id(&doc, i)).collect();
+
+        // Fixture sanity: the source's timing genuinely differs from every
+        // target's, so "timing untouched" below is falsifiable.
+        for t in &before {
+            assert_ne!(
+                (t.start, t.duration, t.source_in),
+                (source.start, source.duration, source.source_in),
+                "fixture must give {} timing distinct from the source",
+                t.name
+            );
+            assert_ne!(t.effects, source.effects, "fixture target already matches");
+        }
+
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+        let cmds = paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a, b, c],
+            AttrSelector::ALL,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 3, "one SetClipProp per target");
+
+        let mut d = doc.clone();
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut d);
+
+        for (i, &id) in [a, b, c].iter().enumerate() {
+            let after = clip_by_id(&d, id);
+            let prev = &before[i];
+            // Look: carried.
+            assert_eq!(after.effects, source.effects, "{}: effects", after.name);
+            assert_eq!(after.grade, source.grade, "{}: grade", after.name);
+            assert_eq!(
+                after.transform.base, source.transform.base,
+                "{}: transform",
+                after.name
+            );
+            assert_eq!(
+                after.transform.tracks, source.transform.tracks,
+                "{}: transform keyframes",
+                after.name
+            );
+            // `reframe` is deliberately NOT in the pasted set — the target
+            // keeps its own per-format overrides (see this section's comment).
+            assert_eq!(after.reframe, prev.reframe, "{}: reframe", after.name);
+            assert_ne!(
+                after.reframe, source.reframe,
+                "{}: fixture must give the source a reframe the target lacks, \
+                 else the exclusion above is untested",
+                after.name
+            );
+            assert_eq!(
+                after.audio.as_ref().map(|x| x.params.base.gain_db),
+                Some(-6.0),
+                "{}: audio gain",
+                after.name
+            );
+            // Identity and timing: untouched.
+            assert_eq!(after.id, prev.id);
+            assert_eq!(after.name, prev.name);
+            assert_eq!(after.start, prev.start, "{}: start moved", after.name);
+            assert_eq!(after.duration, prev.duration, "{}: duration", after.name);
+            assert_eq!(after.source_in, prev.source_in, "{}: source_in", after.name);
+            assert_eq!(after.source, prev.source);
+            assert_eq!(after.speed, prev.speed, "{}: speed", after.name);
+            assert_eq!(after.composition, prev.composition);
+            assert_eq!(after.transition_in, prev.transition_in);
+            assert_eq!(after.transition_out, prev.transition_out);
+        }
+        // The source itself was not a target and is unchanged.
+        assert_eq!(clip_by_id(&d, src), source);
+    }
+
+    /// THE CRUX (26 §10 K-B15): pasting onto N clips is ONE undo step, and one
+    /// undo restores all N.
+    #[test]
+    fn paste_attributes_is_one_undo_unit_across_a_multi_selection() {
+        let (mut doc, _seq, _tracks, (src, a, b, c), _lut) = paste_attr_fixture();
+        let before = doc.timeline.clone();
+
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+        let cmds = paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a, b, c],
+            AttrSelector::ALL,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 3);
+
+        let mut history = crate::history::CommandHistory::new(64);
+        let depth_before = history.undo_depth();
+        history.execute_discrete(
+            Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+            &mut doc,
+        );
+        assert_eq!(
+            history.undo_depth() - depth_before,
+            1,
+            "a 3-clip paste must record exactly ONE undo step, not three"
+        );
+        let after = doc.timeline.clone();
+        assert_ne!(
+            after, before,
+            "the paste must actually have changed the doc"
+        );
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.timeline, before,
+            "a single undo must restore all three targets"
+        );
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.timeline, after, "a single redo must re-apply all three");
+    }
+
+    /// The reason a `Command::Batch` is safe here at all: `TimelineCmd::apply`
+    /// debug-asserts `Sequence::validate()` after EVERY member, so a multi-clip
+    /// edit is only batchable if each intermediate state is valid. It is,
+    /// because the pasted attribute set touches nothing `validate()` reads.
+    ///
+    /// The second half proves that is a real property of the chosen set, not
+    /// luck: pasting `transition_out` too — the family deliberately excluded —
+    /// DOES break the same invariant.
+    #[test]
+    fn paste_attributes_batch_never_breaks_the_sequence_invariant() {
+        let (doc, seq, _tracks, (src, a, b, c), _lut) = paste_attr_fixture();
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+        let cmds = paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a, b, c],
+            AttrSelector::ALL,
+        )
+        .unwrap();
+
+        let mut d = doc.clone();
+        for (i, cmd) in cmds.iter().enumerate() {
+            Command::Timeline(cmd.clone()).apply(&mut d);
+            let s = d.timeline.as_ref().unwrap().sequences.get(&seq).unwrap();
+            assert!(
+                s.validate().is_ok(),
+                "invariant broken after batch member {i}: {:?}",
+                s.validate()
+            );
+        }
+
+        // Sensitivity: had the attribute set included transitions, the same
+        // "just stamp the source's fields onto the target" move would break it.
+        // `src` is followed on V1 by `a` at a hard cut in `before`, so a pasted
+        // `transition_out` on `src` is exactly `TransitionOutAtCut`.
+        let mut d2 = doc.clone();
+        {
+            let p = d2.timeline.as_mut().unwrap();
+            let s = p.sequences.get_mut(&seq).unwrap();
+            let t = &mut s.video_tracks[0];
+            // Butt `a` up against `src` to form the hard cut, then stamp a
+            // transition the way an over-broad paste would.
+            let src_end = t.clips[0].end();
+            t.clips[1].start = src_end;
+            t.clips[0].transition_out = Some(super::super::clip::Transition::new(
+                super::super::clip::TransitionKind::CrossDissolve,
+                Tick(10),
+            ));
+            assert!(
+                s.validate().is_err(),
+                "control: pasting a transition at a hard cut must be the thing \
+                 that breaks validate(), else this test proves nothing"
+            );
+        }
+    }
+
+    /// Each selector flag moves exactly its own family and leaves the other
+    /// three alone (a `false` flag is "do not touch", not "reset to default").
+    #[test]
+    fn paste_attributes_selector_flags_are_independent() {
+        let (doc, _seq, _tracks, (src, a, _b, _c), _lut) = paste_attr_fixture();
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+        let source = clip_by_id(&doc, src);
+        let base = clip_by_id(&doc, a);
+
+        let only = |effects, grade, transform, audio| AttrSelector {
+            effects,
+            grade,
+            transform,
+            audio,
+        };
+        for (sel, name) in [
+            (only(true, false, false, false), "effects"),
+            (only(false, true, false, false), "grade"),
+            (only(false, false, true, false), "transform"),
+            (only(false, false, false, true), "audio"),
+        ] {
+            let cmds =
+                paste_clip_attributes(doc.timeline.as_ref().unwrap(), &attrs, &[a], sel).unwrap();
+            assert_eq!(cmds.len(), 1, "{name}: expected one command");
+            let mut d = doc.clone();
+            Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut d);
+            let after = clip_by_id(&d, a);
+
+            let want_effects = if sel.effects { &source } else { &base };
+            let want_grade = if sel.grade { &source } else { &base };
+            let want_transform = if sel.transform { &source } else { &base };
+            let want_audio = if sel.audio { &source } else { &base };
+            assert_eq!(after.effects, want_effects.effects, "{name}: effects");
+            assert_eq!(after.grade, want_grade.grade, "{name}: grade");
+            assert_eq!(
+                after.transform.base, want_transform.transform.base,
+                "{name}: transform"
+            );
+            assert_eq!(after.reframe, base.reframe, "{name}: reframe excluded");
+            assert_eq!(
+                after.audio.is_some(),
+                want_audio.audio.is_some(),
+                "{name}: audio"
+            );
+        }
+
+        // An all-false selector produces no commands at all.
+        assert!(paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a],
+            only(false, false, false, false),
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    /// An `AudioFade` longer than its clip never reaches unity gain (the mixer
+    /// divides elapsed by `fade.duration`), so a pasted fade is clamped to the
+    /// TARGET's duration, per target.
+    #[test]
+    fn paste_attributes_clamps_an_over_long_audio_fade() {
+        let (doc, _seq, _tracks, (src, a, b, _c), _lut) = paste_attr_fixture();
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+        let src_fade = attrs.audio.as_ref().unwrap().fade_in.unwrap().duration;
+        let b_dur = clip_by_id(&doc, b).duration;
+        let a_dur = clip_by_id(&doc, a).duration;
+        // Fixture sanity — one target is shorter than the fade and one is not,
+        // so the test exercises both the clamped and the unclamped branch.
+        assert!(src_fade > b_dur, "fixture: b must be shorter than the fade");
+        assert!(src_fade < a_dur, "fixture: a must be longer than the fade");
+
+        let cmds = paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a, b],
+            AttrSelector::ALL,
+        )
+        .unwrap();
+        let mut d = doc.clone();
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut d);
+
+        assert_eq!(
+            clip_by_id(&d, b).audio.unwrap().fade_in.unwrap().duration,
+            b_dur,
+            "an over-long fade must clamp to the target's own duration"
+        );
+        assert_eq!(
+            clip_by_id(&d, a).audio.unwrap().fade_in.unwrap().duration,
+            src_fade,
+            "a fade that fits must be carried verbatim"
+        );
+    }
+
+    /// 26 §10 K-B15's watch-out: a grade carrying a `Lut3d` whose asset is not
+    /// in this project is refused, and an unknown target id refuses the WHOLE
+    /// paste rather than landing on the clips it could resolve.
+    #[test]
+    fn paste_attributes_refuses_a_missing_lut_and_an_unknown_target() {
+        let (mut doc, _seq, _tracks, (src, a, b, _c), lut) = paste_attr_fixture();
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+
+        // Control: with the LUT asset present the paste is accepted.
+        assert!(paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a],
+            AttrSelector::ALL
+        )
+        .is_ok());
+
+        // Drop the LUT the way `remove_asset` would, leaving a stale clipboard.
+        doc.timeline.as_mut().unwrap().media.assets.remove(&lut);
+        assert_eq!(
+            paste_clip_attributes(
+                doc.timeline.as_ref().unwrap(),
+                &attrs,
+                &[a],
+                AttrSelector::ALL
+            ),
+            Err(EditError::NoAsset(lut))
+        );
+        // …but a paste that does not carry the grade is still fine.
+        assert!(paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a],
+            AttrSelector::EFFECTS_ONLY
+        )
+        .is_ok());
+
+        // An unknown target aborts the whole call — no partial paste.
+        let ghost = ClipId::new();
+        assert_eq!(
+            paste_clip_attributes(
+                doc.timeline.as_ref().unwrap(),
+                &attrs,
+                &[a, ghost, b],
+                AttrSelector::EFFECTS_ONLY
+            ),
+            Err(EditError::NoClip(ghost))
+        );
+    }
+
+    /// A target that already matches contributes no command, so "paste again"
+    /// cannot push an empty undo step; a duplicated id is one paste, not two.
+    #[test]
+    fn paste_attributes_skips_no_op_targets() {
+        let (doc, _seq, _tracks, (src, a, _b, _c), _lut) = paste_attr_fixture();
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+
+        // Onto the source itself: nothing to do.
+        assert!(paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[src],
+            AttrSelector::ALL
+        )
+        .unwrap()
+        .is_empty());
+
+        // A duplicated target id collapses to one command…
+        let cmds = paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a, a],
+            AttrSelector::ALL,
+        )
+        .unwrap();
+        assert_eq!(cmds.len(), 1);
+
+        // …and re-pasting the same attributes afterwards is a no-op.
+        let mut d = doc.clone();
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut d);
+        assert!(paste_clip_attributes(
+            d.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a],
+            AttrSelector::ALL
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    /// Every command inverts cleanly (undo/redo identity, DoD §4) and the
+    /// pasted state survives a save/load round-trip — no new document fields,
+    /// so this is additive-in-v5 by construction (`SetClipProp` of existing
+    /// `Clip` fields), and this pins that nothing pasted fails to serialize.
+    #[test]
+    fn paste_attributes_commands_invert_and_survive_serde() {
+        let (mut doc, _seq, _tracks, (src, a, b, c), _lut) = paste_attr_fixture();
+        let attrs = clip_attributes(doc.timeline.as_ref().unwrap(), src).unwrap();
+        let cmds = paste_clip_attributes(
+            doc.timeline.as_ref().unwrap(),
+            &attrs,
+            &[a, b, c],
+            AttrSelector::ALL,
+        )
+        .unwrap();
+        for cmd in &cmds {
+            let json = serde_json::to_string(cmd).unwrap();
+            let back: TimelineCmd = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, cmd);
+        }
+        // Applied one at a time, each inverts to the exact prior state.
+        for cmd in &cmds {
+            assert_undo_roundtrip(&doc, cmd);
+        }
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut doc);
+
+        let project = doc.timeline.as_ref().unwrap();
+        let json = serde_json::to_string(project).unwrap();
+        let back: TimelineProject = serde_json::from_str(&json).unwrap();
+        assert_eq!(&back, project, "pasted attributes must round-trip");
+        assert_eq!(
+            back.sequences[&_seq]
+                .tracks()
+                .flat_map(|t| t.clips.iter())
+                .filter(|cl| cl.effects.len() == 2 && cl.grade.is_some())
+                .count(),
+            4,
+            "source + three targets all carry the stack after reload"
+        );
     }
 }

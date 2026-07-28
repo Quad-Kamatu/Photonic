@@ -288,7 +288,7 @@ impl GpuFrameSource for PatternGpuSource {
     fn video_texture(&mut self, _: &GpuContext, _: AssetId, _: Tick, _: bool) -> Option<GpuFrame> {
         Some(self.frame.clone())
     }
-    fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<GpuFrame> {
+    fn still_texture(&mut self, _: &GpuContext, _: AssetId, _: u32, _: u32) -> Option<GpuFrame> {
         Some(self.frame.clone())
     }
     fn vector_texture(

@@ -5544,6 +5544,23 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "paste_attributes",
+            "description": "Paste Attributes (26 §10 K-B15): copy one clip's LOOK onto other, already-existing clips — effect stack, grade, transform (pos/scale/rotation/anchor/opacity + its keyframes) and clip audio (gain/fades/channel map). Timing is never touched: start, duration, source, source_in, speed, transitions, composition and per-format reframe all stay as they are, so this is NOT a clip copy (use insert_clip to lay down a new clip). Pasting onto N clips is ONE undo step. Targets that already match are skipped and reported in `skipped`. Refused if the grade carries a Lut3d whose asset is not in this project, or if any target clip id is unknown (no partial paste).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_clip_id": { "type": "string", "description": "The clip whose look is copied." },
+                    "target_clip_ids": { "type": "array", "items": { "type": "string" }, "description": "Clips to stamp it onto; must be non-empty. May span tracks and sequences." },
+                    "attributes": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["effects","grade","transform","audio"] },
+                        "description": "Families to transfer. Omit for all four; an empty array is refused. An unlisted family leaves the target's own value untouched (it is not reset)."
+                    }
+                },
+                "required": ["source_clip_id","target_clip_ids"]
+            }
+        },
+        {
             "name": "list_effect_kinds",
             "description": "Registry introspection sourced from the effect manifest catalogue (spec 30 §2.7). Returns `effect_kinds`: one entry per manifest with `id`, `version`, `name`, `category`, `arity`, the legacy `kind` tag, and a `params` table (each `{path, kind, default, range, animatable, ui, group, display}`) — lets an agent discover effects and their param ranges without guessing.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -6164,7 +6181,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "get_scopes",
-            "description": "Waveform/vectorscope/histogram data for a clip at a tick (07 §5) — data, not an image (the UI/agent renders it). Renders the frame headlessly (requires a GPU adapter, else EngineUnavailable). Returns full luma/RGB histograms, a down-sampled luma waveform, and a 32x32 vectorscope grid.",
+            "description": "Waveform/vectorscope/histogram data for a clip at a tick (07 §5) — data, not an image (the UI/agent renders it). Renders the frame headlessly (requires a GPU adapter, else EngineUnavailable). Reads the K-E2 per-clip tap by default: the clip's own texture after its Grade, before the track fold and CaptionOverlay (03 §3.6), so a clip under a caption track or another video track is measured, not the composite. Returns full luma/RGB histograms, a down-sampled luma waveform, a 32x32 vectorscope grid, and `tap` naming the readback point actually used.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6172,7 +6189,8 @@ pub fn tool_list() -> Value {
                     "at_ticks": { "type": "integer" },
                     "at_tc": { "type": "string" },
                     "at_seconds": { "type": "number" },
-                    "format_index": { "type": "integer" }
+                    "format_index": { "type": "integer" },
+                    "tap": { "type": "string", "enum": ["clip","program"], "description": "Readback point (K-E2). 'clip' (default) = the clip's post-Grade, pre-fold texture; 'program' = the folded sequence pre-CaptionOverlay. A 'clip' tap the frame does not contain falls back to 'program' and says so in `tap`/`tap_fallback_reason`." }
                 },
                 "required": ["clip_id"]
             }

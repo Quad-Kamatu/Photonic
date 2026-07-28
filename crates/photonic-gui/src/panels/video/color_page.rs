@@ -12,11 +12,20 @@
 //! `SetGrade` if it changed — so undo/redo, autosave, MCP and the engine mirror
 //! all observe the edit through the one sanctioned channel.
 //!
-//! Scopes read `photonic_render::scopes` GPU compute over the engine's presented
-//! working texture (03 §3.6 readback / 07 §6). The per-clip pre-`CaptionOverlay`
-//! isolation of 03 §3.6 awaits an engine `get_scopes(clip, at)` surface (10 §3.10);
-//! until then this scopes the program frame — the 07 §6 / 13 §10.2 "no clip
-//! isolation" fallback, labelled with the selected clip's name for orientation.
+//! Scopes read `photonic_render::scopes` GPU compute over the engine's **scope
+//! tap** (K-E2): `EngineFrame::scope_tap`, which is the selected clip's texture
+//! after its `Grade` and before the track fold, or the folded program before
+//! `CaptionOverlay` (03 §3.6 readback point as amended by 27 A-7 to 07 §5's
+//! per-clip-with-fallback wording). It is deliberately NOT the presented frame,
+//! which is post-fold and post-caption — the signal 26 K-E2 flagged as measuring
+//! the wrong thing. The tap point is chosen in-panel and sent to the engine by
+//! the caller as `EngineCmd::SetScopeTap`; when the playhead is not over the
+//! chosen clip the engine falls back to the program tap and the panel relabels
+//! (13 §10.2 — never blank).
+//!
+//! Choosing a tap point mutates no document state, so it is session-only view
+//! state (egui temp data) and NOT a `Command` — there is nothing to undo, the
+//! same rule `ViewNodeOverride` follows.
 
 use egui::{pos2, vec2, Color32, Pos2, Rect, RichText, Sense, Stroke, TextureOptions, Ui, Vec2};
 use egui_phosphor::regular as ph;
@@ -27,6 +36,9 @@ use photonic_core::timeline::{
     ops, AssetId, AssetKind, AssetSource, CdlParams, ClipId, Grade, GradeOp, GradeOpId,
     GradeOpKind, GradeOpParams, LutInterp, SequenceId, TrackId,
 };
+
+use photonic_video::graph::ScopeTapPoint;
+use photonic_video::session::EngineFrame;
 
 use crate::panels::{eyedropper_btn, EyedropperTarget, PanelAction};
 
@@ -1136,23 +1148,67 @@ pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 // Floating scopes panel (07 §6 / 13 §10)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Which readback point the user asked the scopes to measure (K-E2). Session-only
+/// view state — it mutates no document, so it is deliberately egui temp data and
+/// not a `Command` (see the module header on the one-undo-unit rule).
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
+pub(crate) enum TapMode {
+    /// Follow the timeline selection: scope the selected clip, program otherwise.
+    #[default]
+    Clip,
+    /// Pin the program tap regardless of selection.
+    Program,
+}
+
+/// Resolve the panel's tap request from the mode and the current selection
+/// (13 §10.2: with nothing selected there is no clip to scope, so the request is
+/// the program). Pure, so it is unit-testable without an egui context.
+pub(crate) fn requested_tap(mode: TapMode, selection: &[ClipId]) -> ScopeTapPoint {
+    match (mode, selection.first()) {
+        (TapMode::Clip, Some(clip)) => ScopeTapPoint::Clip(*clip),
+        _ => ScopeTapPoint::Program,
+    }
+}
+
+/// The "Scoping: …" line (13 §10.2). Named from what the engine ACTUALLY tapped,
+/// never from the request, plus a reason when the two disagree — the panel must
+/// not claim to be scoping a clip it is not.
+pub(crate) fn scope_tap_label(doc: &Document, want: ScopeTapPoint, got: ScopeTapPoint) -> String {
+    match got {
+        ScopeTapPoint::Clip(clip) => clip_name(doc, clip),
+        ScopeTapPoint::Program if matches!(want, ScopeTapPoint::Clip(_)) => {
+            "Program (clip not under the playhead)".to_string()
+        }
+        ScopeTapPoint::Program => "Program".to_string(),
+    }
+}
+
 /// Floating / dockable scopes window (07 §6): waveform / parade / vectorscope /
 /// histogram, GPU-computed via `photonic_render::scopes` over the engine's
-/// presented working texture and painted from the read-back bins. Its own window
-/// close button clears `open`.
+/// **scope tap** and painted from the read-back bins. Its own window close button
+/// clears `open`.
+///
+/// K-E2: the measured texture is the engine's `EngineFrame::scope_tap` — the
+/// selected clip's post-`Grade`, pre-fold texture, or the program pre-
+/// `CaptionOverlay` — never the presented (post-caption, post-fold) frame, which
+/// is the signal 26 K-E2 flagged as "the wrong thing". Returns the tap the panel
+/// wants so the caller can hand it to the engine.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_scopes_panel(
     ctx: &egui::Context,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    frame_tex: Option<&wgpu::Texture>,
+    frame: Option<&EngineFrame>,
     doc: &Document,
     selection: &[ClipId],
     open: &mut bool,
     kind: &mut ScopeKind,
-) {
+) -> ScopeTapPoint {
     let mut is_open = *open;
-    let label = scope_source_label(doc, selection);
+    let mode_id = egui::Id::new("scopes_tap_mode");
+    let mut mode: TapMode = ctx.data(|d| d.get_temp(mode_id).unwrap_or_default());
+    let want = requested_tap(mode, selection);
+    let got = frame.map(|f| f.scope_tap_point).unwrap_or(want);
 
     egui::Window::new("Scopes")
         .open(&mut is_open)
@@ -1171,14 +1227,40 @@ pub(crate) fn draw_scopes_panel(
                     }
                 }
             });
+            // K-E2 tap-point picker (07 §5's per-clip-with-fallback). Same
+            // `selectable_label` idiom as the scope-kind row above, so it
+            // inherits the same focus/hit-target behaviour.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Tap").small().color(muted(ui)));
+                for (m, name, tip) in [
+                    (
+                        TapMode::Clip,
+                        "Clip",
+                        "Scope the selected clip after its grade, before the track fold",
+                    ),
+                    (
+                        TapMode::Program,
+                        "Program",
+                        "Scope the whole sequence before caption overlay",
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(mode == m, name)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        mode = m;
+                    }
+                }
+            });
             ui.label(
-                RichText::new(format!("Scoping: {label}"))
+                RichText::new(format!("Scoping: {}", scope_tap_label(doc, want, got)))
                     .small()
                     .color(muted(ui)),
             );
             ui.separator();
 
-            let Some(tex) = frame_tex else {
+            let Some(tap) = frame.and_then(|f| f.scope_tap.as_ref()) else {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
@@ -1187,31 +1269,36 @@ pub(crate) fn draw_scopes_panel(
                 });
                 return;
             };
+            // The tap texture comes out of the node pool and is bucket-padded, so
+            // every scope reads its LOGICAL extent (03 §3.4) — measuring the
+            // padding would put a phantom black spike in each plot.
+            let (tex, w, h) = (tap.texture.as_ref(), tap.width, tap.height);
             match *kind {
-                ScopeKind::Histogram => draw_histogram(ui, device, queue, tex),
-                ScopeKind::Parade => draw_parade(ui, device, queue, tex),
-                ScopeKind::Waveform => draw_waveform(ui, device, queue, tex),
-                ScopeKind::Vectorscope => draw_vectorscope(ui, device, queue, tex),
+                ScopeKind::Histogram => draw_histogram(ui, device, queue, tex, w, h),
+                ScopeKind::Parade => draw_parade(ui, device, queue, tex, w, h),
+                ScopeKind::Waveform => draw_waveform(ui, device, queue, tex, w, h),
+                ScopeKind::Vectorscope => draw_vectorscope(ui, device, queue, tex, w, h),
             }
         });
 
+    ctx.data_mut(|d| d.insert_temp(mode_id, mode));
     *open = is_open;
+    requested_tap(mode, selection)
 }
 
-fn scope_source_label(doc: &Document, selection: &[ClipId]) -> String {
-    if let Some((seq, track, clip)) = locate_clip(doc, selection) {
-        if let Some(name) = doc
-            .timeline
-            .as_ref()
-            .and_then(|p| p.sequences.get(&seq))
-            .and_then(|s| s.track(track))
-            .and_then(|t| t.clips.iter().find(|c| c.id == clip))
-            .map(|c| c.name.clone())
-        {
-            return name;
-        }
-    }
-    "Program".to_string()
+/// A clip's display name, or a short id fallback when it is not in the document.
+fn clip_name(doc: &Document, clip: ClipId) -> String {
+    doc.timeline
+        .as_ref()
+        .and_then(|p| {
+            p.sequences
+                .values()
+                .flat_map(|s| s.video_tracks.iter().chain(s.audio_tracks.iter()))
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip)
+        })
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "Program".to_string())
 }
 
 /// K-E1 histogram component mask: bit0=Y, bit1=R, bit2=G, bit3=B.
@@ -1234,8 +1321,16 @@ impl Default for HistChannels {
     }
 }
 
-fn draw_histogram(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
-    let h = photonic_render::scopes::histogram_gpu(device, queue, tex);
+fn draw_histogram(
+    ui: &mut Ui,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    logical_w: u32,
+    logical_h: u32,
+) {
+    let h =
+        photonic_render::scopes::histogram_gpu_logical(device, queue, tex, logical_w, logical_h);
     // K-E1: channel toggles (session-only, egui temp data).
     let id = ui.id().with("hist_channels");
     let mut ch = ui
@@ -1312,10 +1407,18 @@ fn draw_histogram(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: 
     painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
 }
 
-fn draw_parade(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
+fn draw_parade(
+    ui: &mut Ui,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    logical_w: u32,
+    logical_h: u32,
+) {
     // The render API's waveform is luma-only, so render the three per-channel
     // histograms side by side as an RGB level parade (real per-channel data).
-    let h = photonic_render::scopes::histogram_gpu(device, queue, tex);
+    let h =
+        photonic_render::scopes::histogram_gpu_logical(device, queue, tex, logical_w, logical_h);
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, w * 0.6), Sense::hover());
     let painter = ui.painter_at(rect);
@@ -1355,8 +1458,16 @@ fn draw_parade(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wg
     painter.rect_stroke(rect, 3.0, Stroke::new(1.0, border(ui)));
 }
 
-fn draw_waveform(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
-    let wf = photonic_render::scopes::waveform_gpu(device, queue, tex);
+fn draw_waveform(
+    ui: &mut Ui,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    logical_w: u32,
+    logical_h: u32,
+) {
+    let wf =
+        photonic_render::scopes::waveform_gpu_logical(device, queue, tex, logical_w, logical_h);
     let out_w = 256usize;
     let out_h = wf.bins;
     let mut pixels = vec![Color32::from_rgb(7, 7, 11); out_w * out_h];
@@ -1377,7 +1488,14 @@ fn draw_waveform(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &
     scope_image(ui, "scope_waveform", out_w, out_h, pixels, None);
 }
 
-fn draw_vectorscope(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) {
+fn draw_vectorscope(
+    ui: &mut Ui,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    logical_w: u32,
+    logical_h: u32,
+) {
     // K-E1 matrix switch: GPU path is BT.709-only today; when the user picks
     // BT.601 we recompute on a CPU readback of the same texture via the
     // matrix-aware vectorscope (scopes stay correct for SD footage).
@@ -1398,9 +1516,9 @@ fn draw_vectorscope(ui: &mut Ui, device: &wgpu::Device, queue: &wgpu::Queue, tex
         // CPU path with BT.601 — read texture not available here cheaply;
         // fall back to GPU 709 bins but label the mode (full 601 GPU twin is
         // residual). Show the switch and use GPU data so the panel still works.
-        photonic_render::scopes::vectorscope_gpu(device, queue, tex)
+        photonic_render::scopes::vectorscope_gpu_logical(device, queue, tex, logical_w, logical_h)
     } else {
-        photonic_render::scopes::vectorscope_gpu(device, queue, tex)
+        photonic_render::scopes::vectorscope_gpu_logical(device, queue, tex, logical_w, logical_h)
     };
     let _ = use_601;
     let n = vs.size;
@@ -1526,6 +1644,46 @@ fn scope_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── K-E2 scope tap ──────────────────────────────────────────────────────
+
+    /// The panel's request follows the selection in `Clip` mode and is pinned in
+    /// `Program` mode; with nothing selected there is no clip to scope, so the
+    /// request is the program (13 §10.2's "never blank").
+    #[test]
+    fn tap_request_follows_selection_only_in_clip_mode() {
+        let clip = ClipId::new();
+        assert_eq!(
+            requested_tap(TapMode::Clip, &[clip]),
+            ScopeTapPoint::Clip(clip)
+        );
+        assert_eq!(requested_tap(TapMode::Clip, &[]), ScopeTapPoint::Program);
+        assert_eq!(
+            requested_tap(TapMode::Program, &[clip]),
+            ScopeTapPoint::Program,
+            "Program mode ignores the selection"
+        );
+    }
+
+    /// The "Scoping:" line names what the engine ACTUALLY tapped. When a clip tap
+    /// was requested but the engine fell back, the label must say so rather than
+    /// keep claiming the clip's name — the failure mode is a colourist trusting a
+    /// program reading they think is a clip reading.
+    #[test]
+    fn tap_label_reports_the_fallback_rather_than_the_request() {
+        let doc = Document::new("scopes", 16.0, 16.0);
+        let clip = ClipId::new();
+        let fell_back = scope_tap_label(&doc, ScopeTapPoint::Clip(clip), ScopeTapPoint::Program);
+        assert!(
+            fell_back.starts_with("Program") && fell_back.contains("not under the playhead"),
+            "a fallback must be visible in the label, got {fell_back:?}"
+        );
+        assert_eq!(
+            scope_tap_label(&doc, ScopeTapPoint::Program, ScopeTapPoint::Program),
+            "Program",
+            "an honest program request carries no fallback note"
+        );
+    }
 
     #[test]
     fn chroma_round_trips_through_wheel() {

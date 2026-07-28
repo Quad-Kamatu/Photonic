@@ -71,6 +71,20 @@ impl FrameProvider for EmptyProvider {
 /// (the active format's pixel dimensions). Nodes are already topologically
 /// sorted (every input precedes its consumer), so one forward pass suffices.
 pub fn evaluate(graph: &FrameGraph, canvas: (u32, u32), provider: &mut dyn FrameProvider) -> Image {
+    evaluate_at(graph, canvas, provider, None)
+}
+
+/// Evaluate `graph` and return the image at `node` — the CPU mirror of
+/// [`crate::graph::eval::Evaluator::evaluate_with_tap`], so a K-E2 scope tap can
+/// be asserted pixel-for-pixel without a GPU adapter. `None` means "the graph's
+/// output", i.e. exactly [`evaluate`]. A node id outside the graph degrades to a
+/// transparent canvas rather than panicking, matching the output path.
+pub fn evaluate_at(
+    graph: &FrameGraph,
+    canvas: (u32, u32),
+    provider: &mut dyn FrameProvider,
+    node: Option<crate::graph::ir::IrNodeId>,
+) -> Image {
     let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
     let mut results: Vec<Option<Image>> = (0..graph.nodes.len()).map(|_| None).collect();
 
@@ -90,9 +104,10 @@ pub fn evaluate(graph: &FrameGraph, canvas: (u32, u32), provider: &mut dyn Frame
         results[i] = Some(img);
     }
 
-    match graph.output {
-        Some(out) => results[out.0 as usize]
-            .take()
+    match node.or(graph.output) {
+        Some(out) => results
+            .get_mut(out.0 as usize)
+            .and_then(|slot| slot.take())
             .unwrap_or_else(|| Image::new(cw, ch)),
         None => Image::new(cw, ch),
     }

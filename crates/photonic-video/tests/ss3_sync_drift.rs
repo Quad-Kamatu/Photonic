@@ -196,7 +196,13 @@ impl GpuFrameSource for LoopFrameSource<'_> {
         Some(GpuFrame::new(Arc::new(tex), width, height))
     }
 
-    fn still_texture(&mut self, _gpu: &GpuContext, _asset: AssetId) -> Option<GpuFrame> {
+    fn still_texture(
+        &mut self,
+        _gpu: &GpuContext,
+        _asset: AssetId,
+        _w: u32,
+        _h: u32,
+    ) -> Option<GpuFrame> {
         None
     }
 

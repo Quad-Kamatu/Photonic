@@ -3846,26 +3846,36 @@ impl PhotonicApp {
         // default-off, so vector mode and untouched video mode are unchanged).
         if self.mode == AppMode::Video {
             if self.scopes_panel_open {
-                // GPU scopes run over the engine's presented working texture via
-                // `photonic_render::scopes` (07 §6). The engine shares the
-                // renderer's device (02 §1), so the same device/queue read it.
+                // GPU scopes run over the engine's K-E2 scope tap (the clip's
+                // post-grade / pre-fold texture, or the program pre-caption) via
+                // `photonic_render::scopes` (07 §6 / 03 §3.6). The engine shares
+                // the renderer's device (02 §1), so the same device/queue read it.
                 let frame = self
                     .engine
                     .as_ref()
                     .and_then(|b| b.session().latest_frame());
-                let frame_tex = frame.as_ref().map(|f| f.texture.as_ref());
                 let device = renderer.device_arc();
                 let queue = renderer.queue_arc();
-                panels::video::color_page::draw_scopes_panel(
+                let want = panels::video::color_page::draw_scopes_panel(
                     ctx,
                     &device,
                     &queue,
-                    frame_tex,
+                    frame.as_deref(),
                     doc,
                     &self.timeline_selection,
                     &mut self.scopes_panel_open,
                     &mut self.scope_kind,
                 );
+                // Stateless resend: the engine echoes the tap it was asked for on
+                // `EngineStatus`, so comparing against that sends one command per
+                // real change instead of one per frame.
+                if let Some(bridge) = self.engine.as_ref() {
+                    if bridge.session().status().scope_tap != want {
+                        bridge
+                            .session()
+                            .send(photonic_video::EngineCmd::SetScopeTap(want));
+                    }
+                }
             }
             // K-A6 Edit Duration floating form (position / in / out / duration +
             // ripple). Drawn next to the export dialog so both can share the

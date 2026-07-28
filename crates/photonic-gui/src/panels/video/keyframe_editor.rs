@@ -364,41 +364,50 @@ fn snap_frame(at: Tick, fps: FrameRate) -> Tick {
     Tick(((at.0 + tpf / 2) / tpf) * tpf)
 }
 
-// ── Ease presets ─────────────────────────────────────────────────────────────
+// ── Ease presets (26 §10 K-B12) ──────────────────────────────────────────────
 
-/// The ease presets offered in the toolbar / context menu (13 §5). Bezier
-/// presets are the standard CSS timing functions.
-const EASE_PRESETS: &[(&str, Interp)] = &[
-    ("Hold", Interp::Hold),
-    ("Linear", Interp::Linear),
-    (
-        "Ease In",
-        Interp::Bezier {
-            out_handle: [0.42, 0.0],
-            in_handle: [1.0, 1.0],
-        },
-    ),
-    (
-        "Ease Out",
-        Interp::Bezier {
-            out_handle: [0.0, 0.0],
-            in_handle: [0.58, 1.0],
-        },
-    ),
-    (
-        "Ease In-Out",
-        Interp::Bezier {
-            out_handle: [0.42, 0.0],
-            in_handle: [0.58, 1.0],
-        },
-    ),
-];
+/// Label shown for a Bezier curve that matches no named preset.
+const CUSTOM_EASE_LABEL: &str = "Custom";
 
-fn interp_short(i: &Interp) -> &'static str {
-    match i {
-        Interp::Hold => "Hold",
-        Interp::Linear => "Linear",
-        Interp::Bezier { .. } => "Bezier",
+/// The readout for a keyframe's outgoing easing: the preset name when the stored
+/// handles are one of [`anim::EasePreset::ALL`], else `Custom` (a hand-dragged
+/// curve). Never lies about which preset is applied — the name comes from
+/// [`anim::EasePreset::from_interp`], i.e. from the stored handles.
+fn ease_readout(interp: &Interp) -> String {
+    match anim::EasePreset::from_interp(interp) {
+        Some(p) => format!("{} · {}", p.label(), p.css()),
+        None => match interp {
+            Interp::Bezier {
+                out_handle: [x1, y1],
+                in_handle: [x2, y2],
+            } => format!("{CUSTOM_EASE_LABEL} · cubic-bezier({x1:.3}, {y1:.3}, {x2:.3}, {y2:.3})"),
+            // Hold/Linear always resolve to a preset, so this is unreachable in
+            // practice; keep it total rather than panicking in a paint path.
+            _ => CUSTOM_EASE_LABEL.to_string(),
+        },
+    }
+}
+
+/// One preset row in the toolbar / context menu: is it the preset currently
+/// applied to `interp`?
+///
+/// Compares *preset identity*, not the `Interp` variant. Every eased preset is
+/// an `Interp::Bezier`, so a variant-level comparison lights up all four at once
+/// — the defect this replaced, pinned by
+/// `ease_toolbar_marks_exactly_one_preset_active`.
+fn preset_is_active(interp: Option<&Interp>, preset: anim::EasePreset) -> bool {
+    interp
+        .and_then(anim::EasePreset::from_interp)
+        .map(|p| p == preset)
+        .unwrap_or(false)
+}
+
+/// Hover text for a preset button: the name plus the exact handles it writes, so
+/// the curve a preset applies is inspectable before it is committed.
+fn preset_hover(preset: anim::EasePreset) -> String {
+    match preset.handles() {
+        Some(_) => format!("{} — {}", preset.label(), preset.css()),
+        None => format!("{} — {} (no Bezier handles)", preset.label(), preset.css()),
     }
 }
 
@@ -978,18 +987,19 @@ fn draw_curve_area(
                 .and_then(|t| t.keyframes.iter().find(|k| k.at == at).map(|k| k.interp))
         });
         ui.add_enabled_ui(sel_at.is_some(), |ui| {
-            for (name, interp) in EASE_PRESETS {
-                let active = cur_interp
-                    .as_ref()
-                    .map(|c| interp_short(c) == interp_short(interp))
-                    .unwrap_or(false);
-                if ui.selectable_label(active, *name).clicked() {
+            for preset in anim::EasePreset::ALL {
+                let active = preset_is_active(cur_interp.as_ref(), *preset);
+                if ui
+                    .selectable_label(active, preset.label())
+                    .on_hover_text(preset_hover(*preset))
+                    .clicked()
+                {
                     if let Some(at) = sel_at {
                         actions.push(KfAction::SetInterp {
                             target: row.target.clone(),
                             path: row.path.clone(),
                             at,
-                            interp: *interp,
+                            interp: preset.interp(),
                         });
                     }
                 }
@@ -1009,6 +1019,17 @@ fn draw_curve_area(
                     });
                     st.sel_kf_at = None;
                 }
+            }
+            // Which easing the selected keyframe actually carries — the preset
+            // name, or `Custom · cubic-bezier(…)` for hand-dragged handles, so a
+            // curve the toolbar cannot highlight still reads out (K-B12).
+            if let Some(i) = cur_interp.as_ref() {
+                ui.label(
+                    egui::RichText::new(ease_readout(i))
+                        .monospace()
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
             }
         });
     });
@@ -1335,15 +1356,21 @@ fn draw_float_curve(
     let menu_idx = hover.and_then(|pos| hit_index(&points, pos, 8.0));
     if let Some(mi) = menu_idx {
         let at = kfs[mi].at;
+        let cur = kfs[mi].interp;
         resp.context_menu(|ui| {
             ui.label(egui::RichText::new("Easing").small().weak());
-            for (name, interp) in EASE_PRESETS {
-                if ui.button(*name).clicked() {
+            for preset in anim::EasePreset::ALL {
+                let active = preset_is_active(Some(&cur), *preset);
+                if ui
+                    .selectable_label(active, preset.label())
+                    .on_hover_text(preset_hover(*preset))
+                    .clicked()
+                {
                     actions.push(KfAction::SetInterp {
                         target: row.target.clone(),
                         path: row.path.clone(),
                         at,
-                        interp: *interp,
+                        interp: preset.interp(),
                     });
                     ui.close_menu();
                 }
@@ -1599,6 +1626,161 @@ mod tests {
         let target = AnimTarget::ClipTransform { clip: clip.id };
         let v = value_at(&clip, &target, &path, Tick(500)).unwrap();
         assert_eq!(as_f64(&v), Some(50.0));
+    }
+
+    // ── Named easing presets (26 §10 K-B12) ─────────────────────────────────
+
+    /// The toolbar/context-menu highlight must mark exactly ONE preset for a
+    /// keyframe that carries one — and none for a hand-dragged curve.
+    ///
+    /// Sensitivity: the same loop run with the *pre-fix* rule (compare the
+    /// `Interp` variant, which is what the old `interp_short` comparison did)
+    /// must still light up all four Bezier presets, so this test fails if the
+    /// active-preset rule ever regresses to variant matching.
+    #[test]
+    fn ease_toolbar_marks_exactly_one_preset_active() {
+        let variant_rule = |cur: &Interp, p: anim::EasePreset| {
+            std::mem::discriminant(cur) == std::mem::discriminant(&p.interp())
+        };
+        let bezier_count = anim::EasePreset::ALL
+            .iter()
+            .filter(|p| p.handles().is_some())
+            .count();
+        assert!(bezier_count >= 2, "need several Bezier presets to compare");
+
+        for applied in anim::EasePreset::ALL {
+            let cur = applied.interp();
+            let active: Vec<&str> = anim::EasePreset::ALL
+                .iter()
+                .filter(|p| preset_is_active(Some(&cur), **p))
+                .map(|p| p.label())
+                .collect();
+            assert_eq!(
+                active,
+                vec![applied.label()],
+                "{} highlighted {active:?}",
+                applied.label()
+            );
+
+            if applied.handles().is_some() {
+                let by_variant = anim::EasePreset::ALL
+                    .iter()
+                    .filter(|p| variant_rule(&cur, **p))
+                    .count();
+                assert_eq!(
+                    by_variant,
+                    bezier_count,
+                    "the pre-fix variant rule should still be ambiguous for {}",
+                    applied.label()
+                );
+            }
+        }
+
+        // A hand-dragged curve is no preset: nothing is highlighted.
+        let custom = Interp::Bezier {
+            out_handle: [0.31, 0.72],
+            in_handle: [0.91, 0.24],
+        };
+        assert!(anim::EasePreset::ALL
+            .iter()
+            .all(|p| !preset_is_active(Some(&custom), *p)));
+        // …and no selection highlights nothing either.
+        assert!(anim::EasePreset::ALL
+            .iter()
+            .all(|p| !preset_is_active(None, *p)));
+    }
+
+    #[test]
+    fn ease_readout_names_presets_and_falls_back_to_custom() {
+        for p in anim::EasePreset::ALL {
+            let text = ease_readout(&p.interp());
+            assert!(text.starts_with(p.label()), "{p:?} read out as {text}");
+            assert!(text.contains(&p.css()), "{p:?} read out as {text}");
+        }
+        let custom = Interp::Bezier {
+            out_handle: [0.31, 0.72],
+            in_handle: [0.91, 0.24],
+        };
+        let text = ease_readout(&custom);
+        assert!(text.starts_with(CUSTOM_EASE_LABEL), "{text}");
+        assert!(text.contains("0.310"), "{text}");
+        // Hover text names the curve it will write.
+        assert!(anim::EasePreset::EaseInOut
+            .css()
+            .starts_with("cubic-bezier("));
+        assert!(
+            preset_hover(anim::EasePreset::EaseInOut).contains(&anim::EasePreset::EaseInOut.css())
+        );
+    }
+
+    /// Applying a preset is ONE user verb ⇒ ONE undo unit, and undo restores the
+    /// previous easing exactly (DoD 4). Exercises the same `KfAction::SetInterp`
+    /// → `kf_action_cmds` path both editor surfaces commit through.
+    #[test]
+    fn applying_a_preset_is_one_undo_unit() {
+        use photonic_core::history::Command;
+        use photonic_core::timeline::{Sequence, Track, TrackKind};
+
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick(0), Tick(1000));
+        let path = PropPath::new("transform.x");
+        let tr = clip.transform.track_mut(&path);
+        tr.insert_keyframe(Keyframe::new(
+            Tick(0),
+            PropValue::Float(0.0),
+            Interp::Linear,
+        ));
+        tr.insert_keyframe(Keyframe::new(
+            Tick(500),
+            PropValue::Float(100.0),
+            Interp::Linear,
+        ));
+        let clip_id = clip.id;
+
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("S", FrameRate::FPS_30, 1920, 1080);
+        let mut vtrack = Track::new(TrackKind::Video, "V1");
+        vtrack.clips.push(clip);
+        seq.video_tracks.push(vtrack);
+        project.insert_sequence(seq);
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+
+        let target = AnimTarget::ClipTransform { clip: clip_id };
+        let preset = anim::EasePreset::EaseInOut;
+        let cmds = kf_action_cmds(
+            doc.timeline.as_ref().unwrap(),
+            KfAction::SetInterp {
+                target: target.clone(),
+                path: path.clone(),
+                at: Tick(0),
+                interp: preset.interp(),
+            },
+        );
+        assert_eq!(cmds.len(), 1, "one preset click must be one command");
+
+        let cmd = cmds.into_iter().next().unwrap();
+        let inverse = Command::Timeline(cmd.clone()).inverse(&doc).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+
+        let read = |doc: &Document| {
+            find_clip(doc.timeline.as_ref().unwrap(), clip_id)
+                .unwrap()
+                .transform
+                .track(&path)
+                .unwrap()
+                .keyframes[0]
+                .interp
+        };
+        // The stored form is plain Bezier handles, and reads back as the preset.
+        assert_eq!(read(&doc), preset.interp());
+        assert_eq!(
+            anim::EasePreset::from_interp(&read(&doc)),
+            Some(preset),
+            "applied preset must be identifiable from what was stored"
+        );
+
+        inverse.apply(&mut doc);
+        assert_eq!(read(&doc), Interp::Linear, "undo must restore the easing");
     }
 
     #[test]

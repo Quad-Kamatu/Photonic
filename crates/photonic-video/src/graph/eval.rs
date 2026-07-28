@@ -357,7 +357,20 @@ pub trait GpuFrameSource {
         proxy: bool,
     ) -> Option<GpuFrame>;
 
-    fn still_texture(&mut self, gpu: &GpuContext, asset: AssetId) -> Option<GpuFrame>;
+    /// `w`/`h` are the **logical** size the still is wanted at — the canvas, in
+    /// picture pixels, never a pool bucket size. The provider may return a
+    /// smaller frame (it must not upscale a small still); the evaluator
+    /// normalizes whatever comes back to the canvas. Mirrors the CPU
+    /// reference's [`FrameProvider::decode_still`](crate::graph::eval_cpu::FrameProvider::decode_still),
+    /// which has carried the canvas hint from the start; see 26 K-C8 / 32 §9 for
+    /// why the cache behind it must key on this size.
+    fn still_texture(
+        &mut self,
+        gpu: &GpuContext,
+        asset: AssetId,
+        w: u32,
+        h: u32,
+    ) -> Option<GpuFrame>;
 
     fn vector_texture(
         &mut self,
@@ -396,7 +409,7 @@ impl GpuFrameSource for NullFrameSource {
     fn video_texture(&mut self, _: &GpuContext, _: AssetId, _: Tick, _: bool) -> Option<GpuFrame> {
         None
     }
-    fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<GpuFrame> {
+    fn still_texture(&mut self, _: &GpuContext, _: AssetId, _: u32, _: u32) -> Option<GpuFrame> {
         None
     }
     fn vector_texture(
@@ -422,6 +435,12 @@ pub struct Evaluator {
     caption: photonic_render::caption::CaptionCompositor,
     /// The content hash of the last presented output, pinned in the cache.
     pinned_output: Option<crate::graph::ir::ContentHash>,
+    /// The content hash of the last published scope tap (K-E2), pinned for the
+    /// same reason the output is: the GUI/MCP holds that `Arc<Texture>` past the
+    /// end of the frame, and an unpinned intermediate is a legal LRU recycle
+    /// target — the next frame would then render another node into the texture
+    /// the scopes are still measuring.
+    pinned_tap: Option<crate::graph::ir::ContentHash>,
 }
 
 impl Evaluator {
@@ -443,6 +462,7 @@ impl Evaluator {
             cache,
             caption,
             pinned_output: None,
+            pinned_tap: None,
         }
     }
 
@@ -468,6 +488,29 @@ impl Evaluator {
         canvas: (u32, u32),
         source: &mut dyn GpuFrameSource,
     ) -> Option<Arc<wgpu::Texture>> {
+        self.evaluate_with_tap(graph, canvas, source, None).0
+    }
+
+    /// [`Evaluator::evaluate`] that also hands back one **intermediate** node's
+    /// texture — the K-E2 scope tap (03 §3.6 / 07 §5).
+    ///
+    /// This is the whole reason a per-clip scope tap is not a second render:
+    /// `tap` names a node of the same graph, and this evaluator already
+    /// materialises every node in the graph on its way to the output, so the tap
+    /// costs one `Arc` clone and one cache pin — **no extra evaluation**, no
+    /// second compile, and nothing added to the per-frame budget of 02 §8. A
+    /// `tap` outside the graph (stale id) yields `None` rather than panicking.
+    /// The tap is returned as a [`GpuFrame`] and not a bare texture because a
+    /// pooled texture is bucket-padded: a scope that measured the physical
+    /// extent would fold the padding into every histogram. The logical size
+    /// rides along so the readback crops correctly.
+    pub fn evaluate_with_tap(
+        &mut self,
+        graph: &FrameGraph,
+        canvas: (u32, u32),
+        source: &mut dyn GpuFrameSource,
+        tap: Option<crate::graph::ir::IrNodeId>,
+    ) -> (Option<Arc<wgpu::Texture>>, Option<GpuFrame>) {
         let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
         let mut results: Vec<Option<GpuFrame>> = (0..graph.nodes.len()).map(|_| None).collect();
 
@@ -487,10 +530,17 @@ impl Evaluator {
                     Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
                     None => self.transparent(cw, ch),
                 },
-                IrOp::DecodeStill { asset } => match source.still_texture(&self.gpu, *asset) {
-                    Some(frame) => self.normalize_source_cached(node.content_hash, frame, cw, ch),
-                    None => self.transparent(cw, ch),
-                },
+                // K-C8: the still is requested at the LOGICAL canvas size
+                // (`cw`/`ch` — already preview-scaled by `preview_canvas`), not
+                // at a pool bucket size. The provider caches on exactly that.
+                IrOp::DecodeStill { asset } => {
+                    match source.still_texture(&self.gpu, *asset, cw, ch) {
+                        Some(frame) => {
+                            self.normalize_source_cached(node.content_hash, frame, cw, ch)
+                        }
+                        None => self.transparent(cw, ch),
+                    }
+                }
                 IrOp::RasterVector {
                     vref,
                     doc_state,
@@ -505,7 +555,35 @@ impl Evaluator {
             results[i] = Some(out);
         }
 
-        let out_node = graph.output?;
+        // The scope tap (K-E2): a node already computed above. Pinned like the
+        // output so the consumer's `Arc` cannot alias a recycled pool texture.
+        let tap_hit = tap
+            .filter(|id| (id.0 as usize) < graph.nodes.len())
+            .and_then(|id| {
+                results[id.0 as usize]
+                    .clone()
+                    .map(|frame| (graph.nodes[id.0 as usize].content_hash, frame))
+            });
+        match &tap_hit {
+            Some((hash, _)) => {
+                if let Some(prev) = self.pinned_tap.replace(*hash) {
+                    if prev != *hash {
+                        self.cache.unpin(prev);
+                    }
+                }
+                self.cache.pin(*hash);
+            }
+            None => {
+                if let Some(prev) = self.pinned_tap.take() {
+                    self.cache.unpin(prev);
+                }
+            }
+        }
+        let tap_tex = tap_hit.map(|(_, frame)| frame);
+
+        let Some(out_node) = graph.output else {
+            return (None, tap_tex);
+        };
         let out_hash = graph.nodes[out_node.0 as usize].content_hash;
         // Pin the displayed output; unpin the previous one (03 §3.4 exception 1).
         if let Some(prev) = self.pinned_output.replace(out_hash) {
@@ -514,9 +592,10 @@ impl Evaluator {
             }
         }
         self.cache.pin(out_hash);
-        results[out_node.0 as usize]
+        let out_tex = results[out_node.0 as usize]
             .clone()
-            .map(|frame| frame.texture)
+            .map(|frame| frame.texture);
+        (out_tex, tap_tex)
     }
 
     /// Render a computed (non-source) op into a cached texture, or return the
@@ -3532,7 +3611,13 @@ mod tests {
         ) -> Option<GpuFrame> {
             Some(self.frame.clone())
         }
-        fn still_texture(&mut self, _: &GpuContext, _: AssetId) -> Option<GpuFrame> {
+        fn still_texture(
+            &mut self,
+            _: &GpuContext,
+            _: AssetId,
+            _: u32,
+            _: u32,
+        ) -> Option<GpuFrame> {
             Some(self.frame.clone())
         }
         fn vector_texture(
@@ -3943,6 +4028,7 @@ mod tests {
         crate::graph::compile::CompiledFrame {
             graph,
             diagnostics: vec![],
+            ..Default::default()
         }
     }
 
@@ -4458,6 +4544,7 @@ mod tests {
         crate::graph::compile::CompiledFrame {
             graph,
             diagnostics: vec![],
+            ..Default::default()
         }
     }
 
@@ -4515,6 +4602,7 @@ mod tests {
         crate::graph::compile::CompiledFrame {
             graph,
             diagnostics: vec![],
+            ..Default::default()
         }
     }
 

@@ -639,6 +639,27 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Cancel Grabbed Item Move",
         default: None, // Esc hardwired while grab active
     },
+    // K-B15 Paste Attributes: copy the LOOK of the clip on the timeline
+    // clipboard (`video.copy`, Ctrl+C) onto every selected clip, as ONE undo
+    // step — Premiere's Ctrl+C → Ctrl+Alt+V flow, Kdenlive's "Paste Effects"
+    // for the narrower form. No timing, source or trim is touched.
+    //
+    // No default binding on purpose: the video-mode key poll that fires
+    // `video.*` bindings is a fixed id list in `app/monitor.rs`, which this
+    // story does not own, so advertising Ctrl+Alt+V in the palette would show
+    // a shortcut that does not fire. Reachable from the command palette
+    // (Ctrl+K) and rebindable in preferences; wiring the accelerator and the
+    // clip context menu is a filed follow-up.
+    CommandDef {
+        id: "video.paste_attributes",
+        label: "Paste Attributes onto Selected Clips",
+        default: None,
+    },
+    CommandDef {
+        id: "video.paste_effects",
+        label: "Paste Effects onto Selected Clips",
+        default: None,
+    },
 ];
 
 /// Tool-activation commands surfaced in the palette. Labels come from

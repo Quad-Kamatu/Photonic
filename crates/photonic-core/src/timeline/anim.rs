@@ -86,6 +86,156 @@ pub enum Interp {
     },
 }
 
+// ── Named easing presets (26 §10 K-B12) ─────────────────────────────────────
+
+/// A named easing preset — a display name for one fixed [`Interp`].
+///
+/// **A preset is a name, not a stored form.** `EasePreset` is deliberately *not*
+/// serializable and never reaches a document: [`Self::interp`] lowers a preset to
+/// the plain `Hold`/`Linear`/`Bezier { out_handle, in_handle }` that already
+/// round-trips, and [`Self::from_interp`] recovers the name from stored handles.
+/// So picking "Ease In-Out" in the curve editor writes exactly what dragging the
+/// handles there by hand would write — no new variant, no serde migration, and
+/// an older build reads the document unchanged.
+///
+/// **26 §10 K-B12 asks for an explicit decision on the overshoot families.**
+/// Back, elastic and bounce leave `[0,1]` on the value axis, which the normalized
+/// handle form cannot express, so they are **omitted** rather than approximated
+/// with a cubic (the item's own watch-out). Admitting them would need a real
+/// `Interp` variant plus a migration; that is a separate, larger change. Every
+/// preset here therefore stays inside the unit box — pinned by
+/// `ease_presets_stay_inside_the_unit_box`.
+///
+/// The four eased curves are the CSS `transition-timing-function` keywords, the
+/// same vocabulary [`cubic_bezier_ease`] already implements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EasePreset {
+    /// Step — hold the value until the next keyframe.
+    Hold,
+    /// Constant rate.
+    Linear,
+    /// CSS `ease` — `cubic-bezier(0.25, 0.1, 0.25, 1)`.
+    Ease,
+    /// CSS `ease-in` — `cubic-bezier(0.42, 0, 1, 1)`.
+    EaseIn,
+    /// CSS `ease-out` — `cubic-bezier(0, 0, 0.58, 1)`.
+    EaseOut,
+    /// CSS `ease-in-out` — `cubic-bezier(0.42, 0, 0.58, 1)`.
+    EaseInOut,
+}
+
+/// Tolerance used by [`EasePreset::from_interp`] when matching stored handles
+/// against a preset. Handles round-trip exactly through serde, so this only
+/// absorbs a lossy re-writer; the presets are separated by ≥ 0.1 in handle
+/// space, so no two can match the same `Interp`
+/// (`ease_preset_handles_are_far_apart`).
+const PRESET_EPS: f64 = 1e-9;
+
+impl EasePreset {
+    /// Every preset, in picker order (gentlest vocabulary first).
+    pub const ALL: &'static [EasePreset] = &[
+        EasePreset::Hold,
+        EasePreset::Linear,
+        EasePreset::Ease,
+        EasePreset::EaseIn,
+        EasePreset::EaseOut,
+        EasePreset::EaseInOut,
+    ];
+
+    /// Stable machine identifier (snake_case). Safe to put in a tool argument or
+    /// a preference — unlike [`Self::label`], it is not display text.
+    pub const fn id(self) -> &'static str {
+        match self {
+            EasePreset::Hold => "hold",
+            EasePreset::Linear => "linear",
+            EasePreset::Ease => "ease",
+            EasePreset::EaseIn => "ease_in",
+            EasePreset::EaseOut => "ease_out",
+            EasePreset::EaseInOut => "ease_in_out",
+        }
+    }
+
+    /// Human-readable name for a picker row.
+    pub const fn label(self) -> &'static str {
+        match self {
+            EasePreset::Hold => "Hold",
+            EasePreset::Linear => "Linear",
+            EasePreset::Ease => "Ease",
+            EasePreset::EaseIn => "Ease In",
+            EasePreset::EaseOut => "Ease Out",
+            EasePreset::EaseInOut => "Ease In-Out",
+        }
+    }
+
+    /// The `(out_handle, in_handle)` pair, or `None` for the two non-Bezier
+    /// presets.
+    pub const fn handles(self) -> Option<([f64; 2], [f64; 2])> {
+        match self {
+            EasePreset::Hold | EasePreset::Linear => None,
+            EasePreset::Ease => Some(([0.25, 0.1], [0.25, 1.0])),
+            EasePreset::EaseIn => Some(([0.42, 0.0], [1.0, 1.0])),
+            EasePreset::EaseOut => Some(([0.0, 0.0], [0.58, 1.0])),
+            EasePreset::EaseInOut => Some(([0.42, 0.0], [0.58, 1.0])),
+        }
+    }
+
+    /// Lower the preset to the stored interpolation — what actually lands in the
+    /// document.
+    pub const fn interp(self) -> Interp {
+        match self.handles() {
+            None => match self {
+                EasePreset::Hold => Interp::Hold,
+                _ => Interp::Linear,
+            },
+            Some((out_handle, in_handle)) => Interp::Bezier {
+                out_handle,
+                in_handle,
+            },
+        }
+    }
+
+    /// The CSS spelling, for a tooltip or a readout.
+    pub fn css(self) -> String {
+        match self.handles() {
+            None => match self {
+                EasePreset::Hold => "step-end".to_string(),
+                _ => "linear".to_string(),
+            },
+            Some(([x1, y1], [x2, y2])) => format!("cubic-bezier({x1}, {y1}, {x2}, {y2})"),
+        }
+    }
+
+    /// Look a preset up by [`id`](Self::id).
+    pub fn from_id(id: &str) -> Option<EasePreset> {
+        EasePreset::ALL.iter().copied().find(|p| p.id() == id)
+    }
+
+    /// Recover the preset name behind a stored [`Interp`], or `None` when the
+    /// curve is a hand-authored Bezier that matches no preset ("Custom").
+    ///
+    /// Matching on the `Interp` *variant* alone is not enough: all four eased
+    /// presets are `Interp::Bezier`, so a variant-only comparison reports every
+    /// one of them as the current preset at once
+    /// (`preset_identity_separates_curves_variant_matching_conflates`).
+    pub fn from_interp(interp: &Interp) -> Option<EasePreset> {
+        match interp {
+            Interp::Hold => Some(EasePreset::Hold),
+            Interp::Linear => Some(EasePreset::Linear),
+            Interp::Bezier {
+                out_handle,
+                in_handle,
+            } => EasePreset::ALL.iter().copied().find(|p| match p.handles() {
+                Some((o, i)) => close2(o, *out_handle) && close2(i, *in_handle),
+                None => false,
+            }),
+        }
+    }
+}
+
+fn close2(a: [f64; 2], b: [f64; 2]) -> bool {
+    (a[0] - b[0]).abs() <= PRESET_EPS && (a[1] - b[1]).abs() <= PRESET_EPS
+}
+
 /// One keyframe: a clip-relative time, a value, and the interpolation that
 /// governs the segment leaving it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -416,6 +566,227 @@ mod tests {
             let v = cubic_bezier_ease(p1, p2, i as f64 / 20.0);
             assert!(v >= prev - 1e-9, "not monotone at {i}: {v} < {prev}");
             prev = v;
+        }
+    }
+
+    // ── Named easing presets (26 §10 K-B12) ─────────────────────────────────
+
+    /// The handle values themselves are the thing under test here — these are
+    /// the published CSS `transition-timing-function` curves, and a silent drift
+    /// in one would change every animation authored with it.
+    #[test]
+    fn ease_presets_pin_the_css_handle_values() {
+        assert_eq!(EasePreset::Hold.interp(), Interp::Hold);
+        assert_eq!(EasePreset::Linear.interp(), Interp::Linear);
+        assert_eq!(EasePreset::Ease.handles(), Some(([0.25, 0.1], [0.25, 1.0])));
+        assert_eq!(
+            EasePreset::EaseIn.handles(),
+            Some(([0.42, 0.0], [1.0, 1.0]))
+        );
+        assert_eq!(
+            EasePreset::EaseOut.handles(),
+            Some(([0.0, 0.0], [0.58, 1.0]))
+        );
+        assert_eq!(
+            EasePreset::EaseInOut.handles(),
+            Some(([0.42, 0.0], [0.58, 1.0]))
+        );
+        // The CSS spelling a picker shows must agree with the handles it applies.
+        assert_eq!(EasePreset::EaseIn.css(), "cubic-bezier(0.42, 0, 1, 1)");
+        assert_eq!(EasePreset::Hold.css(), "step-end");
+        assert_eq!(EasePreset::Linear.css(), "linear");
+    }
+
+    #[test]
+    fn ease_preset_ids_and_labels_are_unique() {
+        let n = EasePreset::ALL.len();
+        let mut ids: Vec<&str> = EasePreset::ALL.iter().map(|p| p.id()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "duplicate preset id");
+        let mut labels: Vec<&str> = EasePreset::ALL.iter().map(|p| p.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "duplicate preset label");
+        for p in EasePreset::ALL {
+            assert_eq!(EasePreset::from_id(p.id()), Some(*p));
+        }
+        assert_eq!(EasePreset::from_id("bounce_in"), None);
+    }
+
+    #[test]
+    fn from_interp_round_trips_every_preset_and_rejects_custom() {
+        for p in EasePreset::ALL {
+            assert_eq!(
+                EasePreset::from_interp(&p.interp()),
+                Some(*p),
+                "{} did not round-trip",
+                p.id()
+            );
+        }
+        // A hand-dragged curve that is no preset reads as "Custom" (None).
+        let custom = Interp::Bezier {
+            out_handle: [0.3, 0.7],
+            in_handle: [0.9, 0.2],
+        };
+        assert_eq!(EasePreset::from_interp(&custom), None);
+    }
+
+    /// Sensitivity guard for [`EasePreset::from_interp`]: prove the *pre-fix*
+    /// path — comparing only the `Interp` variant, which is what a picker doing
+    /// `matches!(a, Bezier{..}) == matches!(b, Bezier{..})` does — really cannot
+    /// tell two different eased presets apart, so this test can fail if
+    /// `from_interp` ever degrades into that.
+    #[test]
+    fn preset_identity_separates_curves_variant_matching_conflates() {
+        let eased: Vec<EasePreset> = EasePreset::ALL
+            .iter()
+            .copied()
+            .filter(|p| p.handles().is_some())
+            .collect();
+        assert!(eased.len() >= 2, "need two Bezier presets to compare");
+        let variant = |i: &Interp| std::mem::discriminant(i);
+        let mut pairs = 0usize;
+        for a in &eased {
+            for b in &eased {
+                if a == b {
+                    continue;
+                }
+                pairs += 1;
+                // The pre-fix comparison sees these as the same easing…
+                assert_eq!(
+                    variant(&a.interp()),
+                    variant(&b.interp()),
+                    "variant matching should conflate {} and {}",
+                    a.id(),
+                    b.id()
+                );
+                // …while preset identity keeps them distinct.
+                assert_ne!(
+                    EasePreset::from_interp(&a.interp()),
+                    EasePreset::from_interp(&b.interp()),
+                );
+            }
+        }
+        assert!(pairs > 0, "no preset pairs compared");
+    }
+
+    /// No two presets may sit within the match tolerance of each other, or
+    /// [`EasePreset::from_interp`]'s "first match wins" would be ambiguous.
+    #[test]
+    fn ease_preset_handles_are_far_apart() {
+        let with_handles: Vec<([f64; 2], [f64; 2])> =
+            EasePreset::ALL.iter().filter_map(|p| p.handles()).collect();
+        for (i, a) in with_handles.iter().enumerate() {
+            for b in with_handles.iter().skip(i + 1) {
+                let d = (a.0[0] - b.0[0])
+                    .abs()
+                    .max((a.0[1] - b.0[1]).abs())
+                    .max((a.1[0] - b.1[0]).abs())
+                    .max((a.1[1] - b.1[1]).abs());
+                assert!(d > 1e-3, "presets {a:?} and {b:?} are only {d} apart");
+            }
+        }
+    }
+
+    /// 26 §10 K-B12's watch-out: never approximate an overshooting family with a
+    /// cubic. Every offered preset must stay inside the unit box — and the check
+    /// must be able to fail, so it also asserts that a classic "back" curve
+    /// (which is what a silent approximation would try to smuggle in) *does*
+    /// leave it.
+    #[test]
+    fn ease_presets_stay_inside_the_unit_box() {
+        for p in EasePreset::ALL {
+            let Some((o, i)) = p.handles() else { continue };
+            for s in 0..=64 {
+                let v = cubic_bezier_ease(o, i, s as f64 / 64.0);
+                assert!(
+                    (-1e-9..=1.0 + 1e-9).contains(&v),
+                    "{} overshoots: ease({})={v}",
+                    p.id(),
+                    s as f64 / 64.0
+                );
+            }
+        }
+        // The excluded family really is excluded *because* it overshoots.
+        let back = ([0.68, -0.55], [0.265, 1.55]);
+        let overshoots = (0..=64)
+            .map(|s| cubic_bezier_ease(back.0, back.1, s as f64 / 64.0))
+            .any(|v| !(-1e-9..=1.0 + 1e-9).contains(&v));
+        assert!(
+            overshoots,
+            "the unit-box check cannot fail — it would pass a back/elastic curve"
+        );
+    }
+
+    /// Presets are names over the *existing* stored form: applying one writes
+    /// plain Bezier handles, the JSON carries no preset name, and reading it
+    /// back recovers the name. No new persisted variant, so no migration.
+    #[test]
+    fn presets_round_trip_through_serde_as_plain_handles() {
+        for p in EasePreset::ALL {
+            let kf = Keyframe::new(Tick(120), PropValue::Float(1.5), p.interp());
+            let json = serde_json::to_string(&kf).expect("serialize");
+            if p.handles().is_some() {
+                // An eased preset must store as a bare Bezier: handles only, no
+                // trace of the name it was picked by. (`Hold`/`Linear` are
+                // exempt — their ids *are* the pre-existing variant tags.)
+                assert!(json.contains("bezier"), "not stored as Bezier: {json}");
+                for name in [p.id(), p.label()] {
+                    assert!(
+                        !json.contains(name),
+                        "{} leaked its preset name into the document: {json}",
+                        p.id()
+                    );
+                }
+            } else {
+                assert!(
+                    json.contains(&format!(r#""kind":"{}""#, p.id())),
+                    "{} should store as the pre-existing variant tag: {json}",
+                    p.id()
+                );
+            }
+            let back: Keyframe = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, kf);
+            assert_eq!(EasePreset::from_interp(&back.interp), Some(*p));
+        }
+    }
+
+    /// The names mean what they say when evaluated: ease-in starts slow (below
+    /// linear early), ease-out starts fast (above linear early), ease-in-out is
+    /// symmetric, and Hold does not move at all.
+    #[test]
+    fn preset_names_match_their_evaluated_shape() {
+        let ease = |p: EasePreset, u: f64| {
+            let (o, i) = p.handles().expect("bezier preset");
+            cubic_bezier_ease(o, i, u)
+        };
+        assert!(ease(EasePreset::EaseIn, 0.25) < 0.25);
+        assert!(ease(EasePreset::EaseOut, 0.25) > 0.25);
+        assert!((ease(EasePreset::EaseInOut, 0.5) - 0.5).abs() < 1e-6);
+        assert!(ease(EasePreset::EaseInOut, 0.25) < 0.25);
+        assert!(ease(EasePreset::EaseInOut, 0.75) > 0.75);
+        assert!(ease(EasePreset::Ease, 0.25) > 0.25, "CSS ease leads early");
+
+        // Through `eval`, on a real lane: Hold steps, Linear is the diagonal.
+        let lane = |p: EasePreset| {
+            track(vec![
+                Keyframe::new(Tick(0), PropValue::Float(0.0), p.interp()),
+                Keyframe::new(Tick(100), PropValue::Float(100.0), Interp::Linear),
+            ])
+        };
+        let base = PropValue::Float(0.0);
+        assert_eq!(
+            eval(&lane(EasePreset::Hold), &base, Tick(50)),
+            PropValue::Float(0.0)
+        );
+        assert_eq!(
+            eval(&lane(EasePreset::Linear), &base, Tick(50)),
+            PropValue::Float(50.0)
+        );
+        match eval(&lane(EasePreset::EaseIn), &base, Tick(25)) {
+            PropValue::Float(v) => assert!(v < 25.0, "ease-in should lag at t=0.25, got {v}"),
+            other => panic!("unexpected {other:?}"),
         }
     }
 

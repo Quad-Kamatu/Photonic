@@ -209,6 +209,18 @@ pub fn scopes_from_pixels_cpu(pixels: &[f32], width: u32, height: u32) -> Scopes
 const COMPUTE_PRELUDE: &str = r#"
 @group(0) @binding(0) var t_src: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>>;
+// K-E2: the LOGICAL extent to measure. A working texture out of the node pool is
+// bucket-padded (dimensions rounded up to a 64px multiple, 03 §3.4), and that
+// padding is transparent black — measuring it puts a phantom spike in bin 0 of
+// every scope. `logical.xy` is the real image size; `.zw` is reserved padding to
+// keep the uniform 16-byte aligned.
+@group(0) @binding(2) var<uniform> logical: vec4<u32>;
+
+// True when this invocation is inside both the logical extent and the texture.
+fn in_scope(gid: vec3<u32>) -> bool {
+    let dims = textureDimensions(t_src);
+    return gid.x < min(logical.x, dims.x) && gid.y < min(logical.y, dims.y);
+}
 
 fn oetf709(e: f32) -> f32 {
     let x = clamp(e, 0.0, 1.0);
@@ -230,8 +242,7 @@ pub const HISTOGRAM_SHADER: &str = r#"
 __PRELUDE__
 @compute @workgroup_size(8, 8, 1)
 fn cs_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(t_src);
-    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    if (!in_scope(gid)) { return; }
     let px = textureLoad(t_src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let s = signal(px);
     atomicAdd(&bins[bin256(luma709(s))], 1u);
@@ -247,8 +258,7 @@ pub const WAVEFORM_SHADER: &str = r#"
 __PRELUDE__
 @compute @workgroup_size(8, 8, 1)
 fn cs_wave(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(t_src);
-    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    if (!in_scope(gid)) { return; }
     let px = textureLoad(t_src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let s = signal(px);
     atomicAdd(&bins[gid.x * 256u + bin256(luma709(s))], 1u);
@@ -269,8 +279,7 @@ fn cbcr(s: vec3<f32>) -> vec2<u32> {
 }
 @compute @workgroup_size(8, 8, 1)
 fn cs_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(t_src);
-    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    if (!in_scope(gid)) { return; }
     let px = textureLoad(t_src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let s = signal(px);
     let b = cbcr(s);
@@ -308,11 +317,17 @@ fn run_scope(
     shader_src: &str,
     entry: &str,
     out_len: usize,
+    logical: (u32, u32),
 ) -> Vec<u32> {
     let bins = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("scope_bins"),
         contents: bytemuck::cast_slice(&vec![0u32; out_len]),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    });
+    let logical_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("scope_logical"),
+        contents: bytemuck::cast_slice(&[logical.0, logical.1, 0u32, 0u32]),
+        usage: wgpu::BufferUsages::UNIFORM,
     });
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scope_bgl"),
@@ -332,6 +347,16 @@ fn run_scope(
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -369,9 +394,18 @@ fn run_scope(
                 binding: 1,
                 resource: bins.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: logical_buf.as_entire_binding(),
+            },
         ],
     });
-    let (w, h) = (tex.width(), tex.height());
+    // Dispatch over the logical extent only — the shader still bounds-checks, but
+    // there is no reason to launch invocations over pool padding.
+    let (w, h) = (
+        logical.0.min(tex.width()).max(1),
+        logical.1.min(tex.height()).max(1),
+    );
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("scope_rb"),
         size: (out_len * 4) as u64,
@@ -405,8 +439,22 @@ fn run_scope(
     out
 }
 
-/// GPU histogram at the readback point (07 §5).
+/// GPU histogram at the readback point (07 §5), measuring the whole texture.
+///
+/// Prefer [`histogram_gpu_logical`] for any texture that came out of the video
+/// node pool: those are bucket-padded and this form counts the padding.
 pub fn histogram_gpu(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) -> Histogram {
+    histogram_gpu_logical(device, queue, tex, tex.width(), tex.height())
+}
+
+/// [`histogram_gpu`] restricted to the image's logical `w × h` (K-E2).
+pub fn histogram_gpu_logical(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    w: u32,
+    h: u32,
+) -> Histogram {
     let raw = run_scope(
         device,
         queue,
@@ -414,6 +462,7 @@ pub fn histogram_gpu(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Tex
         HISTOGRAM_SHADER,
         "cs_hist",
         HIST_BINS * 4,
+        (w, h),
     );
     let mut h = Histogram::default();
     h.luma.copy_from_slice(&raw[0..256]);
@@ -423,29 +472,54 @@ pub fn histogram_gpu(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Tex
     h
 }
 
-/// GPU waveform at the readback point (07 §5).
+/// GPU waveform at the readback point (07 §5), measuring the whole texture.
 pub fn waveform_gpu(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture) -> Waveform {
-    let w = tex.width() as usize;
+    waveform_gpu_logical(device, queue, tex, tex.width(), tex.height())
+}
+
+/// [`waveform_gpu`] restricted to the image's logical `w × h` (K-E2). The
+/// returned [`Waveform::width`] is the logical width, so column *x* on the plot
+/// is column *x* of the image and not of the pool bucket.
+pub fn waveform_gpu_logical(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    w: u32,
+    h: u32,
+) -> Waveform {
+    let cols = w.min(tex.width()).max(1) as usize;
     let data = run_scope(
         device,
         queue,
         tex,
         WAVEFORM_SHADER,
         "cs_wave",
-        w * WAVEFORM_BINS,
+        cols * WAVEFORM_BINS,
+        (w, h),
     );
     Waveform {
-        width: w,
+        width: cols,
         bins: WAVEFORM_BINS,
         data,
     }
 }
 
-/// GPU vectorscope at the readback point (07 §5).
+/// GPU vectorscope at the readback point (07 §5), measuring the whole texture.
 pub fn vectorscope_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     tex: &wgpu::Texture,
+) -> Vectorscope {
+    vectorscope_gpu_logical(device, queue, tex, tex.width(), tex.height())
+}
+
+/// [`vectorscope_gpu`] restricted to the image's logical `w × h` (K-E2).
+pub fn vectorscope_gpu_logical(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    w: u32,
+    h: u32,
 ) -> Vectorscope {
     let data = run_scope(
         device,
@@ -454,6 +528,7 @@ pub fn vectorscope_gpu(
         VECTORSCOPE_SHADER,
         "cs_vector",
         VECTORSCOPE_SIZE * VECTORSCOPE_SIZE,
+        (w, h),
     );
     Vectorscope {
         size: VECTORSCOPE_SIZE,
@@ -467,10 +542,22 @@ pub fn scopes_from_texture_gpu(
     queue: &wgpu::Queue,
     tex: &wgpu::Texture,
 ) -> Scopes {
+    scopes_from_texture_gpu_logical(device, queue, tex, tex.width(), tex.height())
+}
+
+/// All three GPU scopes over the logical `w × h` of a (possibly bucket-padded)
+/// working texture — the K-E2 scope-tap read path.
+pub fn scopes_from_texture_gpu_logical(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    w: u32,
+    h: u32,
+) -> Scopes {
     Scopes {
-        histogram: histogram_gpu(device, queue, tex),
-        waveform: waveform_gpu(device, queue, tex),
-        vectorscope: vectorscope_gpu(device, queue, tex),
+        histogram: histogram_gpu_logical(device, queue, tex, w, h),
+        waveform: waveform_gpu_logical(device, queue, tex, w, h),
+        vectorscope: vectorscope_gpu_logical(device, queue, tex, w, h),
     }
 }
 
@@ -647,6 +734,74 @@ mod tests {
         assert_eq!(gpu.luma.iter().sum::<u32>(), w * h);
         assert!(l1(&gpu.luma, &cpu.luma) <= 4, "luma drift");
         assert!(l1(&gpu.red, &cpu.red) <= 4, "red drift");
+    }
+
+    /// K-E2: a working texture out of the node pool is bucket-padded, and the
+    /// padding is transparent black. The logical-extent form must measure only
+    /// the image; the whole-texture form (which the tap must never use) is
+    /// asserted here to visibly disagree, so this test cannot pass if the
+    /// bounds uniform is dropped and both forms collapse to the same thing.
+    #[test]
+    fn logical_extent_excludes_the_pool_padding() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter — skipping scope logical-extent test");
+            return;
+        };
+        // A 64×64 "bucket" whose top-left 8×8 is the real image (mid grey); the
+        // rest stays the zeroed transparent-black padding.
+        const BUCKET: u32 = 64;
+        const LOGICAL: u32 = 8;
+        let grey = color::bt709_eotf(0.5);
+        let mut px = vec![0.0f32; (BUCKET * BUCKET * 4) as usize];
+        for y in 0..LOGICAL {
+            for x in 0..LOGICAL {
+                let i = ((y * BUCKET + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[grey, grey, grey, 1.0]);
+            }
+        }
+        let tex = upload(&device, &queue, &px, BUCKET, BUCKET);
+
+        let cropped = histogram_gpu_logical(&device, &queue, &tex, LOGICAL, LOGICAL);
+        assert_eq!(
+            cropped.luma.iter().sum::<u32>(),
+            LOGICAL * LOGICAL,
+            "only the logical pixels are sampled"
+        );
+        assert_eq!(
+            cropped.luma[0], 0,
+            "no phantom black spike from the padding"
+        );
+        // The populated bin is derived, not asserted as a literal: f16 storage
+        // may land the mid-grey one bin either side of `bin256(0.5)`.
+        let populated: Vec<usize> = cropped
+            .luma
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c > 0)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(populated.len(), 1, "a uniform grey fills exactly one bin");
+        let mid = populated[0];
+        assert!(
+            mid.abs_diff(bin256(0.5)) <= 1,
+            "…and that bin is the mid-grey one, got {mid}"
+        );
+        assert_eq!(cropped.luma[mid], LOGICAL * LOGICAL, "all grey in one bin");
+
+        // Sensitivity: the whole-texture form really does count the padding.
+        let whole = histogram_gpu(&device, &queue, &tex);
+        assert_eq!(whole.luma.iter().sum::<u32>(), BUCKET * BUCKET);
+        assert_eq!(
+            whole.luma[0],
+            BUCKET * BUCKET - LOGICAL * LOGICAL,
+            "the un-cropped read is dominated by padding — this is the defect the \
+             logical form exists to avoid"
+        );
+
+        // The waveform's column axis must be the image's, not the bucket's.
+        let wf = waveform_gpu_logical(&device, &queue, &tex, LOGICAL, LOGICAL);
+        assert_eq!(wf.width, LOGICAL as usize);
+        assert_eq!(wf.count(0, mid), LOGICAL);
     }
 
     #[test]

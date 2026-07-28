@@ -227,6 +227,16 @@ impl PhotonicApp {
             "video.paste" => {
                 self.timeline_paste_clipboard(doc, history);
             }
+            // K-B15 Paste Attributes: the clip on the timeline clipboard
+            // (`video.copy`) is the LOOK source; every selected clip is a
+            // target. One undo step regardless of how many are selected.
+            "video.paste_attributes" => {
+                modified = self.timeline_paste_attributes(doc, history, ops::AttrSelector::ALL);
+            }
+            "video.paste_effects" => {
+                modified =
+                    self.timeline_paste_attributes(doc, history, ops::AttrSelector::EFFECTS_ONLY);
+            }
             "video.add_marker" => self.timeline_add_marker_at_playhead(doc, history),
             // ── 3/4-point editing (spec 16 §4) ────────────────────────────────
             // Insert/Overwrite lay down the armed source at the playhead;
@@ -1078,6 +1088,75 @@ impl PhotonicApp {
         }
         history.execute_discrete(Command::Batch(cmds), doc);
         self.timeline_selection = new_sel;
+        true
+    }
+
+    /// **Paste Attributes** (26 §10 K-B15): stamp the LOOK of the clip on the
+    /// timeline clipboard onto every timeline-selected clip — effect stack,
+    /// grade, transform and clip audio, filtered by `sel`. Nothing about
+    /// timing, source or trim moves.
+    ///
+    /// The source is `timeline_clipboard[0]`, i.e. whatever `video.copy`
+    /// (Ctrl+C) last captured — deliberately reusing the existing clipboard
+    /// rather than adding a second one, which is also exactly Premiere's
+    /// Ctrl+C → Ctrl+Alt+V and Kdenlive's copy-then-Paste-Effects flow. A
+    /// multi-clip copy pastes the FIRST captured clip's attributes (the rest
+    /// stay available for an ordinary `video.paste`).
+    ///
+    /// Committed as ONE `Command::Batch` however many clips are selected: one
+    /// user verb, one undo step. Safe as a plain batch because none of the
+    /// pasted fields is read by `Sequence::validate()`, which
+    /// `TimelineCmd::apply` debug-asserts after every batch member — see
+    /// `ops::paste_clip_attributes`. Returns `true` if the document changed.
+    pub(crate) fn timeline_paste_attributes(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        sel: ops::AttrSelector,
+    ) -> bool {
+        let Some(source) = self.timeline_clipboard.first() else {
+            self.set_import_status(
+                "Paste attributes: nothing copied yet — copy a clip first (Ctrl+C)".into(),
+            );
+            return false;
+        };
+        if self.timeline_selection.is_empty() {
+            self.set_import_status("Paste attributes: select the clip(s) to paste onto".into());
+            return false;
+        }
+        let attrs = ops::ClipAttributes::of(&source.clip);
+        let targets = self.timeline_selection.clone();
+        let Some(project) = doc.timeline.as_ref() else {
+            return false;
+        };
+        // Skip selection entries that no longer resolve (a clip deleted since
+        // it was selected) rather than refusing the whole paste — the core op
+        // is strict about unknown ids because MCP callers name them
+        // explicitly, but a stale GUI selection is not a user error.
+        let live: Vec<ClipId> = targets
+            .into_iter()
+            .filter(|id| ops::clip_attributes(project, *id).is_ok())
+            .collect();
+        if live.is_empty() {
+            return false;
+        }
+        let cmds = match ops::paste_clip_attributes(project, &attrs, &live, sel) {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_import_status(format!("Paste attributes failed: {e}"));
+                return false;
+            }
+        };
+        if cmds.is_empty() {
+            self.set_import_status("Paste attributes: the selected clip(s) already match".into());
+            return false;
+        }
+        let n = cmds.len();
+        history.execute_discrete(
+            Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+            doc,
+        );
+        self.set_import_status(format!("Pasted attributes onto {n} clip(s)"));
         true
     }
 
@@ -2290,5 +2369,172 @@ mod clip_edit_tests {
         assert!(sequence.track(video_target_id).unwrap().clips.is_empty());
         assert!(sequence.track(audio_target_id).unwrap().clips.is_empty());
         assert_eq!(history.undo_depth(), 0);
+    }
+
+    // ── K-B15 Paste Attributes ──────────────────────────────────────────────
+
+    /// Three selected clips on two tracks, plus a dressed-up source on the
+    /// timeline clipboard.
+    fn paste_attr_app() -> (PhotonicApp, Document, SequenceId, TrackId, Vec<ClipId>) {
+        let mut project = TimelineProject::new();
+        let mut sequence = Sequence::new("s", FrameRate::FPS_30, 1920, 1080);
+        let mut v = Track::new(TrackKind::Video, "V1");
+        let mut v2 = Track::new(TrackKind::Video, "V2");
+        let t0 = clip_at(0, 100);
+        let t1 = clip_at(400, 250);
+        let t2 = clip_at(50, 90);
+        let ids = vec![t0.id, t1.id, t2.id];
+        v.clips.push(t0);
+        v.clips.push(t1);
+        v2.clips.push(t2);
+        let v_id = v.id;
+        sequence.video_tracks.push(v);
+        sequence.video_tracks.push(v2);
+        let seq_id = project.insert_sequence(sequence);
+
+        let mut doc = Document::new("attrs", 1920.0, 1080.0);
+        doc.timeline = Some(project);
+
+        // The look source: two effects, a grade, and a moved transform.
+        let mut src = clip_at(1_000, 700);
+        src.effects = vec![
+            photonic_core::timeline::ClipEffect::new(photonic_core::timeline::EffectKind::Blur),
+            photonic_core::timeline::ClipEffect::new(photonic_core::timeline::EffectKind::Sharpen),
+        ];
+        src.grade = Some(photonic_core::timeline::Grade::new());
+        src.transform.base.opacity = 0.25;
+
+        let mut app = PhotonicApp::default();
+        app.timeline_clipboard = vec![ClipboardClip {
+            clip: src,
+            kind: TrackKind::Video,
+        }];
+        app.timeline_selection = ids.clone();
+        (app, doc, seq_id, v_id, ids)
+    }
+
+    fn clip_of(doc: &Document, seq: SequenceId, id: ClipId) -> Clip {
+        doc.timeline.as_ref().unwrap().sequences[&seq]
+            .tracks()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.id == id)
+            .expect("clip present")
+            .clone()
+    }
+
+    /// Pasting onto a three-clip selection is ONE undo step, the look lands on
+    /// all three, and no clip moves.
+    #[test]
+    fn paste_attributes_is_one_undo_step_and_moves_nothing() {
+        let (mut app, mut doc, seq, _v, ids) = paste_attr_app();
+        let mut history = CommandHistory::new(32);
+        let before: Vec<Clip> = ids.iter().map(|&i| clip_of(&doc, seq, i)).collect();
+
+        assert!(app.timeline_paste_attributes(&mut doc, &mut history, ops::AttrSelector::ALL));
+        assert_eq!(
+            history.undo_depth(),
+            1,
+            "a 3-clip paste must be exactly one undo step"
+        );
+
+        for (i, &id) in ids.iter().enumerate() {
+            let after = clip_of(&doc, seq, id);
+            assert_eq!(after.effects.len(), 2, "clip {i} did not get the stack");
+            assert!(after.grade.is_some(), "clip {i} did not get the grade");
+            assert_eq!(after.transform.base.opacity, 0.25);
+            assert_eq!(after.start, before[i].start, "clip {i} moved");
+            assert_eq!(after.duration, before[i].duration, "clip {i} retimed");
+            assert_eq!(after.source_in, before[i].source_in);
+        }
+
+        assert!(history.undo(&mut doc));
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(
+                clip_of(&doc, seq, id),
+                before[i],
+                "one undo must restore clip {i}"
+            );
+        }
+        assert_eq!(history.undo_depth(), 0);
+    }
+
+    /// The narrower "Paste Effects" verb carries the stack and nothing else.
+    #[test]
+    fn paste_effects_carries_only_the_stack() {
+        let (mut app, mut doc, seq, _v, ids) = paste_attr_app();
+        let mut history = CommandHistory::new(32);
+        let before = clip_of(&doc, seq, ids[0]);
+
+        assert!(app.timeline_paste_attributes(
+            &mut doc,
+            &mut history,
+            ops::AttrSelector::EFFECTS_ONLY
+        ));
+        let after = clip_of(&doc, seq, ids[0]);
+        assert_eq!(after.effects.len(), 2);
+        assert!(after.grade.is_none(), "grade must not have been pasted");
+        assert_eq!(
+            after.transform.base.opacity, before.transform.base.opacity,
+            "transform must not have been pasted"
+        );
+    }
+
+    /// Both no-source and no-selection are quiet no-ops that push no undo step,
+    /// and a second identical paste adds no empty step either.
+    #[test]
+    fn paste_attributes_no_ops_push_no_undo_step() {
+        let (mut app, mut doc, _seq, _v, _ids) = paste_attr_app();
+        let mut history = CommandHistory::new(32);
+
+        let empty_clipboard = std::mem::take(&mut app.timeline_clipboard);
+        assert!(!app.timeline_paste_attributes(&mut doc, &mut history, ops::AttrSelector::ALL));
+        assert_eq!(history.undo_depth(), 0, "no clipboard → no undo step");
+        app.timeline_clipboard = empty_clipboard;
+
+        let sel = std::mem::take(&mut app.timeline_selection);
+        assert!(!app.timeline_paste_attributes(&mut doc, &mut history, ops::AttrSelector::ALL));
+        assert_eq!(history.undo_depth(), 0, "no selection → no undo step");
+        app.timeline_selection = sel;
+
+        assert!(app.timeline_paste_attributes(&mut doc, &mut history, ops::AttrSelector::ALL));
+        assert_eq!(history.undo_depth(), 1);
+        assert!(
+            !app.timeline_paste_attributes(&mut doc, &mut history, ops::AttrSelector::ALL),
+            "re-pasting the same attributes must be a no-op"
+        );
+        assert_eq!(history.undo_depth(), 1, "no empty second undo step");
+    }
+
+    /// A stale selection entry (clip deleted since it was selected) must not
+    /// take the whole paste down with it.
+    #[test]
+    fn paste_attributes_tolerates_a_stale_selection_entry() {
+        let (mut app, mut doc, seq, _v, ids) = paste_attr_app();
+        let mut history = CommandHistory::new(32);
+        app.timeline_selection.push(ClipId::new()); // never existed
+
+        assert!(app.timeline_paste_attributes(&mut doc, &mut history, ops::AttrSelector::ALL));
+        assert_eq!(history.undo_depth(), 1);
+        for &id in &ids {
+            assert_eq!(clip_of(&doc, seq, id).effects.len(), 2);
+        }
+    }
+
+    /// Both commands are registered, and neither claims a keyboard shortcut it
+    /// cannot deliver — the video-mode key poll (`app/monitor.rs`) does not
+    /// list them, so a default binding would be advertised and never fire.
+    #[test]
+    fn paste_attribute_commands_are_registered_without_a_dead_binding() {
+        for id in ["video.paste_attributes", "video.paste_effects"] {
+            let def = commands::REGISTRY
+                .iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from the command registry"));
+            assert!(
+                def.default.is_none(),
+                "{id} advertises a binding the video-mode key poll does not dispatch"
+            );
+            assert!(commands::all_commands().iter().any(|c| c.id == id));
+        }
     }
 }

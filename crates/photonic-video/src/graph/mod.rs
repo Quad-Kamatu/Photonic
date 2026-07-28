@@ -28,5 +28,6 @@ pub use source_range::{
 };
 
 pub use compile::{
-    compile, CompileCode, CompileDiagnostic, CompiledFrame, DiagSeverity, Quality, ViewNodeOverride,
+    compile, CompileCode, CompileDiagnostic, CompiledFrame, DiagSeverity, Quality, ScopeTapPoint,
+    ViewNodeOverride,
 };

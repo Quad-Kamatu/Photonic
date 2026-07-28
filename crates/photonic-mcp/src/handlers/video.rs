@@ -45,6 +45,7 @@ use photonic_video::export::convert as export_convert;
 use photonic_video::export::presets as export_presets;
 use photonic_video::export::render_loop;
 use photonic_video::graph::eval::read_texture_rgba16f;
+use photonic_video::graph::ScopeTapPoint;
 use photonic_video::media::ffmpeg_locate;
 use photonic_video::media::probe as video_probe;
 use photonic_video::media::proxy as video_proxy;
@@ -2344,6 +2345,118 @@ pub async fn effect_stack(state: &AppState, args: EffectStackArgs) -> ToolResult
     let label = cmd.description();
     history.execute_discrete(Command::Timeline(cmd), &mut doc);
     ToolResult::text(label)
+}
+
+// ─── Paste Attributes (26 §10 K-B15) ─────────────────────────────────────────
+
+/// **Paste Attributes**: stamp one clip's look — effect stack, grade,
+/// transform, clip audio — onto N already-existing clips as ONE undo step.
+/// Deliberately distinct from the clip clipboard: no clip is created, moved,
+/// retimed or re-sourced. See `ops::paste_clip_attributes` for the exact
+/// carried/excluded field list and why each call was made.
+pub async fn paste_attributes(state: &AppState, args: PasteAttributesArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: paste_attributes {} -> {} target(s)",
+        args.source_clip_id,
+        args.target_clip_ids.len()
+    );
+    if args.target_clip_ids.is_empty() {
+        return ToolResult::error("target_clip_ids must not be empty");
+    }
+    let sel = match args.attributes.as_deref() {
+        None => ops::AttrSelector::ALL,
+        Some([]) => {
+            return ToolResult::error(
+                "attributes must not be an empty array — omit it to paste all four \
+                 (effects, grade, transform, audio)",
+            )
+        }
+        Some(list) => {
+            let mut s = ops::AttrSelector {
+                effects: false,
+                grade: false,
+                transform: false,
+                audio: false,
+            };
+            for a in list {
+                match a {
+                    ClipAttributeArg::Effects => s.effects = true,
+                    ClipAttributeArg::Grade => s.grade = true,
+                    ClipAttributeArg::Transform => s.transform = true,
+                    ClipAttributeArg::Audio => s.audio = true,
+                }
+            }
+            s
+        }
+    };
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let attrs = match ops::clip_attributes(project, args.source_clip_id) {
+        Ok(a) => a,
+        Err(e) => return map_edit_error(e),
+    };
+    let cmds = match ops::paste_clip_attributes(project, &attrs, &args.target_clip_ids, sel) {
+        Ok(c) => c,
+        Err(e) => return map_edit_error(e),
+    };
+
+    // Which targets actually changed — the op drops no-op targets, so report
+    // them explicitly rather than letting an agent infer success from silence.
+    let updated: Vec<String> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            photonic_core::timeline::TimelineCmd::SetClipProp { new, .. } => {
+                Some(new.id.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    let skipped: Vec<String> = args
+        .target_clip_ids
+        .iter()
+        .map(|c| c.to_string())
+        .filter(|c| !updated.contains(c))
+        .collect();
+
+    let mut families: Vec<&str> = Vec::new();
+    if sel.effects {
+        families.push("effects");
+    }
+    if sel.grade {
+        families.push("grade");
+    }
+    if sel.transform {
+        families.push("transform");
+    }
+    if sel.audio {
+        families.push("audio");
+    }
+
+    let n = cmds.len();
+    if n > 0 {
+        // ONE user verb = ONE undo unit, even across a multi-selection. Safe as
+        // a plain Batch because none of the pasted fields is read by
+        // `Sequence::validate()`, which `TimelineCmd::apply` debug-asserts
+        // after every batch member (see the op's module comment).
+        history.execute_discrete(
+            Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+            &mut doc,
+        );
+    }
+    ToolResult::text(format!(
+        "Pasted attributes onto {n} clip(s) ({} unchanged)",
+        skipped.len()
+    ))
+    .with_data(json!({
+        "source_clip_id": args.source_clip_id.to_string(),
+        "attributes": families,
+        "updated": updated,
+        "skipped": skipped,
+    }))
 }
 
 pub async fn list_effect_kinds(_state: &AppState, _args: ListEffectKindsArgs) -> ToolResult {
@@ -5935,14 +6048,52 @@ pub async fn get_scopes(state: &AppState, args: GetScopesArgs) -> ToolResult {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (pixels, w, h) = match render_seq_pixels(state, seq_id, t, args.format_index).await {
-        Ok(v) => v,
-        Err(e) => return e,
+    // K-E2: the scopes tap is a per-clip readback point, not the program frame.
+    // `render_scope_tap_pixels` asks the engine for the clip's post-`Grade`
+    // texture and reports which point it actually got, so an agent grading a
+    // clip under a caption track or a second video track measures the signal it
+    // is adjusting (03 §3.6 as amended by 27 A-7).
+    let want = match args.tap {
+        ScopeTap::Clip => ScopeTapPoint::Clip(args.clip_id),
+        ScopeTap::Program => ScopeTapPoint::Program,
     };
+    let (pixels, w, h, got) =
+        match render_scope_tap_pixels(state, seq_id, t, args.format_index, want).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
     let flat: Vec<f32> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
     let scopes = photonic_render::scopes::scopes_from_pixels_cpu(&flat, w, h);
-    ToolResult::text(format!("scopes for {w}x{h} frame at tick {}", t.0))
-        .with_data(scopes_json(&scopes, t))
+    let tap_label = match got {
+        ScopeTapPoint::Clip(_) => "clip",
+        ScopeTapPoint::Program => "program",
+    };
+    let fell_back = want != got;
+    let mut data = scopes_json(&scopes, t);
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("tap".into(), json!(tap_label));
+        obj.insert("width".into(), json!(w));
+        obj.insert("height".into(), json!(h));
+        if fell_back {
+            obj.insert(
+                "tap_fallback_reason".into(),
+                json!(
+                    "the requested clip is not rendered at this tick (off its span, \
+                       a disabled track, or zero opacity) — scoped the program instead"
+                ),
+            );
+        }
+    }
+    let note = if fell_back {
+        " (fell back from the clip tap — the clip is not in this frame)"
+    } else {
+        ""
+    };
+    ToolResult::text(format!(
+        "scopes for {w}x{h} {tap_label} tap at tick {}{note}",
+        t.0
+    ))
+    .with_data(data)
 }
 
 /// Compact, agent-consumable scope payload (07 §5): full histograms plus a
@@ -5997,16 +6148,24 @@ fn scopes_json(s: &photonic_render::scopes::Scopes, t: Tick) -> serde_json::Valu
     })
 }
 
-/// Render one frame headlessly and read back its logical RGBA f32 pixels —
-/// the read path `get_scopes` shares with `render_frame_at` (10 §4), factored
-/// so both stay in lock-step. Readonly (design rule 5): the per-call format
-/// override lands on the shadow timeline only.
-async fn render_seq_pixels(
+/// K-E2: render one frame headlessly and read back the **scope tap** —
+/// `want` resolved against that frame's graph, which is `ScopeTapPoint::Program`
+/// whenever the requested clip is not in the frame (13 §10.2). Returns the
+/// pixels, their logical size (the pooled texture is bucket-padded, so the
+/// frame's own logical dims are used, never the texture's) and the point that
+/// actually produced them.
+///
+/// This costs no second render: the tap names a node the same evaluation
+/// already produced (see `Evaluator::evaluate_with_tap`). What it does cost is
+/// the same seek-and-wait transaction `render_frame_at` pays, so it stays behind
+/// the transport lock like every other engine read.
+async fn render_scope_tap_pixels(
     state: &AppState,
     seq_id: SequenceId,
     t: Tick,
     format_index: Option<usize>,
-) -> Result<(Vec<[f32; 4]>, u32, u32), ToolResult> {
+    want: ScopeTapPoint,
+) -> Result<(Vec<[f32; 4]>, u32, u32, ScopeTapPoint), ToolResult> {
     let bridge = engine_bridge(state)?;
     let (fr, formats, active_format) = sequence_render_info(state, seq_id).await?;
     if let Some(fi) = format_index {
@@ -6020,7 +6179,6 @@ async fn render_seq_pixels(
     let fi = format_index
         .unwrap_or(active_format)
         .min(formats.len().saturating_sub(1));
-    let (w, h) = (formats[fi].width.max(1), formats[fi].height.max(1));
     if t.0 < 0 {
         return Err(err_code("TickOutOfRange", "tick must be >= 0"));
     }
@@ -6045,6 +6203,7 @@ async fn render_seq_pixels(
     bridge
         .session()
         .send(EngineCmd::SetProxyMode(ProxyMode::ForceOriginal));
+    bridge.session().send(EngineCmd::SetScopeTap(want));
     let prev = bridge.session().latest_frame();
     bridge.session().send(EngineCmd::SetActiveSequence(seq_id));
     bridge.session().send(EngineCmd::Seek(snapped));
@@ -6054,16 +6213,28 @@ async fn render_seq_pixels(
         })
         .await;
     bridge.session().send(EngineCmd::SetProxyMode(restore));
-    match frame {
-        Some(frame) => Ok((
-            read_texture_rgba16f(bridge.engine().gpu(), &frame.texture, w, h),
-            w,
-            h,
-        )),
-        None => Err(ToolResult::error(
+    // Leave the engine on the default tap: a readonly tool must not leave the
+    // session pinned to one clip's texture for the next caller (design rule 5).
+    bridge
+        .session()
+        .send(EngineCmd::SetScopeTap(ScopeTapPoint::Program));
+    let Some(frame) = frame else {
+        return Err(ToolResult::error(
             "engine did not produce the requested frame within 30s",
-        )),
-    }
+        ));
+    };
+    let Some(tap) = frame.scope_tap.as_ref() else {
+        return Err(err_code(
+            "NoScopeSignal",
+            "the sequence renders nothing at this tick — there is no signal to scope",
+        ));
+    };
+    Ok((
+        read_texture_rgba16f(bridge.engine().gpu(), &tap.texture, tap.width, tap.height),
+        tap.width,
+        tap.height,
+        frame.scope_tap_point,
+    ))
 }
 
 // ─── Node graph (10 §3.11) ───────────────────────────────────────────────────
@@ -6840,6 +7011,58 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Mutex;
 
+    // ── K-E2 `get_scopes` tap argument ──────────────────────────────────────
+
+    /// Omitting `tap` must select the **clip** readback point — the whole point
+    /// of K-E2 is that the default stops being "the program frame". A default
+    /// that silently flipped back to `program` would be invisible in every other
+    /// test, so it is pinned here.
+    #[test]
+    fn get_scopes_defaults_to_the_per_clip_tap() {
+        let args: GetScopesArgs =
+            serde_json::from_value(json!({ "clip_id": ClipId::new().to_string() }))
+                .expect("minimal args parse");
+        assert_eq!(args.tap, ScopeTap::Clip);
+    }
+
+    /// Every value the published schema advertises for `tap` must actually
+    /// deserialize, and nothing else may. The accepted set is READ FROM THE
+    /// SCHEMA rather than written out again here, so the two cannot drift.
+    #[test]
+    fn get_scopes_tap_enum_matches_the_published_schema() {
+        let schema = crate::schema_gen::tool_list();
+        let tool = schema
+            .as_array()
+            .expect("tool list")
+            .iter()
+            .find(|t| t["name"] == "get_scopes")
+            .expect("get_scopes is published");
+        let values = tool["inputSchema"]["properties"]["tap"]["enum"]
+            .as_array()
+            .expect("tap advertises an enum")
+            .clone();
+        assert!(!values.is_empty());
+        for v in &values {
+            let args: GetScopesArgs = serde_json::from_value(json!({
+                "clip_id": ClipId::new().to_string(),
+                "tap": v,
+            }))
+            .unwrap_or_else(|e| panic!("schema advertises tap={v} but it fails to parse: {e}"));
+            let round = match args.tap {
+                ScopeTap::Clip => "clip",
+                ScopeTap::Program => "program",
+            };
+            assert_eq!(Value::from(round), *v, "tap value round-trips");
+        }
+        // Sensitivity: an un-advertised value must be rejected, or the loop above
+        // would prove nothing about the enum being closed.
+        assert!(serde_json::from_value::<GetScopesArgs>(json!({
+            "clip_id": ClipId::new().to_string(),
+            "tap": "monitor",
+        }))
+        .is_err());
+    }
+
     fn test_state() -> AppState {
         let (tx, _rx) = std::sync::mpsc::channel();
         AppState {
@@ -7161,6 +7384,227 @@ mod tests {
             r.is_error,
             Some(true),
             "unknown param path must refuse: {r:?}"
+        );
+    }
+
+    // ── paste_attributes (26 §10 K-B15) ─────────────────────────────────────
+
+    /// A source clip dressed with two effects and a grade, plus three targets
+    /// spread over two tracks (one of them in the same track as the source) at
+    /// deliberately different start/duration/source_in.
+    async fn paste_attr_state() -> (AppState, Value, Vec<Value>) {
+        let state = test_state();
+        let (seq_id, v1) = create_seq_and_track(&state, "video").await;
+        let v2 = create_track(&state, &seq_id, "video").await;
+
+        let src = insert_solid_clip(&state, &v1, 0, 300).await;
+        let t1 = insert_solid_clip(&state, &v1, 400, 200).await;
+        let t2 = insert_solid_clip(&state, &v2, 0, 100).await;
+        let t3 = insert_solid_clip(&state, &v2, 700, 500).await;
+
+        for kind in ["blur", "sharpen"] {
+            let r = call(
+                &state,
+                "effect_stack",
+                json!({ "scope": "clip", "op": "add", "clip_id": src, "kind": kind }),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "add {kind}: {r:?}");
+        }
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({
+                "scope": "clip", "op": "set_grade", "clip_id": src,
+                "grade": { "ops": [], "bypass": true }
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_grade: {r:?}");
+        (state, src, vec![t1, t2, t3])
+    }
+
+    async fn clip_json(state: &AppState, clip: &Value) -> Value {
+        let r = call(state, "get_clip", json!({ "clip_id": clip })).await;
+        assert_ne!(r.is_error, Some(true), "get_clip: {r:?}");
+        data(&r)["clip"].clone()
+    }
+
+    /// THE CRUX: pasting onto three clips is ONE undo step, and one `undo`
+    /// restores all three — not the first, not the last.
+    #[tokio::test]
+    async fn paste_attributes_is_one_undo_step_across_a_multi_selection() {
+        let (state, src, targets) = paste_attr_state().await;
+        for t in &targets {
+            let c = clip_json(&state, t).await;
+            assert_eq!(c["effects"].as_array().map(|a| a.len()).unwrap_or(0), 0);
+        }
+
+        let r = call(
+            &state,
+            "paste_attributes",
+            json!({ "source_clip_id": src, "target_clip_ids": targets }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "paste_attributes: {r:?}");
+        assert_eq!(data(&r)["updated"].as_array().unwrap().len(), 3);
+        assert!(data(&r)["skipped"].as_array().unwrap().is_empty());
+
+        for t in &targets {
+            let c = clip_json(&state, t).await;
+            assert_eq!(
+                c["effects"].as_array().unwrap().len(),
+                2,
+                "target {t} did not receive the stack"
+            );
+            assert_eq!(c["grade"]["bypass"], json!(true), "target {t} grade");
+        }
+
+        // ONE undo must take all three back.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        for t in &targets {
+            let c = clip_json(&state, t).await;
+            assert_eq!(
+                c["effects"].as_array().map(|a| a.len()).unwrap_or(0),
+                0,
+                "a single undo must clear target {t} too"
+            );
+            assert!(c["grade"].is_null(), "target {t} grade must be gone");
+        }
+        // The source is untouched throughout.
+        let s = clip_json(&state, &src).await;
+        assert_eq!(s["effects"].as_array().unwrap().len(), 2);
+    }
+
+    /// A paste that silently moved or retimed a clip would be a bug. Nothing
+    /// about position, length, trim, speed or source may change.
+    #[tokio::test]
+    async fn paste_attributes_never_moves_or_retimes_a_clip() {
+        let (state, src, targets) = paste_attr_state().await;
+        let mut before = Vec::new();
+        for t in &targets {
+            before.push(clip_json(&state, t).await);
+        }
+        let source = clip_json(&state, &src).await;
+        // Fixture sanity: the source's timing really does differ, so the
+        // "unchanged" assertions below can fail.
+        for b in &before {
+            assert_ne!(
+                (&b["start"], &b["duration"]),
+                (&source["start"], &source["duration"])
+            );
+        }
+
+        let r = call(
+            &state,
+            "paste_attributes",
+            json!({ "source_clip_id": src, "target_clip_ids": targets }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "paste_attributes: {r:?}");
+
+        for (i, t) in targets.iter().enumerate() {
+            let after = clip_json(&state, t).await;
+            for field in ["id", "start", "duration", "source", "source_in", "speed"] {
+                assert_eq!(
+                    after[field], before[i][field],
+                    "paste changed {field} on target {t}"
+                );
+            }
+        }
+    }
+
+    /// `attributes` narrows the paste; an unlisted family leaves the target's
+    /// own value untouched rather than resetting it.
+    #[tokio::test]
+    async fn paste_attributes_narrows_by_family() {
+        let (state, src, targets) = paste_attr_state().await;
+        let t = &targets[0];
+
+        let r = call(
+            &state,
+            "paste_attributes",
+            json!({
+                "source_clip_id": src, "target_clip_ids": [t],
+                "attributes": ["effects"]
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "paste effects-only: {r:?}");
+        assert_eq!(data(&r)["attributes"], json!(["effects"]));
+        let c = clip_json(&state, t).await;
+        assert_eq!(c["effects"].as_array().unwrap().len(), 2);
+        assert!(
+            c["grade"].is_null(),
+            "grade was not requested and must not have been pasted"
+        );
+
+        // Re-pasting the same family is now a no-op — no empty undo step.
+        let r = call(
+            &state,
+            "paste_attributes",
+            json!({
+                "source_clip_id": src, "target_clip_ids": [t],
+                "attributes": ["effects"]
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true));
+        assert!(data(&r)["updated"].as_array().unwrap().is_empty());
+        assert_eq!(data(&r)["skipped"].as_array().unwrap().len(), 1);
+
+        // Now the grade, which must not disturb the already-pasted stack.
+        let r = call(
+            &state,
+            "paste_attributes",
+            json!({
+                "source_clip_id": src, "target_clip_ids": [t],
+                "attributes": ["grade"]
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "paste grade-only: {r:?}");
+        let c = clip_json(&state, t).await;
+        assert_eq!(c["grade"]["bypass"], json!(true));
+        assert_eq!(c["effects"].as_array().unwrap().len(), 2);
+    }
+
+    /// Every refusal path, including the one that matters most: an unknown
+    /// target aborts the WHOLE paste instead of landing on the others.
+    #[tokio::test]
+    async fn paste_attributes_refuses_bad_requests() {
+        let (state, src, targets) = paste_attr_state().await;
+        let ghost = uuid::Uuid::new_v4().to_string();
+
+        for (args, why) in [
+            (
+                json!({ "source_clip_id": src, "target_clip_ids": [] }),
+                "empty target list",
+            ),
+            (
+                json!({ "source_clip_id": src, "target_clip_ids": [&targets[0]], "attributes": [] }),
+                "empty attribute list",
+            ),
+            (
+                json!({ "source_clip_id": ghost, "target_clip_ids": [&targets[0]] }),
+                "unknown source",
+            ),
+            (
+                json!({ "source_clip_id": src, "target_clip_ids": [&targets[0], ghost] }),
+                "unknown target",
+            ),
+        ] {
+            let r = call(&state, "paste_attributes", args).await;
+            assert_eq!(r.is_error, Some(true), "{why} must refuse: {r:?}");
+        }
+
+        // …and the refused "unknown target" call left NO partial paste behind.
+        let c = clip_json(&state, &targets[0]).await;
+        assert_eq!(
+            c["effects"].as_array().map(|a| a.len()).unwrap_or(0),
+            0,
+            "a refused paste must not have landed on the resolvable target"
         );
     }
 

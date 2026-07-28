@@ -764,6 +764,33 @@ pub struct EffectStackArgs {
 #[derive(Debug, Deserialize, Default)]
 pub struct ListEffectKindsArgs {}
 
+/// One attribute family a `paste_attributes` call may transfer (26 §10 K-B15).
+/// Deliberately the same four names as
+/// `photonic_core::timeline::ops::AttrSelector`'s flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipAttributeArg {
+    Effects,
+    Grade,
+    Transform,
+    Audio,
+}
+
+/// **Paste Attributes** (26 §10 K-B15): copy one clip's effect stack / grade /
+/// transform / audio onto other, already-existing clips. Timing and source are
+/// never touched — this is not the clip clipboard.
+#[derive(Debug, Deserialize)]
+pub struct PasteAttributesArgs {
+    /// The clip whose look is copied.
+    pub source_clip_id: ClipId,
+    /// The clips it is stamped onto. Must be non-empty.
+    pub target_clip_ids: Vec<ClipId>,
+    /// Families to transfer; omit for all four. An empty array is refused (it
+    /// could only ever be a no-op, and silence there reads as success).
+    #[serde(default)]
+    pub attributes: Option<Vec<ClipAttributeArg>>,
+}
+
 // ─── Keyframes (10 §3.7) ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -1381,6 +1408,21 @@ pub struct GetScopesArgs {
     pub at_seconds: Option<f64>,
     #[serde(default)]
     pub format_index: Option<usize>,
+    /// K-E2 readback point (03 §3.6 / 07 §5). Defaults to
+    /// [`ScopeTap::Clip`] — the clip's own texture after its `Grade`, before the
+    /// track fold and `CaptionOverlay`. `program` scopes the folded sequence
+    /// instead (still pre-`CaptionOverlay`).
+    #[serde(default)]
+    pub tap: ScopeTap,
+}
+
+/// Which texture `get_scopes` measures (K-E2).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeTap {
+    #[default]
+    Clip,
+    Program,
 }
 
 // ─── Node graph (10 §3.11) ───────────────────────────────────────────────────

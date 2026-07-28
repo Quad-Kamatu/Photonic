@@ -53,13 +53,14 @@ use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
     compile_asset_peek, compile_with_luts, fit_long_edge, CompileDiagnostic, DiagSeverity,
-    LutProvider, Quality, DRAFT_MAX_LONG_EDGE,
+    LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
 use crate::graph::ir::IrOp;
 use crate::media::ffmpeg_locate::{locate, FfmpegTools};
 use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
 use crate::media::probe::{content_hash, probe_details, ProbeDetails};
+use crate::media::stills::{resample_linear_premult, still_target_size, StillCache};
 use crate::playback::prefetch::{
     cut_ahead_targets, lru_eviction_victims, CUT_AHEAD_LEAD_FRAMES, MAX_LIVE_SOURCES,
 };
@@ -199,6 +200,11 @@ pub enum EngineCmd {
     SetPreviewTarget(PreviewTarget),
     /// Draft (default) vs Full interactive quality (24 §4).
     SetPreviewQuality(PreviewQuality),
+    /// K-E2: choose which texture the scopes measure (03 §3.6 / 07 §5) — the
+    /// program pre-`CaptionOverlay`, or one clip's post-`Grade` node. Pure view
+    /// state, like [`EngineCmd::SetPreviewTarget`]: it changes nothing the
+    /// document can observe, so it is not a `Command` and has no undo unit.
+    SetScopeTap(ScopeTapPoint),
     /// Source-space seek while `PreviewTarget::Asset` (ignored for Sequence).
     SeekSource {
         asset: AssetId,
@@ -231,6 +237,16 @@ pub struct EngineFrame {
     pub sequence: SequenceId,
     /// When set, this frame is an asset source peek (24 §3), not program-out.
     pub preview_asset: Option<AssetId>,
+    /// K-E2 scope tap for this frame: an **intermediate** texture of the same
+    /// evaluation (03 §3.6 readback point), not a second render. `None` only for
+    /// an asset peek or an empty program. Carries its logical size because the
+    /// pooled texture is bucket-padded — scopes must measure the logical extent.
+    pub scope_tap: Option<GpuFrame>,
+    /// Which tap `scope_tap` actually is — the requested one, or
+    /// [`ScopeTapPoint::Program`] after the 13 §10.2 fallback (the playhead is
+    /// not over the requested clip). The UI labels from this, never from the
+    /// request, so "Scoping: <clip>" cannot lie.
+    pub scope_tap_point: ScopeTapPoint,
 }
 
 /// Engine → GUI state (02 §1: playhead, dropped frames, cache stats, xruns).
@@ -278,6 +294,10 @@ pub struct EngineStatus {
     /// Total graph latency in samples (31 §3): max track-path latency + master
     /// chain. Published for A/V clock offset; 0 when no feeder is running.
     pub graph_latency_samples: u32,
+    /// K-E2: the scope tap the engine is currently **asked** for. Echoed so a
+    /// stateless UI can send [`EngineCmd::SetScopeTap`] only on a real change
+    /// (compare `EngineFrame::scope_tap_point` to see what it actually got).
+    pub scope_tap: ScopeTapPoint,
 }
 
 /// Wait-free master meter snapshot (G-4 / 09 §8). Linear amplitude, not dB —
@@ -308,6 +328,7 @@ impl Default for EngineStatus {
             export: None,
             master_level: None,
             graph_latency_samples: 0,
+            scope_tap: ScopeTapPoint::Program,
         }
     }
 }
@@ -567,6 +588,10 @@ struct EngineThread {
     /// `ScrubSeek` and the settling `Seek`). Selects the cheap keyframe-preview
     /// decode path and lets the compositor hold the last frame between previews.
     scrubbing: bool,
+    /// K-E2: which texture the scopes measure. View state, never a document
+    /// mutation; defaults to the program tap so scopes stop reading the
+    /// post-`CaptionOverlay` presented frame even before a clip is chosen.
+    scope_tap: ScopeTapPoint,
 
     audio: AudioEngine,
     feeder: Option<AudioFeeder>,
@@ -625,6 +650,7 @@ impl EngineThread {
             buffering: false,
             last_error: None,
             scrubbing: false,
+            scope_tap: ScopeTapPoint::Program,
             audio: AudioEngine::new(),
             feeder: None,
             xruns: None,
@@ -761,6 +787,13 @@ impl EngineThread {
             }
             EngineCmd::SetPreviewQuality(q) => {
                 self.preview_quality = q;
+                self.controller.request_present();
+            }
+            EngineCmd::SetScopeTap(point) => {
+                // Re-present so the next published frame carries the new tap.
+                // The re-present is a cache-hit replay of the same graph (the tap
+                // changes no content hash), not a re-render.
+                self.scope_tap = point;
                 self.controller.request_present();
             }
             EngineCmd::SeekSource { asset, time } => {
@@ -1146,15 +1179,29 @@ impl EngineThread {
                             .set_document(&doc, self.last_revision.unwrap_or(0));
                     }
                 }
-                if let Some(texture) =
-                    self.evaluator
-                        .evaluate(&compiled.graph, canvas, &mut self.media)
-                {
+                // K-E2: resolve the requested scope tap against THIS frame's
+                // graph. `resolve_tap` applies the 13 §10.2 fallback (a clip the
+                // playhead is not over → the program tap), and reports which
+                // point survived so the frame can be labelled honestly. An asset
+                // peek carries no taps at all — it is not a sequence render.
+                let (tap_point, tap_node) = match compiled.resolve_tap(self.scope_tap) {
+                    Some((point, node)) => (point, Some(node)),
+                    None => (ScopeTapPoint::Program, None),
+                };
+                let (frame_tex, tap_tex) = self.evaluator.evaluate_with_tap(
+                    &compiled.graph,
+                    canvas,
+                    &mut self.media,
+                    tap_node,
+                );
+                if let Some(texture) = frame_tex {
                     self.frame_out.store(Some(Arc::new(EngineFrame {
                         texture,
                         time: frame_time,
                         sequence: seq_id,
                         preview_asset,
+                        scope_tap: tap_tex,
+                        scope_tap_point: tap_point,
                     })));
                     self.frames_published = self.frames_published.saturating_add(1);
                     self.buffering = false;
@@ -1319,6 +1366,15 @@ impl EngineThread {
             h = h
                 .wrapping_mul(0x9E37_79B9)
                 .wrapping_add(graph_latency_samples as u64);
+            // K-E2: fold the requested tap so a tap change republishes status
+            // even on a paused, otherwise-idle playhead — the GUI compares this
+            // echo against its own choice to decide whether to resend.
+            h = h
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(match self.scope_tap {
+                    ScopeTapPoint::Program => 0,
+                    ScopeTapPoint::Clip(id) => 1 ^ (id.0.as_u128() as u64),
+                });
             h
         };
         if sig == self.last_status_sig && self.last_error.is_none() {
@@ -1345,6 +1401,7 @@ impl EngineThread {
             export: export.as_ref().map(|e| (**e).clone()),
             master_level,
             graph_latency_samples,
+            scope_tap: self.scope_tap,
         }));
     }
 }
@@ -1387,7 +1444,8 @@ struct VideoSourceEntry {
 
 /// Resolves `DecodeVideo` ops to working textures over per-asset ffmpeg
 /// sidecar decode rings (02 §3). Stills (`DecodeStill` via
-/// `RasterImage::from_encoded`, uploaded once and cached by asset) are wired
+/// `RasterImage::from_encoded`, downscaled to the requested logical size and
+/// cached by `(asset, size)` — 26 K-C8, see [`crate::media::stills`]) are wired
 /// here too. Vector frames (`RasterVector` via `HeadlessRenderer`, cached by
 /// `VectorStateKey`) remain the documented follow-up seam — until then that op
 /// evaluates transparent.
@@ -1406,9 +1464,11 @@ struct MediaSources {
     /// Uploaded working textures keyed by decoded pts — scrub back/forward
     /// over the same frames skips the GPU upload.
     uploads: HashMap<(AssetId, Tick, bool), GpuFrame>,
-    /// Decoded still images uploaded to the working format, cached by asset
-    /// (a still never changes until relink/`InvalidateRange`).
-    stills: HashMap<AssetId, GpuFrame>,
+    /// Decoded still images uploaded to the working format, cached by
+    /// `(asset, logical size)` (26 K-C8). A still's pixels never change until
+    /// relink/`InvalidateRange`, but the size it is wanted at does — Draft vs
+    /// Full preview, and a different sequence format.
+    stills: StillCache<GpuFrame>,
     converter: Option<YuvConverter>,
     /// Whether the engine is playing — set each present before evaluate. Selects
     /// the ring-wait budget: short while playing (drop over stall), longer while
@@ -1439,8 +1499,8 @@ struct MediaSources {
 /// from the decode ring).
 const UPLOAD_CACHE_CAP: usize = 32;
 
-/// Still-image texture cache cap; wholesale clear on overflow (each entry is
-/// cheap to redecode from disk).
+/// Still-image texture cache cap, counted in `(asset, size)` entries (26 K-C8);
+/// wholesale clear on overflow (each entry is cheap to redecode from disk).
 const STILL_CACHE_CAP: usize = 16;
 
 /// Rasterized-vector texture cache cap; wholesale clear on overflow.
@@ -1467,7 +1527,7 @@ impl MediaSources {
             vectors: HashMap::new(),
             headless: None,
             uploads: HashMap::new(),
-            stills: HashMap::new(),
+            stills: StillCache::new(STILL_CACHE_CAP),
             converter: None,
             playing: false,
             scrubbing: false,
@@ -1604,7 +1664,7 @@ impl MediaSources {
         self.pending.retain(|(asset, _), _| !assets.contains(asset));
         self.uploads
             .retain(|(asset, _, _), _| !assets.contains(asset));
-        self.stills.retain(|asset, _| !assets.contains(asset));
+        self.stills.remove_assets(assets);
     }
 
     /// Promote any background source builds that have finished into `sources`.
@@ -1861,11 +1921,22 @@ impl GpuFrameSource for MediaSources {
         Some(texture)
     }
 
-    fn still_texture(&mut self, gpu: &GpuContext, asset: AssetId) -> Option<GpuFrame> {
-        // DecodeStill: decode the encoded image asset once, upload it into the
-        // working format, and cache it by asset (02 §3). An `InvalidateRange`
-        // touching the asset drops the entry and forces a redecode on relink.
-        if let Some(frame) = self.stills.get(&asset) {
+    fn still_texture(
+        &mut self,
+        gpu: &GpuContext,
+        asset: AssetId,
+        req_w: u32,
+        req_h: u32,
+    ) -> Option<GpuFrame> {
+        // DecodeStill: decode the encoded image asset, resample it to the size
+        // the evaluator asked for, upload it into the working format, and cache
+        // it on `(asset, that size)` (02 §3, 26 K-C8). `req_w`/`req_h` are the
+        // LOGICAL canvas size — already preview-scaled, never a pool bucket —
+        // so a Draft canvas uploads a Draft-sized still instead of the full
+        // 6000 px original. An `InvalidateRange` touching the asset drops every
+        // size of it and forces a redecode on relink.
+        let requested = (req_w.max(1), req_h.max(1));
+        if let Some(frame) = self.stills.get(asset, requested) {
             return Some(frame.clone());
         }
         let project = self.project.as_ref()?;
@@ -1876,14 +1947,12 @@ impl GpuFrameSource for MediaSources {
         };
         let bytes = std::fs::read(path).ok()?;
         let img = photonic_core::RasterImage::from_encoded(&bytes).ok()?;
-        let frame = upload_still(gpu, &img);
-        // Bound the cache like `uploads` — a project with many stills would
-        // otherwise grow it without limit. Wholesale clear on overflow (entries
-        // are cheap to redecode from disk).
-        if self.stills.len() >= STILL_CACHE_CAP {
-            self.stills.clear();
-        }
-        self.stills.insert(asset, frame.clone());
+        let native = (img.width.max(1), img.height.max(1));
+        let (tw, th) = still_target_size(native, requested);
+        let frame = upload_still_scaled(gpu, &img, tw, th);
+        // Bound the cache like `uploads` — a project with many stills (now times
+        // the sizes each is wanted at) would otherwise grow it without limit.
+        self.stills.insert(asset, native, requested, frame.clone());
         Some(frame)
     }
 
@@ -1935,6 +2004,11 @@ impl GpuFrameSource for MediaSources {
 /// [`GpuFrame`] carries the native logical width and height separately. The
 /// evaluator normalizes that logical region to the canvas with explicit texel
 /// loads, so padding never participates in sampling.
+///
+/// The padded texture keeps `COPY_SRC`, like the unpadded upload it copies from,
+/// so what was *actually* uploaded stays readable — otherwise a source upload
+/// small enough to need padding (a Draft-scale still, K-C8) becomes the one case
+/// no diagnostic or test can inspect.
 fn pad_to_pool_bucket(gpu: &GpuContext, src: wgpu::Texture) -> wgpu::Texture {
     let (w, h) = (src.width(), src.height());
     let bucket = crate::graph::ir::TextureDesc {
@@ -1956,7 +2030,9 @@ fn pad_to_pool_bucket(gpu: &GpuContext, src: wgpu::Texture) -> wgpu::Texture {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let mut enc = gpu
@@ -1977,22 +2053,36 @@ fn pad_to_pool_bucket(gpu: &GpuContext, src: wgpu::Texture) -> wgpu::Texture {
     padded
 }
 
-/// Upload an sRGB8 straight-alpha [`RasterImage`] into the compositor's working
-/// texture: `Rgba16Float`, linear-light, **premultiplied** (D-09) — the same
-/// space `YuvConverter` produces for video, so stills composite identically.
+/// Upload an sRGB8 straight-alpha [`RasterImage`] at its native size. Vector
+/// rasters arrive already rendered at the requested size, so they take this.
 fn upload_still(gpu: &GpuContext, img: &photonic_core::RasterImage) -> GpuFrame {
-    let (w, h) = (img.width.max(1), img.height.max(1));
-    // sRGB8 straight → linear premultiplied f16, packed little-endian.
+    upload_still_scaled(gpu, img, img.width, img.height)
+}
+
+/// Upload an sRGB8 straight-alpha [`RasterImage`] into the compositor's working
+/// texture at `tw`×`th`: `Rgba16Float`, linear-light, **premultiplied** (D-09) —
+/// the same space `YuvConverter` produces for video, so stills composite
+/// identically.
+///
+/// `tw`/`th` downscale only (clamped to the source by
+/// [`resample_linear_premult`]); at 1:1 the packed bytes are identical to the
+/// plain per-pixel convert this replaced.
+fn upload_still_scaled(
+    gpu: &GpuContext,
+    img: &photonic_core::RasterImage,
+    tw: u32,
+    th: u32,
+) -> GpuFrame {
+    let w = tw.clamp(1, img.width.max(1));
+    let h = th.clamp(1, img.height.max(1));
+    // sRGB8 straight → linear premultiplied f16, packed little-endian, area-
+    // resampled to (w, h) on the way (26 K-C8).
     let mut texels: Vec<u8> = Vec::with_capacity((w as usize) * (h as usize) * 8);
-    for px in img.pixels.chunks_exact(4) {
-        let a = px[3] as f32 / 255.0;
-        let r = srgb_to_linear(px[0] as f32 / 255.0) * a;
-        let g = srgb_to_linear(px[1] as f32 / 255.0) * a;
-        let b = srgb_to_linear(px[2] as f32 / 255.0) * a;
-        for c in [r, g, b, a] {
+    resample_linear_premult(img, w, h, |px| {
+        for c in px {
             texels.extend_from_slice(&f32_to_f16_bits(c).to_le_bytes());
         }
-    }
+    });
     let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("still_upload"),
         size: wgpu::Extent3d {
@@ -2025,15 +2115,6 @@ fn upload_still(gpu: &GpuContext, img: &photonic_core::RasterImage) -> GpuFrame 
         },
     );
     GpuFrame::new(Arc::new(pad_to_pool_bucket(gpu, texture)), w, h)
-}
-
-/// sRGB EOTF (gamma-decode) — matches `raster/adjust.rs` / `headless.rs`.
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 /// IEEE-754 binary32 → binary16 bit pattern (round-toward-zero). Matches the
@@ -2290,8 +2371,12 @@ mod tests {
         assert_eq!(f32_to_f16_bits(-1.0), 0xbc00);
     }
 
+    /// The EOTF the still-upload path decodes with. It is `graph::ops`' shared
+    /// one (K-C8 removed the byte-identical private copy that used to live
+    /// here), so CPU kernels, GPU uniforms and still uploads cannot drift.
     #[test]
     fn srgb_to_linear_endpoints() {
+        use crate::graph::ops::srgb_to_linear;
         assert!((srgb_to_linear(0.0) - 0.0).abs() < 1e-6);
         assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-4);
         // Monotone and inside the unit interval mid-scale.
@@ -2306,6 +2391,7 @@ mod tests {
     fn still_upload_premultiplies_transparent_black_to_zero() {
         // No GPU dependency: verify the CPU premultiply/pack path directly.
         // A fully transparent pixel packs to all-zero f16 (premultiplied).
+        use crate::graph::ops::srgb_to_linear;
         let (r, g, b, a) = (255u8, 255u8, 255u8, 0u8);
         let af = a as f32 / 255.0;
         let rl = srgb_to_linear(r as f32 / 255.0) * af;
@@ -2315,5 +2401,131 @@ mod tests {
         assert_eq!(f32_to_f16_bits(gl), 0);
         assert_eq!(f32_to_f16_bits(bl), 0);
         assert_eq!(f32_to_f16_bits(af), 0);
+    }
+
+    /// A 64×64 four-quadrant PNG on disk, plus a project whose media pool holds
+    /// it as an `Image` asset. Quadrants survive any correct area downscale by
+    /// an even factor with their colours exactly intact, so the *content* of a
+    /// resampled still is checkable, not just its dimensions.
+    fn quadrant_still_project(dir: &std::path::Path) -> (Arc<TimelineProject>, AssetId) {
+        let size = 64u32;
+        let mut img = photonic_core::RasterImage::new(size, size);
+        for y in 0..size {
+            for x in 0..size {
+                let rgba = match (x < size / 2, y < size / 2) {
+                    (true, true) => [255, 0, 0, 255],
+                    (false, true) => [0, 255, 0, 255],
+                    (true, false) => [0, 0, 255, 255],
+                    (false, false) => [255, 255, 255, 255],
+                };
+                img.set_pixel(x, y, rgba);
+            }
+        }
+        let path = dir.join("quadrants.png");
+        std::fs::write(&path, img.to_png()).expect("write still fixture");
+
+        let mut project = TimelineProject::new();
+        let asset = photonic_core::timeline::MediaAsset::new(
+            photonic_core::timeline::AssetKind::Image,
+            AssetSource::File {
+                path,
+                rel_path: None,
+            },
+        );
+        let id = asset.id;
+        project.media.assets.insert(id, asset);
+        (Arc::new(project), id)
+    }
+
+    /// Assert a still frame's four quadrants are the fixture's colours, read
+    /// back over its **logical** `w`×`h` region (the physical texture is pool-
+    /// bucket padded and is generally bigger).
+    fn assert_quadrants(gpu: &GpuContext, frame: &GpuFrame) {
+        let (w, h) = (frame.width, frame.height);
+        let px = crate::graph::eval::read_texture_rgba16f(gpu, &frame.texture, w, h);
+        let at = |x: u32, y: u32| px[(y * w + x) as usize];
+        let near = |got: [f32; 4], want: [f32; 4]| {
+            got.iter()
+                .zip(want.iter())
+                .all(|(g, w)| (g - w).abs() < 1e-3)
+        };
+        for (x, y, want, name) in [
+            (w / 4, h / 4, [1.0, 0.0, 0.0, 1.0], "top-left red"),
+            (3 * w / 4, h / 4, [0.0, 1.0, 0.0, 1.0], "top-right green"),
+            (w / 4, 3 * h / 4, [0.0, 0.0, 1.0, 1.0], "bottom-left blue"),
+            (3 * w / 4, 3 * h / 4, [1.0; 4], "bottom-right white"),
+        ] {
+            let got = at(x, y);
+            assert!(
+                near(got, want),
+                "{w}x{h} still: {name} quadrant at ({x},{y}) is {got:?}, want {want:?}"
+            );
+        }
+    }
+
+    /// K-C8. The same still requested at two logical sizes must come back at
+    /// **both** sizes, each correct — the asset-only key served whichever was
+    /// decoded first for the other, so this fails against it twice over: the
+    /// 16×16 request came back 64×64, and reading its logical 16×16 region got
+    /// the red quadrant everywhere instead of all four.
+    #[test]
+    fn still_cache_keys_on_the_requested_logical_size() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("skip still cache size test: no GPU adapter");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("photonic-kc8-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (project, id) = quadrant_still_project(&dir);
+
+        let mut media = MediaSources::new(None);
+        media.set_project(project);
+
+        // Full canvas, then a Draft-sized one.
+        let full = media.still_texture(&gpu, id, 64, 64).expect("full still");
+        let draft = media.still_texture(&gpu, id, 16, 16).expect("draft still");
+
+        assert_eq!((full.width, full.height), (64, 64));
+        assert_eq!(
+            (draft.width, draft.height),
+            (16, 16),
+            "the 16x16 request must not be served the 64x64 upload"
+        );
+        assert_quadrants(&gpu, &full);
+        assert_quadrants(&gpu, &draft);
+        assert_eq!(media.stills.len(), 2, "one entry per requested size");
+
+        // The key is the LOGICAL size, not the physical one: a 16×16 still is
+        // padded up into a 64×64 pool bucket, and keying on that bucket would
+        // have collapsed these two requests back into one entry.
+        assert_eq!(
+            crate::graph::ir::TextureDesc {
+                width: 16,
+                height: 16
+            }
+            .bucket(),
+            (64, 64)
+        );
+        assert!(
+            draft.texture.width() >= draft.width,
+            "physical texture is bucket-padded past the logical picture"
+        );
+
+        // Not over-specified either: a canvas at or above native canonicalizes
+        // onto the full-resolution entry instead of allocating a duplicate.
+        let oversized = media
+            .still_texture(&gpu, id, 4096, 4096)
+            .expect("oversized request");
+        assert!(
+            Arc::ptr_eq(&oversized.texture, &full.texture),
+            "a canvas larger than the image must reuse the native-size entry"
+        );
+        assert_eq!(media.stills.len(), 2, "no duplicate full-resolution entry");
+
+        // Relink eviction drops every size of the asset, not just one.
+        media.invalidate_assets(&HashSet::from([id]));
+        assert_eq!(media.stills.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
