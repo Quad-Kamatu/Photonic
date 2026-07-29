@@ -29,7 +29,7 @@
 
 use photonic_core::layer::BlendMode;
 use photonic_core::timeline::grade::{
-    CdlParams, Grade, GradeOp, GradeOpKind, GradeOpParams, LutInterp,
+    CdlParams, Grade, GradeMask, GradeOp, GradeOpKind, GradeOpParams, LutInterp, WindowShape,
 };
 use photonic_core::timeline::{
     Clip, ClipSource, FrameRate, Sequence, TimelineProject, Track, TrackKind, Transition,
@@ -62,26 +62,60 @@ fn gpu_or_skip(what: &str) -> Option<GpuContext> {
     }
 }
 
-/// GPU-evaluate `graph` at `CANVAS` with the given source, reading back the output.
-fn eval_gpu(gpu: &GpuContext, graph: &FrameGraph, source: &mut dyn GpuFrameSource) -> Image {
+/// A deliberately awkward canvas: non-square, and neither axis is a multiple of
+/// the pool's 64px bucket — 100 rounds to 128 (x1.28) and 40 rounds to 64
+/// (x1.60), so the two axes scale by DIFFERENT ratios.
+///
+/// [`CANVAS`] cannot catch a physical-vs-logical confusion: 8x8 buckets to a
+/// *square* 64x64, where both axes scale identically and anything normalized
+/// over the target stays centred and symmetric. Two shipped wrong-pixels bugs
+/// hid behind exactly that (grade power windows in `2670c2d`, and the GPU scope
+/// kernels), so anything that consumes normalized spatial coordinates should be
+/// swept here as well as at `CANVAS`.
+const AWKWARD_CANVAS: (u32, u32) = (100, 40);
+
+/// GPU-evaluate `graph` at `canvas` with the given source, reading back the output.
+fn eval_gpu_at(
+    gpu: &GpuContext,
+    graph: &FrameGraph,
+    source: &mut dyn GpuFrameSource,
+    canvas: (u32, u32),
+) -> Image {
     let mut eval = Evaluator::new(gpu.clone());
     let tex = eval
-        .evaluate(graph, CANVAS, source)
+        .evaluate(graph, canvas, source)
         .expect("graph produced an output texture");
-    let px = read_texture_rgba16f(gpu, &tex, CANVAS.0, CANVAS.1);
+    let px = read_texture_rgba16f(gpu, &tex, canvas.0, canvas.1);
     Image {
-        width: CANVAS.0,
-        height: CANVAS.1,
+        width: canvas.0,
+        height: canvas.1,
         pixels: px,
     }
+}
+
+/// GPU-evaluate `graph` at `CANVAS` with the given source, reading back the output.
+fn eval_gpu(gpu: &GpuContext, graph: &FrameGraph, source: &mut dyn GpuFrameSource) -> Image {
+    eval_gpu_at(gpu, graph, source, CANVAS)
+}
+
+/// Assert the CPU and GPU evaluators agree within `tol` (max abs channel diff) at
+/// `canvas`, for a media-free (`NullFrameSource` / `EmptyProvider`) graph.
+fn assert_parity_solid_at(
+    gpu: &GpuContext,
+    label: &str,
+    graph: &FrameGraph,
+    tol: f32,
+    canvas: (u32, u32),
+) {
+    let cpu = eval_cpu::evaluate(graph, canvas, &mut EmptyProvider);
+    let g = eval_gpu_at(gpu, graph, &mut NullFrameSource, canvas);
+    assert_pixels_within(label, &cpu, &g, tol);
 }
 
 /// Assert the CPU and GPU evaluators agree within `tol` (max abs channel diff) for
 /// a media-free (`NullFrameSource` / `EmptyProvider`) graph.
 fn assert_parity_solid(gpu: &GpuContext, label: &str, graph: &FrameGraph, tol: f32) {
-    let cpu = eval_cpu::evaluate(graph, CANVAS, &mut EmptyProvider);
-    let g = eval_gpu(gpu, graph, &mut NullFrameSource);
-    assert_pixels_within(label, &cpu, &g, tol);
+    assert_parity_solid_at(gpu, label, graph, tol, CANVAS);
 }
 
 fn assert_pixels_within(label: &str, cpu: &Image, gpu: &Image, tol: f32) {
@@ -434,8 +468,14 @@ fn fit_mode_cpu_gpu_parity() {
 /// A single-clip solid project decorated with `grade`, compiled to a frame graph
 /// carrying a real `IrOp::Grade` (resolved via the same path production uses).
 fn graded_solid(grade: Grade) -> CompiledFrame {
+    graded_solid_at(grade, CANVAS)
+}
+
+/// [`graded_solid`] at an explicit canvas, so a grade can be swept at a size
+/// whose pool bucket differs from the picture (see [`AWKWARD_CANVAS`]).
+fn graded_solid_at(grade: Grade, canvas: (u32, u32)) -> CompiledFrame {
     let mut project = TimelineProject::new();
-    let mut seq = Sequence::new("seq", FrameRate::FPS_30, CANVAS.0, CANVAS.1);
+    let mut seq = Sequence::new("seq", FrameRate::FPS_30, canvas.0, canvas.1);
     let seq_id = seq.id;
     let mut track = Track::new(TrackKind::Video, "V1");
     let mut clip = Clip::new(
@@ -539,6 +579,82 @@ fn grade_op_kind_cpu_gpu_parity() {
         let params = grade_params_for(kind).expect("known kind has a fixture");
         let compiled = graded_solid(single_op_grade(GradeOp::new(kind, params)));
         assert_parity_solid(&gpu, &format!("grade/{kind:?}"), &compiled.graph, 1e-3);
+    }
+}
+
+/// A rotated, off-centre elliptical power window.
+///
+/// Rotation is deliberate: it is the case that rules out "just pre-scale the
+/// centre and size on the CPU" as a fix for the physical-vs-logical mismatch.
+/// With a per-axis scale, pre-scaling would SHEAR a rotated ellipse, so the
+/// correction has to happen in the shader's coordinate space. Off-centre so a
+/// mis-scaled coordinate translates the window rather than merely resizing it
+/// symmetrically about the middle, which a centred window can hide.
+fn rotated_power_window() -> GradeMask {
+    GradeMask::PowerWindow {
+        shape: WindowShape::Ellipse,
+        center: [0.42, 0.55],
+        size: [0.28, 0.36],
+        rotation: 0.6,
+        softness: 0.15,
+        invert: false,
+    }
+}
+
+/// Every grade kind, MASKED, at a canvas whose pool bucket differs from the
+/// picture on both axes by different ratios.
+///
+/// This is the case `grade_op_kind_cpu_gpu_parity` structurally cannot see: its
+/// rows are all `mask: None`, and `CANVAS` (8x8) buckets to a square 64x64. A
+/// power window is the only thing in the grade path that consumes normalized
+/// spatial coordinates, so it is the only thing that can disagree between an
+/// evaluator that normalizes over the picture (CPU) and one that normalizes over
+/// the render target (GPU) — which is precisely the bug fixed in `2670c2d`.
+#[test]
+fn masked_grade_cpu_gpu_parity_at_an_awkward_canvas() {
+    let Some(gpu) = gpu_or_skip("masked grade parity at an awkward canvas") else {
+        return;
+    };
+
+    // Guard against a vacuous sweep: if the mask were inert at this canvas, CPU
+    // and GPU would agree trivially and the test would prove nothing. Establish
+    // first that masking actually changes the CPU result here.
+    let probe_kind = GradeOpKind::Exposure;
+    let params = grade_params_for(probe_kind).expect("known kind has a fixture");
+    let unmasked = graded_solid_at(
+        single_op_grade(GradeOp::new(probe_kind, params.clone())),
+        AWKWARD_CANVAS,
+    );
+    let mut masked_op = GradeOp::new(probe_kind, params);
+    masked_op.mask = Some(rotated_power_window());
+    let masked = graded_solid_at(single_op_grade(masked_op), AWKWARD_CANVAS);
+
+    let a = eval_cpu::evaluate(&unmasked.graph, AWKWARD_CANVAS, &mut EmptyProvider);
+    let b = eval_cpu::evaluate(&masked.graph, AWKWARD_CANVAS, &mut EmptyProvider);
+    let spread = a
+        .pixels
+        .iter()
+        .zip(&b.pixels)
+        .flat_map(|(x, y)| (0..4).map(move |k| (x[k] - y[k]).abs()))
+        .fold(0.0f32, f32::max);
+    assert!(
+        spread > 1e-2,
+        "the power window must actually gate pixels at {AWKWARD_CANVAS:?}, else \
+         this sweep is vacuous (masked vs unmasked differ by only {spread})"
+    );
+
+    for kind in KNOWN_GRADE_KINDS {
+        let params = grade_params_for(kind).expect("known kind has a fixture");
+        let mut op = GradeOp::new(kind, params);
+        op.mask = Some(rotated_power_window());
+        let compiled = graded_solid_at(single_op_grade(op), AWKWARD_CANVAS);
+        assert_parity_solid_at(
+            &gpu,
+            &format!("masked-grade/{kind:?}@{AWKWARD_CANVAS:?}"),
+            &compiled.graph,
+            1e-3,
+            AWKWARD_CANVAS,
+        );
     }
 }
 
