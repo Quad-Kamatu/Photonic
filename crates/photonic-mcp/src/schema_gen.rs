@@ -5022,7 +5022,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "add_marker",
-            "description": "Add a marker to a sequence. Supports undo.",
+            "description": "Add a marker to a sequence. Give a duration (or end_tc) to create a RANGED marker — the unit export_per_marker exports. Supports undo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5032,7 +5032,11 @@ pub fn tool_list() -> Value {
                     "at_seconds": { "type": "number" },
                     "name": { "type": "string" },
                     "color": { "type": "string", "description": "#rrggbb or #rrggbbaa." },
-                    "note": { "type": "string" }
+                    "note": { "type": "string" },
+                    "duration_ticks": { "type": "integer", "description": "0 (default) = point marker; > 0 = ranged." },
+                    "duration_seconds": { "type": "number" },
+                    "end_tc": { "type": "string", "description": "Alternative to a duration: duration = end_tc - at." },
+                    "category_id": { "type": "string", "description": "A MarkerCategory id from list_marker_categories." }
                 },
                 "required": ["sequence_id"]
             }
@@ -5053,6 +5057,116 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": { "sequence_id": { "type": "string" } },
                 "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "set_marker",
+            "description": "Universal marker editor — position, duration (0 = point, > 0 = ranged), name, note, colour, category. Only supplied fields change. Pass clip_id to edit a clip-scoped marker instead of a sequence marker. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "marker_id": { "type": "string" },
+                    "clip_id": { "type": "string", "description": "Omit for a sequence marker; supply to edit that clip's own marker." },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer" },
+                    "duration_seconds": { "type": "number" },
+                    "end_tc": { "type": "string" },
+                    "name": { "type": "string" },
+                    "note": { "type": "string" },
+                    "color": { "type": "string", "description": "#rrggbb / #rrggbbaa, or \"\" to clear the override and use the category colour." },
+                    "category_id": { "type": "string" },
+                    "clear_category": { "type": "boolean", "description": "Clear the category reference (category_id is then ignored)." }
+                },
+                "required": ["marker_id"]
+            }
+        },
+        {
+            "name": "add_clip_marker",
+            "description": "Add a clip-scoped marker. `at` is CLIP-RELATIVE (0 = the clip's first frame) and the marker travels with the clip. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string", "description": "Parsed as a duration into the clip, not a sequence timecode." },
+                    "at_seconds": { "type": "number" },
+                    "duration_ticks": { "type": "integer" },
+                    "duration_seconds": { "type": "number" },
+                    "name": { "type": "string" },
+                    "note": { "type": "string" },
+                    "color": { "type": "string", "description": "#rrggbb or #rrggbbaa." },
+                    "category_id": { "type": "string" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "remove_clip_marker",
+            "description": "Remove a clip-scoped marker. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" }, "marker_id": { "type": "string" } },
+                "required": ["clip_id","marker_id"]
+            }
+        },
+        {
+            "name": "list_clip_markers",
+            "description": "List a clip's own markers. Each entry carries the clip-relative `at` plus the derived `sequence_tick`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "clip_id": { "type": "string" } },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "list_marker_categories",
+            "description": "List the project's marker categories (id, name, colour, glyph).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_marker_category",
+            "description": "Add a project marker category. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "color": { "type": "string", "description": "#rrggbb or #rrggbbaa." },
+                    "glyph": { "type": "string", "enum": ["diamond","circle","square","triangle","flag","bar"] }
+                },
+                "required": ["name","color"]
+            }
+        },
+        {
+            "name": "seed_marker_categories",
+            "description": "Seed the five default marker categories (Marker/Cut/Note/Todo/Chapter) as ONE undo step. No-op if the project already has categories.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "update_marker_category",
+            "description": "Rename / recolour / re-glyph a marker category in place; its id and every reference to it are preserved. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "category_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "color": { "type": "string", "description": "#rrggbb or #rrggbbaa." },
+                    "glyph": { "type": "string", "enum": ["diamond","circle","square","triangle","flag","bar"] }
+                },
+                "required": ["category_id"]
+            }
+        },
+        {
+            "name": "remove_marker_category",
+            "description": "Remove a marker category, reassigning every marker that referenced it to `reassign_to` (or clearing the reference when omitted) in the same undo step. Markers are never silently remapped. Supports undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "category_id": { "type": "string" },
+                    "reassign_to": { "type": "string", "description": "Another category id; omit to clear the reference instead." }
+                },
+                "required": ["category_id"]
             }
         },
 
@@ -5566,6 +5680,84 @@ pub fn tool_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
 
+        // Effect presets, custom stacks and favourites (26 §10 K-B4). The
+        // library is USER state in <config>/Photonic/effect_presets.json, not
+        // document state: only effect_preset_apply edits the document, and it
+        // is exactly one undo step.
+        {
+            "name": "effect_preset_list",
+            "description": "List effect presets (26 §10 K-B4): the built-in catalogue first, then the user's own saved stacks from <config>/Photonic/effect_presets.json. Each entry carries `name`, `built_in`, `effect_ids`, `effect_count`, `has_grade`, `parameter_preset_for` (set when the preset is a single-effect parameter preset), a one-line `summary`, and `unresolvable_effect_ids` — ids this build has no manifest for, which still apply but land inert (39 §2.2), never dropped. Read-only; presets are app config, so nothing here appears in undo history.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "effect_preset_save",
+            "description": "Save one scope's current effect stack AND its grade as a named preset (26 §10 K-B4). Addresses the scope exactly as effect_stack does (scope + clip_id/track_id/sequence_id/asset_id). This writes app config, NOT the document: there is no document mutation and no undo step. A built-in name is refused (NotSupportedV1); an existing user name is overwritten in place, keeping its position in the user's ordering. A scope with no effects and no grade is refused — there would be nothing to apply.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Preset name. Built-in names are read-only." },
+                    "scope": { "type": "string", "enum": ["clip","track","master","asset"] },
+                    "clip_id": { "type": "string", "description": "Required for scope=clip." },
+                    "track_id": { "type": "string", "description": "Required for scope=track." },
+                    "sequence_id": { "type": "string", "description": "scope=master; defaults to the active sequence." },
+                    "asset_id": { "type": "string", "description": "Required for scope=asset." }
+                },
+                "required": ["name","scope"]
+            }
+        },
+        {
+            "name": "effect_preset_apply",
+            "description": "Apply a preset (built-in or user) to a scope (26 §10 K-B4). Effects are APPENDED to the existing stack in the preset's own order; a preset's grade REPLACES the scope's grade, and a preset with no grade leaves it alone. Use paste_attributes for wholesale replacement. Exactly ONE undo step regardless of how many effects the preset holds or how many clips it lands on — scope=clip accepts clip_ids for a multi-clip apply, and an unknown id refuses the whole call rather than half-applying.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Resolved across built-ins first, then user presets (see effect_preset_list)." },
+                    "scope": { "type": "string", "enum": ["clip","track","master","asset"] },
+                    "clip_id": { "type": "string", "description": "scope=clip, single target." },
+                    "clip_ids": { "type": "array", "items": { "type": "string" }, "description": "scope=clip, many targets — applied as ONE batch. Given instead of clip_id." },
+                    "track_id": { "type": "string", "description": "Required for scope=track." },
+                    "sequence_id": { "type": "string", "description": "scope=master; defaults to the active sequence." },
+                    "asset_id": { "type": "string", "description": "Required for scope=asset." }
+                },
+                "required": ["name","scope"]
+            }
+        },
+        {
+            "name": "effect_preset_delete",
+            "description": "Delete a user effect preset (app-level config — no document mutation, no undo step). Built-ins are read-only and refuse deletion with NotSupportedV1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "effect_preset_rename",
+            "description": "Rename a user effect preset, keeping its position in the user's ordering (app-level config — no document mutation, no undo step). Refused with NotSupportedV1 if either `from` or `to` names a built-in; renaming onto an existing user preset replaces it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "from": { "type": "string" }, "to": { "type": "string" } },
+                "required": ["from","to"]
+            }
+        },
+        {
+            "name": "effect_favourite_list",
+            "description": "List the user's favourited effect ids in their own order (26 §10 K-B4) — an ordering over the manifest catalogue, not a copy of it. Each entry carries `id`, the manifest `name`, and `available`: false means this build has no manifest for that id, so it is kept untouched (39 §2.2) and simply not offered. Read-only.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "effect_favourite_set",
+            "description": "Star or unstar one effect id (app-level config — no document mutation, no undo step). Idempotent: setting the state it already has succeeds and rewrites nothing. Starring an id this build has no manifest for is refused as a typo (see list_effect_kinds); UNstarring one always works, so a library carried from a build with more effects can be pruned.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Stable effect id from list_effect_kinds, e.g. \"blur.gaussian\"." },
+                    "favourite": { "type": "boolean" }
+                },
+                "required": ["id","favourite"]
+            }
+        },
+
         // Keyframes (10 §3.7)
         {
             "name": "set_keyframe",
@@ -5660,11 +5852,35 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "relink_media",
-            "description": "Repoint an offline (or any) asset to a new file path. Supports undo.",
+            "description": "Repoint an offline (or any) asset to a new file path. The file must exist (AssetOffline otherwise). If the asset carries a content_hash and the new file's hash differs, the call is refused with HashMismatch unless allow_hash_mismatch is true — a relink to the wrong take is invisible until export. Accepting a byte change records the new hash and clears the stale probe in the same undo step (re-run probe_media). Supports undo.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "asset_id": { "type": "string" }, "new_path": { "type": "string" } },
+                "properties": {
+                    "asset_id": { "type": "string" },
+                    "new_path": { "type": "string" },
+                    "allow_hash_mismatch": { "type": "boolean", "description": "Bind the asset to a file whose bytes differ from its recorded content_hash. Default false." }
+                },
                 "required": ["asset_id","new_path"]
+            }
+        },
+        {
+            "name": "find_offline_media",
+            "description": "List every media-pool asset whose file is not reachable, with its recorded content_hash and the number of timeline clips that would go offline with it. The inventory a relink starts from (26 K-C6).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "relink_media_batch",
+            "description": "Relink offline media in bulk by scanning a folder — the moved-project case (26 K-C6). Each asset is matched strongest-identity-first: content_hash (survives a rename), then exact filename, then case-insensitive filename; ties resolve to the lexicographically smallest path and are flagged ambiguous. Every relink is verified against the asset's content_hash and an entry whose bytes differ is reported under skipped_hash_mismatch and NOT committed unless allow_hash_mismatch is true (accepting one records the new hash and clears the stale probe). dry_run returns the same plan without touching the document. The whole batch commits as ONE undo step. The scan is depth- and count-capped; scan_truncated reports when it hit a cap, hashed_scan reports whether by-hash discovery was possible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "search_dir": { "type": "string", "description": "Folder to scan for replacement files." },
+                    "asset_ids": { "type": "array", "items": { "type": "string" }, "description": "Restrict to these assets; default is every offline asset." },
+                    "recursive": { "type": "boolean", "description": "Walk subdirectories. Default true." },
+                    "dry_run": { "type": "boolean", "description": "Report the plan and change nothing. Default false." },
+                    "allow_hash_mismatch": { "type": "boolean", "description": "Also commit entries whose bytes differ from the recorded content_hash. Default false." }
+                },
+                "required": ["search_dir"]
             }
         },
         {

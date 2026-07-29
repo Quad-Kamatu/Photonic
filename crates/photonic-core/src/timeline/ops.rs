@@ -25,7 +25,10 @@ use super::grade::{Grade, GradeOpParams};
 use super::graph::{GraphOp, NodeGraph};
 use super::ids::*;
 use super::media::MediaBin;
-use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
+use super::sequence::{
+    Marker, MarkerCategory, MarkerRef, MarkerRetarget, Sequence, SequenceFormat, TimelineProject,
+    Track, TrackKind,
+};
 use super::time::{FrameRate, Tick};
 use std::path::PathBuf;
 
@@ -56,6 +59,12 @@ pub enum EditError {
     SidechainCycle,
     /// A nested-sequence insertion would create a sequence cycle (CAP-005).
     SequenceCycle,
+    /// No marker with this id in the addressed scope (35 §1).
+    NoMarker(MarkerId),
+    /// No marker category with this id on the project (35 §1.3). Also returned
+    /// when a delete is asked to reassign its markers to the very category
+    /// being deleted — after the delete that target would not exist.
+    NoMarkerCategory(MarkerCategoryId),
 }
 
 impl std::fmt::Display for EditError {
@@ -251,6 +260,23 @@ pub fn remove_unused_assets(p: &TimelineProject) -> Vec<TimelineCmd> {
         .collect()
 }
 
+/// Repoint one asset at a new file (26 K-C6 single case).
+///
+/// # `rel_path` (read this before changing the command shape)
+///
+/// [`AssetSource::File`](super::media::AssetSource::File) carries
+/// `{ path, rel_path }`, and `media.rs`'s doc comment specifies the load ladder
+/// as *`rel_path` first, then `path`, then relink-by-hash* — the mechanism that
+/// makes a **moved project** reopen with no relink at all. `RelinkAsset` rewrites
+/// `path` only and deliberately leaves `rel_path` alone, which is correct **only
+/// because `rel_path` is currently vestigial**: nothing in the workspace ever
+/// writes a `Some(..)` (grep `rel_path` — every construction site is `None`) and
+/// no loader reads it. The day the ladder is implemented, a relink that leaves a
+/// stale `rel_path` in place would be silently overridden by it on the next open
+/// — so `TimelineCmd::RelinkAsset` must grow `old_rel_path`/`new_rel_path` (kept
+/// undoable) *in the same change* that starts populating the field. Filed as the
+/// K-C6 follow-up; not fixable from `ops.rs` alone since the command shape lives
+/// in `commands.rs`.
 pub fn relink_asset(
     p: &TimelineProject,
     asset: AssetId,
@@ -270,6 +296,314 @@ pub fn relink_asset(
         old_path,
         new_path,
     })
+}
+
+// ── K-C6: batch relink of offline media ─────────────────────────────────────
+//
+// The single-asset relink above has existed since P2. What a user who moved a
+// folder actually needs is the *batch*: 200 offline clips, one directory
+// rewrite, one undo step. The planner below is deliberately pure — it takes the
+// scan result as data and returns a plan; the filesystem walk and the hashing
+// live in the callers (MCP handler / media-pool panel), which keeps
+// `photonic-core` free of I/O and makes every matching rule unit-testable
+// without touching a disk.
+
+/// One file found by the caller's scan of a relink search root.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelinkCandidate {
+    pub path: PathBuf,
+    /// Content hash of this file, in the same shape as
+    /// [`MediaAsset::content_hash`](super::media::MediaAsset::content_hash).
+    /// `None` when the caller chose not to hash the scan (large folders); the
+    /// by-hash *discovery* rule then simply does not fire, while per-entry
+    /// verification still can (it hashes only the chosen file).
+    pub content_hash: Option<String>,
+}
+
+/// Which rule bound a candidate to an offline asset, strongest first.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RelinkMatchKind {
+    /// Same bytes (`content_hash` equality) — the relink identity per
+    /// `media.rs`'s module docs. Survives a rename.
+    ContentHash,
+    /// Same file name, byte-for-byte.
+    ExactName,
+    /// Same file name ignoring ASCII case (a case-insensitive volume, or media
+    /// copied through one, routinely changes case).
+    CaseInsensitiveName,
+}
+
+/// Does the file we are about to bind actually hold the asset's bytes?
+///
+/// `Unknown` is a first-class outcome and is **not** an error: the asset may
+/// never have been hashed, the caller may not be able to recompute the stored
+/// hash's algorithm, or the file may be unreadable. Never report `Mismatch`
+/// unless two hashes were genuinely compared — a false mismatch would train
+/// users to click past the one guard that catches a wrong-take relink.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RelinkHashCheck {
+    Match,
+    Mismatch,
+    Unknown,
+}
+
+impl RelinkHashCheck {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelinkHashCheck::Match => "match",
+            RelinkHashCheck::Mismatch => "mismatch",
+            RelinkHashCheck::Unknown => "unknown",
+        }
+    }
+}
+
+impl RelinkMatchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelinkMatchKind::ContentHash => "content_hash",
+            RelinkMatchKind::ExactName => "exact_name",
+            RelinkMatchKind::CaseInsensitiveName => "case_insensitive_name",
+        }
+    }
+}
+
+/// One proposed relink: what would change, how it was found, and whether the
+/// bytes agree. This is the preview row — nothing is committed until
+/// [`relink_plan_commands`] turns accepted entries into commands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelinkPlanEntry {
+    pub asset: AssetId,
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+    pub matched_by: RelinkMatchKind,
+    pub hash: RelinkHashCheck,
+    /// Hash of `new_path` as computed by the caller's hasher, when it could be
+    /// computed. Used to re-identify the asset once a byte change is accepted.
+    pub new_hash: Option<String>,
+    /// More than one scanned file matched by the same rule; the plan picked the
+    /// lexicographically smallest path so the result is deterministic, but the
+    /// choice is a guess and the UI must say so.
+    pub ambiguous: bool,
+}
+
+/// The result of planning a batch relink.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RelinkPlan {
+    pub entries: Vec<RelinkPlanEntry>,
+    /// Offline assets no scanned file matched, sorted.
+    pub unmatched: Vec<AssetId>,
+}
+
+impl RelinkPlan {
+    /// Entries whose bytes are known to differ from the asset's recorded hash —
+    /// the ones a caller must not commit without explicit consent.
+    pub fn mismatched(&self) -> impl Iterator<Item = &RelinkPlanEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.hash == RelinkHashCheck::Mismatch)
+    }
+}
+
+/// Every file-backed asset whose file is not reachable, sorted for determinism.
+///
+/// `exists` is injected rather than calling `Path::exists` so `photonic-core`
+/// stays I/O-free and the predicate can be faked in tests. `EmbeddedVector`
+/// assets are never offline (they live in the document).
+pub fn offline_assets(
+    p: &TimelineProject,
+    mut exists: impl FnMut(&std::path::Path) -> bool,
+) -> Vec<AssetId> {
+    let mut out: Vec<AssetId> = p
+        .media
+        .assets
+        .values()
+        .filter(|a| match &a.source {
+            super::media::AssetSource::File { path, .. } => !exists(path),
+            super::media::AssetSource::EmbeddedVector { .. } => false,
+        })
+        .map(|a| a.id)
+        .collect();
+    out.sort();
+    out
+}
+
+fn file_name_of(p: &std::path::Path) -> Option<String> {
+    p.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+/// Plan a batch relink of `offline` against the files in `candidates`.
+///
+/// Rule order per asset — strongest identity first, which is the order
+/// `media.rs` specifies (`content_hash` first, then filename):
+///
+/// 1. **`content_hash` equality.** Survives a rename, and is the only rule that
+///    can be wrong solely through a hash collision.
+/// 2. **Exact file name.**
+/// 3. **Case-insensitive file name.**
+///
+/// Whichever rule fires, the entry then records a *verification*: the chosen
+/// file is hashed via `hash_like(stored_hash, candidate_path)` and compared to
+/// the asset's stored hash. `hash_like` is passed the stored hash (`None` when
+/// the asset has never been hashed) precisely so a caller can hash with **the
+/// same algorithm that produced it** and return `None` when it cannot — a
+/// cross-algorithm comparison would manufacture a mismatch on every asset (the
+/// P2 `siphash64:` stopgap vs the engine's xxh3).
+///
+/// Ties are broken on the lexicographically smallest path and flagged
+/// `ambiguous`, so the same scan always produces the same plan.
+///
+/// An asset whose best match is the path it *already* points at appears in
+/// neither list: there is nothing to change, and emitting it would spend an undo
+/// step on a no-op. (Reachable only when a caller passes online assets
+/// explicitly — the offline set never contains one.)
+pub fn plan_relink(
+    p: &TimelineProject,
+    offline: &[AssetId],
+    candidates: &[RelinkCandidate],
+    mut hash_like: impl FnMut(Option<&str>, &std::path::Path) -> Option<String>,
+) -> RelinkPlan {
+    let mut plan = RelinkPlan::default();
+    let mut ids: Vec<AssetId> = offline.to_vec();
+    ids.sort();
+    ids.dedup();
+
+    for id in ids {
+        let Some(asset) = p.media.assets.get(&id) else {
+            continue;
+        };
+        let super::media::AssetSource::File { path: old_path, .. } = &asset.source else {
+            continue; // embedded vectors have no file to relink
+        };
+        let want_name = file_name_of(old_path);
+
+        // Collect the matches for each rule, then take the strongest non-empty.
+        let by_hash: Vec<&RelinkCandidate> = match asset.content_hash.as_deref() {
+            Some(h) => candidates
+                .iter()
+                .filter(|c| c.content_hash.as_deref() == Some(h))
+                .collect(),
+            None => Vec::new(),
+        };
+        let by_exact: Vec<&RelinkCandidate> = match &want_name {
+            Some(name) => candidates
+                .iter()
+                .filter(|c| file_name_of(&c.path).as_deref() == Some(name.as_str()))
+                .collect(),
+            None => Vec::new(),
+        };
+        let by_ci: Vec<&RelinkCandidate> = match &want_name {
+            Some(name) => candidates
+                .iter()
+                .filter(|c| {
+                    file_name_of(&c.path)
+                        .map(|n| n.eq_ignore_ascii_case(name))
+                        .unwrap_or(false)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let (matched_by, mut matches) = if !by_hash.is_empty() {
+            (RelinkMatchKind::ContentHash, by_hash)
+        } else if !by_exact.is_empty() {
+            (RelinkMatchKind::ExactName, by_exact)
+        } else if !by_ci.is_empty() {
+            (RelinkMatchKind::CaseInsensitiveName, by_ci)
+        } else {
+            plan.unmatched.push(id);
+            continue;
+        };
+        matches.sort_by(|a, b| a.path.cmp(&b.path));
+        let ambiguous = matches.len() > 1;
+        let chosen = matches[0];
+        if &chosen.path == old_path {
+            // The file the asset already points at (a caller that scanned a
+            // still-online asset's own directory). Relinking it would be a
+            // no-op undo step.
+            continue;
+        }
+
+        // Verify the chosen file's bytes against the asset's identity.
+        let (check, new_hash) = match asset.content_hash.as_deref() {
+            None => (RelinkHashCheck::Unknown, hash_like(None, &chosen.path)),
+            Some(stored) => match hash_like(Some(stored), &chosen.path) {
+                None => (RelinkHashCheck::Unknown, None),
+                Some(actual) => {
+                    let check = if actual == stored {
+                        RelinkHashCheck::Match
+                    } else {
+                        RelinkHashCheck::Mismatch
+                    };
+                    (check, Some(actual))
+                }
+            },
+        };
+
+        plan.entries.push(RelinkPlanEntry {
+            asset: id,
+            old_path: old_path.clone(),
+            new_path: chosen.path.clone(),
+            matched_by,
+            hash: check,
+            new_hash,
+            ambiguous,
+        });
+    }
+    plan.unmatched.sort();
+    plan
+}
+
+/// Turn accepted plan entries into commands — the caller wraps the whole `Vec`
+/// in ONE `Command::Batch` so a 200-clip relink is a single undo unit (DoD 4).
+///
+/// Two data-integrity rules are enforced here rather than left to each caller:
+///
+/// * A [`RelinkHashCheck::Mismatch`] entry is **skipped** unless
+///   `accept_mismatch`. Binding a clip to the wrong take is a failure the user
+///   would not notice until export.
+/// * When a mismatch *is* accepted, the asset is re-identified in the same
+///   batch: `content_hash` becomes the new file's hash and `probe` is cleared,
+///   because a probe describes the bytes that were probed — keeping the old
+///   duration/resolution around for a different file is exactly the silent lie
+///   the hash check exists to prevent. Re-probe (`probe_media`) refills it.
+///   An asset that had *no* hash gets the new one recorded, keeping its probe.
+pub fn relink_plan_commands(
+    p: &TimelineProject,
+    entries: &[RelinkPlanEntry],
+    accept_mismatch: bool,
+) -> Vec<TimelineCmd> {
+    let mut cmds = Vec::new();
+    for e in entries {
+        if e.hash == RelinkHashCheck::Mismatch && !accept_mismatch {
+            continue;
+        }
+        if e.new_path == e.old_path {
+            continue;
+        }
+        let Ok(relink) = relink_asset(p, e.asset, e.new_path.clone()) else {
+            continue;
+        };
+        cmds.push(relink);
+        let Some(asset) = p.media.assets.get(&e.asset) else {
+            continue;
+        };
+        match e.hash {
+            RelinkHashCheck::Mismatch => {
+                if let Ok(meta) = set_asset_meta(p, e.asset, None, e.new_hash.clone()) {
+                    cmds.push(meta);
+                }
+            }
+            RelinkHashCheck::Unknown if asset.content_hash.is_none() && e.new_hash.is_some() => {
+                if let Ok(meta) =
+                    set_asset_meta(p, e.asset, asset.probe.clone(), e.new_hash.clone())
+                {
+                    cmds.push(meta);
+                }
+            }
+            _ => {}
+        }
+    }
+    cmds
 }
 
 /// Set or clear an asset's proxy attachment while preserving a lossless undo
@@ -2157,6 +2491,232 @@ pub fn set_marker(
         old,
         new,
     })
+}
+
+// ── Clip-scoped markers (35 §1.5) ───────────────────────────────────────────
+//
+// The sequence-marker trio above addresses `(SequenceId, MarkerId)`; a clip
+// marker lives on the clip and travels with it, so it is addressed by
+// `ClipId` alone (`find_clip_mut`'s convention, shared with
+// `SetClipComposition`). `at` is CLIP-RELATIVE — use
+// `Clip::marker_sequence_tick` to place one on the timeline.
+
+/// Locate a clip anywhere in the project, by id alone.
+fn clip_anywhere(p: &TimelineProject, id: ClipId) -> Result<&Clip, EditError> {
+    p.sequences
+        .values()
+        .flat_map(|s| s.video_tracks.iter().chain(s.audio_tracks.iter()))
+        .flat_map(|t| t.clips.iter())
+        .find(|c| c.id == id)
+        .ok_or(EditError::NoClip(id))
+}
+
+/// Add a clip-scoped marker. The caller supplies the fully-built `Marker`;
+/// [`Marker::clip_scoped`] fills a fresh id and the `Content` anchor.
+///
+/// `at` is validated against the clip's own length, because an out-of-range
+/// clip marker is invisible: it maps to a sequence tick outside the clip and
+/// no consumer would ever draw it.
+pub fn add_clip_marker(
+    p: &TimelineProject,
+    clip_id: ClipId,
+    marker: Marker,
+) -> Result<TimelineCmd, EditError> {
+    let c = clip_anywhere(p, clip_id)?;
+    if marker.at.0 < 0 || marker.at > c.duration {
+        return Err(EditError::IndexOutOfRange);
+    }
+    Ok(TimelineCmd::AddClipMarker {
+        clip: clip_id,
+        marker,
+    })
+}
+
+pub fn remove_clip_marker(
+    p: &TimelineProject,
+    clip_id: ClipId,
+    marker_id: MarkerId,
+) -> Result<TimelineCmd, EditError> {
+    let c = clip_anywhere(p, clip_id)?;
+    let marker = c
+        .markers
+        .iter()
+        .find(|m| m.id == marker_id)
+        .ok_or(EditError::NoMarker(marker_id))?
+        .clone();
+    Ok(TimelineCmd::RemoveClipMarker {
+        clip: clip_id,
+        marker,
+    })
+}
+
+/// Edit a clip marker's fields. `new.id` identifies the marker; the op captures
+/// the old state for a self-contained inverse.
+pub fn set_clip_marker(
+    p: &TimelineProject,
+    clip_id: ClipId,
+    new: Marker,
+) -> Result<TimelineCmd, EditError> {
+    let c = clip_anywhere(p, clip_id)?;
+    let old = c
+        .markers
+        .iter()
+        .find(|m| m.id == new.id)
+        .ok_or(EditError::NoMarker(new.id))?
+        .clone();
+    if new.at.0 < 0 || new.at > c.duration {
+        return Err(EditError::IndexOutOfRange);
+    }
+    Ok(TimelineCmd::SetClipMarker {
+        clip: clip_id,
+        id: new.id,
+        old,
+        new,
+    })
+}
+
+// ── Marker categories (35 §1.3) ─────────────────────────────────────────────
+
+/// Add a project marker category, appended to the end of display order.
+///
+/// Rejects a category whose id is already present — ids are stable and unique
+/// within the registry, and a duplicate would make `marker_category` ambiguous.
+pub fn add_marker_category(
+    p: &TimelineProject,
+    category: MarkerCategory,
+) -> Result<TimelineCmd, EditError> {
+    if p.marker_category(category.id).is_some() {
+        return Err(EditError::IndexOutOfRange);
+    }
+    Ok(TimelineCmd::AddMarkerCategory {
+        index: p.marker_categories.len(),
+        category,
+        retarget: Vec::new(),
+    })
+}
+
+/// Seed the five default categories ([`MarkerCategory::default_seed`]) as ONE
+/// batch of commands — the caller commits them as a single undo unit.
+///
+/// Returns an empty vec when the project already has categories, so "seed
+/// defaults" is idempotent rather than duplicating the set.
+pub fn seed_marker_categories(p: &TimelineProject) -> Vec<TimelineCmd> {
+    if !p.marker_categories.is_empty() {
+        return Vec::new();
+    }
+    MarkerCategory::default_seed()
+        .into_iter()
+        .enumerate()
+        .map(|(i, category)| TimelineCmd::AddMarkerCategory {
+            category,
+            index: i,
+            retarget: Vec::new(),
+        })
+        .collect()
+}
+
+/// Rename / recolour / re-glyph a category. `new.id` identifies it; the id is
+/// never changed by this op (that would orphan every referencing marker).
+pub fn set_marker_category(
+    p: &TimelineProject,
+    new: MarkerCategory,
+) -> Result<TimelineCmd, EditError> {
+    let old = p
+        .marker_category(new.id)
+        .ok_or(EditError::NoMarkerCategory(new.id))?
+        .clone();
+    Ok(TimelineCmd::SetMarkerCategory {
+        id: new.id,
+        old,
+        new,
+    })
+}
+
+/// Remove a marker category, deciding explicitly what happens to the markers
+/// that referenced it (26 K-A2's "reassign on delete").
+///
+/// * `reassign_to == Some(other)` — every referencing marker, in both scopes,
+///   moves to `other` as part of the same command.
+/// * `reassign_to == None` — the references are cleared to `None`.
+///
+/// Either way the change is *recorded* per marker, so undo restores each one
+/// to the deleted category and 35 §1.3's "never silently remapped" rule holds:
+/// nothing is left pointing at a category that no longer exists, and nothing
+/// is re-pointed without the command saying so.
+pub fn remove_marker_category(
+    p: &TimelineProject,
+    id: MarkerCategoryId,
+    reassign_to: Option<MarkerCategoryId>,
+) -> Result<TimelineCmd, EditError> {
+    let category = p
+        .marker_category(id)
+        .ok_or(EditError::NoMarkerCategory(id))?
+        .clone();
+    let index = p
+        .marker_category_index(id)
+        .ok_or(EditError::NoMarkerCategory(id))?;
+    if let Some(target) = reassign_to {
+        // Reassigning to the category being deleted would leave every marker
+        // pointing at a missing id — the exact outcome the rule forbids.
+        if target == id || p.marker_category(target).is_none() {
+            return Err(EditError::NoMarkerCategory(target));
+        }
+    }
+    let retarget = p
+        .markers_in_category(id)
+        .into_iter()
+        .map(|marker| MarkerRetarget {
+            marker,
+            old: Some(id),
+            new: reassign_to,
+        })
+        .collect();
+    Ok(TimelineCmd::RemoveMarkerCategory {
+        category,
+        index,
+        retarget,
+    })
+}
+
+/// Point one marker (either scope) at a category, or clear it with `None`.
+/// A convenience over [`set_marker`] / [`set_clip_marker`] for the panel's
+/// per-row category picker; validates that the target category exists so a
+/// dangling reference can never be *created* by an edit (only inherited from a
+/// file, where the UI flags it).
+pub fn set_marker_category_of(
+    p: &TimelineProject,
+    marker: MarkerRef,
+    category: Option<MarkerCategoryId>,
+) -> Result<TimelineCmd, EditError> {
+    if let Some(c) = category {
+        if p.marker_category(c).is_none() {
+            return Err(EditError::NoMarkerCategory(c));
+        }
+    }
+    match marker {
+        MarkerRef::Sequence { seq: sid, marker } => {
+            let s = seq(p, sid)?;
+            let mut new = s
+                .markers
+                .iter()
+                .find(|m| m.id == marker)
+                .ok_or(EditError::NoMarker(marker))?
+                .clone();
+            new.category = category;
+            set_marker(p, sid, new)
+        }
+        MarkerRef::Clip { clip, marker } => {
+            let c = clip_anywhere(p, clip)?;
+            let mut new = c
+                .markers
+                .iter()
+                .find(|m| m.id == marker)
+                .ok_or(EditError::NoMarker(marker))?
+                .clone();
+            new.category = category;
+            set_clip_marker(p, clip, new)
+        }
+    }
 }
 
 /// Set (or clear, with `None`) a sequence's preview/export work range.
@@ -5257,6 +5817,309 @@ mod tests {
                 .count(),
             4,
             "source + three targets all carry the stack after reload"
+        );
+    }
+
+    // ── K-C6: batch relink ──────────────────────────────────────────────────
+
+    use super::super::media::{AssetKind, AssetSource, MediaAsset, MediaProbe};
+
+    /// A project holding `(path, hash)` assets, plus the ids in the same order.
+    fn relink_fixture(rows: &[(&str, Option<&str>)]) -> (Document, Vec<AssetId>) {
+        let mut project = TimelineProject::new();
+        let mut ids = Vec::new();
+        for (path, hash) in rows {
+            let mut a = MediaAsset::from_file(AssetKind::Video, *path);
+            a.content_hash = hash.map(|h| h.to_string());
+            ids.push(a.id);
+            project.media.insert(a);
+        }
+        let mut doc = Document::new("t", 100.0, 100.0);
+        doc.timeline = Some(project);
+        (doc, ids)
+    }
+
+    fn cand(path: &str, hash: Option<&str>) -> RelinkCandidate {
+        RelinkCandidate {
+            path: PathBuf::from(path),
+            content_hash: hash.map(|h| h.to_string()),
+        }
+    }
+
+    /// A hasher that knows what each file on the fake disk contains.
+    fn faked<'a>(
+        table: &'a [(&'a str, &'a str)],
+    ) -> impl FnMut(Option<&str>, &std::path::Path) -> Option<String> + 'a {
+        move |_stored, path| {
+            table
+                .iter()
+                .find(|(p, _)| std::path::Path::new(p) == path)
+                .map(|(_, h)| h.to_string())
+        }
+    }
+
+    #[test]
+    fn offline_assets_are_only_the_unreachable_file_backed_ones() {
+        let (mut doc, ids) = relink_fixture(&[("/vol/a.mp4", None), ("/gone/b.mp4", None)]);
+        let embedded = MediaAsset::new(
+            AssetKind::VectorDoc,
+            AssetSource::EmbeddedVector {
+                root: super::super::media::VectorRef::WholeDocument,
+            },
+        );
+        let embedded_id = embedded.id;
+        doc.timeline.as_mut().unwrap().media.insert(embedded);
+
+        let offline = offline_assets(doc.timeline.as_ref().unwrap(), |p| {
+            p == std::path::Path::new("/vol/a.mp4")
+        });
+        assert_eq!(offline, vec_sorted(&[ids[1]]));
+        // Non-vacuous: the other two assets exist in the pool and are excluded
+        // for two different reasons (reachable file / no file at all).
+        assert_eq!(doc.timeline.as_ref().unwrap().media.assets.len(), 3);
+        assert!(!offline.contains(&ids[0]));
+        assert!(!offline.contains(&embedded_id));
+    }
+
+    fn vec_sorted(ids: &[AssetId]) -> Vec<AssetId> {
+        let mut v = ids.to_vec();
+        v.sort();
+        v
+    }
+
+    /// The relink identity is the hash, not the name: a scan holding both a
+    /// same-named *different* file and a renamed *identical* one binds the
+    /// identical bytes.
+    #[test]
+    fn plan_relink_prefers_content_hash_over_a_same_named_different_file() {
+        let (doc, ids) = relink_fixture(&[("/old/a.mp4", Some("xxh:aaa"))]);
+        let p = doc.timeline.as_ref().unwrap();
+        let disk = [("/new/a.mp4", "xxh:zzz"), ("/new/take1.mp4", "xxh:aaa")];
+        let candidates = [
+            cand("/new/a.mp4", Some("xxh:zzz")),
+            cand("/new/take1.mp4", Some("xxh:aaa")),
+        ];
+
+        let plan = plan_relink(p, &ids, &candidates, faked(&disk));
+        assert_eq!(plan.entries.len(), 1);
+        let e = &plan.entries[0];
+        assert_eq!(e.new_path, PathBuf::from("/new/take1.mp4"));
+        assert_eq!(e.matched_by, RelinkMatchKind::ContentHash);
+        assert_eq!(e.hash, RelinkHashCheck::Match);
+
+        // Sensitivity: drop the hash match and the SAME scan now binds the
+        // same-named file — and flags it as different bytes.
+        let plan = plan_relink(p, &ids, &candidates[..1], faked(&disk));
+        let e = &plan.entries[0];
+        assert_eq!(e.new_path, PathBuf::from("/new/a.mp4"));
+        assert_eq!(e.matched_by, RelinkMatchKind::ExactName);
+        assert_eq!(e.hash, RelinkHashCheck::Mismatch);
+        assert_eq!(e.new_hash.as_deref(), Some("xxh:zzz"));
+    }
+
+    #[test]
+    fn plan_relink_falls_back_from_exact_to_case_insensitive_name() {
+        let (doc, ids) = relink_fixture(&[("/old/Clip_01.MOV", None)]);
+        let p = doc.timeline.as_ref().unwrap();
+
+        // Exact name wins when present.
+        let plan = plan_relink(
+            p,
+            &ids,
+            &[
+                cand("/new/clip_01.mov", None),
+                cand("/new/Clip_01.MOV", None),
+            ],
+            faked(&[]),
+        );
+        assert_eq!(plan.entries[0].new_path, PathBuf::from("/new/Clip_01.MOV"));
+        assert_eq!(plan.entries[0].matched_by, RelinkMatchKind::ExactName);
+
+        // Only the case-folded name survives the copy → still relinks.
+        let plan = plan_relink(p, &ids, &[cand("/new/clip_01.mov", None)], faked(&[]));
+        assert_eq!(plan.entries[0].new_path, PathBuf::from("/new/clip_01.mov"));
+        assert_eq!(
+            plan.entries[0].matched_by,
+            RelinkMatchKind::CaseInsensitiveName
+        );
+
+        // Nothing resembling it → reported as unmatched, never guessed at.
+        let plan = plan_relink(p, &ids, &[cand("/new/other.mov", None)], faked(&[]));
+        assert!(plan.entries.is_empty());
+        assert_eq!(plan.unmatched, ids);
+    }
+
+    /// An unverifiable hash must read `Unknown`, never `Mismatch` — a false
+    /// mismatch would teach users to click through the one integrity guard.
+    #[test]
+    fn plan_relink_never_manufactures_a_mismatch_it_could_not_measure() {
+        let (doc, ids) = relink_fixture(&[("/old/a.mp4", Some("siphash64:0011223344556677"))]);
+        let p = doc.timeline.as_ref().unwrap();
+        let candidates = [cand("/new/a.mp4", Some("xxh:zzz"))];
+
+        // Caller cannot recompute the stored algorithm → None → Unknown.
+        let plan = plan_relink(p, &ids, &candidates, |_stored, _path| None);
+        assert_eq!(plan.entries[0].hash, RelinkHashCheck::Unknown);
+        assert_eq!(plan.entries[0].new_hash, None);
+
+        // Same fixture, a caller that CAN hash in the stored algorithm: the
+        // difference is now measured and reported.
+        let plan = plan_relink(p, &ids, &candidates, |_stored, _path| {
+            Some("siphash64:ffffffffffffffff".to_string())
+        });
+        assert_eq!(plan.entries[0].hash, RelinkHashCheck::Mismatch);
+    }
+
+    #[test]
+    fn plan_relink_is_deterministic_and_flags_an_ambiguous_scan() {
+        let (doc, ids) = relink_fixture(&[("/old/a.mp4", None)]);
+        let p = doc.timeline.as_ref().unwrap();
+        let forwards = [cand("/new/b/a.mp4", None), cand("/new/a/a.mp4", None)];
+        let backwards = [cand("/new/a/a.mp4", None), cand("/new/b/a.mp4", None)];
+
+        let one = plan_relink(p, &ids, &forwards, faked(&[]));
+        let two = plan_relink(p, &ids, &backwards, faked(&[]));
+        assert_eq!(one, two, "scan order must not change the plan");
+        assert_eq!(one.entries[0].new_path, PathBuf::from("/new/a/a.mp4"));
+        assert!(
+            one.entries[0].ambiguous,
+            "two files matched the same rule — the UI must be able to say so"
+        );
+
+        // One candidate → not ambiguous (the flag means something).
+        let single = plan_relink(p, &ids, &forwards[..1], faked(&[]));
+        assert!(!single.entries[0].ambiguous);
+    }
+
+    /// A byte change is refused by default, and accepting it re-identifies the
+    /// asset (new hash, stale probe dropped) inside the same batch.
+    #[test]
+    fn relink_plan_commands_gate_a_byte_change_and_re_identify_on_accept() {
+        let (mut doc, ids) = relink_fixture(&[("/old/a.mp4", Some("xxh:aaa"))]);
+        doc.timeline
+            .as_mut()
+            .unwrap()
+            .media
+            .assets
+            .get_mut(&ids[0])
+            .unwrap()
+            .probe = Some(MediaProbe {
+            duration: Tick(1000),
+            video: None,
+            audio: None,
+            container: "mov".into(),
+            codec: "h264".into(),
+        });
+        let p = doc.timeline.as_ref().unwrap();
+        let disk = [("/new/a.mp4", "xxh:zzz")];
+        let plan = plan_relink(p, &ids, &[cand("/new/a.mp4", None)], faked(&disk));
+        assert_eq!(plan.entries[0].hash, RelinkHashCheck::Mismatch);
+
+        assert!(
+            relink_plan_commands(p, &plan.entries, false).is_empty(),
+            "a wrong-take relink must not be committed without consent"
+        );
+
+        let cmds = relink_plan_commands(p, &plan.entries, true);
+        assert_eq!(
+            cmds.len(),
+            2,
+            "RelinkAsset + the re-identifying SetAssetMeta"
+        );
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut doc);
+        let a = &doc.timeline.as_ref().unwrap().media.assets[&ids[0]];
+        assert!(matches!(
+            &a.source,
+            AssetSource::File { path, .. } if path == std::path::Path::new("/new/a.mp4")
+        ));
+        assert_eq!(a.content_hash.as_deref(), Some("xxh:zzz"));
+        assert!(
+            a.probe.is_none(),
+            "the probe described the old bytes and must not survive a byte change"
+        );
+    }
+
+    /// A hash-verified relink leaves probe and hash exactly as they were — the
+    /// re-identification above is specific to an accepted byte change.
+    #[test]
+    fn a_verified_relink_touches_only_the_path() {
+        let (mut doc, ids) = relink_fixture(&[("/old/a.mp4", Some("xxh:aaa"))]);
+        let p = doc.timeline.as_ref().unwrap();
+        let disk = [("/new/a.mp4", "xxh:aaa")];
+        let plan = plan_relink(
+            p,
+            &ids,
+            &[cand("/new/a.mp4", Some("xxh:aaa"))],
+            faked(&disk),
+        );
+        assert_eq!(plan.entries[0].hash, RelinkHashCheck::Match);
+        let cmds = relink_plan_commands(p, &plan.entries, false);
+        assert_eq!(cmds.len(), 1, "no metadata edit for an unchanged identity");
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()).apply(&mut doc);
+        assert_eq!(
+            doc.timeline.as_ref().unwrap().media.assets[&ids[0]]
+                .content_hash
+                .as_deref(),
+            Some("xxh:aaa")
+        );
+    }
+
+    /// DoD 4: a folder move is ONE undo unit — every asset returns to its old
+    /// path on a single inverse, not one undo per clip.
+    #[test]
+    fn a_whole_folder_relink_is_one_undo_unit() {
+        let rows = [
+            ("/old/a.mp4", Some("h:a")),
+            ("/old/b.mp4", Some("h:b")),
+            ("/old/c.mp4", Some("h:c")),
+        ];
+        let (mut doc, ids) = relink_fixture(&rows);
+        let p = doc.timeline.as_ref().unwrap();
+        let offline = offline_assets(p, |_| false);
+        assert_eq!(offline.len(), 3, "fixture must actually be all-offline");
+
+        let candidates: Vec<RelinkCandidate> = ["a", "b", "c"]
+            .iter()
+            .map(|n| cand(&format!("/new/{n}.mp4"), Some(&format!("h:{n}"))))
+            .collect();
+        let plan = plan_relink(p, &offline, &candidates, faked(&[]));
+        assert_eq!(plan.entries.len(), 3);
+        assert!(plan.unmatched.is_empty());
+
+        let cmds = relink_plan_commands(p, &plan.entries, false);
+        let batch = Command::Batch(cmds.into_iter().map(Command::Timeline).collect());
+        let inverse = batch.inverse(&doc).expect("batch inverts");
+        batch.apply(&mut doc);
+        let paths = |d: &Document| -> Vec<String> {
+            let mut v: Vec<String> = ids
+                .iter()
+                .map(
+                    |id| match &d.timeline.as_ref().unwrap().media.assets[id].source {
+                        AssetSource::File { path, .. } => path.display().to_string(),
+                        _ => String::new(),
+                    },
+                )
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            paths(&doc),
+            vec![
+                "/new/a.mp4".to_string(),
+                "/new/b.mp4".into(),
+                "/new/c.mp4".into()
+            ]
+        );
+        inverse.apply(&mut doc);
+        assert_eq!(
+            paths(&doc),
+            vec![
+                "/old/a.mp4".to_string(),
+                "/old/b.mp4".into(),
+                "/old/c.mp4".into()
+            ],
+            "one undo restores every relinked asset"
         );
     }
 }

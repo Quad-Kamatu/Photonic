@@ -285,6 +285,15 @@ impl PhotonicApp {
                         doc_modified = true;
                     }
                 }
+                // ── Marker navigation (video mode, 26 K-A2) ──────────────────
+                // Deliberately does NOT touch `history` or set `doc_modified`:
+                // moving the playhead is session state, and a review pass that
+                // walks twenty markers must leave the undo stack untouched.
+                // Assigning the field is enough — `app/monitor.rs` notices the
+                // disagreement with `bridge.agreed_playhead` and issues the seek.
+                PanelAction::SeekPlayhead { at } => {
+                    self.playhead = at.max(photonic_core::timeline::Tick::ZERO);
+                }
                 // ── Clip inspector / effects browser (video mode) ────────────
                 PanelAction::ClipEditDiscrete(cmd) => {
                     history.execute_discrete(Command::Timeline(cmd), doc);

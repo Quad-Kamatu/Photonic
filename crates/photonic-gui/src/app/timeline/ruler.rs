@@ -11,7 +11,9 @@ use super::layout::TimelineView;
 use super::ops_bridge;
 use photonic_core::document::Document;
 use photonic_core::history::CommandHistory;
-use photonic_core::timeline::{FrameRate, MarkerId, Sequence, SequenceId, Tick, TICKS_PER_SECOND};
+use photonic_core::timeline::{
+    FrameRate, MarkerGlyph, MarkerId, Sequence, SequenceId, Tick, TICKS_PER_SECOND,
+};
 
 /// Format a tick as `HH:MM:SS:FF` timecode at `fr` (04 §3.2).
 pub(crate) fn timecode(t: Tick, fr: FrameRate) -> String {
@@ -50,6 +52,62 @@ const MARKER_R: f32 = 4.0;
 /// Marker pointer hit-test radius — a bit larger than the rendered radius so
 /// grabbing a marker doesn't require pixel-perfect aim.
 const MARKER_HIT_PX: f32 = 6.0;
+
+/// Screen-space outline for a [`MarkerGlyph`] centred on `(x, cy)` (K-A2).
+/// `Bar` and `Circle` are painted directly by [`paint_marker_glyph`]; every
+/// other glyph is a convex polygon.
+pub(crate) fn marker_glyph_points(glyph: MarkerGlyph, x: f32, cy: f32, r: f32) -> Vec<egui::Pos2> {
+    match glyph {
+        MarkerGlyph::Square => vec![
+            egui::pos2(x - r * 0.8, cy - r * 0.8),
+            egui::pos2(x + r * 0.8, cy - r * 0.8),
+            egui::pos2(x + r * 0.8, cy + r * 0.8),
+            egui::pos2(x - r * 0.8, cy + r * 0.8),
+        ],
+        MarkerGlyph::Triangle => vec![
+            egui::pos2(x, cy - r),
+            egui::pos2(x + r, cy + r * 0.7),
+            egui::pos2(x - r, cy + r * 0.7),
+        ],
+        MarkerGlyph::Flag => vec![
+            egui::pos2(x - r * 0.5, cy - r),
+            egui::pos2(x + r, cy - r * 0.4),
+            egui::pos2(x - r * 0.5, cy + r * 0.2),
+            egui::pos2(x - r * 0.5, cy + r),
+        ],
+        MarkerGlyph::Bar => vec![
+            egui::pos2(x - r * 0.4, cy - r),
+            egui::pos2(x + r * 0.4, cy - r),
+            egui::pos2(x + r * 0.4, cy + r),
+            egui::pos2(x - r * 0.4, cy + r),
+        ],
+        // `Circle` has no polygon form; the diamond points are its bounding
+        // rhombus and are never used for it (see `paint_marker_glyph`).
+        MarkerGlyph::Diamond | MarkerGlyph::Circle => marker_diamond(x, cy, r),
+    }
+}
+
+/// Paint one marker glyph. Split from [`marker_glyph_points`] so the polygon
+/// geometry stays unit-testable without a painter.
+fn paint_marker_glyph(
+    painter: &egui::Painter,
+    glyph: MarkerGlyph,
+    x: f32,
+    cy: f32,
+    r: f32,
+    fill: egui::Color32,
+    stroke: egui::Stroke,
+) {
+    if glyph == MarkerGlyph::Circle {
+        painter.circle(egui::pos2(x, cy), r * 0.85, fill, stroke);
+        return;
+    }
+    painter.add(egui::Shape::convex_polygon(
+        marker_glyph_points(glyph, x, cy, r),
+        fill,
+        stroke,
+    ));
+}
 
 fn marker_diamond(x: f32, cy: f32, r: f32) -> Vec<egui::Pos2> {
     vec![
@@ -149,15 +207,29 @@ pub(crate) fn draw_ruler(
         }
     }
 
-    // Marker diamonds.
+    // Marker glyphs + range bars (K-A2). A marker's own `color` wins; failing
+    // that its category's colour; failing that the accent. A marker naming a
+    // category the project does not have renders NEUTRAL and is flagged with a
+    // hollow outline — 35 §1.3's "never silently remapped" rule, drawn.
+    let categories = doc
+        .timeline
+        .as_ref()
+        .map(|p| p.marker_categories.clone())
+        .unwrap_or_default();
     let cy = ruler_rect.top() + 5.0;
     for m in &seq.markers {
         let x = view.tick_to_x(m.at, lane_left);
-        if x < ruler_rect.left() || x > ruler_rect.right() {
+        let x_end = view.tick_to_x(m.end(), lane_left);
+        if x_end < ruler_rect.left() || x > ruler_rect.right() {
             continue;
         }
+        let cat = m
+            .category
+            .and_then(|id| categories.iter().find(|c| c.id == id));
+        let dangling = m.category.is_some() && cat.is_none();
         let col = m
             .color
+            .or(cat.map(|c| c.color))
             .map(|c| {
                 egui::Color32::from_rgb(
                     (c.r * 255.0) as u8,
@@ -165,12 +237,41 @@ pub(crate) fn draw_ruler(
                     (c.b * 255.0) as u8,
                 )
             })
-            .unwrap_or(accent);
-        painter.add(egui::Shape::convex_polygon(
-            marker_diamond(x, cy, MARKER_R),
-            col,
-            egui::Stroke::NONE,
-        ));
+            .unwrap_or(if dangling { tick_col } else { accent });
+        // A ranged marker (duration > 0) draws its span, so the K-F2
+        // export-per-marker unit is visible rather than implied.
+        if m.is_range() && x_end > x + 1.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x, cy - 1.5),
+                    egui::pos2(x_end.min(ruler_rect.right()), cy + 1.5),
+                ),
+                1.0,
+                col.gamma_multiply(0.55),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(x_end.min(ruler_rect.right()), cy - MARKER_R),
+                    egui::pos2(x_end.min(ruler_rect.right()), cy + MARKER_R),
+                ],
+                egui::Stroke::new(1.0, col),
+            );
+        }
+        if x < ruler_rect.left() || x > ruler_rect.right() {
+            continue;
+        }
+        let glyph = cat.map(|c| c.glyph).unwrap_or(MarkerGlyph::Diamond);
+        let stroke = if dangling {
+            egui::Stroke::new(1.0, col)
+        } else {
+            egui::Stroke::NONE
+        };
+        let fill = if dangling {
+            egui::Color32::TRANSPARENT
+        } else {
+            col
+        };
+        paint_marker_glyph(&painter, glyph, x, cy, MARKER_R, fill, stroke);
     }
 
     // ── Interaction ──────────────────────────────────────────────────────
@@ -440,5 +541,49 @@ mod tests {
         v.pixels_per_tick /= 100.0;
         let zoomed_out = label_interval(&v, fr, 72.0);
         assert!(zoomed_out.0 >= zoomed_in.0);
+    }
+
+    /// K-A2: each [`MarkerGlyph`] must actually draw differently, and stay
+    /// inside the marker radius so the ruler strip's 24px height and the
+    /// `MARKER_HIT_PX` hit test still make sense. A copy-paste that gave two
+    /// categories the same shape would make the glyph field decorative.
+    #[test]
+    fn every_marker_glyph_is_distinct_and_bounded() {
+        use photonic_core::timeline::MarkerGlyph as G;
+        let (x, cy, r) = (100.0_f32, 10.0_f32, 4.0_f32);
+        let all = [
+            G::Diamond,
+            G::Circle,
+            G::Square,
+            G::Triangle,
+            G::Flag,
+            G::Bar,
+        ];
+        let shapes: Vec<Vec<egui::Pos2>> = all
+            .iter()
+            .map(|g| marker_glyph_points(*g, x, cy, r))
+            .collect();
+        for (i, a) in shapes.iter().enumerate() {
+            assert!(a.len() >= 3, "{:?} is not a polygon", all[i]);
+            for p in a {
+                assert!(
+                    (p.x - x).abs() <= r + 0.01 && (p.y - cy).abs() <= r + 0.01,
+                    "{:?} escapes the marker radius at {p:?}",
+                    all[i]
+                );
+            }
+            for (j, b) in shapes.iter().enumerate() {
+                // Circle shares Diamond's polygon by design (it is painted as a
+                // real circle, never as these points) — every other pair must
+                // differ.
+                let circle_pair = matches!(
+                    (all[i], all[j]),
+                    (G::Diamond, G::Circle) | (G::Circle, G::Diamond)
+                );
+                if i != j && !circle_pair {
+                    assert_ne!(a, b, "{:?} and {:?} paint the same shape", all[i], all[j]);
+                }
+            }
+        }
     }
 }

@@ -2210,6 +2210,68 @@ pub(crate) async fn dispatch_tool_inner(
             ))
         }
 
+        // Marker depth: editing, clip scope, categories (26 K-A2)
+        "set_marker" => {
+            let a: SetMarkerArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::set_marker(state, a).await,
+            ))
+        }
+        "add_clip_marker" => {
+            let a: AddClipMarkerArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::add_clip_marker(state, a).await,
+            ))
+        }
+        "remove_clip_marker" => {
+            let a: RemoveClipMarkerArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::remove_clip_marker(state, a).await,
+            ))
+        }
+        "list_clip_markers" => {
+            let a: ListClipMarkersArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::list_clip_markers(state, a).await,
+            ))
+        }
+        "list_marker_categories" => {
+            let a: ListMarkerCategoriesArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::list_marker_categories(state, a).await,
+            ))
+        }
+        "add_marker_category" => {
+            let a: AddMarkerCategoryArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::add_marker_category(state, a).await,
+            ))
+        }
+        "seed_marker_categories" => {
+            let a: SeedMarkerCategoriesArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::seed_marker_categories(state, a).await,
+            ))
+        }
+        "update_marker_category" => {
+            let a: UpdateMarkerCategoryArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::update_marker_category(state, a).await,
+            ))
+        }
+        "remove_marker_category" => {
+            let a: RemoveMarkerCategoryArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::remove_marker_category(state, a).await,
+            ))
+        }
+
         // Track (10 §3.3)
         "add_track" => {
             let a: AddTrackArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -2447,6 +2509,57 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::paste_attributes(state, a).await,
             ))
         }
+
+        // Effect presets, custom stacks and favourites (26 §10 K-B4). The
+        // library is a config file, so only `effect_preset_apply` is
+        // `mutating` — the rest never produce a document edit or an undo step.
+        "effect_preset_list" => {
+            let a: EffectPresetListArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::video::effect_preset_list(state, a).await,
+            ))
+        }
+        "effect_preset_save" => {
+            let a: EffectPresetSaveArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::effect_preset_save(state, a).await,
+            ))
+        }
+        "effect_preset_apply" => {
+            let a: EffectPresetApplyArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::effect_preset_apply(state, a).await,
+            ))
+        }
+        "effect_preset_delete" => {
+            let a: EffectPresetDeleteArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::effect_preset_delete(state, a).await,
+            ))
+        }
+        "effect_preset_rename" => {
+            let a: EffectPresetRenameArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::effect_preset_rename(state, a).await,
+            ))
+        }
+        "effect_favourite_list" => {
+            let a: EffectFavouriteListArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::video::effect_favourite_list(state, a).await,
+            ))
+        }
+        "effect_favourite_set" => {
+            let a: EffectFavouriteSetArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::effect_favourite_set(state, a).await,
+            ))
+        }
         "list_effect_kinds" => {
             let a: ListEffectKindsArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(
@@ -2493,6 +2606,25 @@ pub(crate) async fn dispatch_tool_inner(
             Ok(ToolOutput::mutating(
                 handlers::video::relink_media(state, a).await,
             ))
+        }
+        "find_offline_media" => {
+            let a: FindOfflineMediaArgs = serde_json::from_value(args).unwrap_or_default();
+            Ok(ToolOutput::readonly(
+                handlers::video::find_offline_media(state, a).await,
+            ))
+        }
+        "relink_media_batch" => {
+            let a: RelinkMediaBatchArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            // A dry run mutates nothing, so it must not schedule a checkpoint
+            // (same rule `effect_stack`'s list op follows).
+            let readonly = a.dry_run.unwrap_or(false);
+            let res = handlers::video::relink_media_batch(state, a).await;
+            Ok(if readonly {
+                ToolOutput::readonly(res)
+            } else {
+                ToolOutput::mutating(res)
+            })
         }
         "list_media" => {
             let a: ListMediaArgs = serde_json::from_value(args).unwrap_or_default();

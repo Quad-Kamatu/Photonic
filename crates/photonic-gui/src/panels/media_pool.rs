@@ -20,6 +20,9 @@
 use super::{PanelAction, PropPanelCtx};
 use egui::Ui;
 use egui_phosphor::regular as ph;
+use photonic_core::timeline::ops::{
+    RelinkCandidate, RelinkHashCheck, RelinkMatchKind, RelinkPlanEntry,
+};
 use photonic_core::timeline::{
     AssetId, AssetKind, AssetSource, BinId, MediaAsset, MediaBin, MediaPool, ProxyRef, ProxyStatus,
     Tick, TICKS_PER_SECOND,
@@ -66,6 +69,58 @@ pub struct MediaPoolUi {
     pub waveform_ready: std::collections::HashSet<String>,
     /// Loaded egui textures for poster paths (path string → TextureHandle).
     poster_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    /// K-C6 relink: in-flight folder scan (worker → panel), the plan awaiting
+    /// the user's confirmation, and the consent flag for byte changes.
+    relink_rx: Option<mpsc::Receiver<RelinkScanResult>>,
+    pub relink_scanning: bool,
+    pub relink_preview: Option<RelinkPreview>,
+    pub relink_accept_mismatch: bool,
+    /// Cached "how many assets are offline" answer. Recomputed at most every
+    /// [`OFFLINE_RECHECK`] because the predicate is a `stat` per asset and the
+    /// panel redraws every frame — on a remounting network volume that would be
+    /// thousands of syscalls a second.
+    offline_count: Option<(std::time::Instant, usize)>,
+}
+
+/// How stale the offline-asset count may get before the panel re-`stat`s.
+const OFFLINE_RECHECK: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// A completed background scan of a relink search root.
+struct RelinkScanResult {
+    root: PathBuf,
+    candidates: Vec<RelinkCandidate>,
+    truncated: bool,
+}
+
+/// The plan the user is being asked to confirm (K-C6). Nothing is committed
+/// until they press the button — "never relink silently on hash match alone"
+/// (26 §K-C6), and equally never on a *name* match alone.
+pub struct RelinkPreview {
+    pub root: PathBuf,
+    pub entries: Vec<RelinkPlanEntry>,
+    /// Offline assets nothing in the scan accounted for.
+    pub unmatched: Vec<(AssetId, String)>,
+    pub scanned: usize,
+    /// The scan hit its depth/count cap — "no match" may just mean "not looked
+    /// at", and the UI must not imply otherwise.
+    pub truncated: bool,
+}
+
+impl RelinkPreview {
+    pub fn mismatch_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.hash == RelinkHashCheck::Mismatch)
+            .count()
+    }
+
+    /// Entries that would actually commit under the current consent flag.
+    pub fn committable(&self, accept_mismatch: bool) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| accept_mismatch || e.hash != RelinkHashCheck::Mismatch)
+            .count()
+    }
 }
 
 /// Completed background proxy job, applied by the app through an undoable
@@ -117,11 +172,161 @@ impl Default for MediaPoolUi {
             keyframe_ready: std::collections::HashSet::new(),
             waveform_ready: std::collections::HashSet::new(),
             poster_textures: std::collections::HashMap::new(),
+            relink_rx: None,
+            relink_scanning: false,
+            relink_preview: None,
+            relink_accept_mismatch: false,
+            offline_count: None,
         }
     }
 }
 
+// ── K-C6: relink scan (GUI side) ─────────────────────────────────────────────
+//
+// The dir walk and the hash-algorithm dispatch below are deliberate near-twins
+// of `photonic-mcp`'s `scan_relink_candidates`/`hash_like`. Their eventual
+// single home is `photonic-video/src/media/relink.rs` — the file 02's crate
+// layout already names for exactly this — but that crate is owned elsewhere
+// this phase, so the duplication is recorded here rather than smuggled in.
+
+/// Files under `root` that could stand in for an offline asset.
+///
+/// Depth- and count-capped (a user who picks `/` gets an answer, not a
+/// traversal) and does not follow directory symlinks. `truncated` is returned so
+/// the panel can say "not looked at" instead of implying "not there".
+fn scan_relink_candidates(
+    root: &Path,
+    recursive: bool,
+    hash_files: bool,
+) -> (Vec<RelinkCandidate>, bool) {
+    const MAX_DEPTH: usize = 8;
+    const MAX_FILES: usize = 20_000;
+    const MAX_HASHED: usize = 4_096;
+
+    let mut out: Vec<RelinkCandidate> = Vec::new();
+    let mut truncated = false;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_FILES {
+                truncated = true;
+                break;
+            }
+            // `file_type()` does not follow symlinks; `metadata()` would, and a
+            // self-referential directory link would then never terminate.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if recursive && depth < MAX_DEPTH {
+                    stack.push((entry.path(), depth + 1));
+                } else if recursive {
+                    truncated = true;
+                }
+            } else if ft.is_file() {
+                out.push(RelinkCandidate {
+                    path: entry.path(),
+                    content_hash: None,
+                });
+            }
+        }
+        if out.len() >= MAX_FILES {
+            truncated = true;
+            break;
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    if hash_files && out.len() <= MAX_HASHED {
+        for c in out.iter_mut() {
+            c.content_hash = photonic_video::media::probe::content_hash(&c.path).ok();
+        }
+    }
+    (out, truncated)
+}
+
+/// Hash `path` with the algorithm that produced `stored`, or `None` when that
+/// algorithm is not reproducible here.
+///
+/// Returning `None` yields `RelinkHashCheck::Unknown`, which is the honest
+/// answer — reporting a *mismatch* we did not measure would train the user to
+/// tick "relink anyway" past the one guard that catches a wrong-take relink.
+/// (`siphash64:` is the retired P2 MCP stopgap; this crate cannot recompute it.)
+fn hash_like(stored: Option<&str>, path: &Path) -> Option<String> {
+    match stored {
+        None => photonic_video::media::probe::content_hash(path).ok(),
+        Some(s) if s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit()) => {
+            photonic_video::media::probe::content_hash(path).ok()
+        }
+        Some(_) => None,
+    }
+}
+
 impl MediaPoolUi {
+    /// Start a background scan of `root` for relink candidates (K-C6). The
+    /// result is drained by [`draw_media_pool`] and turned into a preview; the
+    /// user confirms before anything is committed.
+    pub fn spawn_relink_scan(&mut self, root: PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        self.relink_rx = Some(rx);
+        self.relink_scanning = true;
+        self.relink_preview = None;
+        self.relink_accept_mismatch = false;
+        std::thread::spawn(move || {
+            let (candidates, truncated) = scan_relink_candidates(&root, true, true);
+            let _ = tx.send(RelinkScanResult {
+                root,
+                candidates,
+                truncated,
+            });
+        });
+    }
+
+    /// Drain a finished scan and plan the relink against `project`.
+    fn poll_relink_scan(&mut self, project: &photonic_core::timeline::TimelineProject) {
+        let Some(rx) = self.relink_rx.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.relink_rx = None;
+        self.relink_scanning = false;
+        let offline = photonic_core::timeline::ops::offline_assets(project, |p| p.exists());
+        let plan = photonic_core::timeline::ops::plan_relink(
+            project,
+            &offline,
+            &result.candidates,
+            hash_like,
+        );
+        let unmatched = plan
+            .unmatched
+            .iter()
+            .filter_map(|id| project.media.assets.get(id))
+            .map(|a| (a.id, asset_display_name(a)))
+            .collect();
+        self.relink_preview = Some(RelinkPreview {
+            root: result.root,
+            entries: plan.entries,
+            unmatched,
+            scanned: result.candidates.len(),
+            truncated: result.truncated,
+        });
+        // The pool's online/offline picture is about to change.
+        self.offline_count = None;
+    }
+
+    /// Offline asset count, re-`stat`ed at most every [`OFFLINE_RECHECK`].
+    fn offline_count(&mut self, pool: &MediaPool) -> usize {
+        let fresh = self
+            .offline_count
+            .is_some_and(|(at, _)| at.elapsed() < OFFLINE_RECHECK);
+        if !fresh {
+            let n = pool.assets.values().filter(|a| asset_is_offline(a)).count();
+            self.offline_count = Some((std::time::Instant::now(), n));
+        }
+        self.offline_count.map(|(_, n)| n).unwrap_or(0)
+    }
     /// L0-first import (24 §2): returns stubs for immediate `AddAsset`, then
     /// runs hash → probe → poster → keyframe index → waveform on a worker.
     pub fn spawn_import(
@@ -776,6 +981,10 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         });
     }
 
+    // ── K-C6: offline media + batch relink ──────────────────────────────────
+    ctx.media_ui.poll_relink_scan(project);
+    draw_relink_section(ui, ctx, project);
+
     ui.separator();
 
     // ── Bins tree (flat with parent refs → indented tree) ───────────────────
@@ -878,6 +1087,212 @@ pub(crate) fn draw_media_pool(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 }
             }
         });
+}
+
+/// K-C6: the offline row, the folder-scan trigger, and the preview the user
+/// confirms before anything is rebound.
+///
+/// Nothing here mutates the document. The confirm button hands a `Vec<
+/// TimelineCmd>` up as [`PanelAction::ClipEditBatch`] — the panel layer's
+/// generic "N commands, ONE undo step" carrier (`app/panel_actions.rs` wraps it
+/// in `Command::Batch` and calls `execute_discrete`), so a 200-clip folder move
+/// is one undo (DoD 4).
+fn draw_relink_section(
+    ui: &mut Ui,
+    ctx: &mut PropPanelCtx,
+    project: &photonic_core::timeline::TimelineProject,
+) {
+    let offline_n = ctx.media_ui.offline_count(&project.media);
+    if offline_n == 0 && ctx.media_ui.relink_preview.is_none() && !ctx.media_ui.relink_scanning {
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{} {offline_n} offline", ph::LINK_BREAK))
+                .strong()
+                .color(egui::Color32::from_rgb(235, 100, 90)),
+        )
+        .on_hover_text(
+            "Assets whose file is not where the project says it is — a moved \
+             folder, a renamed drive, or an unmounted volume.",
+        );
+        if ui
+            .add_enabled(
+                offline_n > 0 && !ctx.media_ui.relink_scanning,
+                egui::Button::new("Relink offline…"),
+            )
+            .on_hover_text(
+                "Pick the folder the media moved to. Every offline asset it can \
+                 account for is matched (same bytes, then same name) and shown \
+                 for confirmation before anything is rebound.",
+            )
+            .clicked()
+        {
+            if let Some(dir) = rfd::FileDialog::new()
+                .set_title("Relink: choose the folder the media moved to")
+                .pick_folder()
+            {
+                ctx.media_ui.spawn_relink_scan(dir);
+            }
+        }
+        if ctx.media_ui.relink_scanning {
+            ui.add(egui::Spinner::new().size(14.0));
+            ui.label(egui::RichText::new("Scanning…").weak().small());
+        }
+    });
+
+    // Taken out (and put back below unless the user resolved it) so the closure
+    // can own the `ctx` borrow it needs to raise a `PanelAction`.
+    let Some(preview) = ctx.media_ui.relink_preview.take() else {
+        return;
+    };
+    let mut keep = true;
+    let mut accept = ctx.media_ui.relink_accept_mismatch;
+    let mismatches = preview.mismatch_count();
+    let committable = preview.committable(accept);
+    let total = preview.entries.len();
+    let unmatched = preview.unmatched.len();
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "Relink preview — {} ({} file(s) scanned)",
+                preview.root.display(),
+                preview.scanned
+            ))
+            .strong(),
+        );
+        if preview.truncated {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} Scan hit its depth/size cap — an unmatched asset may just \
+                     not have been looked at.",
+                    ph::WARNING
+                ))
+                .small()
+                .color(egui::Color32::from_rgb(235, 170, 80)),
+            );
+        }
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .auto_shrink([false, true])
+            .id_salt("relink_preview_rows")
+            .show(ui, |ui| {
+                for e in &preview.entries {
+                    let name = project
+                        .media
+                        .assets
+                        .get(&e.asset)
+                        .map(asset_display_name)
+                        .unwrap_or_else(|| "(gone)".to_string());
+                    ui.horizontal(|ui| {
+                        let (glyph, color, tip) = match e.hash {
+                            RelinkHashCheck::Match => (
+                                ph::SEAL_CHECK,
+                                egui::Color32::from_rgb(120, 200, 140),
+                                "Same bytes as the original — verified by content hash.",
+                            ),
+                            RelinkHashCheck::Mismatch => (
+                                ph::WARNING,
+                                egui::Color32::from_rgb(235, 100, 90),
+                                "DIFFERENT BYTES. This file is not the take the project \
+                                 recorded — relinking to it rebinds every clip to other \
+                                 media, and nothing downstream will tell you.",
+                            ),
+                            RelinkHashCheck::Unknown => (
+                                ph::MAGNIFYING_GLASS,
+                                egui::Color32::from_rgb(180, 180, 190),
+                                "Unverified: this asset has no comparable content hash, \
+                                 so the bytes could not be checked.",
+                            ),
+                        };
+                        ui.label(egui::RichText::new(glyph).color(color))
+                            .on_hover_text(tip);
+                        ui.label(egui::RichText::new(&name).small().strong());
+                        ui.label(egui::RichText::new(ph::ARROW_RIGHT).weak().small());
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(e.new_path.display().to_string()).small(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(format!(
+                            "{}\nmatched by: {}{}",
+                            e.new_path.display(),
+                            match e.matched_by {
+                                RelinkMatchKind::ContentHash => "content hash (same bytes)",
+                                RelinkMatchKind::ExactName => "file name",
+                                RelinkMatchKind::CaseInsensitiveName => "file name, ignoring case",
+                            },
+                            if e.ambiguous {
+                                "\nseveral files matched this rule — the first was chosen"
+                            } else {
+                                ""
+                            }
+                        ));
+                    });
+                }
+                for (_, name) in &preview.unmatched {
+                    ui.label(
+                        egui::RichText::new(format!("{} {name} — no candidate found", ph::X))
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+
+        if mismatches > 0 {
+            ui.checkbox(
+                &mut accept,
+                format!("Relink {mismatches} asset(s) whose bytes differ"),
+            )
+            .on_hover_text(
+                "Those files are not the takes this project recorded. Accepting \
+                 records the new content hash and clears the stale probe, so the \
+                 pool stops claiming metadata for media that is no longer there.",
+            );
+        }
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    committable > 0,
+                    egui::Button::new(format!("Relink {committable} asset(s)")),
+                )
+                .on_hover_text("Commits as ONE undo step")
+                .clicked()
+            {
+                let cmds = photonic_core::timeline::ops::relink_plan_commands(
+                    project,
+                    &preview.entries,
+                    accept,
+                );
+                if !cmds.is_empty() {
+                    ctx.action = Some(PanelAction::ClipEditBatch(cmds));
+                }
+                keep = false;
+            }
+            if ui.button("Cancel").clicked() {
+                keep = false;
+            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "{total} matched · {mismatches} byte change(s) · {unmatched} unmatched"
+                ))
+                .weak()
+                .small(),
+            );
+        });
+    });
+
+    ctx.media_ui.relink_accept_mismatch = accept;
+    if keep {
+        ctx.media_ui.relink_preview = Some(preview);
+    } else {
+        // Committed or dismissed: the online/offline picture just changed.
+        ctx.media_ui.offline_count = None;
+    }
 }
 
 fn draw_bin_tree(
@@ -1354,5 +1769,158 @@ mod tests {
         ids.sort_by_key(|i| i.0);
         ids.dedup();
         assert_eq!(ids.len(), 3);
+    }
+
+    // ── K-C6 relink flow ────────────────────────────────────────────────────
+
+    fn kc6_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "photonic_gui_kc6_{tag}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The scan is deterministic, recursive by request, and hashes what it finds
+    /// so a *renamed* file can still be matched by content.
+    #[test]
+    fn relink_scan_is_sorted_recursive_and_hashed() {
+        let dir = kc6_dir("scan");
+        std::fs::write(dir.join("b.mp4"), b"bee").unwrap();
+        std::fs::write(dir.join("a.mp4"), b"ay").unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("c.mp4"), b"see").unwrap();
+
+        let (flat, _) = scan_relink_candidates(&dir, false, false);
+        assert_eq!(flat.len(), 2, "non-recursive must not descend");
+        assert!(flat.iter().all(|c| c.content_hash.is_none()));
+
+        let (deep, truncated) = scan_relink_candidates(&dir, true, true);
+        assert!(!truncated);
+        let names: Vec<String> = deep
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["a.mp4", "b.mp4", "c.mp4"],
+            "sorted by full path"
+        );
+        assert!(
+            deep.iter().all(|c| c.content_hash.is_some()),
+            "a hashed scan is what makes by-content matching possible"
+        );
+        // Distinct bytes → distinct hashes (a scan that hashed everything to the
+        // same value would match everything to everything).
+        let mut hashes: Vec<&String> = deep
+            .iter()
+            .filter_map(|c| c.content_hash.as_ref())
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The panel must never *claim* a byte mismatch it cannot measure: the
+    /// retired MCP `siphash64:` identity is not reproducible here, so it reads
+    /// Unknown, while an xxh3 identity is recomputed and compared for real.
+    #[test]
+    fn hash_like_reports_unknown_rather_than_a_false_mismatch() {
+        let dir = kc6_dir("hash");
+        let file = dir.join("a.mp4");
+        std::fs::write(&file, b"some bytes").unwrap();
+        let real = photonic_video::media::probe::content_hash(&file).unwrap();
+
+        assert_eq!(
+            hash_like(Some(&real), &file).as_deref(),
+            Some(real.as_str())
+        );
+        assert_eq!(hash_like(None, &file).as_deref(), Some(real.as_str()));
+        assert_eq!(
+            hash_like(Some("siphash64:0011223344556677"), &file),
+            None,
+            "an algorithm this crate cannot compute must not be reported as a mismatch"
+        );
+        // Sensitivity: a genuinely different file does produce a different hash,
+        // so the `Some(..)` arms above are not trivially equal.
+        let other = dir.join("b.mp4");
+        std::fs::write(&other, b"other bytes entirely").unwrap();
+        assert_ne!(
+            hash_like(Some(&real), &other).as_deref(),
+            Some(real.as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The confirm button's count and the commands it produces agree: a byte
+    /// change is excluded until the user opts in.
+    #[test]
+    fn preview_commits_only_verified_entries_until_mismatch_is_accepted() {
+        use photonic_core::timeline::ops;
+        use photonic_core::timeline::TimelineProject;
+
+        let mut project = TimelineProject::new();
+        let mut good = MediaAsset::from_file(AssetKind::Video, "/old/good.mp4");
+        good.content_hash = Some("aaaaaaaaaaaaaaaa".into());
+        let mut bad = MediaAsset::from_file(AssetKind::Video, "/old/bad.mp4");
+        bad.content_hash = Some("bbbbbbbbbbbbbbbb".into());
+        let (good_id, bad_id) = (good.id, bad.id);
+        project.media.insert(good);
+        project.media.insert(bad);
+
+        // Fake disk: good.mp4 kept its bytes, bad.mp4 is a different take.
+        let plan = ops::plan_relink(
+            &project,
+            &[good_id, bad_id],
+            &[
+                RelinkCandidate {
+                    path: PathBuf::from("/new/good.mp4"),
+                    content_hash: Some("aaaaaaaaaaaaaaaa".into()),
+                },
+                RelinkCandidate {
+                    path: PathBuf::from("/new/bad.mp4"),
+                    content_hash: Some("cccccccccccccccc".into()),
+                },
+            ],
+            |stored, path| {
+                let _ = stored;
+                match path.file_name().unwrap().to_string_lossy().as_ref() {
+                    "good.mp4" => Some("aaaaaaaaaaaaaaaa".into()),
+                    _ => Some("cccccccccccccccc".into()),
+                }
+            },
+        );
+        let preview = RelinkPreview {
+            root: PathBuf::from("/new"),
+            entries: plan.entries,
+            unmatched: Vec::new(),
+            scanned: 2,
+            truncated: false,
+        };
+        assert_eq!(preview.entries.len(), 2);
+        assert_eq!(preview.mismatch_count(), 1);
+        assert_eq!(
+            preview.committable(false),
+            1,
+            "button label must exclude it"
+        );
+        assert_eq!(preview.committable(true), 2);
+
+        // …and the commands the button builds match the label.
+        let cmds = ops::relink_plan_commands(&project, &preview.entries, false);
+        assert_eq!(cmds.len(), 1);
+        let accepted = ops::relink_plan_commands(&project, &preview.entries, true);
+        assert_eq!(
+            accepted.len(),
+            3,
+            "two relinks plus the re-identification of the changed asset"
+        );
     }
 }

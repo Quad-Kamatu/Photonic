@@ -483,6 +483,28 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Add Marker at Playhead",
         default: Some(KeyBinding::plain(Key::M)),
     },
+    // K-A2 marker depth. `video.add_range_marker` is the keyboard route to a
+    // RANGED marker — the unit "Export each ranged marker" (K-F2) fans out
+    // over, and previously uncreatable from anywhere in the app.
+    // Marker navigation is deliberately distinct from `video.{prev,next}_snap`:
+    // snap points also include clip edges, keyframes and the zone, so walking a
+    // review pass marker-by-marker is not the same gesture. No default binding
+    // — every plain and modified arrow key in video mode is already taken.
+    CommandDef {
+        id: "video.add_range_marker",
+        label: "Add Ranged Marker from Work Range",
+        default: None,
+    },
+    CommandDef {
+        id: "video.prev_marker",
+        label: "Go to Previous Marker",
+        default: None,
+    },
+    CommandDef {
+        id: "video.next_marker",
+        label: "Go to Next Marker",
+        default: None,
+    },
     // 3/4-point editing (spec 16, Premiere defaults). Insert/Overwrite lay down
     // the armed source at the playhead; Lift/Extract clear the timeline in/out.
     // Razor is a blade-mode toggle. Bound here + dispatched in `command_center`;

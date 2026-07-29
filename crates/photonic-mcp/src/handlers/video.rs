@@ -35,10 +35,10 @@ use crate::server::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use photonic_core::history::Command;
 use photonic_core::timeline::{
-    ops, AnimTarget, AssetId, AssetKind, Clip, ClipEffect, ClipId, ClipSource, ClipTiming,
-    EditError, FormatOp, FrameRate, Keyframe, Marker, MarkerId, PropPath, ProxyRef, ProxyStatus,
-    Ratio, Sequence, SequenceId, SpeedMap, Tick, TimelineCmd, TimelineProject, Track, TrackId,
-    TrackSettings, Transition, TICKS_PER_SECOND,
+    effect_preset, ops, AnimTarget, AssetId, AssetKind, Clip, ClipEffect, ClipId, ClipSource,
+    ClipTiming, EditError, FormatOp, FrameRate, Keyframe, Marker, MarkerCategory, MarkerId,
+    PropPath, ProxyRef, ProxyStatus, Ratio, Sequence, SequenceId, SpeedMap, Tick, TimelineCmd,
+    TimelineProject, Track, TrackId, TrackSettings, Transition, TICKS_PER_SECOND,
 };
 use photonic_core::Color;
 use photonic_video::export::convert as export_convert;
@@ -50,7 +50,7 @@ use photonic_video::media::ffmpeg_locate;
 use photonic_video::media::probe as video_probe;
 use photonic_video::media::proxy as video_proxy;
 use photonic_video::{EngineCmd, ProxyMode};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -542,8 +542,25 @@ pub async fn add_marker(state: &AppState, args: AddMarkerArgs) -> ToolResult {
         },
         None => None,
     };
+    let duration = match resolve_marker_duration(
+        at,
+        args.duration_ticks,
+        args.duration_seconds,
+        args.end_tc.as_deref(),
+        Some(seq.frame_rate),
+    ) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    if let Some(cat) = args.category_id {
+        if project.marker_category(cat).is_none() {
+            return ToolResult::error(format!("marker category {cat} not found"));
+        }
+    }
     let mut marker = Marker::new(at, args.name.unwrap_or_default());
     marker.color = color;
+    marker.duration = duration;
+    marker.category = args.category_id;
     if let Some(note) = args.note {
         marker.note = note;
     }
@@ -552,6 +569,400 @@ pub async fn add_marker(state: &AppState, args: AddMarkerArgs) -> ToolResult {
         Ok(cmd) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
             ToolResult::text("Added marker").with_data(json!({ "marker_id": marker_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// A marker's `duration` from any of the three spellings: an explicit tick or
+/// second count, or an `end_tc` the duration is derived from (`end - at`).
+/// Missing/none = `0`, i.e. a point marker (35 §1: `duration` is never
+/// `Option`). A negative result is refused rather than silently clamped —
+/// `end_tc` before `at` is a caller mistake, not an intent to make a point
+/// marker.
+fn resolve_marker_duration(
+    at: Tick,
+    ticks: Option<i64>,
+    seconds: Option<f64>,
+    end_tc: Option<&str>,
+    frame_rate: Option<FrameRate>,
+) -> Result<Tick, ToolResult> {
+    let d = if let Some(t) = ticks {
+        Tick(t)
+    } else if let Some(s) = seconds {
+        Tick((s * TICKS_PER_SECOND as f64).round() as i64)
+    } else if let Some(tc) = end_tc {
+        let end = resolve_tick(None, Some(tc), None, frame_rate)?;
+        end - at
+    } else {
+        Tick::ZERO
+    };
+    if d.0 < 0 {
+        return Err(err_code(
+            "TickOutOfRange",
+            "marker duration must be >= 0 (0 = point marker)",
+        ));
+    }
+    Ok(d)
+}
+
+/// Apply the optional edit fields shared by `set_marker` / `set_clip_marker`
+/// onto a cloned marker. Returns the error `ToolResult` for a bad value.
+fn apply_marker_edits(
+    m: &mut Marker,
+    args: &SetMarkerArgs,
+    frame_rate: Option<FrameRate>,
+) -> Result<(), ToolResult> {
+    if args.at_ticks.is_some() || args.at_tc.is_some() || args.at_seconds.is_some() {
+        m.at = resolve_tick(
+            args.at_ticks,
+            args.at_tc.as_deref(),
+            args.at_seconds,
+            frame_rate,
+        )?;
+    }
+    if args.duration_ticks.is_some() || args.duration_seconds.is_some() || args.end_tc.is_some() {
+        m.duration = resolve_marker_duration(
+            m.at,
+            args.duration_ticks,
+            args.duration_seconds,
+            args.end_tc.as_deref(),
+            frame_rate,
+        )?;
+    }
+    if let Some(name) = args.name.clone() {
+        m.name = name;
+    }
+    if let Some(note) = args.note.clone() {
+        m.note = note;
+    }
+    if let Some(hex) = args.color.as_deref() {
+        // "" clears the per-marker override so the category colour shows again.
+        m.color = if hex.is_empty() {
+            None
+        } else {
+            match Color::from_hex(hex) {
+                Some(c) => Some(c),
+                None => {
+                    return Err(ToolResult::error(format!(
+                        "invalid color {hex:?} — expected #rrggbb or #rrggbbaa"
+                    )))
+                }
+            }
+        };
+    }
+    if args.clear_category {
+        m.category = None;
+    } else if let Some(cat) = args.category_id {
+        m.category = Some(cat);
+    }
+    Ok(())
+}
+
+/// Universal marker editor (26 K-A2). Without this there is no way to give a
+/// marker a duration, and `export_per_marker` (K-F2) fans out over exactly the
+/// ranged markers nothing could create.
+pub async fn set_marker(state: &AppState, args: SetMarkerArgs) -> ToolResult {
+    tracing::debug!("tool: set_marker {}", args.marker_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if let Some(cat) = args.category_id {
+        if !args.clear_category && project.marker_category(cat).is_none() {
+            return ToolResult::error(format!("marker category {cat} not found"));
+        }
+    }
+    let cmd = match args.clip_id {
+        Some(clip_id) => {
+            let Some((seq_id, track_id)) = locate_clip(project, clip_id) else {
+                return ToolResult::error(format!("clip {clip_id} not found"));
+            };
+            let Some(clip) = find_clip(project, seq_id, track_id, clip_id) else {
+                return ToolResult::error(format!("clip {clip_id} not found"));
+            };
+            let fr = project.sequences.get(&seq_id).map(|s| s.frame_rate);
+            let Some(mut new) = clip
+                .markers
+                .iter()
+                .find(|m| m.id == args.marker_id)
+                .cloned()
+            else {
+                return ToolResult::error(format!(
+                    "marker {} not found on clip {clip_id}",
+                    args.marker_id
+                ));
+            };
+            if let Err(e) = apply_marker_edits(&mut new, &args, fr) {
+                return e;
+            }
+            ops::set_clip_marker(project, clip_id, new)
+        }
+        None => {
+            let Some(seq_id) = locate_marker(project, args.marker_id) else {
+                return ToolResult::error(format!("marker {} not found", args.marker_id));
+            };
+            let seq = &project.sequences[&seq_id];
+            let Some(mut new) = seq.markers.iter().find(|m| m.id == args.marker_id).cloned() else {
+                return ToolResult::error(format!("marker {} not found", args.marker_id));
+            };
+            if let Err(e) = apply_marker_edits(&mut new, &args, Some(seq.frame_rate)) {
+                return e;
+            }
+            ops::set_marker(project, seq_id, new)
+        }
+    };
+    match cmd {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Updated marker")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+// ─── Clip-scoped markers (26 K-A2 / 35 §1.5) ────────────────────────────────
+
+pub async fn add_clip_marker(state: &AppState, args: AddClipMarkerArgs) -> ToolResult {
+    tracing::debug!("tool: add_clip_marker {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, _)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let fr = project.sequences.get(&seq_id).map(|s| s.frame_rate);
+    // Clip markers are clip-relative, so `at_tc` is a DURATION into the clip,
+    // not a sequence timecode — the same parse, a different origin.
+    let at = match resolve_tick(args.at_ticks, args.at_tc.as_deref(), args.at_seconds, fr) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let duration =
+        match resolve_marker_duration(at, args.duration_ticks, args.duration_seconds, None, fr) {
+            Ok(d) => d,
+            Err(e) => return e,
+        };
+    if let Some(cat) = args.category_id {
+        if project.marker_category(cat).is_none() {
+            return ToolResult::error(format!("marker category {cat} not found"));
+        }
+    }
+    let mut marker = Marker::clip_scoped(at, args.name.unwrap_or_default());
+    marker.duration = duration;
+    marker.category = args.category_id;
+    if let Some(note) = args.note {
+        marker.note = note;
+    }
+    if let Some(hex) = args.color {
+        match Color::from_hex(&hex) {
+            Some(c) => marker.color = Some(c),
+            None => {
+                return ToolResult::error(format!(
+                    "invalid color {hex:?} — expected #rrggbb or #rrggbbaa"
+                ))
+            }
+        }
+    }
+    let marker_id = marker.id;
+    match ops::add_clip_marker(project, args.clip_id, marker) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Added clip marker").with_data(json!({ "marker_id": marker_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn remove_clip_marker(state: &AppState, args: RemoveClipMarkerArgs) -> ToolResult {
+    tracing::debug!("tool: remove_clip_marker {}", args.marker_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    match ops::remove_clip_marker(project, args.clip_id, args.marker_id) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Removed clip marker")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn list_clip_markers(state: &AppState, args: ListClipMarkersArgs) -> ToolResult {
+    tracing::debug!("tool: list_clip_markers {}", args.clip_id);
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    // `at` is clip-relative; `sequence_tick` is the timeline position, so a
+    // caller never has to re-derive `clip.start + m.at` itself.
+    let markers: Vec<serde_json::Value> = clip
+        .markers
+        .iter()
+        .map(|m| {
+            let mut v = serde_json::to_value(m).unwrap_or(json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "sequence_tick".into(),
+                    json!(clip.marker_sequence_tick(m).0),
+                );
+            }
+            v
+        })
+        .collect();
+    ToolResult::text(format!("{} clip marker(s)", clip.markers.len())).with_data(json!({
+        "markers": markers,
+        "sequence_id": seq_id,
+        "clip_start_ticks": clip.start.0,
+    }))
+}
+
+// ─── Marker categories (26 K-A2 / 35 §1.3) ──────────────────────────────────
+
+pub async fn list_marker_categories(
+    state: &AppState,
+    _args: ListMarkerCategoriesArgs,
+) -> ToolResult {
+    tracing::debug!("tool: list_marker_categories");
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    ToolResult::text(format!(
+        "{} marker category/categories",
+        project.marker_categories.len()
+    ))
+    .with_data(json!({ "categories": project.marker_categories }))
+}
+
+pub async fn add_marker_category(state: &AppState, args: AddMarkerCategoryArgs) -> ToolResult {
+    tracing::debug!("tool: add_marker_category {:?}", args.name);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(color) = Color::from_hex(&args.color) else {
+        return ToolResult::error(format!(
+            "invalid color {:?} — expected #rrggbb or #rrggbbaa",
+            args.color
+        ));
+    };
+    let mut category = MarkerCategory::new(args.name, color);
+    if let Some(glyph) = args.glyph {
+        category.glyph = glyph;
+    }
+    let category_id = category.id;
+    match ops::add_marker_category(project, category) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Added marker category")
+                .with_data(json!({ "category_id": category_id }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// Seed the five default categories as ONE undo unit. Idempotent: a project
+/// that already has categories is left alone.
+pub async fn seed_marker_categories(
+    state: &AppState,
+    _args: SeedMarkerCategoriesArgs,
+) -> ToolResult {
+    tracing::debug!("tool: seed_marker_categories");
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let cmds = ops::seed_marker_categories(project);
+    if cmds.is_empty() {
+        return ToolResult::text("Marker categories already present — nothing seeded")
+            .with_data(json!({ "categories": project.marker_categories }));
+    }
+    let batch = cmds.into_iter().map(Command::Timeline).collect();
+    history.execute_discrete(Command::Batch(batch), &mut doc);
+    let categories = doc
+        .timeline
+        .as_ref()
+        .map(|p| p.marker_categories.clone())
+        .unwrap_or_default();
+    ToolResult::text(format!("Seeded {} marker categories", categories.len()))
+        .with_data(json!({ "categories": categories }))
+}
+
+pub async fn update_marker_category(
+    state: &AppState,
+    args: UpdateMarkerCategoryArgs,
+) -> ToolResult {
+    tracing::debug!("tool: update_marker_category {}", args.category_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(existing) = project.marker_category(args.category_id) else {
+        return ToolResult::error(format!("marker category {} not found", args.category_id));
+    };
+    let mut new = existing.clone();
+    if let Some(name) = args.name {
+        new.name = name;
+    }
+    if let Some(hex) = args.color {
+        match Color::from_hex(&hex) {
+            Some(c) => new.color = c,
+            None => {
+                return ToolResult::error(format!(
+                    "invalid color {hex:?} — expected #rrggbb or #rrggbbaa"
+                ))
+            }
+        }
+    }
+    if let Some(glyph) = args.glyph {
+        new.glyph = glyph;
+    }
+    match ops::set_marker_category(project, new) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Updated marker category")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+pub async fn remove_marker_category(
+    state: &AppState,
+    args: RemoveMarkerCategoryArgs,
+) -> ToolResult {
+    tracing::debug!("tool: remove_marker_category {}", args.category_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let affected = project.markers_in_category(args.category_id).len();
+    match ops::remove_marker_category(project, args.category_id, args.reassign_to) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text(format!(
+                "Removed marker category ({affected} marker(s) {})",
+                match args.reassign_to {
+                    Some(_) => "reassigned",
+                    None => "cleared",
+                }
+            ))
+            .with_data(json!({ "markers_retargeted": affected }))
         }
         Err(e) => map_edit_error(e),
     }
@@ -2153,17 +2564,24 @@ pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> Too
 
 // ─── Scoped effect stacks — track / master / asset (26 §10 K-B1/K-B2) ────────
 
-/// Resolve the [`VfxOwner`] an `effect_stack` call names, or the refusal to
-/// send back. `master` defaults to the active sequence, mirroring the audio
-/// master bus's "active sequence" rule (09 §10) while still allowing an
-/// explicit `sequence_id`.
-fn resolve_vfx_owner(
+/// Resolve one [`VfxOwner`] from the four addressing fields `effect_stack`
+/// publishes, or the refusal to send back. `master` defaults to the active
+/// sequence, mirroring the audio master bus's "active sequence" rule (09 §10)
+/// while still allowing an explicit `sequence_id`.
+///
+/// Shared with the K-B4 preset verbs (`effect_preset_save`/`_apply`) so the two
+/// surfaces cannot drift on what a scope means or on which id each one needs.
+fn resolve_owner_fields(
     project: &TimelineProject,
-    args: &EffectStackArgs,
+    scope: EffectScopeArg,
+    clip_id: Option<ClipId>,
+    track_id: Option<TrackId>,
+    sequence_id: Option<SequenceId>,
+    asset_id: Option<AssetId>,
 ) -> Result<VfxOwner, ToolResult> {
-    match args.scope {
+    match scope {
         EffectScopeArg::Clip => {
-            let Some(clip) = args.clip_id else {
+            let Some(clip) = clip_id else {
                 return Err(ToolResult::error("scope=clip requires clip_id"));
             };
             if locate_clip(project, clip).is_none() {
@@ -2172,7 +2590,7 @@ fn resolve_vfx_owner(
             Ok(VfxOwner::Clip(clip))
         }
         EffectScopeArg::Track => {
-            let Some(track) = args.track_id else {
+            let Some(track) = track_id else {
                 return Err(ToolResult::error("scope=track requires track_id"));
             };
             if locate_track(project, track).is_none() {
@@ -2181,7 +2599,7 @@ fn resolve_vfx_owner(
             Ok(VfxOwner::Track(track))
         }
         EffectScopeArg::Master => {
-            let seq = match args.sequence_id.or(project.active_sequence) {
+            let seq = match sequence_id.or(project.active_sequence) {
                 Some(s) => s,
                 None => {
                     return Err(ToolResult::error(
@@ -2195,7 +2613,7 @@ fn resolve_vfx_owner(
             Ok(VfxOwner::Master(seq))
         }
         EffectScopeArg::Asset => {
-            let Some(asset) = args.asset_id else {
+            let Some(asset) = asset_id else {
                 return Err(ToolResult::error("scope=asset requires asset_id"));
             };
             if !project.media.assets.contains_key(&asset) {
@@ -2204,6 +2622,21 @@ fn resolve_vfx_owner(
             Ok(VfxOwner::Asset(asset))
         }
     }
+}
+
+/// The [`VfxOwner`] an `effect_stack` call names.
+fn resolve_vfx_owner(
+    project: &TimelineProject,
+    args: &EffectStackArgs,
+) -> Result<VfxOwner, ToolResult> {
+    resolve_owner_fields(
+        project,
+        args.scope,
+        args.clip_id,
+        args.track_id,
+        args.sequence_id,
+        args.asset_id,
+    )
 }
 
 /// JSON projection of one stacked effect, the shape `effect_stack op=list`
@@ -2345,6 +2778,424 @@ pub async fn effect_stack(state: &AppState, args: EffectStackArgs) -> ToolResult
     let label = cmd.description();
     history.execute_discrete(Command::Timeline(cmd), &mut doc);
     ToolResult::text(label)
+}
+
+// ─── Effect presets, custom stacks and favourites (26 §10 K-B4) ──────────────
+//
+// The library is USER state in `<config>/Photonic/effect_presets.json`, not
+// document state (see `photonic_core::timeline::effect_preset`'s module docs,
+// which follow proposal 206). That single decision fixes the whole shape of
+// this surface:
+//
+// * `effect_preset_apply` is the ONLY verb here that touches `CommandHistory`,
+//   and it produces exactly ONE `Command::Batch` however many effects (or, for
+//   `scope=clip`, however many clips) it lands on.
+// * `_list`, `_save`, `_delete`, `_rename` and the two favourite verbs read and
+//   write a config file and deliberately create no undo entry — the same
+//   contract `save_export_preset`/`delete_export_preset` already ship, down to
+//   refusing a built-in name with `NotSupportedV1`.
+
+/// Test seam: when set, the preset verbs read and write this path instead of
+/// the resolved config file.
+#[cfg(test)]
+static TEST_LIBRARY_PATH: StdMutex<Option<std::path::PathBuf>> = StdMutex::new(None);
+
+/// `<config>/Photonic/effect_presets.json`.
+#[cfg(not(test))]
+fn preset_library_path() -> Result<std::path::PathBuf, ToolResult> {
+    effect_preset::library_path().ok_or_else(|| {
+        ToolResult::error(
+            "could not resolve the app config directory — the effect preset library has nowhere \
+             to live",
+        )
+    })
+}
+
+/// Under `cargo test` the developer's real library is NEVER touched: an
+/// un-overridden path resolves to a per-process temp file that no test creates,
+/// so even a test that forgets [`tests::TestLibrary`] cannot read, rewrite or
+/// quarantine `<config>/Photonic/effect_presets.json`.
+#[cfg(test)]
+fn preset_library_path() -> Result<std::path::PathBuf, ToolResult> {
+    if let Some(p) = TEST_LIBRARY_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Ok(p);
+    }
+    Ok(std::env::temp_dir().join(format!(
+        "photonic-mcp-unset-preset-library-{}.json",
+        std::process::id()
+    )))
+}
+
+fn load_preset_library() -> Result<effect_preset::LibraryLoad, ToolResult> {
+    let path = preset_library_path()?;
+    effect_preset::load_library_from(&path)
+        .map_err(|e| ToolResult::error(format!("could not read the effect preset library: {e}")))
+}
+
+fn save_preset_library(library: &effect_preset::EffectPresetLibrary) -> Result<(), ToolResult> {
+    let path = preset_library_path()?;
+    effect_preset::save_library_to(&path, library)
+        .map_err(|e| ToolResult::error(format!("could not persist the effect preset library: {e}")))
+}
+
+/// A built-in name is read-only, reported with the same `NotSupportedV1` shape
+/// `save_export_preset` uses; everything else is a plain refusal.
+fn map_preset_error(e: effect_preset::EffectPresetError) -> ToolResult {
+    match e {
+        effect_preset::EffectPresetError::BuiltInName(_) => {
+            err_code("NotSupportedV1", e.to_string())
+        }
+        _ => ToolResult::error(e.to_string()),
+    }
+}
+
+/// One-line human summary — what applying this preset would add.
+fn preset_summary(p: &effect_preset::EffectPreset) -> String {
+    let stack = if p.effects.is_empty() {
+        "no effects".to_string()
+    } else {
+        p.effects
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ")
+    };
+    if p.grade.is_some() {
+        format!("{stack} + grade")
+    } else {
+        stack
+    }
+}
+
+/// JSON projection of one catalogue entry. `unresolvable_effect_ids` is the
+/// honest answer to "will this preset arrive whole on this build?" — entries
+/// this build has no manifest for still apply, inert-and-preserved (39 §2.2),
+/// they simply do not render.
+fn preset_json(p: &effect_preset::EffectPreset) -> Value {
+    json!({
+        "name": p.name,
+        "built_in": effect_preset::is_built_in(&p.name),
+        "effect_ids": p.effects.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        "effect_count": p.effects.len(),
+        "has_grade": p.grade.is_some(),
+        "parameter_preset_for": p.parameter_preset_for().map(|id| id.as_str()),
+        "unresolvable_effect_ids": p.inert_ids(),
+        "summary": preset_summary(p),
+    })
+}
+
+pub async fn effect_preset_list(_state: &AppState, _args: EffectPresetListArgs) -> ToolResult {
+    tracing::debug!("tool: effect_preset_list");
+    let load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    let presets: Vec<Value> = load.library.catalogue().iter().map(preset_json).collect();
+    let built_ins = presets
+        .iter()
+        .filter(|p| p["built_in"] == json!(true))
+        .count();
+    ToolResult::text(format!(
+        "{} effect preset(s) ({built_ins} built-in)",
+        presets.len()
+    ))
+    .with_data(json!({
+        "presets": presets,
+        "library_path": preset_library_path().ok().map(|p| p.display().to_string()),
+        // Set when the stored file would not parse and was moved aside rather
+        // than overwritten (206 §4.2 rule 5) — the user lost nothing, but they
+        // deserve to be told once.
+        "quarantined": load.quarantined.map(|p| p.display().to_string()),
+    }))
+}
+
+pub async fn effect_preset_save(state: &AppState, args: EffectPresetSaveArgs) -> ToolResult {
+    tracing::debug!("tool: effect_preset_save {:?} {:?}", args.name, args.scope);
+    // Deliberately no history lock: this writes a config file, never the
+    // document, and must not produce an undo entry.
+    let (stack, grade) = {
+        let doc = state.document.lock().await;
+        let Some(project) = doc.timeline.as_ref() else {
+            return ToolResult::error("no timeline project");
+        };
+        let owner = match resolve_owner_fields(
+            project,
+            args.scope,
+            args.clip_id,
+            args.track_id,
+            args.sequence_id,
+            args.asset_id,
+        ) {
+            Ok(o) => o,
+            Err(e) => return e,
+        };
+        let stack = match ops::effect_stack(project, owner) {
+            Ok(s) => s.to_vec(),
+            Err(e) => return map_edit_error(e),
+        };
+        let grade = match ops::scope_grade(project, owner) {
+            Ok(g) => g.cloned(),
+            Err(e) => return map_edit_error(e),
+        };
+        (stack, grade)
+    };
+    let preset = effect_preset::EffectPreset::new(args.name.clone(), stack, grade);
+    let summary = preset_json(&preset);
+    let summary_line = preset_summary(&preset);
+    let mut load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    let replaced = load.library.presets.iter().any(|p| p.name == args.name);
+    if let Err(e) = load.library.upsert(preset) {
+        return map_preset_error(e);
+    }
+    if let Err(e) = save_preset_library(&load.library) {
+        return e;
+    }
+    ToolResult::text(format!(
+        "{} effect preset {:?} — {} (no undo step: this is app config, not the document)",
+        if replaced { "updated" } else { "saved" },
+        args.name,
+        summary_line,
+    ))
+    .with_data(json!({ "preset": summary, "replaced": replaced }))
+}
+
+pub async fn effect_preset_apply(state: &AppState, args: EffectPresetApplyArgs) -> ToolResult {
+    tracing::debug!("tool: effect_preset_apply {:?} {:?}", args.name, args.scope);
+    // Read the library before taking the document lock — file IO under the
+    // document lock would be pure contention.
+    let load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    let Some(preset) = load.library.get(&args.name) else {
+        return ToolResult::error(format!(
+            "no effect preset named {:?} — see effect_preset_list",
+            args.name
+        ));
+    };
+    if preset.effects.is_empty() && preset.grade.is_none() {
+        return ToolResult::error(format!(
+            "preset {:?} is empty — nothing to apply",
+            args.name
+        ));
+    }
+    // Taking `clip_ids` and silently ignoring `clip_id` would apply to a
+    // different set of clips than the caller wrote down.
+    if args.clip_ids.is_some() && args.clip_id.is_some() {
+        return ToolResult::error("give clip_id or clip_ids, not both");
+    }
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+
+    // Resolve EVERY target before building any command: an unknown id refuses
+    // the whole call rather than half-applying, the same no-partial rule
+    // `paste_attributes` follows.
+    let owners: Vec<VfxOwner> = match (args.scope, args.clip_ids.as_ref()) {
+        (EffectScopeArg::Clip, Some(ids)) => {
+            if ids.is_empty() {
+                return ToolResult::error("clip_ids must not be empty");
+            }
+            let mut owners = Vec::with_capacity(ids.len());
+            for &clip in ids {
+                // A repeat id would apply the preset twice to one stack while
+                // reporting one target; drop the duplicate instead.
+                if owners.contains(&VfxOwner::Clip(clip)) {
+                    continue;
+                }
+                match resolve_owner_fields(
+                    project,
+                    EffectScopeArg::Clip,
+                    Some(clip),
+                    None,
+                    None,
+                    None,
+                ) {
+                    Ok(o) => owners.push(o),
+                    Err(e) => return e,
+                }
+            }
+            owners
+        }
+        _ => {
+            if args.clip_ids.is_some() {
+                return ToolResult::error("clip_ids is only valid with scope=clip");
+            }
+            match resolve_owner_fields(
+                project,
+                args.scope,
+                args.clip_id,
+                args.track_id,
+                args.sequence_id,
+                args.asset_id,
+            ) {
+                Ok(o) => vec![o],
+                Err(e) => return e,
+            }
+        }
+    };
+
+    let mut cmds = Vec::new();
+    for owner in &owners {
+        match effect_preset::apply_commands(project, *owner, &preset) {
+            Ok(mut c) => cmds.append(&mut c),
+            Err(e) => return map_edit_error(e),
+        }
+    }
+    if cmds.is_empty() {
+        return ToolResult::error(format!("preset {:?} produced no edit", args.name));
+    }
+    let steps = cmds.len();
+    // ONE `Command::Batch`, whatever the preset's size — a one-effect preset is
+    // a one-member batch rather than a different carrier, so the undo count
+    // never depends on how big the preset is.
+    history.execute_discrete(
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+        &mut doc,
+    );
+    let unresolvable = preset.inert_ids();
+    ToolResult::text(format!(
+        "applied preset {:?} to {} scope(s) as ONE undo step",
+        args.name,
+        owners.len()
+    ))
+    .with_data(json!({
+        "name": preset.name,
+        "targets": owners.len(),
+        "commands": steps,
+        "unresolvable_effect_ids": unresolvable,
+    }))
+}
+
+pub async fn effect_preset_delete(_state: &AppState, args: EffectPresetDeleteArgs) -> ToolResult {
+    tracing::debug!("tool: effect_preset_delete {:?}", args.name);
+    let mut load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    if let Err(e) = load.library.remove(&args.name) {
+        return map_preset_error(e);
+    }
+    if let Err(e) = save_preset_library(&load.library) {
+        return e;
+    }
+    ToolResult::text(format!(
+        "deleted effect preset {:?} (no undo step: this is app config, not the document)",
+        args.name
+    ))
+}
+
+pub async fn effect_preset_rename(_state: &AppState, args: EffectPresetRenameArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: effect_preset_rename {:?} -> {:?}",
+        args.from,
+        args.to
+    );
+    let mut load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    if let Err(e) = load.library.rename(&args.from, &args.to) {
+        return map_preset_error(e);
+    }
+    if let Err(e) = save_preset_library(&load.library) {
+        return e;
+    }
+    ToolResult::text(format!(
+        "renamed effect preset {:?} to {:?} (no undo step: this is app config, not the document)",
+        args.from, args.to
+    ))
+}
+
+/// Is `id` an effect this build actually has a manifest for?
+fn effect_id_is_known(id: &str) -> bool {
+    photonic_core::timeline::manifest(photonic_core::timeline::EffectId::new(id.to_string()))
+        .is_some()
+}
+
+pub async fn effect_favourite_list(
+    _state: &AppState,
+    _args: EffectFavouriteListArgs,
+) -> ToolResult {
+    tracing::debug!("tool: effect_favourite_list");
+    let load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    let favourites: Vec<Value> = load
+        .library
+        .favourites
+        .iter()
+        .map(|id| {
+            let m = photonic_core::timeline::manifest(photonic_core::timeline::EffectId::new(
+                id.clone(),
+            ));
+            json!({
+                "id": id,
+                // An id this build has no manifest for stays in the user's
+                // ordering untouched (39 §2.2) and is simply not offered.
+                "available": m.is_some(),
+                "name": m.map(|m| m.name),
+            })
+        })
+        .collect();
+    ToolResult::text(format!("{} favourite effect(s)", favourites.len()))
+        .with_data(json!({ "favourites": favourites }))
+}
+
+pub async fn effect_favourite_set(_state: &AppState, args: EffectFavouriteSetArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: effect_favourite_set {:?} {}",
+        args.id,
+        args.favourite
+    );
+    // Starring an id this build cannot resolve is a typo, not a portability
+    // story — refuse it. UNstarring one must still work, so a user who opened
+    // their library on a build with more effects can prune it here.
+    if args.favourite && !effect_id_is_known(&args.id) {
+        return ToolResult::error(format!(
+            "unknown effect id {:?} — see list_effect_kinds",
+            args.id
+        ));
+    }
+    let mut load = match load_preset_library() {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    if load.library.is_favourite(&args.id) == args.favourite {
+        return ToolResult::text(format!(
+            "effect {:?} is already {}",
+            args.id,
+            if args.favourite {
+                "a favourite"
+            } else {
+                "not a favourite"
+            }
+        ));
+    }
+    load.library.toggle_favourite(&args.id);
+    if let Err(e) = save_preset_library(&load.library) {
+        return e;
+    }
+    ToolResult::text(format!(
+        "{} effect {:?} (no undo step: this is app config, not the document)",
+        if args.favourite {
+            "favourited"
+        } else {
+            "un-favourited"
+        },
+        args.id
+    ))
 }
 
 // ─── Paste Attributes (26 §10 K-B15) ─────────────────────────────────────────
@@ -2638,11 +3489,23 @@ fn guess_asset_kind(path: &std::path::Path) -> Option<AssetKind> {
     })
 }
 
-/// A stopgap content identity (head+tail+len, `DefaultHasher`/SipHash) — NOT
-/// the `xxh3` the core data model's doc comment (media.rs:6) describes as the
-/// eventual relink identity; that lands with the P3 engine work. Good enough
-/// to detect an exact-byte-match relink candidate now.
+/// The content identity written for newly imported media: the engine's `xxh3`
+/// head+tail+len digest (`photonic_video::media::content_hash`).
+///
+/// This is deliberately the *same* function `probe_media` and the GUI import
+/// worker call. Before K-C6 this tool wrote the [`legacy_p2_content_hash`]
+/// stopgap instead, so an MCP-imported asset's hash was not comparable with a
+/// GUI-imported one — and hash-based relink matching across the two surfaces
+/// could never fire. Hashes already stored in older documents keep working:
+/// [`hash_like`] recomputes whichever algorithm produced the stored value.
 fn content_hash(path: &std::path::Path) -> Option<String> {
+    photonic_video::media::content_hash(path).ok()
+}
+
+/// The P2 stopgap identity (head+tail+len, `DefaultHasher`/SipHash), retained
+/// **only** so a `siphash64:`-prefixed hash written by an older build can still
+/// be verified against a file today. Never written for new imports.
+fn legacy_p2_content_hash(path: &std::path::Path) -> Option<String> {
     use std::hash::{Hash, Hasher};
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
@@ -2663,6 +3526,102 @@ fn content_hash(path: &std::path::Path) -> Option<String> {
     head.hash(&mut hasher);
     tail.hash(&mut hasher);
     Some(format!("siphash64:{:016x}", hasher.finish()))
+}
+
+/// Hash `path` with **the same algorithm that produced `stored`**, or `None`
+/// when that algorithm is unrecognized.
+///
+/// This is what `ops::plan_relink` calls to verify a relink candidate. Hashing
+/// with a different algorithm than the stored value would report a mismatch for
+/// every asset, which would train a user (or an agent) to pass
+/// `allow_hash_mismatch` reflexively and defeat the only guard that catches a
+/// relink to the wrong take. `None` (→ `RelinkHashCheck::Unknown`) is the honest
+/// answer for an identity we cannot reproduce.
+fn hash_like(stored: Option<&str>, path: &std::path::Path) -> Option<String> {
+    match stored {
+        // No recorded identity: hash in the current algorithm so the relink can
+        // record one.
+        None => content_hash(path),
+        Some(s) if s.starts_with("siphash64:") => legacy_p2_content_hash(path),
+        // xxh3-64 renders as 16 bare hex chars (photonic-video `content_hash`).
+        Some(s) if s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit()) => content_hash(path),
+        Some(_) => None,
+    }
+}
+
+/// Walk `root` for files that could be relink candidates.
+///
+/// Bounded on purpose: a user pointed at `/` should get an answer, not a
+/// traversal. Symlinked directories are not followed (a self-referential link
+/// would otherwise be an infinite walk), the depth is capped, and the file count
+/// is capped — `truncated` is reported so the caller never mistakes a truncated
+/// scan for "no candidate exists".
+fn scan_relink_candidates(
+    root: &std::path::Path,
+    recursive: bool,
+    hash_files: bool,
+) -> (Vec<ops::RelinkCandidate>, bool) {
+    const MAX_DEPTH: usize = 8;
+    const MAX_FILES: usize = 20_000;
+    /// Above this many candidates the scan stops hashing: by-hash *discovery*
+    /// (finding a renamed file) then does not fire, while per-entry
+    /// verification still does — it only hashes the one file it chose.
+    const MAX_HASHED: usize = 4_096;
+
+    let mut out: Vec<ops::RelinkCandidate> = Vec::new();
+    let mut truncated = false;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_FILES {
+                truncated = true;
+                break;
+            }
+            let path = entry.path();
+            // `metadata()` follows symlinks; `file_type()` does not — use the
+            // latter so a directory symlink is never descended into.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if recursive && depth < MAX_DEPTH {
+                    stack.push((path, depth + 1));
+                } else if recursive {
+                    truncated = true;
+                }
+            } else if ft.is_file() {
+                out.push(ops::RelinkCandidate {
+                    path,
+                    content_hash: None,
+                });
+            }
+        }
+        if out.len() >= MAX_FILES {
+            truncated = true;
+            break;
+        }
+    }
+    // Deterministic order regardless of directory iteration order.
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    if hash_files && out.len() <= MAX_HASHED {
+        for c in out.iter_mut() {
+            c.content_hash = content_hash(&c.path);
+        }
+    }
+    (out, truncated)
+}
+
+/// JSON row for one planned/committed relink.
+fn relink_entry_json(e: &ops::RelinkPlanEntry) -> Value {
+    json!({
+        "asset_id": e.asset,
+        "old_path": e.old_path.display().to_string(),
+        "new_path": e.new_path.display().to_string(),
+        "matched_by": e.matched_by.as_str(),
+        "hash": e.hash.as_str(),
+        "ambiguous": e.ambiguous,
+    })
 }
 
 pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult {
@@ -2741,24 +3700,242 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
     .with_data(json!({ "assets": created }))
 }
 
+/// Repoint one asset at a new file (26 K-C6).
+///
+/// Two guards were added when the batch flow landed, because a relink to the
+/// *wrong bytes* is a data-integrity failure the user does not notice until
+/// export:
+///
+/// * the new path must exist (`AssetOffline` otherwise — relinking to a missing
+///   file has never been anything but a typo), and
+/// * if the asset carries a `content_hash` and the new file's hash differs, the
+///   call is refused with `HashMismatch` unless `allow_hash_mismatch: true`.
+///   Accepting the change re-identifies the asset in the same undo step (new
+///   hash recorded, stale `probe` dropped — it described the old bytes).
 pub async fn relink_media(state: &AppState, args: RelinkMediaArgs) -> ToolResult {
     tracing::debug!("tool: relink_media {}", args.asset_id);
+    let new_path = std::path::PathBuf::from(&args.new_path);
+    if !new_path.exists() {
+        return err_code("AssetOffline", format!("file not found: {}", args.new_path));
+    }
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
     let Some(project) = doc.timeline.as_ref() else {
         return ToolResult::error("no timeline project");
     };
-    match ops::relink_asset(
-        project,
-        args.asset_id,
-        std::path::PathBuf::from(&args.new_path),
-    ) {
-        Ok(cmd) => {
-            history.execute_discrete(Command::Timeline(cmd), &mut doc);
-            ToolResult::text("Relinked asset")
-        }
-        Err(e) => map_edit_error(e),
+    let Some(asset) = project.media.assets.get(&args.asset_id) else {
+        return map_edit_error(photonic_core::timeline::ops::EditError::NoAsset(
+            args.asset_id,
+        ));
+    };
+    let stored = asset.content_hash.clone();
+    let actual = hash_like(stored.as_deref(), &new_path);
+    let mismatch = matches!((&stored, &actual), (Some(s), Some(a)) if s != a);
+    if mismatch && !args.allow_hash_mismatch {
+        return err_code(
+            "HashMismatch",
+            format!(
+                "{} does not hold this asset's bytes (recorded {}, found {}). \
+                 Relinking anyway rebinds every clip to different media — pass \
+                 allow_hash_mismatch: true to accept it.",
+                args.new_path,
+                stored.as_deref().unwrap_or("-"),
+                actual.as_deref().unwrap_or("-"),
+            ),
+        );
     }
+    let mut cmds = match ops::relink_asset(project, args.asset_id, new_path) {
+        Ok(cmd) => vec![Command::Timeline(cmd)],
+        Err(e) => return map_edit_error(e),
+    };
+    if mismatch {
+        // Byte change accepted: record the new identity and drop the probe,
+        // which described the file we just stopped pointing at.
+        if let Ok(meta) = ops::set_asset_meta(project, args.asset_id, None, actual.clone()) {
+            cmds.push(Command::Timeline(meta));
+        }
+    } else if stored.is_none() {
+        if let Ok(meta) =
+            ops::set_asset_meta(project, args.asset_id, asset.probe.clone(), actual.clone())
+        {
+            cmds.push(Command::Timeline(meta));
+        }
+    }
+    let one_step = if cmds.len() == 1 {
+        cmds.remove(0)
+    } else {
+        Command::Batch(cmds)
+    };
+    history.execute_discrete(one_step, &mut doc);
+    ToolResult::text(if mismatch {
+        "Relinked asset to different bytes — content hash updated, probe cleared (re-run probe_media)"
+    } else {
+        "Relinked asset"
+    })
+    .with_data(json!({
+        "asset_id": args.asset_id,
+        "new_path": args.new_path,
+        "hash": match (&stored, &actual) {
+            (Some(_), None) => "unknown",
+            (None, _) => "unknown",
+            _ if mismatch => "mismatch",
+            _ => "match",
+        },
+    }))
+}
+
+/// Every offline asset in the pool (26 K-C6) — the inventory a relink flow
+/// starts from, and the "project open reports what is missing" surface.
+pub async fn find_offline_media(state: &AppState, _args: FindOfflineMediaArgs) -> ToolResult {
+    tracing::debug!("tool: find_offline_media");
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::text("No timeline project yet").with_data(json!({ "offline": [] }));
+    };
+    let offline = ops::offline_assets(project, |p| p.exists());
+    let rows: Vec<Value> = offline
+        .iter()
+        .filter_map(|id| project.media.assets.get(id))
+        .map(|a| {
+            let path = match &a.source {
+                photonic_core::timeline::AssetSource::File { path, .. } => {
+                    path.display().to_string()
+                }
+                _ => String::new(),
+            };
+            json!({
+                "asset_id": a.id,
+                "path": path,
+                "kind": a.kind,
+                "content_hash": a.content_hash,
+                "clip_uses": clip_use_count(project, a.id),
+            })
+        })
+        .collect();
+    ToolResult::text(format!(
+        "{} offline asset(s) of {} in the pool",
+        rows.len(),
+        project.media.assets.len()
+    ))
+    .with_data(json!({
+        "offline": rows,
+        "pool_size": project.media.assets.len(),
+    }))
+}
+
+/// How many timeline clips reference `asset` — the "how bad is this" number for
+/// an offline row. Derived, never stored.
+fn clip_use_count(project: &photonic_core::timeline::TimelineProject, asset: AssetId) -> usize {
+    project
+        .sequences
+        .values()
+        .flat_map(|s| s.tracks())
+        .flat_map(|t| t.clips.iter())
+        .filter(|c| c.source.asset() == Some(asset))
+        .count()
+}
+
+/// Relink every offline asset that a scan of `search_dir` can account for, as
+/// ONE undo step (26 K-C6 — the batch is the whole value of the item).
+pub async fn relink_media_batch(state: &AppState, args: RelinkMediaBatchArgs) -> ToolResult {
+    tracing::debug!("tool: relink_media_batch {}", args.search_dir);
+    let root = std::path::PathBuf::from(&args.search_dir);
+    if !root.is_dir() {
+        return err_code(
+            "AssetOffline",
+            format!("search_dir is not a directory: {}", args.search_dir),
+        );
+    }
+    let recursive = args.recursive.unwrap_or(true);
+    let (candidates, truncated) = scan_relink_candidates(&root, recursive, true);
+    let hashed_scan = candidates.iter().any(|c| c.content_hash.is_some());
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+
+    // Default target: every offline asset. An explicit list is honoured as-is
+    // (an online asset can be re-pointed too — "Replace clip", not "locate").
+    let targets: Vec<AssetId> = match &args.asset_ids {
+        Some(ids) if !ids.is_empty() => {
+            if let Some(missing) = ids.iter().find(|id| !project.media.assets.contains_key(id)) {
+                return map_edit_error(photonic_core::timeline::ops::EditError::NoAsset(*missing));
+            }
+            ids.clone()
+        }
+        _ => ops::offline_assets(project, |p| p.exists()),
+    };
+    let plan = ops::plan_relink(project, &targets, &candidates, hash_like);
+
+    let mismatched: Vec<Value> = plan.mismatched().map(relink_entry_json).collect();
+    let allow_mismatch = args.allow_hash_mismatch.unwrap_or(false);
+    let would: Vec<Value> = plan
+        .entries
+        .iter()
+        .filter(|e| allow_mismatch || e.hash != ops::RelinkHashCheck::Mismatch)
+        .map(relink_entry_json)
+        .collect();
+    let unmatched: Vec<Value> = plan
+        .unmatched
+        .iter()
+        .filter_map(|id| project.media.assets.get(id))
+        .map(|a| {
+            json!({
+                "asset_id": a.id,
+                "path": match &a.source {
+                    photonic_core::timeline::AssetSource::File { path, .. } =>
+                        path.display().to_string(),
+                    _ => String::new(),
+                },
+            })
+        })
+        .collect();
+
+    let data = json!({
+        "dry_run": args.dry_run.unwrap_or(false),
+        "scanned_files": candidates.len(),
+        "scan_truncated": truncated,
+        "hashed_scan": hashed_scan,
+        "relinked": would,
+        "skipped_hash_mismatch": if allow_mismatch { Vec::new() } else { mismatched.clone() },
+        "unmatched": unmatched,
+    });
+
+    if args.dry_run.unwrap_or(false) {
+        return ToolResult::text(format!(
+            "Dry run: {} asset(s) would relink, {} blocked by a content-hash mismatch, {} unmatched",
+            would.len(),
+            if allow_mismatch { 0 } else { mismatched.len() },
+            plan.unmatched.len()
+        ))
+        .with_data(data);
+    }
+
+    let cmds = ops::relink_plan_commands(project, &plan.entries, allow_mismatch);
+    if cmds.is_empty() {
+        return ToolResult::text(format!(
+            "Nothing relinked — {} candidate file(s) scanned, {} blocked by a content-hash \
+             mismatch, {} offline asset(s) unmatched",
+            candidates.len(),
+            if allow_mismatch { 0 } else { mismatched.len() },
+            plan.unmatched.len()
+        ))
+        .with_data(data);
+    }
+    // ONE undo unit for the whole folder move (DoD 4).
+    history.execute_discrete(
+        Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+        &mut doc,
+    );
+    ToolResult::text(format!(
+        "Relinked {} asset(s) as one undo step ({} blocked by a content-hash mismatch, {} unmatched)",
+        would.len(),
+        if allow_mismatch { 0 } else { mismatched.len() },
+        plan.unmatched.len()
+    ))
+    .with_data(data)
 }
 
 pub async fn list_media(state: &AppState, args: ListMediaArgs) -> ToolResult {
@@ -7387,6 +8564,712 @@ mod tests {
         );
     }
 
+    // ── Effect presets / custom stacks / favourites (26 §10 K-B4) ───────────
+
+    /// Serializes the tests that install a preset-library override, because
+    /// that override is process-global.
+    static PRESET_LIBRARY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Points the K-B4 verbs at a throwaway library file for one test.
+    ///
+    /// Lock poisoning is deliberately ignored on both mutexes: a test that
+    /// panics must fail on its own assertion, not convert every later preset
+    /// test into a lock-poison error that hides the real failure.
+    struct TestLibrary {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        dir: std::path::PathBuf,
+    }
+
+    impl TestLibrary {
+        fn new() -> Self {
+            let lock = PRESET_LIBRARY_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir =
+                std::env::temp_dir().join(format!("photonic-mcp-presets-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("temp preset dir");
+            let path = dir.join("effect_presets.json");
+            *TEST_LIBRARY_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+            TestLibrary { _lock: lock, dir }
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.dir.join("effect_presets.json")
+        }
+    }
+
+    impl Drop for TestLibrary {
+        fn drop(&mut self) {
+            *TEST_LIBRARY_PATH.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    async fn undo_depth(state: &AppState) -> usize {
+        state.history.lock().await.undo_depth()
+    }
+
+    /// The stack ids currently on a clip, via the real `effect_stack op=list`.
+    async fn stack_ids(state: &AppState, clip: &Value) -> Vec<String> {
+        let r = call(
+            state,
+            "effect_stack",
+            json!({ "scope": "clip", "op": "list", "clip_id": clip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "effect_stack list: {r:?}");
+        data(&r)["effects"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The built-in catalogue is offered as-is, and the shape each entry
+    /// publishes is the shape an agent needs to choose one.
+    #[tokio::test]
+    async fn effect_preset_list_offers_the_built_in_catalogue() {
+        let _lib = TestLibrary::new();
+        let state = test_state();
+        let r = call(&state, "effect_preset_list", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let presets = data(&r)["presets"].as_array().cloned().unwrap_or_default();
+
+        // Expectation READ FROM THE CATALOGUE, never a literal count.
+        let expected = effect_preset::built_in_presets();
+        assert!(!expected.is_empty(), "this build ships built-in presets");
+        assert_eq!(
+            presets.len(),
+            expected.len(),
+            "empty library ⇒ built-ins only"
+        );
+        for (got, want) in presets.iter().zip(&expected) {
+            assert_eq!(got["name"], json!(want.name));
+            assert_eq!(got["built_in"], json!(true));
+            assert_eq!(got["effect_count"], json!(want.effects.len()));
+            assert!(
+                got["unresolvable_effect_ids"]
+                    .as_array()
+                    .expect("unresolvable_effect_ids is an array")
+                    .is_empty(),
+                "a built-in must resolve on the build that ships it: {got}"
+            );
+        }
+        // `parameter_preset_for` has to discriminate, or it is decoration: it
+        // is set for a single-effect preset and absent for a multi-effect one.
+        let single = presets
+            .iter()
+            .find(|p| p["effect_count"] == json!(1))
+            .expect("a one-effect built-in");
+        assert!(single["parameter_preset_for"].is_string(), "{single}");
+        let multi = presets
+            .iter()
+            .find(|p| p["effect_count"].as_u64().unwrap_or(0) > 1)
+            .expect("a multi-effect built-in");
+        assert!(multi["parameter_preset_for"].is_null(), "{multi}");
+    }
+
+    /// THE CRUX of K-B4's MCP half: saving captures the scope's stack *and*
+    /// grade into a config file with no undo entry, and applying it lands as
+    /// exactly ONE undo step that a single `undo` fully reverses.
+    #[tokio::test]
+    async fn effect_preset_save_captures_a_scope_and_apply_is_one_undo_step() {
+        let lib = TestLibrary::new();
+        let state = test_state();
+        let (_seq, track) = create_seq_and_track(&state, "video").await;
+        let src = insert_solid_clip(&state, &track, 0, 300).await;
+        let dst = insert_solid_clip(&state, &track, 400, 300).await;
+
+        for id in ["blur.gaussian", "stylize.vignette"] {
+            let r = call(
+                &state,
+                "effect_stack",
+                json!({ "scope": "clip", "op": "add", "clip_id": src, "effect_id": id }),
+            )
+            .await;
+            assert_ne!(r.is_error, Some(true), "add {id}: {r:?}");
+        }
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({
+                "scope": "clip", "op": "set_grade", "clip_id": src,
+                "grade": { "ops": [], "bypass": true }
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_grade: {r:?}");
+
+        // Saving is a config write: the undo depth must not move.
+        let before_save = undo_depth(&state).await;
+        let r = call(
+            &state,
+            "effect_preset_save",
+            json!({ "name": "My Look", "scope": "clip", "clip_id": src }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "save: {r:?}");
+        assert_eq!(
+            undo_depth(&state).await,
+            before_save,
+            "saving a preset must NOT create an undo entry"
+        );
+        assert!(lib.path().exists(), "the library file was written");
+        assert_eq!(
+            data(&r)["preset"]["effect_ids"],
+            json!(["blur.gaussian", "stylize.vignette"])
+        );
+        assert_eq!(data(&r)["preset"]["has_grade"], json!(true));
+        assert_eq!(data(&r)["preset"]["built_in"], json!(false));
+
+        // It shows up in the catalogue after the built-ins.
+        let r = call(&state, "effect_preset_list", json!({})).await;
+        let presets = data(&r)["presets"].as_array().cloned().unwrap_or_default();
+        assert_eq!(presets.len(), effect_preset::built_in_presets().len() + 1);
+        assert_eq!(presets.last().unwrap()["name"], json!("My Look"));
+
+        // Apply to the untouched clip.
+        assert!(stack_ids(&state, &dst).await.is_empty(), "dst starts clean");
+        let before_apply = undo_depth(&state).await;
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": "My Look", "scope": "clip", "clip_id": dst }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "apply: {r:?}");
+
+        // Sensitivity: prove it really applied, in the preset's own order, and
+        // that the grade came with it — before claiming undo restored anything.
+        assert_eq!(
+            stack_ids(&state, &dst).await,
+            vec!["blur.gaussian".to_string(), "stylize.vignette".to_string()],
+            "the preset's stack is appended in its own order"
+        );
+        let r_list = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "clip", "op": "list", "clip_id": dst }),
+        )
+        .await;
+        assert_eq!(
+            data(&r_list)["grade"]["bypass"],
+            json!(true),
+            "grade applied"
+        );
+        assert_eq!(
+            undo_depth(&state).await,
+            before_apply + 1,
+            "a 2-effect + grade apply is ONE undo step, not three"
+        );
+
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        assert!(
+            stack_ids(&state, &dst).await.is_empty(),
+            "one undo reverses the whole apply"
+        );
+        let r_list = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "clip", "op": "list", "clip_id": dst }),
+        )
+        .await;
+        assert!(
+            data(&r_list)["grade"].is_null(),
+            "one undo also restores the grade slot"
+        );
+    }
+
+    /// A multi-clip apply is still exactly ONE `Command::Batch`: one `undo`
+    /// restores every target, not just the last one.
+    #[tokio::test]
+    async fn effect_preset_apply_to_many_clips_is_one_batch() {
+        let _lib = TestLibrary::new();
+        let state = test_state();
+        let (seq, v1) = create_seq_and_track(&state, "video").await;
+        let v2 = create_track(&state, &seq, "video").await;
+        let a = insert_solid_clip(&state, &v1, 0, 200).await;
+        let b = insert_solid_clip(&state, &v1, 400, 200).await;
+        let c = insert_solid_clip(&state, &v2, 0, 200).await;
+
+        // "Soft Focus" is a shipped single-effect built-in — no save needed.
+        let name = effect_preset::built_in_presets()
+            .into_iter()
+            .find(|p| p.effects.len() == 1)
+            .expect("a one-effect built-in")
+            .name;
+
+        let before = undo_depth(&state).await;
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": name, "scope": "clip", "clip_ids": [a, b, c] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "apply: {r:?}");
+        assert_eq!(data(&r)["targets"], json!(3));
+        for clip in [&a, &b, &c] {
+            assert_eq!(stack_ids(&state, clip).await.len(), 1, "clip {clip} got it");
+        }
+        assert_eq!(
+            undo_depth(&state).await,
+            before + 1,
+            "three clips, ONE step"
+        );
+
+        call(&state, "undo", json!({})).await;
+        for clip in [&a, &b, &c] {
+            assert!(
+                stack_ids(&state, clip).await.is_empty(),
+                "one undo reverses clip {clip} too"
+            );
+        }
+
+        // A repeated id is one target, not two stacked applies …
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": name, "scope": "clip", "clip_ids": [a, a] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        assert_eq!(data(&r)["targets"], json!(1));
+        assert_eq!(
+            stack_ids(&state, &a).await.len(),
+            1,
+            "applied once, not twice"
+        );
+
+        // … and the two spellings of "which clips" may not disagree.
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": name, "scope": "clip", "clip_id": b, "clip_ids": [c] }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "clip_id + clip_ids: {r:?}");
+    }
+
+    /// No partial apply: one unknown target refuses the whole call and leaves
+    /// the good clips untouched.
+    #[tokio::test]
+    async fn effect_preset_apply_refuses_whole_on_an_unknown_target() {
+        let _lib = TestLibrary::new();
+        let state = test_state();
+        let (_seq, track) = create_seq_and_track(&state, "video").await;
+        let good = insert_solid_clip(&state, &track, 0, 200).await;
+        let name = effect_preset::built_in_presets()
+            .first()
+            .expect("a built-in")
+            .name
+            .clone();
+        let ghost = json!(ClipId::new().to_string());
+
+        let before = undo_depth(&state).await;
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": name, "scope": "clip", "clip_ids": [good, ghost] }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "unknown target must refuse: {r:?}");
+        assert!(
+            stack_ids(&state, &good).await.is_empty(),
+            "the resolvable clip must be left alone"
+        );
+        assert_eq!(undo_depth(&state).await, before, "a refusal is not an edit");
+
+        // Sensitivity: the same call with only the good id succeeds, so the
+        // refusal above is about the ghost id and not about the arguments.
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": name, "scope": "clip", "clip_ids": [good] }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        assert!(!stack_ids(&state, &good).await.is_empty());
+    }
+
+    /// Built-ins are read-only on every management verb, reported with the
+    /// same `NotSupportedV1` code `save_export_preset` uses.
+    #[tokio::test]
+    async fn built_in_presets_refuse_save_delete_and_rename() {
+        let _lib = TestLibrary::new();
+        let state = test_state();
+        let (_seq, track) = create_seq_and_track(&state, "video").await;
+        let clip = insert_solid_clip(&state, &track, 0, 200).await;
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "clip", "op": "add", "clip_id": clip, "effect_id": "blur.gaussian" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let built_in = effect_preset::built_in_presets()
+            .first()
+            .expect("a built-in")
+            .name
+            .clone();
+
+        for (tool, args) in [
+            (
+                "effect_preset_save",
+                json!({ "name": built_in, "scope": "clip", "clip_id": clip }),
+            ),
+            ("effect_preset_delete", json!({ "name": built_in })),
+            (
+                "effect_preset_rename",
+                json!({ "from": built_in, "to": "Anything" }),
+            ),
+        ] {
+            let r = call(&state, tool, args).await;
+            assert_eq!(r.is_error, Some(true), "{tool} on a built-in: {r:?}");
+            assert_eq!(
+                data(&r)["error_code"],
+                json!("NotSupportedV1"),
+                "{tool} must refuse a built-in with NotSupportedV1: {r:?}"
+            );
+        }
+        // Renaming a user preset ONTO a built-in name is refused too.
+        let r = call(
+            &state,
+            "effect_preset_save",
+            json!({ "name": "Mine", "scope": "clip", "clip_id": clip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let r = call(
+            &state,
+            "effect_preset_rename",
+            json!({ "from": "Mine", "to": built_in }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "rename onto a built-in: {r:?}");
+        assert_eq!(data(&r)["error_code"], json!("NotSupportedV1"));
+
+        // Sensitivity: the identical verbs DO work on the user preset, so the
+        // refusals above are about built-in-ness and not about the plumbing.
+        let r = call(
+            &state,
+            "effect_preset_rename",
+            json!({ "from": "Mine", "to": "Ours" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "rename a user preset: {r:?}");
+        let r = call(&state, "effect_preset_delete", json!({ "name": "Ours" })).await;
+        assert_ne!(r.is_error, Some(true), "delete a user preset: {r:?}");
+        let r = call(&state, "effect_preset_list", json!({})).await;
+        assert_eq!(
+            data(&r)["presets"].as_array().map(|a| a.len()),
+            Some(effect_preset::built_in_presets().len()),
+            "the user preset is gone, the built-ins are not"
+        );
+    }
+
+    /// Managing the library is NEVER an undo unit — the one rule that
+    /// separates "app config" from "document state" here. Only apply moves the
+    /// history, and the same run proves it does.
+    #[tokio::test]
+    async fn preset_management_never_touches_the_history() {
+        let _lib = TestLibrary::new();
+        let state = test_state();
+        let (_seq, track) = create_seq_and_track(&state, "video").await;
+        let clip = insert_solid_clip(&state, &track, 0, 200).await;
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "clip", "op": "add", "clip_id": clip, "effect_id": "blur.gaussian" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+
+        let base = undo_depth(&state).await;
+        for (tool, args) in [
+            ("effect_preset_list", json!({})),
+            (
+                "effect_preset_save",
+                json!({ "name": "Look A", "scope": "clip", "clip_id": clip }),
+            ),
+            (
+                "effect_preset_rename",
+                json!({ "from": "Look A", "to": "Look B" }),
+            ),
+            (
+                "effect_favourite_set",
+                json!({ "id": "blur.gaussian", "favourite": true }),
+            ),
+            ("effect_favourite_list", json!({})),
+            ("effect_preset_delete", json!({ "name": "Look B" })),
+        ] {
+            let r = call(&state, tool, args).await;
+            assert_ne!(r.is_error, Some(true), "{tool}: {r:?}");
+            assert_eq!(
+                undo_depth(&state).await,
+                base,
+                "{tool} must not create an undo entry"
+            );
+        }
+
+        // Sensitivity: the check above would pass on a broken `undo_depth`, so
+        // prove the counter moves for the one verb that IS a document edit.
+        let name = effect_preset::built_in_presets()
+            .first()
+            .expect("a built-in")
+            .name
+            .clone();
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": name, "scope": "clip", "clip_id": clip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        assert_eq!(undo_depth(&state).await, base + 1, "apply IS one undo step");
+    }
+
+    /// Favourites round-trip, report availability honestly, refuse starring an
+    /// id this build cannot resolve, and still allow un-starring one.
+    #[tokio::test]
+    async fn effect_favourites_round_trip_and_refuse_unknown_ids() {
+        let lib = TestLibrary::new();
+        let state = test_state();
+
+        // Seed a library holding one id this build has no manifest for — the
+        // cross-build case 39 §2.2 describes, unreachable through the API.
+        let mut seeded = effect_preset::EffectPresetLibrary::new();
+        seeded.favourites.push("ghost.effect".to_string());
+        effect_preset::save_library_to(&lib.path(), &seeded).expect("seed library");
+
+        let r = call(&state, "effect_favourite_list", json!({})).await;
+        let favs = data(&r)["favourites"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0]["id"], json!("ghost.effect"));
+        assert_eq!(
+            favs[0]["available"],
+            json!(false),
+            "an id with no manifest is kept but reported unavailable"
+        );
+
+        // Starring an unknown id is a typo and is refused …
+        let r = call(
+            &state,
+            "effect_favourite_set",
+            json!({ "id": "no.such.effect", "favourite": true }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "{r:?}");
+        // … while UN-starring the stale one still works.
+        let r = call(
+            &state,
+            "effect_favourite_set",
+            json!({ "id": "ghost.effect", "favourite": false }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+
+        // A real id round-trips, and the list reflects it both ways.
+        let r = call(
+            &state,
+            "effect_favourite_set",
+            json!({ "id": "blur.gaussian", "favourite": true }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let r = call(&state, "effect_favourite_list", json!({})).await;
+        let favs = data(&r)["favourites"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(favs.len(), 1, "the stale id is gone, the real one is in");
+        assert_eq!(favs[0]["id"], json!("blur.gaussian"));
+        assert_eq!(favs[0]["available"], json!(true));
+        assert!(favs[0]["name"].is_string(), "the manifest name is surfaced");
+
+        // Idempotent, and it survives a reload from disk (it is a file, not a
+        // process-lifetime cache).
+        let r = call(
+            &state,
+            "effect_favourite_set",
+            json!({ "id": "blur.gaussian", "favourite": true }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "setting the same state succeeds");
+        let reloaded = effect_preset::load_library_from(&lib.path()).expect("reload");
+        assert_eq!(
+            reloaded.library.favourites,
+            vec!["blur.gaussian".to_string()]
+        );
+
+        let r = call(
+            &state,
+            "effect_favourite_set",
+            json!({ "id": "blur.gaussian", "favourite": false }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let r = call(&state, "effect_favourite_list", json!({})).await;
+        assert!(data(&r)["favourites"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false));
+    }
+
+    /// A preset written by a build with more effects than this one still
+    /// applies — the unknown entry lands inert-and-preserved (39 §2.2), and
+    /// both the list and the apply say so instead of silently dropping it.
+    #[tokio::test]
+    async fn a_preset_naming_an_unknown_effect_still_applies_inert() {
+        let lib = TestLibrary::new();
+        let state = test_state();
+        let (_seq, track) = create_seq_and_track(&state, "video").await;
+        let clip = insert_solid_clip(&state, &track, 0, 200).await;
+
+        // Hand-author a library holding one real and one future effect.
+        let real = ClipEffect::from_manifest(photonic_core::timeline::EffectId::new_static(
+            "blur.gaussian",
+        ))
+        .expect("blur.gaussian ships in this build");
+        let mut future = real.clone();
+        future.id = photonic_core::timeline::EffectId::new("from.the.future".to_string());
+        let mut seeded = effect_preset::EffectPresetLibrary::new();
+        seeded
+            .upsert(effect_preset::EffectPreset::new(
+                "Time Traveller",
+                vec![real, future],
+                None,
+            ))
+            .expect("seed preset");
+        effect_preset::save_library_to(&lib.path(), &seeded).expect("seed library");
+
+        let r = call(&state, "effect_preset_list", json!({})).await;
+        let listed = data(&r)["presets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p["name"] == json!("Time Traveller"))
+            .expect("the seeded preset is listed");
+        assert_eq!(
+            listed["unresolvable_effect_ids"],
+            json!(["from.the.future"]),
+            "the unknown id is reported, not hidden: {listed}"
+        );
+        assert_eq!(listed["effect_count"], json!(2), "and it is not dropped");
+
+        let r = call(
+            &state,
+            "effect_preset_apply",
+            json!({ "name": "Time Traveller", "scope": "clip", "clip_id": clip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "apply: {r:?}");
+        assert_eq!(
+            data(&r)["unresolvable_effect_ids"],
+            json!(["from.the.future"])
+        );
+        assert_eq!(
+            stack_ids(&state, &clip).await,
+            vec!["blur.gaussian".to_string(), "from.the.future".to_string()],
+            "both entries land, in the preset's order"
+        );
+    }
+
+    /// Every scope `effect_stack` addresses can be saved and re-applied, with
+    /// the same argument spelling — one vocabulary, not two.
+    #[tokio::test]
+    async fn effect_presets_cover_every_effect_stack_scope() {
+        let _lib = TestLibrary::new();
+        let state = test_state();
+        let (seq, track) = create_seq_and_track(&state, "video").await;
+        let clip = insert_solid_clip(&state, &track, 0, 200).await;
+
+        for (scope, addr) in [
+            ("clip", json!({ "clip_id": clip })),
+            ("track", json!({ "track_id": track })),
+            ("master", json!({ "sequence_id": seq })),
+        ] {
+            let mut add = json!({ "scope": scope, "op": "add", "effect_id": "blur.gaussian" });
+            let mut save = json!({ "scope": scope, "name": format!("{scope} look") });
+            let mut apply = json!({ "scope": scope, "name": format!("{scope} look") });
+            for target in [&mut add, &mut save, &mut apply] {
+                for (k, v) in addr.as_object().expect("addressing fields") {
+                    target[k] = v.clone();
+                }
+            }
+            let r = call(&state, "effect_stack", add).await;
+            assert_ne!(r.is_error, Some(true), "{scope} add: {r:?}");
+            let r = call(&state, "effect_preset_save", save).await;
+            assert_ne!(r.is_error, Some(true), "{scope} save: {r:?}");
+            assert_eq!(data(&r)["preset"]["effect_ids"], json!(["blur.gaussian"]));
+            let before = undo_depth(&state).await;
+            let r = call(&state, "effect_preset_apply", apply).await;
+            assert_ne!(r.is_error, Some(true), "{scope} apply: {r:?}");
+            assert_eq!(
+                undo_depth(&state).await,
+                before + 1,
+                "{scope} apply is one undo step"
+            );
+        }
+
+        // Sensitivity: the scope's own required id is genuinely required.
+        let r = call(
+            &state,
+            "effect_preset_save",
+            json!({ "scope": "track", "name": "no id" }),
+        )
+        .await;
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "scope=track without track_id: {r:?}"
+        );
+    }
+
+    /// Saving a scope with nothing on it is refused: an empty preset could
+    /// only ever be a no-op, and silence there reads as success.
+    #[tokio::test]
+    async fn saving_an_empty_scope_is_refused() {
+        let lib = TestLibrary::new();
+        let state = test_state();
+        let (_seq, track) = create_seq_and_track(&state, "video").await;
+        let clip = insert_solid_clip(&state, &track, 0, 200).await;
+
+        let r = call(
+            &state,
+            "effect_preset_save",
+            json!({ "name": "Nothing", "scope": "clip", "clip_id": clip }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "empty scope: {r:?}");
+        assert!(
+            !lib.path().exists(),
+            "a refused save must not create the library file"
+        );
+
+        // Sensitivity: one effect is enough to make the identical call succeed.
+        let r = call(
+            &state,
+            "effect_stack",
+            json!({ "scope": "clip", "op": "add", "clip_id": clip, "effect_id": "blur.gaussian" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let r = call(
+            &state,
+            "effect_preset_save",
+            json!({ "name": "Nothing", "scope": "clip", "clip_id": clip }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+    }
+
     // ── paste_attributes (26 §10 K-B15) ─────────────────────────────────────
 
     /// A source clip dressed with two effects and a grade, plus three targets
@@ -8227,6 +10110,314 @@ mod tests {
         assert_ne!(r.is_error, Some(true), "set_work_range clear: {r:?}");
     }
 
+    // ── Tool family: marker depth (26 K-A2) ──────────────────────────────────
+
+    /// The category registry is writable end-to-end, and deleting a category
+    /// retargets its markers in the SAME undo step.
+    #[tokio::test]
+    async fn family_marker_categories() {
+        let state = test_state();
+        let (seq_id, _) = create_seq_and_track(&state, "video").await;
+
+        // Empty until something seeds it.
+        let r = call(&state, "list_marker_categories", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "list_marker_categories: {r:?}");
+        assert_eq!(
+            data(&r)["categories"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0,
+            "a fresh project has no categories"
+        );
+
+        let r = call(&state, "seed_marker_categories", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "seed_marker_categories: {r:?}");
+        let cats = data(&r)["categories"].as_array().cloned().unwrap();
+        assert_eq!(cats.len(), 5, "{cats:?}");
+        let cut = cats[1]["id"].clone();
+        let note = cats[2]["id"].clone();
+
+        // Seeding twice does not duplicate.
+        let _ = call(&state, "seed_marker_categories", json!({})).await;
+        let r = call(&state, "list_marker_categories", json!({})).await;
+        assert_eq!(
+            data(&r)["categories"].as_array().unwrap().len(),
+            5,
+            "seeding is idempotent"
+        );
+
+        // Seeding is ONE undo unit — undo empties the registry in one step.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "list_marker_categories", json!({})).await;
+        assert_eq!(
+            data(&r)["categories"].as_array().unwrap().len(),
+            0,
+            "one undo must revert the whole seed batch"
+        );
+        let r = call(&state, "redo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "redo: {r:?}");
+        let r = call(&state, "list_marker_categories", json!({})).await;
+        assert_eq!(data(&r)["categories"].as_array().unwrap().len(), 5);
+
+        // Rename/recolour/re-glyph in place.
+        let r = call(
+            &state,
+            "update_marker_category",
+            json!({ "category_id": cut, "name": "Hard cut", "color": "#112233", "glyph": "square" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "update_marker_category: {r:?}");
+        let r = call(&state, "list_marker_categories", json!({})).await;
+        let cats = data(&r)["categories"].as_array().cloned().unwrap();
+        assert_eq!(cats[1]["name"], json!("Hard cut"));
+        assert_eq!(cats[1]["glyph"], json!("square"));
+        assert_eq!(cats[1]["id"], cut, "the id must survive a rename");
+
+        // A custom category.
+        let r = call(
+            &state,
+            "add_marker_category",
+            json!({ "name": "VFX", "color": "#8800ff", "glyph": "flag" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_marker_category: {r:?}");
+        let vfx = data(&r)["category_id"].clone();
+
+        // Put a marker on "Hard cut", then delete that category with a reassign.
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_ticks": 100, "name": "m", "category_id": cut }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_marker with category: {r:?}");
+        let marker_id = data(&r)["marker_id"].clone();
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert_eq!(
+            data(&r)["markers"][0]["category"],
+            cut,
+            "fixture is non-vacuous: the marker really is on the doomed category"
+        );
+
+        let r = call(
+            &state,
+            "remove_marker_category",
+            json!({ "category_id": cut, "reassign_to": note }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "remove_marker_category: {r:?}");
+        assert_eq!(data(&r)["markers_retargeted"], json!(1));
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert_eq!(
+            data(&r)["markers"][0]["category"],
+            note,
+            "the marker must be reassigned, not left dangling"
+        );
+
+        // ONE undo restores both the category and the marker's reference.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert_eq!(
+            data(&r)["markers"][0]["category"],
+            cut,
+            "undo must put the marker back on the deleted category"
+        );
+        let r = call(&state, "list_marker_categories", json!({})).await;
+        let cats = data(&r)["categories"].as_array().cloned().unwrap();
+        assert_eq!(cats[1]["id"], cut, "…at its original display position");
+
+        // Reassigning to the category being deleted is refused.
+        let r = call(
+            &state,
+            "remove_marker_category",
+            json!({ "category_id": cut, "reassign_to": cut }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "self-reassign must fail: {r:?}");
+        // As is pointing a marker at a category that does not exist.
+        let r = call(
+            &state,
+            "set_marker",
+            json!({ "marker_id": marker_id, "category_id": uuid::Uuid::new_v4().to_string() }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "unknown category must fail: {r:?}");
+        let _ = vfx;
+    }
+
+    /// `set_marker` is what makes a RANGED marker reachable — the unit
+    /// `export_per_marker` (K-F2) fans out over.
+    #[tokio::test]
+    async fn set_marker_edits_every_field_including_the_range() {
+        let state = test_state();
+        let (seq_id, _) = create_seq_and_track(&state, "video").await;
+
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_ticks": 100, "name": "point" }),
+        )
+        .await;
+        let marker_id = data(&r)["marker_id"].clone();
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert_eq!(
+            data(&r)["markers"][0]["duration"],
+            json!(0),
+            "a plain add_marker is a POINT marker — the thing K-F2 skips"
+        );
+
+        let r = call(
+            &state,
+            "set_marker",
+            json!({
+                "marker_id": marker_id, "at_ticks": 200, "duration_ticks": 900,
+                "name": "chapter", "note": "review", "color": "#00ff00"
+            }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_marker: {r:?}");
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        let m = &data(&r)["markers"][0];
+        assert_eq!(m["at"], json!(200));
+        assert_eq!(m["duration"], json!(900), "now a RANGED marker");
+        assert_eq!(m["name"], json!("chapter"));
+        assert_eq!(m["note"], json!("review"));
+
+        // Clearing the colour override falls back to the category colour.
+        let r = call(
+            &state,
+            "set_marker",
+            json!({ "marker_id": marker_id, "color": "" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "clear color: {r:?}");
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        assert!(data(&r)["markers"][0]["color"].is_null());
+
+        // Ranged markers can also be created directly, by duration or by end.
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_seconds": 2.0, "duration_seconds": 1.0, "name": "b" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "ranged add_marker: {r:?}");
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_tc": "00:00:10:00", "end_tc": "00:00:12:00", "name": "c" }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "end_tc add_marker: {r:?}");
+        let r = call(&state, "list_markers", json!({ "sequence_id": seq_id })).await;
+        let ranged: Vec<_> = data(&r)["markers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["duration"].as_i64().unwrap_or(0) > 0)
+            .cloned()
+            .collect();
+        assert_eq!(ranged.len(), 3, "three ranged markers: {ranged:?}");
+
+        // An end before the start is refused rather than clamped to a point.
+        let r = call(
+            &state,
+            "add_marker",
+            json!({ "sequence_id": seq_id, "at_tc": "00:00:10:00", "end_tc": "00:00:09:00" }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "backwards range must fail: {r:?}");
+
+        // One set_marker = ONE undo step.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+    }
+
+    /// Clip markers have a writer, are clip-relative, and travel with the clip.
+    #[tokio::test]
+    async fn family_clip_markers() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "video").await;
+        let clip = insert_solid_clip(&state, &track_id, 1000, 1000).await;
+
+        let r = call(
+            &state,
+            "add_clip_marker",
+            json!({ "clip_id": clip, "at_ticks": 250, "name": "beat", "duration_ticks": 100 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "add_clip_marker: {r:?}");
+        let marker_id = data(&r)["marker_id"].clone();
+
+        let r = call(&state, "list_clip_markers", json!({ "clip_id": clip })).await;
+        assert_ne!(r.is_error, Some(true), "list_clip_markers: {r:?}");
+        let m = &data(&r)["markers"][0];
+        assert_eq!(m["at"], json!(250), "`at` is CLIP-relative");
+        assert_eq!(
+            m["sequence_tick"],
+            json!(1250),
+            "…and the timeline position is clip.start + at"
+        );
+        assert_eq!(
+            m["anchor"],
+            json!("content"),
+            "clip markers are Content-anchored"
+        );
+
+        // Edited through the same universal editor, with clip_id as the scope.
+        let r = call(
+            &state,
+            "set_marker",
+            json!({ "marker_id": marker_id, "clip_id": clip, "name": "renamed", "at_ticks": 300 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "set_marker on clip: {r:?}");
+        let r = call(&state, "list_clip_markers", json!({ "clip_id": clip })).await;
+        assert_eq!(data(&r)["markers"][0]["name"], json!("renamed"));
+        assert_eq!(data(&r)["markers"][0]["at"], json!(300));
+
+        // A position outside the clip is refused — it would never be drawn.
+        let r = call(
+            &state,
+            "add_clip_marker",
+            json!({ "clip_id": clip, "at_ticks": 5000 }),
+        )
+        .await;
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "out-of-clip marker must fail: {r:?}"
+        );
+
+        // A sequence-scoped set_marker must NOT find a clip marker.
+        let r = call(&state, "set_marker", json!({ "marker_id": marker_id })).await;
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "clip markers are not reachable without clip_id: {r:?}"
+        );
+
+        let r = call(
+            &state,
+            "remove_clip_marker",
+            json!({ "clip_id": clip, "marker_id": marker_id }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "remove_clip_marker: {r:?}");
+        let r = call(&state, "list_clip_markers", json!({ "clip_id": clip })).await;
+        assert_eq!(data(&r)["markers"].as_array().unwrap().len(), 0);
+
+        // ...and one undo brings it back.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "list_clip_markers", json!({ "clip_id": clip })).await;
+        assert_eq!(data(&r)["markers"].as_array().unwrap().len(), 1);
+    }
+
     // ── Tool family: media bins ────────────────────────────────────────────────
 
     #[tokio::test]
@@ -8612,21 +10803,37 @@ mod tests {
         assert_ne!(r.is_error, Some(true), "list_media: {r:?}");
         let list = data(&r)["assets"].as_array().cloned().unwrap_or_default();
         assert_eq!(list.len(), 1);
-        assert!(list[0]["content_hash"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("siphash64:"));
+        // K-C6: import writes the engine's xxh3 identity (16 bare hex chars),
+        // not the old `siphash64:` stopgap — so a hash written here is
+        // comparable with one written by the GUI import worker or probe_media.
+        let hash = list[0]["content_hash"].as_str().unwrap_or_default();
+        assert_eq!(hash.len(), 16, "xxh3-64 renders as 16 hex chars: {hash:?}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{hash:?}");
 
         let tmp2 =
             std::env::temp_dir().join(format!("photonic_mcp_test_{}.mp4", uuid::Uuid::new_v4()));
         std::fs::write(&tmp2, b"other bytes").unwrap();
+        // Different bytes → refused, because a relink to the wrong take is
+        // invisible until export (K-C6).
         let r = call(
             &state,
             "relink_media",
             json!({ "asset_id": asset_id, "new_path": tmp2.to_string_lossy() }),
         )
         .await;
+        assert_eq!(r.is_error, Some(true), "expected a HashMismatch: {r:?}");
+        assert_eq!(data(&r)["error_code"], json!("HashMismatch"));
+        let r = call(
+            &state,
+            "relink_media",
+            json!({
+                "asset_id": asset_id, "new_path": tmp2.to_string_lossy(),
+                "allow_hash_mismatch": true
+            }),
+        )
+        .await;
         assert_ne!(r.is_error, Some(true), "relink_media: {r:?}");
+        assert_eq!(data(&r)["hash"], json!("mismatch"));
 
         let r = call(&state, "remove_asset", json!({ "asset_id": asset_id })).await;
         assert_ne!(r.is_error, Some(true), "remove_asset: {r:?}");
@@ -8646,6 +10853,240 @@ mod tests {
         .await;
         assert_eq!(r.is_error, Some(true));
         assert_eq!(data(&r)["error_code"], json!("AssetOffline"));
+    }
+
+    // ── K-C6: offline inventory + batch relink ───────────────────────────────
+
+    /// A scratch dir under the system temp root, removed by the caller.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("photonic_kc6_{tag}_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Import `names` from `dir` and return their asset ids in order.
+    async fn import_from(state: &AppState, dir: &std::path::Path, names: &[&str]) -> Vec<Value> {
+        let paths: Vec<String> = names
+            .iter()
+            .map(|n| dir.join(n).to_string_lossy().into_owned())
+            .collect();
+        let r = call(state, "import_media", json!({ "paths": paths })).await;
+        assert_ne!(r.is_error, Some(true), "import_media: {r:?}");
+        data(&r)["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["asset_id"].clone())
+            .collect()
+    }
+
+    async fn asset_path(state: &AppState, asset_id: &Value) -> String {
+        let r = call(state, "list_media", json!({})).await;
+        data(&r)["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| &a["asset_id"] == asset_id)
+            .map(|a| a["source"]["path"].as_str().unwrap_or_default().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The moved-folder case: three clips go offline together, a dry run
+    /// previews the rewrite, the real call commits it as ONE undo step.
+    #[tokio::test]
+    async fn relink_media_batch_moves_a_whole_folder_as_one_undo_step() {
+        let state = test_state();
+        let old = scratch_dir("old");
+        let new = scratch_dir("new");
+        let names = ["a.mp4", "b.mp4", "c.mp4"];
+        for (i, n) in names.iter().enumerate() {
+            std::fs::write(old.join(n), format!("clip bytes {i}").as_bytes()).unwrap();
+        }
+        let ids = import_from(&state, &old, &names).await;
+
+        // Nothing is offline yet — the inventory tool must say so, or the test
+        // below could pass against a pool that was broken from the start.
+        let r = call(&state, "find_offline_media", json!({})).await;
+        assert_eq!(data(&r)["offline"].as_array().unwrap().len(), 0);
+
+        // Simulate the folder move: same names, same bytes, new directory.
+        for n in names.iter() {
+            std::fs::rename(old.join(n), new.join(n)).unwrap();
+        }
+        let r = call(&state, "find_offline_media", json!({})).await;
+        assert_eq!(
+            data(&r)["offline"].as_array().unwrap().len(),
+            3,
+            "moving the folder must take every asset offline: {r:?}"
+        );
+
+        // Dry run: full plan, zero document change.
+        let r = call(
+            &state,
+            "relink_media_batch",
+            json!({ "search_dir": new.to_string_lossy(), "dry_run": true }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "dry run: {r:?}");
+        let d = data(&r);
+        assert_eq!(d["relinked"].as_array().unwrap().len(), 3);
+        assert!(d["unmatched"].as_array().unwrap().is_empty());
+        assert!(d["relinked"][0]["hash"] == json!("match"));
+        assert_eq!(
+            asset_path(&state, &ids[0]).await,
+            old.join("a.mp4").to_string_lossy(),
+            "a dry run must not move anything"
+        );
+
+        // Commit.
+        let r = call(
+            &state,
+            "relink_media_batch",
+            json!({ "search_dir": new.to_string_lossy() }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "relink_media_batch: {r:?}");
+        assert_eq!(data(&r)["relinked"].as_array().unwrap().len(), 3);
+        for (i, n) in names.iter().enumerate() {
+            assert_eq!(
+                asset_path(&state, &ids[i]).await,
+                new.join(n).to_string_lossy()
+            );
+        }
+
+        // DoD 4: ONE user verb, ONE undo unit — a single undo restores all three.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        for (i, n) in names.iter().enumerate() {
+            assert_eq!(
+                asset_path(&state, &ids[i]).await,
+                old.join(n).to_string_lossy(),
+                "one undo must restore every relinked asset"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
+    }
+
+    /// A same-named file holding *different* bytes is the wrong-take trap. It
+    /// must be reported and left offline until the user says otherwise — and a
+    /// renamed file with the *right* bytes must still be found in the same scan.
+    #[tokio::test]
+    async fn relink_media_batch_refuses_a_wrong_take_but_finds_a_renamed_one() {
+        let state = test_state();
+        let old = scratch_dir("old");
+        let new = scratch_dir("new");
+        std::fs::write(old.join("a.mp4"), b"the real take, all of it").unwrap();
+        std::fs::write(old.join("b.mp4"), b"second clip bytes").unwrap();
+        let ids = import_from(&state, &old, &["a.mp4", "b.mp4"]).await;
+
+        std::fs::remove_file(old.join("a.mp4")).unwrap();
+        std::fs::remove_file(old.join("b.mp4")).unwrap();
+        // Same name, different bytes → must NOT be bound silently.
+        std::fs::write(new.join("a.mp4"), b"a DIFFERENT take entirely!").unwrap();
+        // Right bytes under a new name → must still be found, by hash.
+        std::fs::write(new.join("b_final.mp4"), b"second clip bytes").unwrap();
+
+        let r = call(
+            &state,
+            "relink_media_batch",
+            json!({ "search_dir": new.to_string_lossy() }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "relink_media_batch: {r:?}");
+        let d = data(&r);
+        assert!(
+            d["hashed_scan"] == json!(true),
+            "scan must have hashed: {d}"
+        );
+        let relinked = d["relinked"].as_array().unwrap();
+        assert_eq!(relinked.len(), 1, "only the verified match commits: {d}");
+        assert_eq!(relinked[0]["asset_id"], ids[1]);
+        assert_eq!(relinked[0]["matched_by"], json!("content_hash"));
+        let skipped = d["skipped_hash_mismatch"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "the byte change must be named: {d}");
+        assert_eq!(skipped[0]["asset_id"], ids[0]);
+        assert_eq!(skipped[0]["matched_by"], json!("exact_name"));
+
+        assert_eq!(
+            asset_path(&state, &ids[0]).await,
+            old.join("a.mp4").to_string_lossy(),
+            "the mismatched asset must stay offline, not silently rebind"
+        );
+        assert_eq!(
+            asset_path(&state, &ids[1]).await,
+            new.join("b_final.mp4").to_string_lossy()
+        );
+
+        // With consent it binds — and re-identifies the asset so the pool no
+        // longer claims bytes that are not there.
+        let r = call(
+            &state,
+            "relink_media_batch",
+            json!({ "search_dir": new.to_string_lossy(), "allow_hash_mismatch": true }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "relink_media_batch: {r:?}");
+        assert_eq!(
+            asset_path(&state, &ids[0]).await,
+            new.join("a.mp4").to_string_lossy()
+        );
+        let r = call(&state, "list_media", json!({})).await;
+        let row = data(&r)["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["asset_id"] == ids[0])
+            .cloned()
+            .unwrap();
+        let on_disk = photonic_video::media::content_hash(&new.join("a.mp4")).unwrap();
+        assert_eq!(
+            row["content_hash"].as_str().unwrap(),
+            on_disk,
+            "an accepted byte change must re-identify the asset"
+        );
+
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
+    }
+
+    /// Nothing to relink is a clean, informative no-op — not an error, and not
+    /// a spurious undo step.
+    #[tokio::test]
+    async fn relink_media_batch_reports_unmatched_assets() {
+        let state = test_state();
+        let old = scratch_dir("old");
+        let empty = scratch_dir("empty");
+        std::fs::write(old.join("a.mp4"), b"bytes").unwrap();
+        let ids = import_from(&state, &old, &["a.mp4"]).await;
+        std::fs::remove_file(old.join("a.mp4")).unwrap();
+
+        let r = call(
+            &state,
+            "relink_media_batch",
+            json!({ "search_dir": empty.to_string_lossy() }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let d = data(&r);
+        assert!(d["relinked"].as_array().unwrap().is_empty());
+        assert_eq!(d["unmatched"].as_array().unwrap().len(), 1);
+        assert_eq!(d["unmatched"][0]["asset_id"], ids[0]);
+
+        // A non-directory search root is rejected rather than silently scanning
+        // nothing.
+        let r = call(
+            &state,
+            "relink_media_batch",
+            json!({ "search_dir": old.join("a.mp4").to_string_lossy() }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(data(&r)["error_code"], json!("AssetOffline"));
+
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     // ── delete_sequence dangling-reference guard ─────────────────────────────
@@ -8729,6 +11170,16 @@ mod tests {
         "add_marker",
         "remove_marker",
         "list_markers",
+        // Marker depth (26 K-A2)
+        "set_marker",
+        "add_clip_marker",
+        "remove_clip_marker",
+        "list_clip_markers",
+        "list_marker_categories",
+        "add_marker_category",
+        "seed_marker_categories",
+        "update_marker_category",
+        "remove_marker_category",
         "add_track",
         "remove_track",
         "set_track_prop",
@@ -8767,12 +11218,26 @@ mod tests {
         "reorder_effects",
         "set_effect_param",
         "list_effect_kinds",
+        // Scoped effect stacks (26 §10 K-B1/K-B2) and Paste Attributes (K-B15)
+        "effect_stack",
+        "paste_attributes",
+        // Effect presets / custom stacks / favourites (26 §10 K-B4)
+        "effect_preset_list",
+        "effect_preset_save",
+        "effect_preset_apply",
+        "effect_preset_delete",
+        "effect_preset_rename",
+        "effect_favourite_list",
+        "effect_favourite_set",
         "set_keyframe",
         "remove_keyframe",
         "batch_set_keyframes",
         "get_keyframes",
         "import_media",
         "relink_media",
+        // Offline media recovery (26 K-C6)
+        "find_offline_media",
+        "relink_media_batch",
         "list_media",
         "remove_asset",
         "create_bin",

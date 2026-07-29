@@ -34,7 +34,10 @@ use super::grade::Grade;
 use super::graph::{GraphEdge, GraphNode, GraphNodeParams, NodePos};
 use super::ids::*;
 use super::media::{AssetSource, MediaAsset, MediaBin, MediaProbe, ProxyRef};
-use super::sequence::{Marker, Sequence, SequenceFormat, TimelineProject, Track, TrackKind};
+use super::sequence::{
+    Marker, MarkerCategory, MarkerRef, MarkerRetarget, Sequence, SequenceFormat, TimelineProject,
+    Track, TrackKind,
+};
 use super::time::Tick;
 use crate::document::Document;
 use serde::{Deserialize, Serialize};
@@ -674,6 +677,54 @@ pub enum TimelineCmd {
         old: Marker,
         new: Marker,
     },
+    /// Add a clip-scoped marker (35 §1.5). `at` is clip-relative; the marker
+    /// travels with the clip through copy/duplicate/move, unlike a sequence
+    /// marker.
+    AddClipMarker {
+        clip: ClipId,
+        marker: Marker,
+    },
+    /// Remove a clip-scoped marker (carries the full marker for a
+    /// self-contained inverse).
+    RemoveClipMarker {
+        clip: ClipId,
+        marker: Marker,
+    },
+    /// Edit a clip-scoped marker's fields — old/new full markers.
+    SetClipMarker {
+        clip: ClipId,
+        id: MarkerId,
+        old: Marker,
+        new: Marker,
+    },
+    /// Insert a project marker category at `index` (35 §1.3) and apply every
+    /// [`MarkerRetarget`]'s `new` category to the marker it names. `retarget`
+    /// is empty for a plain create; it is populated when this arm is the
+    /// *inverse* of a delete, so undoing a delete both restores the category
+    /// and puts its markers back on it.
+    AddMarkerCategory {
+        category: MarkerCategory,
+        index: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        retarget: Vec<MarkerRetarget>,
+    },
+    /// Remove a project marker category, recording the index it sat at so undo
+    /// restores display order, and applying every [`MarkerRetarget`]'s `new`
+    /// category. `retarget` is what makes the 35 §1.3 rule explicit: markers on
+    /// a deleted category are either reassigned *on the record* or deliberately
+    /// left dangling (and flagged) — never silently remapped.
+    RemoveMarkerCategory {
+        category: MarkerCategory,
+        index: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        retarget: Vec<MarkerRetarget>,
+    },
+    /// Rename / recolour / re-glyph a category in place (id never changes).
+    SetMarkerCategory {
+        id: MarkerCategoryId,
+        old: MarkerCategory,
+        new: MarkerCategory,
+    },
     /// Set (or clear, with `None`) a sequence's preview/export work range.
     SetWorkRange {
         seq: SequenceId,
@@ -876,6 +927,31 @@ fn inverse_perm(order: &[usize]) -> Vec<usize> {
         }
     }
     inv
+}
+
+/// Point every named marker at its retarget's `new` category. Missing markers
+/// are skipped, not an error: a category command must stay applicable after an
+/// unrelated undo removed one of its markers, exactly like the other
+/// find-then-mutate arms above.
+fn apply_retargets(p: &mut TimelineProject, retargets: &[MarkerRetarget]) {
+    for r in retargets {
+        match r.marker {
+            MarkerRef::Sequence { seq, marker } => {
+                if let Some(s) = p.sequences.get_mut(&seq) {
+                    if let Some(m) = s.markers.iter_mut().find(|m| m.id == marker) {
+                        m.category = r.new;
+                    }
+                }
+            }
+            MarkerRef::Clip { clip, marker } => {
+                if let Some(c) = find_clip_mut(p, clip) {
+                    if let Some(m) = c.markers.iter_mut().find(|m| m.id == marker) {
+                        m.category = r.new;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Keep markers in a deterministic order (by tick, then id) so add/remove/set
@@ -1719,6 +1795,12 @@ impl TimelineCmd {
             TimelineCmd::AddMarker { .. } => "Add marker".into(),
             TimelineCmd::RemoveMarker { .. } => "Remove marker".into(),
             TimelineCmd::SetMarker { .. } => "Edit marker".into(),
+            TimelineCmd::AddClipMarker { .. } => "Add clip marker".into(),
+            TimelineCmd::RemoveClipMarker { .. } => "Remove clip marker".into(),
+            TimelineCmd::SetClipMarker { .. } => "Edit clip marker".into(),
+            TimelineCmd::AddMarkerCategory { .. } => "Add marker category".into(),
+            TimelineCmd::RemoveMarkerCategory { .. } => "Remove marker category".into(),
+            TimelineCmd::SetMarkerCategory { .. } => "Edit marker category".into(),
             TimelineCmd::SetWorkRange { .. } => "Set work range".into(),
             TimelineCmd::AddBin { .. } => "Add bin".into(),
             TimelineCmd::RemoveBin { .. } => "Remove bin".into(),
@@ -1978,6 +2060,25 @@ impl TimelineCmd {
                             right.duration = right_dur;
                             right.source_in = right.source_in + left_dur.max(Tick::ZERO);
                             right.transition_in = None;
+                            // Clip markers (35 §1.5) are CLIP-RELATIVE, so a
+                            // split has to partition them, not copy them: a
+                            // marker at or past the cut belongs to the right
+                            // half and its `at` rebases to that half's origin.
+                            // Cloning the vec wholesale would duplicate every
+                            // `MarkerId` and leave the right half's markers
+                            // pointing `left_dur` too far into the clip.
+                            left.markers.retain(|m| m.at < left_dur);
+                            right.markers.retain(|m| m.at >= left_dur);
+                            for m in &mut right.markers {
+                                m.at = m.at - left_dur;
+                                // A ranged marker straddling the cut is clamped
+                                // to the half it now lives in rather than
+                                // reaching past the clip.
+                                m.duration = m.duration.min(right_dur - m.at);
+                            }
+                            for m in &mut left.markers {
+                                m.duration = m.duration.min(left_dur - m.at);
+                            }
                             t.clips.insert(pos + 1, right);
                         }
                     }
@@ -1990,6 +2091,16 @@ impl TimelineCmd {
                     if let Some(ri) = t.clips.iter().position(|c| c.id == *right) {
                         let right_clip = t.clips.remove(ri);
                         if let Some(l) = t.clips.iter_mut().find(|c| c.id == *left) {
+                            // Fold the right half's clip markers back in,
+                            // rebased onto the merged clip's origin — the exact
+                            // inverse of `SplitClip`'s partition above, so
+                            // split→undo round-trips markers losslessly.
+                            let offset = right_clip.start - l.start;
+                            for mut m in right_clip.markers.iter().cloned() {
+                                m.at = m.at + offset;
+                                l.markers.push(m);
+                            }
+                            sort_markers(&mut l.markers);
                             l.duration = right_clip.end() - l.start;
                         }
                     }
@@ -2118,6 +2229,47 @@ impl TimelineCmd {
                         *m = new.clone();
                     }
                     sort_markers(&mut s.markers);
+                }
+            }
+            TimelineCmd::AddClipMarker { clip, marker } => {
+                if let Some(c) = find_clip_mut(p, *clip) {
+                    c.markers.push(marker.clone());
+                    sort_markers(&mut c.markers);
+                }
+            }
+            TimelineCmd::RemoveClipMarker { clip, marker } => {
+                if let Some(c) = find_clip_mut(p, *clip) {
+                    c.markers.retain(|m| m.id != marker.id);
+                }
+            }
+            TimelineCmd::SetClipMarker { clip, id, new, .. } => {
+                if let Some(c) = find_clip_mut(p, *clip) {
+                    if let Some(m) = c.markers.iter_mut().find(|m| m.id == *id) {
+                        *m = new.clone();
+                    }
+                    sort_markers(&mut c.markers);
+                }
+            }
+            TimelineCmd::AddMarkerCategory {
+                category,
+                index,
+                retarget,
+            } => {
+                if !p.marker_categories.iter().any(|c| c.id == category.id) {
+                    let at = (*index).min(p.marker_categories.len());
+                    p.marker_categories.insert(at, category.clone());
+                }
+                apply_retargets(p, retarget);
+            }
+            TimelineCmd::RemoveMarkerCategory {
+                category, retarget, ..
+            } => {
+                p.marker_categories.retain(|c| c.id != category.id);
+                apply_retargets(p, retarget);
+            }
+            TimelineCmd::SetMarkerCategory { id, new, .. } => {
+                if let Some(c) = p.marker_categories.iter_mut().find(|c| c.id == *id) {
+                    *c = new.clone();
                 }
             }
             TimelineCmd::SetWorkRange { seq, new, .. } => {
@@ -2511,6 +2663,43 @@ impl TimelineCmd {
             },
             TimelineCmd::SetMarker { seq, id, old, new } => TimelineCmd::SetMarker {
                 seq: *seq,
+                id: *id,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::AddClipMarker { clip, marker } => TimelineCmd::RemoveClipMarker {
+                clip: *clip,
+                marker: marker.clone(),
+            },
+            TimelineCmd::RemoveClipMarker { clip, marker } => TimelineCmd::AddClipMarker {
+                clip: *clip,
+                marker: marker.clone(),
+            },
+            TimelineCmd::SetClipMarker { clip, id, old, new } => TimelineCmd::SetClipMarker {
+                clip: *clip,
+                id: *id,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::AddMarkerCategory {
+                category,
+                index,
+                retarget,
+            } => TimelineCmd::RemoveMarkerCategory {
+                category: category.clone(),
+                index: *index,
+                retarget: retarget.iter().map(MarkerRetarget::flipped).collect(),
+            },
+            TimelineCmd::RemoveMarkerCategory {
+                category,
+                index,
+                retarget,
+            } => TimelineCmd::AddMarkerCategory {
+                category: category.clone(),
+                index: *index,
+                retarget: retarget.iter().map(MarkerRetarget::flipped).collect(),
+            },
+            TimelineCmd::SetMarkerCategory { id, old, new } => TimelineCmd::SetMarkerCategory {
                 id: *id,
                 old: new.clone(),
                 new: old.clone(),

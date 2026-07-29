@@ -307,15 +307,130 @@ fn eval_effect_params(anim: &AnimProps<EffectParams>, t: Tick) -> EffectParams {
 /// mixer caches per track so the next segment's head has material to splice
 /// against, independent of any downstream `tail_samples`.
 pub const DECLICK_WINDOW_SAMPLES: usize = 1000;
-/// 31 §4.1 default declick threshold (dB, 0..30). Carried here for step-8's
-/// declick maths; the per-clip/project serde surface (§4.3, §10) lands then.
+/// 31 §4.1 default declick threshold (dB, 0..30). See [`boundary_delta_db`]
+/// for exactly what quantity this thresholds.
 pub const DECLICK_THRESHOLD_DB: f32 = 2.0;
+/// 31 §4.3's "disabled when either side is silent", given a number: a boundary
+/// side whose window peak is below this (-80 dBFS) counts as silent and is
+/// never repaired.
+///
+/// **Documented implementation decision** — §4.3 states the rule without a
+/// figure. -80 dBFS is far below anything audible in a mix yet far above the
+/// denormal noise a decoder can leave in an "empty" buffer, so a genuine gap
+/// is never mistaken for material. The rule matters because reversing a loud
+/// tail into a gap would *add* ~21 ms of signal that the timeline does not
+/// contain.
+pub const DECLICK_SILENCE_FLOOR: f32 = 1e-4;
+/// Floor on [`boundary_delta_db`]'s slew reference, so perfectly flat material
+/// (DC, or a decoder's exact-zero run) yields a finite, large `delta_db`
+/// instead of a division by zero. A DC-to-DC splice at different levels really
+/// is a click, so "engage" is the right answer there.
+const DECLICK_SLEW_FLOOR: f32 = 1e-6;
+/// Upper bound on a configured declick window, so a bad project value cannot
+/// make the per-track tail rings unbounded. 1 s at 48 kHz.
+const DECLICK_MAX_WINDOW: usize = 48_000;
+
+/// Boundary-declick settings (31 §4).
+///
+/// 31 §4.3 wants these as a project-level setting with a per-clip override and
+/// §10 lists `declick_threshold_db` as additive serde. That model surface lives
+/// in `photonic-core` and is **not** part of this change; until it exists the
+/// mixer carries the §4.1 defaults and this setter is the seam the model will
+/// drive. Default is **on**, per §4.3.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct DeclickConfig {
+    pub enabled: bool,
+    /// 31 §4.1, range 0..30. Clamped by [`Mixer::set_declick`].
+    pub threshold_db: f32,
+    /// 31 §4.1 crossfade length in samples. Clamped to `1..=DECLICK_MAX_WINDOW`.
+    pub window_samples: usize,
+}
+
+impl Default for DeclickConfig {
+    fn default() -> Self {
+        DeclickConfig {
+            enabled: true,
+            threshold_db: DECLICK_THRESHOLD_DB,
+            window_samples: DECLICK_WINDOW_SAMPLES,
+        }
+    }
+}
+
+impl DeclickConfig {
+    fn sanitized(self) -> Self {
+        DeclickConfig {
+            enabled: self.enabled,
+            threshold_db: if self.threshold_db.is_finite() {
+                self.threshold_db.clamp(0.0, 30.0)
+            } else {
+                DECLICK_THRESHOLD_DB
+            },
+            window_samples: self.window_samples.clamp(1, DECLICK_MAX_WINDOW),
+        }
+    }
+}
+
+/// How much of a *discontinuity* one channel of a segment boundary is, in dB —
+/// 31 §4.1 steps 2–3's `delta_db`, and the whole answer to "is this boundary a
+/// click at all". Above [`DeclickConfig::threshold_db`] the boundary is
+/// repaired; at or below it nothing happens, which is what keeps a hard edit
+/// hard.
+///
+/// ```text
+/// step      = |head[0] - tail_rev[0]|                    the splice's jump
+/// slew      = max |x[i] - x[i-1]| over the outgoing tail
+///             and the incoming head, floored                 the material's
+///                                                            own worst jump
+/// delta_db  = 20 log10(step / slew)
+/// ```
+///
+/// **Documented implementation decision — the reference, and the sign.**
+/// §4.1 says "measure `delta_db` between the outgoing clip's final sample and
+/// the incoming clip's first" and gates on `|delta_db| <= threshold`, without
+/// naming the reference the ratio is taken against. Read literally as a ratio
+/// of the two samples' *amplitudes* it is not a click detector at all, and
+/// fails §9 item 4's own acceptance case in both directions:
+///
+/// - a tone spliced to its own inverse (`+0.5` → `-0.5`) is the largest
+///   possible click and measures **0 dB** — no repair, click ships;
+/// - a boundary into an intentional fade (head ≈ 0) measures **+∞ dB** — a
+///   repair fires on exactly the material §4.3 says to leave alone.
+///
+/// Referencing the step against the material's own worst sample-to-sample
+/// slew fixes both and preserves every stated property of §4.1: the units are
+/// still dB, the default is still 2 dB, the range is still 0..30 (2 dB = "the
+/// splice jumps 1.26× further than the source ever does"; 30 dB = "31×"), and
+/// "most cuts land at similar amplitudes and need no repair" still holds,
+/// because a splice between similar material jumps about as far as the
+/// material itself does and lands at ~0 dB.
+///
+/// It also buys the property the naive always-ramp approach cannot have: an
+/// incoming **transient** — a cut straight onto a drum hit — has enormous slew
+/// of its own, so the splice measures *below* threshold and is left completely
+/// alone. That is why the comparison is **signed** (`delta_db > threshold`)
+/// rather than §4.1's `|delta_db|`: under this reference a splice smoother than
+/// the surrounding material is the *good* case and must never be "repaired".
+///
+/// `tail_rev` is newest-first (`tail_rev[0]` is the outgoing clip's final
+/// sample); `head` is one interleaved block, oldest-first; `n` is the window,
+/// already clamped to both sides' available length.
+fn boundary_delta_db(tail_rev: &[f32], head: &[f32], ch: usize, n: usize) -> f32 {
+    let step = (head[ch] - tail_rev[0]).abs();
+    let mut slew = DECLICK_SLEW_FLOOR;
+    for i in 1..n {
+        slew = slew.max((tail_rev[i - 1] - tail_rev[i]).abs());
+        slew = slew.max((head[i * CHANNELS + ch] - head[(i - 1) * CHANNELS + ch]).abs());
+    }
+    20.0 * (step / slew).log10()
+}
 
 /// The previous segment's tail handed to the next segment's head (31 §4.2, §8
-/// step 4). `tail[c]` is `max(DECLICK_WINDOW_SAMPLES, largest downstream
+/// step 4). `tail[c]` is `max(DeclickConfig::window_samples, largest downstream
 /// tail_samples)` samples of the **pre-fx** track bus, oldest→newest (so the
-/// splice point — the newest sample — is last). Only the graph-shape plumbing
-/// is delivered here; the declick algorithm that consumes this is step 8.
+/// splice point — the newest sample — is last).
+///
+/// The mixer consumes this internally for the §4 declick; this type is the
+/// same tail published for out-of-mixer consumers (analysis, §5).
 pub struct SegmentBoundary {
     pub track: TrackId,
     pub at: Tick,
@@ -462,6 +577,23 @@ struct TailBuf {
     pos: usize,
     filled: usize,
     pending: Option<Tick>,
+    /// A boundary was flagged on the previous block; the next block's head is
+    /// therefore the incoming segment's head and is a declick candidate
+    /// (31 §4.1 step 1: "engage only on a clip-boundary block"). Independent of
+    /// `pending`, which is the *external* [`Mixer::take_segment_boundary`]
+    /// handshake — the internal declick must not consume it, and vice versa.
+    armed: bool,
+    /// The outgoing tail, **newest-first**, loaded when a declick engages:
+    /// `rev[c][0]` is the outgoing clip's final sample. This is 31 §4.1's
+    /// "time-reversing the outgoing tail". Retained (not freed) between
+    /// boundaries so a repeat boundary allocates nothing.
+    rev: [Vec<f32>; CHANNELS],
+    /// Crossfade length `n` and how much of it has been applied. The crossfade
+    /// is `DeclickConfig::window_samples` long and a block is only
+    /// [`BLOCK_FRAMES`], so it deliberately spans blocks; `declick_pos <
+    /// declick_n` means "still in flight".
+    declick_n: usize,
+    declick_pos: usize,
 }
 
 impl TailBuf {
@@ -473,6 +605,10 @@ impl TailBuf {
             pos: 0,
             filled: 0,
             pending: None,
+            armed: false,
+            rev: std::array::from_fn(|_| Vec::new()),
+            declick_n: 0,
+            declick_pos: 0,
         }
     }
 
@@ -489,6 +625,110 @@ impl TailBuf {
         self.pos = 0;
         self.filled = 0;
         self.pending = None;
+        self.cancel_declick();
+    }
+
+    /// Abandon any armed/in-flight declick. The ring it would splice from is
+    /// gone or stale, and a half-applied crossfade against fresh material is
+    /// worse than no repair.
+    fn cancel_declick(&mut self) {
+        self.armed = false;
+        self.declick_n = 0;
+        self.declick_pos = 0;
+    }
+
+    /// 31 §4.1 steps 1–3. If the previous block flagged a boundary, decide
+    /// whether this block's `head` (one interleaved pre-fx track-bus block) is
+    /// a click, and if so load the reversed outgoing tail as the crossfade
+    /// source. Returns `true` iff a repair engaged.
+    ///
+    /// MUST be called *before* [`write_block`](Self::write_block) for this
+    /// block: the ring still holds the outgoing segment, so its newest sample
+    /// is the splice point.
+    fn start_declick(&mut self, cfg: &DeclickConfig, head: &[f32]) -> bool {
+        if !std::mem::take(&mut self.armed) {
+            return false;
+        }
+        // The crossfade is as long as the window, bounded only by how much
+        // outgoing material the ring actually holds (it may not have filled
+        // yet — a cut in the first blocks after a seek). It is deliberately
+        // NOT bounded by the head block: the default window is 1000 samples
+        // against a 512-frame block, so it spans blocks and `apply_declick`
+        // resumes.
+        let n = cfg.window_samples.min(self.filled);
+        // The *measurement* window is bounded by both, since it reads real
+        // samples from each side.
+        let probe = n.min(head.len() / CHANNELS);
+        if n < 2 || probe < 2 {
+            return false;
+        }
+
+        for c in 0..CHANNELS {
+            let ring = &self.ch[c];
+            let rev = &mut self.rev[c];
+            rev.clear();
+            rev.reserve(n);
+            for i in 0..n {
+                rev.push(ring[(self.pos + self.len - 1 - i) % self.len]);
+            }
+        }
+
+        // 31 §4.3: disabled when either side is silent.
+        let tail_peak = (0..probe).fold(0f32, |m, i| {
+            (0..CHANNELS).fold(m, |m, c| m.max(self.rev[c][i].abs()))
+        });
+        let head_peak = (0..probe).fold(0f32, |m, f| {
+            (0..CHANNELS).fold(m, |m, c| m.max(head[f * CHANNELS + c].abs()))
+        });
+        if tail_peak < DECLICK_SILENCE_FLOOR || head_peak < DECLICK_SILENCE_FLOOR {
+            return false;
+        }
+
+        // 31 §4.1 steps 2–3, measured per channel. The *decision* is taken
+        // across channels (engage if any channel is a click) and then applied
+        // to all of them — a repair on one side of a stereo pair only would
+        // shift the image for the duration of the window, which is a worse
+        // artefact than the click.
+        let engage = (0..CHANNELS)
+            .any(|c| boundary_delta_db(&self.rev[c], head, c, probe) > cfg.threshold_db);
+        if !engage {
+            return false;
+        }
+        self.declick_n = n;
+        self.declick_pos = 0;
+        true
+    }
+
+    /// 31 §4.1 step 4's crossfade, applied in place to one interleaved block
+    /// and resumed across blocks until the window is exhausted:
+    ///
+    /// ```text
+    /// mix    = (n - i) / n
+    /// out[i] = tail_reversed[i] * mix + head[i] * (1 - mix)
+    /// ```
+    ///
+    /// At `i == 0` this reproduces the outgoing clip's final sample exactly, so
+    /// the step at the splice is zero, and the reversed tail carries the
+    /// outgoing material's own amplitude — which is why this does not dip the
+    /// level the way a fade does (31 §9 item 4).
+    fn apply_declick(&mut self, block: &mut [f32]) {
+        if self.declick_pos >= self.declick_n {
+            return;
+        }
+        let n = self.declick_n;
+        let frames = block.len() / CHANNELS;
+        for f in 0..frames {
+            let i = self.declick_pos;
+            if i >= n {
+                break;
+            }
+            let mix = (n - i) as f32 / n as f32;
+            for c in 0..CHANNELS {
+                let head = block[f * CHANNELS + c];
+                block[f * CHANNELS + c] = self.rev[c][i] * mix + head * (1.0 - mix);
+            }
+            self.declick_pos += 1;
+        }
     }
 
     /// Push one interleaved block (`frames * CHANNELS`) into the ring.
@@ -528,6 +768,7 @@ impl TailBuf {
         self.pos = 0;
         self.filled = 0;
         self.pending = None;
+        self.cancel_declick();
     }
 }
 
@@ -600,8 +841,11 @@ pub struct Mixer {
     // Instantiated fx chains (31 §8 step 2), synced from the model each block.
     track_fx: HashMap<TrackId, FxChainState>,
     master_fx: FxChainState,
-    // Per-track segment-boundary tail rings (31 §8 step 4).
+    // Per-track segment-boundary tail rings (31 §8 step 4) and the declick
+    // that consumes them (31 §4, §8 step 8).
     tail_cache: HashMap<TrackId, TailBuf>,
+    declick: DeclickConfig,
+    declick_engagements: u64,
     // 31 §3: per-track delay lines for latency compensation.
     track_delay: HashMap<TrackId, DelayLine>,
     /// Last computed graph latency (samples) — for clock offset (31 §3).
@@ -633,6 +877,8 @@ impl Mixer {
             track_fx: HashMap::new(),
             master_fx: FxChainState::new(),
             tail_cache: HashMap::new(),
+            declick: DeclickConfig::default(),
+            declick_engagements: 0,
             track_delay: HashMap::new(),
             last_graph_latency: 0,
             track_bus_scratch: vec![0.0; BLOCK_FRAMES * CHANNELS],
@@ -664,8 +910,41 @@ impl Mixer {
         self.track_fx.clear();
         self.master_fx = FxChainState::new();
         self.tail_cache.clear();
+        self.declick_engagements = 0;
         self.track_delay.clear();
         self.last_graph_latency = 0;
+    }
+
+    /// Current boundary-declick settings (31 §4).
+    pub fn declick_config(&self) -> DeclickConfig {
+        self.declick
+    }
+
+    /// Set the boundary-declick settings (31 §4.3's project-level knob; see
+    /// [`DeclickConfig`] for why it is a setter and not a model field yet).
+    /// Values are clamped to §4.1's stated ranges. Any armed or in-flight
+    /// repair is abandoned, since a crossfade half-applied under one window
+    /// length and half under another is neither.
+    pub fn set_declick(&mut self, cfg: DeclickConfig) {
+        let cfg = cfg.sanitized();
+        if cfg == self.declick {
+            return;
+        }
+        self.declick = cfg;
+        for buf in self.tail_cache.values_mut() {
+            buf.cancel_declick();
+        }
+    }
+
+    /// How many boundaries this mixer has actually repaired (31 §4.1 step 4)
+    /// since construction or the last [`Mixer::reset`].
+    ///
+    /// Deliberately counts *engagements*, not boundaries: the whole point of
+    /// §4.1 step 3's threshold is that most boundaries are left alone, so a
+    /// test that asserts a hard edit stayed hard needs to see this stay at 0
+    /// while blocks are rendered through a boundary.
+    pub fn declick_engagements(&self) -> u64 {
+        self.declick_engagements
     }
 
     /// Apply a mixer-level discontinuity (31 §2.1/§2.3). MUST be called by the
@@ -817,6 +1096,7 @@ impl Mixer {
 
         let coeff = self.gain_pan_coeff;
         let sr = self.sample_rate;
+        let declick_cfg = self.declick;
         let tick_per_sample = TICKS_PER_SECOND / self.sample_rate.max(1) as i64;
         let any_solo = tracks.iter().any(|t| t.audio.solo);
         // A track fx-graph change resets the master chain wholesale (master is
@@ -874,13 +1154,13 @@ impl Mixer {
             //    capture point is deliberately here — after clip rendering,
             //    before the fx chain — so the declick (step 8) repairs the
             //    *source* splice, not the processed signal. Ring length is
-            //    max(DECLICK_WINDOW_SAMPLES, downstream tail_samples) (§4.2). ──
+            //    max(declick window, downstream tail_samples) (§4.2). ──
             let downstream_tail = self
                 .track_fx
                 .get(&track.id)
                 .map_or(0, |fx| fx.tail_samples(&track.audio.fx_chain))
                 + self.master_fx.tail_samples(&master.fx_chain);
-            let tail_len = DECLICK_WINDOW_SAMPLES.max(downstream_tail as usize);
+            let tail_len = declick_cfg.window_samples.max(downstream_tail as usize);
             let buf = self
                 .tail_cache
                 .entry(track.id)
@@ -888,13 +1168,35 @@ impl Mixer {
             if buf.len != tail_len {
                 buf.resize(tail_len);
             }
+
+            // ── 31 §4 / §8 step 8: boundary declick. Ordered strictly before
+            //    `write_block`, so the ring still holds the *outgoing* segment
+            //    when the splice is measured, and so the ring then records the
+            //    repaired signal (a second boundary one block later splices
+            //    against what was actually emitted). Both halves run every
+            //    block: `start_declick` is a no-op unless the previous block
+            //    flagged a boundary, and `apply_declick` is a no-op unless a
+            //    crossfade is in flight — the window is 1000 samples and a
+            //    block is 512, so a repair spans blocks by construction. ──
+            if declick_cfg.enabled {
+                if buf.start_declick(&declick_cfg, &self.track_bus_scratch) {
+                    self.declick_engagements += 1;
+                }
+                buf.apply_declick(&mut self.track_bus_scratch);
+            } else {
+                buf.cancel_declick();
+            }
+
             buf.write_block(&self.track_bus_scratch);
             // A clip ending within this block is a segment boundary on this
             // track: mark the tail pending so a feeder can hand it to the next
-            // segment's head (31 §4.2). Auto-detected from `ClipVoice::remaining`.
+            // segment's head (31 §4.2), and arm the declick so the *next*
+            // block's head is measured against this tail. Auto-detected from
+            // `ClipVoice::remaining`.
             let block_ticks = BLOCK_FRAMES as i64 * tick_per_sample;
             if track.clips.iter().any(|c| c.remaining.0 <= block_ticks) {
                 buf.pending = Some(block_start_tick);
+                buf.armed = true;
             }
 
             // ── 31 §8 step 2: process the (already-synced) track fx chain. ──
@@ -1828,5 +2130,337 @@ mod tests {
         assert_eq!(dry_delay, Some(wet_lat as usize));
         let wet_delay = mixer.track_delay.get(&wet_id).map(|d| d.delay_frames);
         assert_eq!(wet_delay, Some(0));
+    }
+
+    // ── 31 §4 / §8 step 8: boundary declick ─────────────────────────────
+    //
+    // The detector's contract in one line: `delta_db` measures the splice's
+    // jump against the material's own worst jump, so "is this a click" is
+    // decided by how anomalous the step is, not by how big it is. See
+    // `boundary_delta_db`'s doc for why that is the reading of 31 §4.1 taken
+    // here. Each test below pins one consequence of that choice, and each
+    // states the value the naive literal amplitude-ratio reading would give.
+
+    const TAU_F32: f32 = std::f32::consts::TAU;
+
+    /// `len` samples of a sine landing on `end_phase` at its final sample.
+    fn tail_ending_at(freq: f32, amp: f32, end_phase: f32, len: usize) -> Vec<f32> {
+        let step = TAU_F32 * freq / SR as f32;
+        (0..len)
+            .map(|i| (end_phase - step * (len - 1 - i) as f32).sin() * amp)
+            .collect()
+    }
+
+    /// `len` frames of a sine from `start_phase`, duplicated across channels.
+    fn head_from(freq: f32, amp: f32, start_phase: f32, len: usize) -> Vec<f32> {
+        let step = TAU_F32 * freq / SR as f32;
+        let mut out = vec![0.0; len * CHANNELS];
+        for f in 0..len {
+            let s = (start_phase + step * f as f32).sin() * amp;
+            for c in 0..CHANNELS {
+                out[f * CHANNELS + c] = s;
+            }
+        }
+        out
+    }
+
+    fn reversed(tail: &[f32]) -> Vec<f32> {
+        tail.iter().rev().copied().collect()
+    }
+
+    /// The literal-amplitude-ratio reading of §4.1 that `boundary_delta_db`'s
+    /// doc rejects. Present only so the tests below can show what it would
+    /// have decided.
+    fn literal_amplitude_ratio_db(tail_last: f32, head_first: f32) -> f32 {
+        20.0 * (tail_last.abs() / head_first.abs()).log10()
+    }
+
+    /// A splice that continues the waveform is not a click; a splice that
+    /// jumps from the peak back to zero-phase is. Same material, same window —
+    /// only the phase relationship differs, which is the whole point of the
+    /// threshold.
+    #[test]
+    fn delta_db_separates_a_continuous_splice_from_a_cut_mid_cycle() {
+        const N: usize = 200;
+        let (freq, amp) = (1000.0f32, 0.5f32);
+        let step = TAU_F32 * freq / SR as f32;
+        let end_phase = std::f32::consts::FRAC_PI_2; // outgoing ends on the peak
+
+        let tail = tail_ending_at(freq, amp, end_phase, N);
+        let rev = reversed(&tail);
+        assert!((rev[0] - amp).abs() < 1e-6, "tail ends on the sine's peak");
+
+        // (a) phase-continuous: the incoming clip picks up exactly where the
+        //     outgoing one stopped.
+        let smooth = head_from(freq, amp, end_phase + step, N);
+        let smooth_db = boundary_delta_db(&rev, &smooth, 0, N);
+        assert!(
+            smooth_db < DECLICK_THRESHOLD_DB,
+            "a phase-continuous splice must measure below threshold, got {smooth_db} dB"
+        );
+
+        // (b) cut mid-cycle (31 §9 item 4's own case): the incoming clip
+        //     restarts at zero phase while the outgoing one ended on the peak.
+        let cut = head_from(freq, amp, 0.0, N);
+        let cut_db = boundary_delta_db(&rev, &cut, 0, N);
+        assert!(
+            cut_db > DECLICK_THRESHOLD_DB,
+            "a mid-cycle cut must measure above threshold, got {cut_db} dB"
+        );
+        assert!(
+            cut_db - smooth_db > 20.0,
+            "the two cases must be far apart, not marginal ({cut_db} vs {smooth_db} dB)"
+        );
+    }
+
+    /// The case the literal amplitude-ratio reading of §4.1 is blind to: a
+    /// splice onto the inverse of the outgoing material. The two samples have
+    /// identical magnitude — ratio 0 dB, "no repair" — yet the step is the
+    /// largest one the material can produce.
+    #[test]
+    fn delta_db_flags_a_phase_inverted_splice_the_amplitude_ratio_misses() {
+        const N: usize = 200;
+        let (freq, amp) = (1000.0f32, 0.5f32);
+        let end_phase = std::f32::consts::FRAC_PI_2;
+
+        let rev = reversed(&tail_ending_at(freq, amp, end_phase, N));
+        // Incoming is the same tone, inverted: head[0] == -tail_last.
+        let head = head_from(freq, -amp, end_phase, N);
+        assert!((head[0] + rev[0]).abs() < 1e-6, "head[0] == -tail_last");
+
+        assert!(
+            literal_amplitude_ratio_db(rev[0], head[0]).abs() < 1e-3,
+            "the literal amplitude-ratio reading scores this 0 dB — it would ship the click"
+        );
+        let db = boundary_delta_db(&rev, &head, 0, N);
+        assert!(
+            db > DECLICK_THRESHOLD_DB,
+            "a full phase inversion is the largest possible click, got {db} dB"
+        );
+    }
+
+    /// The property the naive "ramp every cut" approach cannot have: cutting
+    /// onto a transient must NOT engage. The incoming material's own slew
+    /// dwarfs the splice's, so the splice is not anomalous — nothing to repair,
+    /// and the attack is left untouched.
+    #[test]
+    fn delta_db_leaves_a_cut_onto_a_transient_alone() {
+        const N: usize = 200;
+        // Outgoing: quiet, slow. Incoming: loud, fast — an attack.
+        let rev = reversed(&tail_ending_at(200.0, 0.05, std::f32::consts::FRAC_PI_2, N));
+        let head = head_from(6000.0, 0.9, 0.05, N);
+
+        // The literal amplitude-ratio reading sees 0.05 against ~0.045 and,
+        // worse, would swing wildly with the incoming clip's start phase.
+        let db = boundary_delta_db(&rev, &head, 0, N);
+        assert!(
+            db < DECLICK_THRESHOLD_DB,
+            "a cut onto a transient must be left alone, got {db} dB — this is the \
+             assertion that stops the declick dulling every hard edit"
+        );
+    }
+
+    /// Perfectly flat material either side (the slew floor's job): a DC step is
+    /// a click, and the reference never divides by zero.
+    #[test]
+    fn delta_db_on_flat_material_is_finite_and_engages() {
+        const N: usize = 64;
+        let rev = vec![0.5f32; N];
+        let head = vec![-0.5f32; N * CHANNELS];
+        let db = boundary_delta_db(&rev, &head, 0, N);
+        assert!(db.is_finite(), "slew floor must keep delta_db finite");
+        assert!(db > DECLICK_THRESHOLD_DB);
+    }
+
+    /// An identical splice (no step at all) measures -inf and is never touched.
+    #[test]
+    fn delta_db_on_a_seamless_splice_is_negative_infinity() {
+        const N: usize = 64;
+        let rev = reversed(&tail_ending_at(1000.0, 0.5, 0.3, N));
+        // head[0] == tail_last exactly.
+        let mut head = head_from(1000.0, 0.5, 0.3, N);
+        head[0] = rev[0];
+        head[1] = rev[0];
+        let db = boundary_delta_db(&rev, &head, 0, N);
+        assert!(
+            db < DECLICK_THRESHOLD_DB,
+            "no step ⇒ no repair, got {db} dB"
+        );
+    }
+
+    /// 31 §4.1 step 4's crossfade, sample for sample, plus the property that
+    /// distinguishes it from a fade: the splice sample keeps the outgoing
+    /// clip's level instead of dipping toward zero.
+    #[test]
+    fn declick_crossfade_matches_the_spec_formula_without_dipping() {
+        const N: usize = 8;
+        let mut buf = TailBuf::new(N);
+        buf.write_block(&[0.5f32; N * CHANNELS]);
+        buf.armed = true;
+
+        let mut head = vec![-0.5f32; N * CHANNELS];
+        let cfg = DeclickConfig {
+            window_samples: N,
+            ..Default::default()
+        };
+        assert!(
+            buf.start_declick(&cfg, &head),
+            "a +0.5 -> -0.5 DC step must engage"
+        );
+        buf.apply_declick(&mut head);
+
+        for i in 0..N {
+            let mix = (N - i) as f32 / N as f32;
+            let expect = 0.5 * mix + (-0.5) * (1.0 - mix);
+            for c in 0..CHANNELS {
+                assert!(
+                    (head[i * CHANNELS + c] - expect).abs() < 1e-6,
+                    "i={i} c={c}: {} != {expect}",
+                    head[i * CHANNELS + c]
+                );
+            }
+        }
+        // The distinguishing property (31 §9 item 4): a fade would put ~0 here.
+        assert_eq!(head[0], 0.5, "the splice sample keeps the outgoing level");
+        // And it really did change the signal.
+        assert!(head[N * CHANNELS - 1] < 0.0);
+    }
+
+    /// The crossfade is a property of the window, not of the block size: it is
+    /// **not** truncated to the block that starts it, and it stops exactly at
+    /// `n`. This is the production case — the default window (1000) is nearly
+    /// two blocks (512).
+    #[test]
+    fn declick_crossfade_resumes_across_blocks_and_stops_at_n() {
+        const N: usize = 12;
+        const CHUNK: usize = 5;
+        let mut buf = TailBuf::new(N);
+        buf.write_block(&[1.0f32; N * CHANNELS]);
+        buf.armed = true;
+        let cfg = DeclickConfig {
+            window_samples: N,
+            ..Default::default()
+        };
+        // The head block handed to `start_declick` is shorter than the window.
+        assert!(buf.start_declick(&cfg, &[-1.0f32; CHUNK * CHANNELS]));
+        assert_eq!(
+            buf.declick_n, N,
+            "the window survives a short first block; only the ring's fill bounds it"
+        );
+
+        // Feed silent blocks: whatever appears is purely the reversed tail
+        // fading out, which makes the per-sample formula readable.
+        let mut applied = Vec::new();
+        for _ in 0..4 {
+            let mut chunk = vec![0.0f32; CHUNK * CHANNELS];
+            buf.apply_declick(&mut chunk);
+            applied.extend_from_slice(&chunk);
+        }
+        for i in 0..N {
+            let mix = (N - i) as f32 / N as f32;
+            assert!(
+                (applied[i * CHANNELS] - mix).abs() < 1e-6,
+                "i={i}: {} != {mix}",
+                applied[i * CHANNELS]
+            );
+        }
+        for i in N..(4 * CHUNK) {
+            assert_eq!(applied[i * CHANNELS], 0.0, "past n the head is untouched");
+        }
+    }
+
+    /// §4.3: disabled when either side is silent — reversing a loud tail into a
+    /// gap would add material the timeline does not contain.
+    #[test]
+    fn declick_is_disabled_when_either_side_is_silent() {
+        const N: usize = 16;
+        let cfg = DeclickConfig {
+            window_samples: N,
+            ..Default::default()
+        };
+
+        let mut into_silence = TailBuf::new(N);
+        into_silence.write_block(&[0.5f32; N * CHANNELS]);
+        into_silence.armed = true;
+        assert!(
+            !into_silence.start_declick(&cfg, &[0.0f32; N * CHANNELS]),
+            "loud tail into a silent head must not engage"
+        );
+
+        let mut from_silence = TailBuf::new(N);
+        from_silence.write_block(&[0.0f32; N * CHANNELS]);
+        from_silence.armed = true;
+        assert!(
+            !from_silence.start_declick(&cfg, &[0.5f32; N * CHANNELS]),
+            "silent tail into a loud head must not engage"
+        );
+    }
+
+    /// Step 1 of §4.1: engage only on a clip-boundary block. Without `armed`,
+    /// even a full-scale step is ignored.
+    #[test]
+    fn declick_never_engages_away_from_a_boundary() {
+        const N: usize = 16;
+        let mut buf = TailBuf::new(N);
+        buf.write_block(&[0.5f32; N * CHANNELS]);
+        let cfg = DeclickConfig {
+            window_samples: N,
+            ..Default::default()
+        };
+        assert!(
+            !buf.start_declick(&cfg, &[-0.5f32; N * CHANNELS]),
+            "a mid-clip step is the material, not a splice"
+        );
+    }
+
+    #[test]
+    fn declick_config_clamps_to_the_spec_ranges() {
+        let mut mixer = Mixer::new(SR);
+        assert_eq!(mixer.declick_config(), DeclickConfig::default());
+        assert!(DeclickConfig::default().enabled, "31 §4.3: default on");
+
+        mixer.set_declick(DeclickConfig {
+            enabled: true,
+            threshold_db: 999.0,
+            window_samples: usize::MAX,
+        });
+        assert_eq!(mixer.declick_config().threshold_db, 30.0);
+        assert_eq!(mixer.declick_config().window_samples, DECLICK_MAX_WINDOW);
+
+        mixer.set_declick(DeclickConfig {
+            enabled: true,
+            threshold_db: -5.0,
+            window_samples: 0,
+        });
+        assert_eq!(mixer.declick_config().threshold_db, 0.0);
+        assert_eq!(mixer.declick_config().window_samples, 1);
+
+        mixer.set_declick(DeclickConfig {
+            enabled: true,
+            threshold_db: f32::NAN,
+            window_samples: 500,
+        });
+        assert_eq!(mixer.declick_config().threshold_db, DECLICK_THRESHOLD_DB);
+    }
+
+    /// Changing the config abandons an in-flight crossfade rather than
+    /// finishing it under a window length it was not planned for.
+    #[test]
+    fn set_declick_cancels_an_in_flight_repair() {
+        let mut mixer = Mixer::new(SR);
+        let id = track_id(1);
+        mixer.tail_cache.insert(id, TailBuf::new(16));
+        {
+            let buf = mixer.tail_cache.get_mut(&id).expect("just inserted");
+            buf.declick_n = 16;
+            buf.declick_pos = 4;
+            buf.armed = true;
+        }
+        mixer.set_declick(DeclickConfig {
+            window_samples: 32,
+            ..Default::default()
+        });
+        let buf = &mixer.tail_cache[&id];
+        assert_eq!((buf.declick_n, buf.declick_pos, buf.armed), (0, 0, false));
     }
 }

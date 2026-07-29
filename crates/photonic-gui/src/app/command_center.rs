@@ -238,6 +238,9 @@ impl PhotonicApp {
                     self.timeline_paste_attributes(doc, history, ops::AttrSelector::EFFECTS_ONLY);
             }
             "video.add_marker" => self.timeline_add_marker_at_playhead(doc, history),
+            "video.add_range_marker" => self.timeline_add_range_marker(doc, history),
+            "video.prev_marker" => self.timeline_step_marker(doc, false),
+            "video.next_marker" => self.timeline_step_marker(doc, true),
             // ── 3/4-point editing (spec 16 §4) ────────────────────────────────
             // Insert/Overwrite lay down the armed source at the playhead;
             // Lift/Extract clear the timeline in/out (`work_range`) on the
@@ -1170,6 +1173,63 @@ impl PhotonicApp {
             return;
         };
         ops_bridge::add_marker(doc, history, seq_id, self.playhead, "Marker");
+    }
+
+    /// K-A2: add a RANGED marker spanning the sequence's in/out work range.
+    ///
+    /// This is the keyboard route to the only marker shape `export_per_marker`
+    /// (K-F2) acts on: `build_export_jobs` skips every marker with
+    /// `duration == 0`, and until K-A2 nothing in the app could produce one.
+    /// No work range = nothing to span, so it is a no-op rather than a
+    /// zero-length marker.
+    pub(crate) fn timeline_add_range_marker(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        use photonic_core::timeline::Marker;
+        let Some(p) = doc.timeline.as_ref() else {
+            return;
+        };
+        let Some(seq_id) = p.active_sequence else {
+            return;
+        };
+        let Some((start, end)) = p.sequences.get(&seq_id).and_then(|s| s.work_range) else {
+            self.set_import_status("Set an in/out range first (I / O)".into());
+            return;
+        };
+        let mut m = Marker::new(start, "Range");
+        m.duration = end - start;
+        if let Ok(cmd) = ops::add_marker(p, seq_id, m) {
+            history.execute_discrete(Command::Timeline(cmd), doc);
+        }
+    }
+
+    /// K-A2: move the playhead to the next/previous marker, in BOTH scopes.
+    ///
+    /// Records nothing in history — navigation is session state (the same rule
+    /// the markers panel's row click follows). Distinct from
+    /// `video.{prev,next}_snap`, which also stops at clip edges, keyframes and
+    /// the zone.
+    pub(crate) fn timeline_step_marker(&mut self, doc: &Document, forward: bool) {
+        use crate::panels::video::markers::{
+            marker_rows, next_marker_at, prev_marker_at, MarkerFilter,
+        };
+        let Some(p) = doc.timeline.as_ref() else {
+            return;
+        };
+        let Some(seq_id) = p.active_sequence else {
+            return;
+        };
+        let rows = marker_rows(p, seq_id, &MarkerFilter::default());
+        let target = if forward {
+            next_marker_at(&rows, self.playhead)
+        } else {
+            prev_marker_at(&rows, self.playhead)
+        };
+        if let Some(t) = target {
+            self.playhead = t.max(Tick::ZERO);
+        }
     }
 
     /// K-E4: grab the latest program-monitor frame as a full-quality PNG.

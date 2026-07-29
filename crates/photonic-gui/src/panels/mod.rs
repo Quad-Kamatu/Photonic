@@ -925,6 +925,13 @@ pub enum PanelAction {
     // ops::*`, reading `ctx.doc`) and hands it up here as one of two generic
     // carriers, matching `ops_bridge.rs`'s "pure op → history" rule at the
     // `PropPanelCtx` boundary instead of inside a drawer fn.
+    /// Move the session playhead to a tick — **not** a document mutation and
+    /// therefore **not** an undo step (26 K-A2 marker navigation; the same rule
+    /// K-G5's history browser follows). A panel only receives a *copy* of the
+    /// playhead through [`video::VideoPanelUi`], and the engine seek is driven
+    /// off `PhotonicApp::playhead` in `app/monitor.rs`, so a panel cannot seek
+    /// directly — it queues this and the main loop assigns the field.
+    SeekPlayhead { at: photonic_core::timeline::Tick },
     /// Committed as ONE non-folding undo step (button/toggle actions: add/
     /// remove/reorder effect, enable toggle, "Reset reframe", etc.).
     ClipEditDiscrete(photonic_core::timeline::TimelineCmd),
@@ -1245,6 +1252,14 @@ pub enum DrawerGroup {
     /// 17 G-12 minimal — not the full VectorDoc title-template system).
     /// Interior owned by `panels/video/titles.rs`.
     Titles,
+    /// Video mode (26 K-A2): the markers workflow — a searchable, filterable,
+    /// sortable list of every marker on the active sequence in both scopes,
+    /// click-to-navigate (zero undo units), name/note/category/position/
+    /// **duration** editing (a duration > 0 is what makes a marker *ranged*,
+    /// the unit K-F2's per-marker export fans out over), and the project's
+    /// `MarkerCategory` registry with reassign-on-delete.
+    /// Interior owned by `panels/video/markers.rs`.
+    Markers,
     /// Video mode (04 §4.1): second preview surface for the raw armed
     /// source asset, its own scrub bar, and true source in/out marks
     /// (17-nle-parity-round2.md §G-10 — Larger, needs its own mini-spec).
@@ -1282,10 +1297,11 @@ impl DrawerGroup {
     /// (17-nle-parity-round2.md) choke-point additions — SourceMonitor,
     /// Multicam, Transcript — trail the P1 set; each is a compile-clean stub
     /// until its named story fills it in.
-    pub const VIDEO_ALL: [DrawerGroup; 9] = [
+    pub const VIDEO_ALL: [DrawerGroup; 10] = [
         DrawerGroup::MediaPool,
         DrawerGroup::ClipInspector,
         DrawerGroup::Effects,
+        DrawerGroup::Markers,
         DrawerGroup::Captions,
         DrawerGroup::NodeEditor,
         DrawerGroup::Titles,
@@ -1318,6 +1334,7 @@ impl DrawerGroup {
             DrawerGroup::Captions => ph::CLOSED_CAPTIONING,
             DrawerGroup::NodeEditor => ph::FLOW_ARROW,
             DrawerGroup::Titles => ph::TEXT_T,
+            DrawerGroup::Markers => ph::MAP_PIN,
             DrawerGroup::SourceMonitor => ph::MONITOR_PLAY,
             DrawerGroup::Multicam => ph::SQUARES_FOUR,
             DrawerGroup::Transcript => ph::ARTICLE,
@@ -1340,6 +1357,7 @@ impl DrawerGroup {
             DrawerGroup::Captions => "Captions",
             DrawerGroup::NodeEditor => "Node Editor",
             DrawerGroup::Titles => "Titles",
+            DrawerGroup::Markers => "Markers",
             DrawerGroup::SourceMonitor => "Source Monitor",
             DrawerGroup::Multicam => "Multicam",
             DrawerGroup::Transcript => "Transcript",
@@ -1370,6 +1388,9 @@ impl DrawerGroup {
             | DrawerGroup::Captions
             | DrawerGroup::NodeEditor
             | DrawerGroup::Titles
+            // Markers is always reachable: its category editor and
+            // "add at playhead" are useful before a single marker exists.
+            | DrawerGroup::Markers
             // Round-2 (17) additions are always reachable, like the P1 video
             // groups above — none of them gate on the vector node-selection
             // count (SourceMonitor/Multicam gate on an armed source/multicam
@@ -1581,6 +1602,7 @@ pub(crate) fn draw_drawer(
         DrawerGroup::Captions => video::caption_editor::draw_caption_editor(ui, ctx),
         DrawerGroup::NodeEditor => video::node_editor::draw_node_editor_palette(ui, ctx),
         DrawerGroup::Titles => video::titles::draw_titles(ui, ctx),
+        DrawerGroup::Markers => video::markers::draw_markers(ui, ctx),
         DrawerGroup::SourceMonitor => video::source_monitor::draw_source_monitor(ui, ctx),
         DrawerGroup::Multicam => video::multicam::draw_multicam(ui, ctx),
         DrawerGroup::Transcript => video::transcript::draw_transcript(ui, ctx),

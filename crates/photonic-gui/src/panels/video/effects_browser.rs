@@ -16,11 +16,13 @@
 //! drag-and-drop (mirrors this codebase's existing seam-documentation
 //! convention, e.g. `app/engine.rs`'s thumbnail/waveform notes).
 
+use super::effect_presets;
 use crate::panels::PanelAction;
 use crate::panels::PropPanelCtx;
 use egui::{Color32, RichText, Ui};
+use photonic_core::timeline::effect_preset::EffectPreset;
 use photonic_core::timeline::{
-    ops, ClipEffect, EffectCategory, EffectId, EffectKind, EffectManifest, MANIFESTS,
+    manifest, ops, ClipEffect, EffectCategory, EffectId, EffectKind, EffectManifest, MANIFESTS,
 };
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
@@ -81,6 +83,14 @@ pub(crate) fn draw_effects_browser(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     );
 
     let mut action: Option<PanelAction> = None;
+    // One library read for the whole panel — see `effect_presets::favourite_ids`.
+    let favourites = effect_presets::favourite_ids(ui);
+
+    // K-B4: presets first (the thing a returning user reaches for), then their
+    // favourites, then the full catalogue.
+    draw_presets_section(ui, ctx, project, &selection, &mut action);
+    draw_favourites_section(ui, ctx, project, &selection, &favourites, &mut action);
+
     for &cat in CATEGORY_ORDER {
         let entries: Vec<&EffectManifest> = MANIFESTS
             .iter()
@@ -92,12 +102,121 @@ pub(crate) fn draw_effects_browser(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         }
         section_header(ui, category_title(cat));
         for m in entries {
-            draw_row(ui, project, &selection, m, &mut action);
+            draw_row(ui, project, &selection, m, &favourites, &mut action);
         }
     }
 
     if action.is_some() {
         ctx.action = action;
+    }
+}
+
+/// K-B4 preset list: built-ins then the user's own saved stacks.
+///
+/// Applying is a document edit and exactly one undo unit
+/// ([`effect_presets::apply_action`]). Deleting is a *library* edit — a config
+/// file — and deliberately produces no undo entry; the button says so.
+fn draw_presets_section(
+    ui: &mut Ui,
+    ctx: &PropPanelCtx,
+    project: &photonic_core::timeline::TimelineProject,
+    selection: &[photonic_core::timeline::ClipId],
+    action: &mut Option<PanelAction>,
+) {
+    let presets: Vec<EffectPreset> = effect_presets::with_library(ui, |lib| {
+        let all = lib
+            .catalogue()
+            .into_iter()
+            .filter(|p| ctx.matches(&p.name))
+            .collect::<Vec<_>>();
+        (all, false)
+    });
+    if presets.is_empty() {
+        return;
+    }
+    section_header(ui, "PRESETS");
+
+    let status = effect_presets::library_status(ui);
+    if !status.0.is_empty() {
+        ui.label(effect_presets::muted(status.0.clone()));
+    }
+
+    let disabled = selection.is_empty();
+    for preset in presets {
+        let built_in = photonic_core::timeline::effect_preset::is_built_in(&preset.name);
+        ui.horizontal(|ui| {
+            let label = if built_in {
+                format!("{}  {}", egui_phosphor::regular::LOCK_SIMPLE, preset.name)
+            } else {
+                preset.name.clone()
+            };
+            let resp = ui
+                .add_enabled(!disabled, egui::SelectableLabel::new(false, label))
+                .on_hover_text(if disabled {
+                    format!(
+                        "{} ({}) — select a clip first.",
+                        preset.name,
+                        effect_presets::preset_summary(&preset)
+                    )
+                } else {
+                    format!(
+                        "{} ({}) — click to add these effects to the selected clip(s) as \
+                         one undoable step.",
+                        preset.name,
+                        effect_presets::preset_summary(&preset)
+                    )
+                });
+            // A single click applies: unlike a catalogue row, a preset row has
+            // no drag payload, so there is no double-click/drag ambiguity to
+            // disambiguate and requiring a double-click would just be slower.
+            if !disabled && resp.clicked() {
+                if let Some(a) = effect_presets::apply_action(project, &preset, selection) {
+                    *action = Some(a);
+                }
+            }
+            if !built_in
+                && ui
+                    .add(egui::Button::new(egui_phosphor::regular::TRASH).small())
+                    .on_hover_text(
+                        "Delete this preset from your library. Not undoable — \
+                         it is a settings file, not the project.",
+                    )
+                    .clicked()
+            {
+                let name = preset.name.clone();
+                effect_presets::with_library(ui, |lib| {
+                    let ok = lib.remove(&name).is_ok();
+                    ((), ok)
+                });
+            }
+        });
+    }
+}
+
+/// The user's starred effects, in their own order (K-B4 favourites). Rendered
+/// with the same row widget as the catalogue so drag/double-click behave
+/// identically — a favourite is an *ordering over the catalogue*, not a copy
+/// of it.
+fn draw_favourites_section(
+    ui: &mut Ui,
+    ctx: &PropPanelCtx,
+    project: &photonic_core::timeline::TimelineProject,
+    selection: &[photonic_core::timeline::ClipId],
+    favourites: &[String],
+    action: &mut Option<PanelAction>,
+) {
+    let ids = effect_presets::resolvable_favourites(favourites);
+    let rows: Vec<&EffectManifest> = ids
+        .iter()
+        .filter_map(|id| manifest(id.clone()))
+        .filter(|m| ctx.matches(m.name) || ctx.matches(m.id.as_str()))
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    section_header(ui, "FAVOURITES");
+    for m in rows {
+        draw_row(ui, project, selection, m, favourites, action);
     }
 }
 
@@ -114,6 +233,7 @@ fn draw_row(
     project: &photonic_core::timeline::TimelineProject,
     selection: &[photonic_core::timeline::ClipId],
     m: &EffectManifest,
+    favourites: &[String],
     action: &mut Option<PanelAction>,
 ) {
     let disabled = selection.is_empty();
@@ -122,8 +242,15 @@ fn draw_row(
     let label = format!("{glyph}  {}", m.name);
     let drag_payload = EffectDrag { id: m.id.clone() };
     let inner = ui
-        .dnd_drag_source(drag_id, drag_payload, |ui| {
-            ui.add_enabled(!disabled, egui::SelectableLabel::new(false, label))
+        .horizontal(|ui| {
+            // K-B4 favourites: starring is a library edit (a config file), so
+            // it is not undoable and does not touch the document at all.
+            let starred = favourites.iter().any(|f| f == m.id.as_str());
+            effect_presets::favourite_toggle(ui, &m.id, starred);
+            ui.dnd_drag_source(drag_id, drag_payload, |ui| {
+                ui.add_enabled(!disabled, egui::SelectableLabel::new(false, label))
+            })
+            .inner
         })
         .inner;
     let hover_text = if disabled {

@@ -18,6 +18,7 @@ pub mod clip;
 pub mod commands;
 pub mod effect_kind;
 pub mod effect_manifest;
+pub mod effect_preset;
 pub mod grade;
 pub mod graph;
 pub mod graph_ops;
@@ -62,6 +63,11 @@ pub use effect_manifest::{
     EffectManifest, EffectMigration, GpuSupport, MigrationError, OperandSpace, ParamKind,
     ParamSpec, UiHint, MANIFESTS, MIGRATIONS,
 };
+// K-B4 effect presets / custom stacks / favourites. A *user* library stored in
+// the app config dir, not in the document — see the module docs.
+pub use effect_preset::{
+    EffectPreset, EffectPresetError, EffectPresetLibrary, LibraryLoad, LibraryStoreError,
+};
 pub use grade::{
     parse_cdl_xml, write_cdl_xml, CdlParams, CdlXmlError, Grade, GradeMask, GradeOp, GradeOpKind,
     GradeOpParams, LutInterp, MaskRef, WindowShape,
@@ -87,8 +93,9 @@ pub use scale::{
     TARGET_SEQUENCES_PER_PROJECT, TARGET_TRACKS_PER_SEQUENCE,
 };
 pub use sequence::{
-    GroupKind, GroupNode, Marker, MarkerAnchor, MarkerCategory, MarkerGlyph, ProjectVideoSettings,
-    Sequence, SequenceFormat, TimelineProject, Track, TrackKind, ValidationError,
+    GroupKind, GroupNode, Marker, MarkerAnchor, MarkerCategory, MarkerGlyph, MarkerRef,
+    MarkerRetarget, ProjectVideoSettings, Sequence, SequenceFormat, TimelineProject, Track,
+    TrackKind, ValidationError,
 };
 pub use time::{FrameRate, Tick, Timecode, TICKS_PER_SECOND};
 pub use unknown::UnknownTag;

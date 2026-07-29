@@ -14,6 +14,8 @@
 //! - [`audio_mixer`]     — 09-audio-mixer.md
 //! - [`export_dialog`]   — 05-import-export.md
 //! - [`duration_dialog`] — 26 K-A6 Edit Duration (position/in/out/duration + ripple)
+//! - [`markers`]        — 26 K-A2 marker system depth (list/navigate/edit,
+//!   ranged markers, clip markers, and the `MarkerCategory` registry)
 //! - [`titles`]          — 05-import-export.md §4b / 17 G-12 (minimal: starter
 //!   presets + `ClipSource::Text` insert/edit; not the full VectorDoc template
 //!   system — see [`titles`]'s module doc for the scope cut)
@@ -41,9 +43,11 @@ pub(crate) mod clip_inspector;
 pub(crate) mod color_page;
 pub(crate) mod diagnostics;
 pub(crate) mod duration_dialog;
+pub(crate) mod effect_presets;
 pub(crate) mod effects_browser;
 pub(crate) mod export_dialog;
 pub(crate) mod keyframe_editor;
+pub(crate) mod markers;
 pub(crate) mod multicam;
 pub(crate) mod node_editor;
 pub(crate) mod render_queue_panel;

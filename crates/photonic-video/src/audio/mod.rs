@@ -42,7 +42,7 @@ pub const RING_BLOCKS: usize = 3;
 pub const CHANNELS: usize = 2;
 
 pub use engine::{AudioEngine, AudioEngineError, MasterClock};
-pub use mixer::{ClipVoice, Mixer, PcmSource, StereoMeter, TrackVoice};
+pub use mixer::{ClipVoice, DeclickConfig, Mixer, PcmSource, StereoMeter, TrackVoice};
 pub use ring::{audio_ring, RingConsumer, RingProducer, XrunCounters};
 pub use waveform::{build_pyramid, PeakBucket, WaveformLevel, WaveformPyramid};
 

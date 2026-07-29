@@ -17,8 +17,8 @@
 
 use photonic_core::timeline::{
     AssetId, BinId, ChannelMap, ClipId, ClipTransform, CueId, FadeShape, FrameRate, GraphId,
-    GraphNodeId, Interp, MarkerId, PropValue, SequenceFormat, SequenceId, TrackId, TrackKind,
-    TransitionKind, TransitionParams,
+    GraphNodeId, Interp, MarkerCategoryId, MarkerGlyph, MarkerId, PropValue, SequenceFormat,
+    SequenceId, TrackId, TrackKind, TransitionKind, TransitionParams,
 };
 use serde::Deserialize;
 
@@ -176,6 +176,19 @@ pub struct AddMarkerArgs {
     pub color: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// K-A2: `> 0` makes this a RANGED marker (`duration` on the model). A
+    /// ranged marker is what `export_per_marker` (K-F2) fans out over, so
+    /// omitting all three leaves a point marker that multi-export skips.
+    #[serde(default)]
+    pub duration_ticks: Option<i64>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    /// End position, as an alternative to a duration (`duration = end - at`).
+    #[serde(default)]
+    pub end_tc: Option<String>,
+    /// K-A2: a `MarkerCategory` id from `list_marker_categories`.
+    #[serde(default)]
+    pub category_id: Option<MarkerCategoryId>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,6 +199,116 @@ pub struct RemoveMarkerArgs {
 #[derive(Debug, Deserialize)]
 pub struct ListMarkersArgs {
     pub sequence_id: SequenceId,
+}
+
+// ─── Marker depth: editing, categories, clip scope (26 K-A2) ────────────────
+
+/// Universal marker editor. Only supplied fields change; everything else keeps
+/// its current value. `clip_id` selects the scope: omitted = a sequence marker,
+/// present = that clip's own marker list.
+#[derive(Debug, Deserialize)]
+pub struct SetMarkerArgs {
+    pub marker_id: MarkerId,
+    /// When set, `marker_id` is looked up on this clip instead of a sequence.
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    #[serde(default)]
+    pub duration_ticks: Option<i64>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_tc: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// `#rrggbb` / `#rrggbbaa`, or `""` to clear the per-marker override and
+    /// fall back to the category colour.
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<MarkerCategoryId>,
+    /// Set true to clear the category (`category_id` is then ignored).
+    #[serde(default)]
+    pub clear_category: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddClipMarkerArgs {
+    pub clip_id: ClipId,
+    /// CLIP-RELATIVE position (0 = the clip's first frame), not a sequence tick.
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub duration_ticks: Option<i64>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<MarkerCategoryId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveClipMarkerArgs {
+    pub clip_id: ClipId,
+    pub marker_id: MarkerId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListClipMarkersArgs {
+    pub clip_id: ClipId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListMarkerCategoriesArgs {}
+
+#[derive(Debug, Deserialize)]
+pub struct AddMarkerCategoryArgs {
+    pub name: String,
+    /// `#rrggbb` or `#rrggbbaa`.
+    pub color: String,
+    #[serde(default)]
+    pub glyph: Option<MarkerGlyph>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SeedMarkerCategoriesArgs {}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMarkerCategoryArgs {
+    pub category_id: MarkerCategoryId,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub glyph: Option<MarkerGlyph>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveMarkerCategoryArgs {
+    pub category_id: MarkerCategoryId,
+    /// Where markers that referenced the deleted category go. Omitted = their
+    /// category is cleared. Either way the move is recorded per marker and is
+    /// undone with the delete — a marker is never left pointing at a category
+    /// that no longer exists, and is never silently remapped (35 §1.3).
+    #[serde(default)]
+    pub reassign_to: Option<MarkerCategoryId>,
 }
 
 // ─── Track (10 §3.3) ────────────────────────────────────────────────────────
@@ -764,6 +887,96 @@ pub struct EffectStackArgs {
 #[derive(Debug, Deserialize, Default)]
 pub struct ListEffectKindsArgs {}
 
+// ─── Effect presets, custom stacks and favourites (26 §10 K-B4) ─────────────
+//
+// A preset library is USER state (`<config>/Photonic/effect_presets.json`),
+// not document state — see `photonic_core::timeline::effect_preset`'s module
+// docs. Only `effect_preset_apply` edits the document (and is exactly one undo
+// unit); every other verb here manages that config file and produces no
+// history entry at all.
+//
+// The four owner-addressing fields (`scope` + `clip_id`/`track_id`/
+// `sequence_id`/`asset_id`) are deliberately spelled exactly as `effect_stack`
+// spells them, and are resolved by the same `resolve_owner_fields` helper, so
+// "which of the four stacks" cannot come to mean two different things on two
+// tools.
+
+#[derive(Debug, Deserialize, Default)]
+pub struct EffectPresetListArgs {}
+
+/// Capture the named scope's current effect stack **and** its grade as a saved
+/// preset. Config-file write only: no document mutation, no undo step.
+#[derive(Debug, Deserialize)]
+pub struct EffectPresetSaveArgs {
+    /// The preset name. A built-in name is refused (`NotSupportedV1`); an
+    /// existing user name is overwritten in place, keeping its position.
+    pub name: String,
+    pub scope: EffectScopeArg,
+    /// `scope=clip`.
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    /// `scope=track`.
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    /// `scope=master`; defaults to the active sequence.
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+    /// `scope=asset`.
+    #[serde(default)]
+    pub asset_id: Option<AssetId>,
+}
+
+/// Apply a preset (built-in or user) to one scope — or, for `scope=clip`, to
+/// several clips at once. Always exactly ONE undo unit.
+#[derive(Debug, Deserialize)]
+pub struct EffectPresetApplyArgs {
+    /// Resolved across built-ins first, then the user's own presets.
+    pub name: String,
+    pub scope: EffectScopeArg,
+    /// `scope=clip`, single target.
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
+    /// `scope=clip`, many targets — applied as one batch, so one undo reverts
+    /// the whole apply. May be given instead of `clip_id`.
+    #[serde(default)]
+    pub clip_ids: Option<Vec<ClipId>>,
+    /// `scope=track`.
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    /// `scope=master`; defaults to the active sequence.
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+    /// `scope=asset`.
+    #[serde(default)]
+    pub asset_id: Option<AssetId>,
+}
+
+/// Delete a user preset. Built-ins are read-only (`NotSupportedV1`).
+#[derive(Debug, Deserialize)]
+pub struct EffectPresetDeleteArgs {
+    pub name: String,
+}
+
+/// Rename a user preset, keeping its position in the user's ordering. Refuses
+/// if either side names a built-in (`NotSupportedV1`).
+#[derive(Debug, Deserialize)]
+pub struct EffectPresetRenameArgs {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct EffectFavouriteListArgs {}
+
+/// Star / unstar one effect id. Idempotent: setting the state it already has
+/// succeeds and rewrites nothing.
+#[derive(Debug, Deserialize)]
+pub struct EffectFavouriteSetArgs {
+    /// A stable effect id from `list_effect_kinds`, e.g. `"blur.gaussian"`.
+    pub id: String,
+    pub favourite: bool,
+}
+
 /// One attribute family a `paste_attributes` call may transfer (26 §10 K-B15).
 /// Deliberately the same four names as
 /// `photonic_core::timeline::ops::AttrSelector`'s flags.
@@ -864,10 +1077,43 @@ pub struct ImportMediaArgs {
     pub bin: Option<String>,
 }
 
+/// `allow_hash_mismatch` is the consent gate for rebinding an asset to
+/// different bytes (26 K-C6): without it a new file whose content hash differs
+/// from the asset's recorded one is refused with `HashMismatch`, because a
+/// relink to the wrong take is invisible until export.
 #[derive(Debug, Deserialize)]
 pub struct RelinkMediaArgs {
     pub asset_id: AssetId,
     pub new_path: String,
+    #[serde(default)]
+    pub allow_hash_mismatch: bool,
+}
+
+/// No arguments — the whole pool is inspected (26 K-C6).
+#[derive(Debug, Deserialize, Default)]
+pub struct FindOfflineMediaArgs {}
+
+/// Batch relink (26 K-C6): scan `search_dir` and re-point every offline asset
+/// it can account for, as ONE undo step.
+///
+/// * `asset_ids` — restrict to these assets; default is every offline asset.
+/// * `recursive` — walk subdirectories (default true; depth- and count-capped).
+/// * `dry_run` — report the plan and change nothing. The preview a user gets
+///   before committing 200 rebinds.
+/// * `allow_hash_mismatch` — commit entries whose bytes differ from the
+///   recorded `content_hash` too. Off by default; those entries are otherwise
+///   reported under `skipped_hash_mismatch` and left offline.
+#[derive(Debug, Deserialize)]
+pub struct RelinkMediaBatchArgs {
+    pub search_dir: String,
+    #[serde(default)]
+    pub asset_ids: Option<Vec<AssetId>>,
+    #[serde(default)]
+    pub recursive: Option<bool>,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub allow_hash_mismatch: Option<bool>,
 }
 
 /// `bin` filters to assets filed under the bin with that exact name.

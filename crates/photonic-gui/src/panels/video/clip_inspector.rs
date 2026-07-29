@@ -920,6 +920,12 @@ fn draw_effects_section(
                         });
                 });
             }
+            // K-B4: apply a saved preset to *this* scope, or save this scope's
+            // stack (plus its grade) as a new one. Applying is one undo unit;
+            // saving is a config-file write and is not undoable — the bar's
+            // hover text says which is which.
+            super::effect_presets::draw_scope_preset_bar(ui, project, owner, action);
+
             if stack.is_empty() {
                 // Only the clip stack has the double-click shortcut (the
                 // Effects browser applies to the *clip selection*); every scope

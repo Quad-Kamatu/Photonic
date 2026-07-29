@@ -495,6 +495,325 @@ fn marker_and_work_range_ops_roundtrip() {
     assert_undo_roundtrip(&d2, &clear);
 }
 
+// ── K-A2: marker categories, clip markers, ranged markers ───────────────────
+
+/// Every marker-category CRUD op is one exactly-invertible undo unit.
+#[test]
+fn marker_category_crud_roundtrips() {
+    let f = fixture();
+
+    // Seeding is one batch of adds; each is individually invertible, and the
+    // whole set restores an empty registry.
+    let seeds = ops::seed_marker_categories(f.project());
+    assert_eq!(
+        seeds.len(),
+        MarkerCategory::default_seed().len(),
+        "seed emits one command per default category"
+    );
+    let mut d = f.doc.clone();
+    for cmd in &seeds {
+        assert_undo_roundtrip(&d, cmd);
+        Command::Timeline(cmd.clone()).apply(&mut d);
+    }
+    let names: Vec<&str> = d
+        .timeline
+        .as_ref()
+        .unwrap()
+        .marker_categories
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["Marker", "Cut", "Note", "Todo", "Chapter"]);
+
+    // Seeding twice is a no-op, not a duplicate set.
+    assert!(
+        ops::seed_marker_categories(d.timeline.as_ref().unwrap()).is_empty(),
+        "seeding an already-seeded project must be idempotent"
+    );
+
+    // Rename + recolour + re-glyph, in place, id preserved.
+    let cut = d.timeline.as_ref().unwrap().marker_categories[1].clone();
+    let mut renamed = cut.clone();
+    renamed.name = "Hard cut".into();
+    renamed.color = photonic_core::Color::rgb(0.1, 0.2, 0.3);
+    renamed.glyph = MarkerGlyph::Square;
+    let set = ops::set_marker_category(d.timeline.as_ref().unwrap(), renamed).unwrap();
+    assert_undo_roundtrip(&d, &set);
+
+    // A plain add appends.
+    let fresh = MarkerCategory::new("VFX", photonic_core::Color::rgb(0.5, 0.0, 0.5));
+    let add = ops::add_marker_category(d.timeline.as_ref().unwrap(), fresh.clone()).unwrap();
+    assert_undo_roundtrip(&d, &add);
+    let mut d2 = d.clone();
+    Command::Timeline(add).apply(&mut d2);
+    assert_eq!(
+        d2.timeline
+            .as_ref()
+            .unwrap()
+            .marker_categories
+            .last()
+            .unwrap()
+            .id,
+        fresh.id
+    );
+    // A duplicate id is refused rather than making `marker_category` ambiguous.
+    assert!(ops::add_marker_category(d2.timeline.as_ref().unwrap(), fresh.clone()).is_err());
+
+    // Editing an unknown category is an error, not a silent no-op.
+    assert_eq!(
+        ops::set_marker_category(
+            f.project(),
+            MarkerCategory::new("ghost", photonic_core::Color::rgb(0.0, 0.0, 0.0)),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("NoMarkerCategory"),
+        true
+    );
+}
+
+/// Deleting a category retargets every referencing marker, in BOTH scopes, as
+/// part of the same undo unit — and undo puts each one back on the deleted
+/// category (35 §1.3 "never silently remapped").
+#[test]
+fn removing_a_category_reassigns_markers_in_both_scopes() {
+    let f = fixture();
+    let mut d = f.doc.clone();
+    for cmd in ops::seed_marker_categories(f.project()) {
+        Command::Timeline(cmd).apply(&mut d);
+    }
+    let cats = d.timeline.as_ref().unwrap().marker_categories.clone();
+    let (cut, note) = (cats[1].id, cats[2].id);
+
+    // One sequence marker and one CLIP marker, both on "Cut".
+    let mut seq_marker = Marker::new(Tick(500), "seq");
+    seq_marker.category = Some(cut);
+    let seq_marker_id = seq_marker.id;
+    Command::Timeline(ops::add_marker(d.timeline.as_ref().unwrap(), f.seq, seq_marker).unwrap())
+        .apply(&mut d);
+    let mut clip_marker = Marker::clip_scoped(Tick(50), "clip");
+    clip_marker.category = Some(cut);
+    let clip_marker_id = clip_marker.id;
+    Command::Timeline(
+        ops::add_clip_marker(d.timeline.as_ref().unwrap(), f.clip_a, clip_marker).unwrap(),
+    )
+    .apply(&mut d);
+
+    // The fixture is non-vacuous: both markers really do reference "Cut"
+    // before the delete, so the assertions below can fail.
+    let found = d.timeline.as_ref().unwrap().markers_in_category(cut);
+    assert_eq!(
+        found.len(),
+        2,
+        "expected both scopes to be found: {found:?}"
+    );
+    assert!(found.contains(&MarkerRef::Sequence {
+        seq: f.seq,
+        marker: seq_marker_id
+    }));
+    assert!(found.contains(&MarkerRef::Clip {
+        clip: f.clip_a,
+        marker: clip_marker_id
+    }));
+
+    // Reassign-on-delete.
+    let rm = ops::remove_marker_category(d.timeline.as_ref().unwrap(), cut, Some(note)).unwrap();
+    assert_undo_roundtrip(&d, &rm);
+    let mut after = d.clone();
+    Command::Timeline(rm).apply(&mut after);
+    let p = after.timeline.as_ref().unwrap();
+    assert!(p.marker_category(cut).is_none(), "category removed");
+    assert_eq!(
+        p.sequences[&f.seq]
+            .markers
+            .iter()
+            .find(|m| m.id == seq_marker_id)
+            .unwrap()
+            .category,
+        Some(note),
+        "sequence marker reassigned"
+    );
+    assert_eq!(
+        p.sequences[&f.seq].track(f.vtrack).unwrap().clips[0]
+            .markers
+            .iter()
+            .find(|m| m.id == clip_marker_id)
+            .unwrap()
+            .category,
+        Some(note),
+        "clip marker reassigned"
+    );
+
+    // Clearing instead of reassigning is the other honest choice.
+    let clear = ops::remove_marker_category(d.timeline.as_ref().unwrap(), cut, None).unwrap();
+    assert_undo_roundtrip(&d, &clear);
+    let mut cleared = d.clone();
+    Command::Timeline(clear).apply(&mut cleared);
+    assert_eq!(
+        cleared.timeline.as_ref().unwrap().sequences[&f.seq]
+            .markers
+            .iter()
+            .find(|m| m.id == seq_marker_id)
+            .unwrap()
+            .category,
+        None
+    );
+
+    // Reassigning to the category being deleted is refused — it would leave
+    // every marker pointing at a missing id, the outcome the rule forbids.
+    assert!(ops::remove_marker_category(d.timeline.as_ref().unwrap(), cut, Some(cut)).is_err());
+    // ...as is reassigning to a category that does not exist.
+    assert!(ops::remove_marker_category(
+        d.timeline.as_ref().unwrap(),
+        cut,
+        Some(MarkerCategoryId::new()),
+    )
+    .is_err());
+    // Deleting a category that is not there at all is an error, not a no-op.
+    assert!(
+        ops::remove_marker_category(f.project(), MarkerCategoryId::new(), None).is_err(),
+        "unknown category delete must be rejected"
+    );
+}
+
+/// Clip markers are a real, undoable, validated write surface.
+#[test]
+fn clip_marker_ops_roundtrip() {
+    let f = fixture();
+    let mut d = f.doc.clone();
+
+    let m = Marker::clip_scoped(Tick(120), "beat");
+    let m_id = m.id;
+    assert_eq!(
+        m.anchor,
+        MarkerAnchor::Content,
+        "clip markers are Content-anchored (35 §1.5)"
+    );
+    let add = ops::add_clip_marker(f.project(), f.clip_a, m).unwrap();
+    assert_undo_roundtrip(&d, &add);
+    Command::Timeline(add).apply(&mut d);
+
+    // Clip-relative `at` maps onto the timeline through the clip's own helper.
+    let clip = &d.timeline.as_ref().unwrap().sequences[&f.seq]
+        .track(f.vtrack)
+        .unwrap()
+        .clips[0];
+    assert_eq!(
+        clip.marker_sequence_tick(&clip.markers[0]),
+        clip.start + Tick(120)
+    );
+
+    // A ranged clip marker (duration > 0) round-trips.
+    let mut ranged = clip.markers[0].clone();
+    ranged.duration = Tick(300);
+    let set = ops::set_clip_marker(d.timeline.as_ref().unwrap(), f.clip_a, ranged).unwrap();
+    assert_undo_roundtrip(&d, &set);
+
+    let rem = ops::remove_clip_marker(d.timeline.as_ref().unwrap(), f.clip_a, m_id).unwrap();
+    assert_undo_roundtrip(&d, &rem);
+
+    // Out-of-clip positions are refused: clip A is 1000 ticks long, so a
+    // marker at 1001 would map outside the clip and never be drawn.
+    assert!(
+        ops::add_clip_marker(f.project(), f.clip_a, Marker::clip_scoped(Tick(1001), "x")).is_err()
+    );
+    assert!(
+        ops::add_clip_marker(
+            f.project(),
+            f.clip_a,
+            Marker::clip_scoped(Tick(1000), "edge")
+        )
+        .is_ok(),
+        "the clip's exclusive end is still an addressable marker position"
+    );
+    // An unknown marker id is an error, not a silent no-op.
+    assert!(ops::remove_clip_marker(f.project(), f.clip_a, MarkerId::new()).is_err());
+    assert!(ops::add_clip_marker(
+        f.project(),
+        ClipId::new(),
+        Marker::clip_scoped(Tick(0), "y")
+    )
+    .is_err());
+}
+
+/// Splitting a clip PARTITIONS its clip markers instead of duplicating them,
+/// and merging folds them back — the pair round-trips losslessly.
+#[test]
+fn split_partitions_clip_markers_and_merge_folds_them_back() {
+    let f = fixture();
+    let mut d = f.doc.clone();
+    // Clip A is [0, 1000). Three markers: before, at, and after the cut at 400.
+    for (at, name) in [
+        (Tick(100), "early"),
+        (Tick(400), "on-cut"),
+        (Tick(700), "late"),
+    ] {
+        let cmd = ops::add_clip_marker(
+            d.timeline.as_ref().unwrap(),
+            f.clip_a,
+            Marker::clip_scoped(at, name),
+        )
+        .unwrap();
+        Command::Timeline(cmd).apply(&mut d);
+    }
+    let before_ids: Vec<MarkerId> = d.timeline.as_ref().unwrap().sequences[&f.seq]
+        .track(f.vtrack)
+        .unwrap()
+        .clips[0]
+        .markers
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(before_ids.len(), 3, "fixture is non-vacuous");
+
+    let split = ops::split_clip(
+        d.timeline.as_ref().unwrap(),
+        f.seq,
+        f.vtrack,
+        f.clip_a,
+        Tick(400),
+    )
+    .unwrap();
+    assert_undo_roundtrip(&d, &split);
+
+    let mut after = d.clone();
+    Command::Timeline(split).apply(&mut after);
+    let t = after.timeline.as_ref().unwrap().sequences[&f.seq]
+        .track(f.vtrack)
+        .unwrap();
+    let (left, right) = (&t.clips[0], &t.clips[1]);
+    // "early" stays left; "on-cut" and "late" move right and REBASE.
+    assert_eq!(
+        left.markers
+            .iter()
+            .map(|m| (m.at, m.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Tick(100), "early")]
+    );
+    assert_eq!(
+        right
+            .markers
+            .iter()
+            .map(|m| (m.at, m.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Tick(0), "on-cut"), (Tick(300), "late")]
+    );
+    // Every id survives exactly once across the two halves — no duplicates.
+    let mut after_ids: Vec<MarkerId> = left
+        .markers
+        .iter()
+        .chain(right.markers.iter())
+        .map(|m| m.id)
+        .collect();
+    after_ids.sort();
+    let mut expect = before_ids.clone();
+    expect.sort();
+    assert_eq!(
+        after_ids, expect,
+        "split must partition ids, not clone them"
+    );
+}
+
 #[test]
 fn media_bin_ops_roundtrip() {
     let f = fixture();
@@ -1361,6 +1680,13 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::AddMarker { .. } => {}
         TimelineCmd::RemoveMarker { .. } => {}
         TimelineCmd::SetMarker { .. } => {}
+        // K-A2 — clip markers + the category registry.
+        TimelineCmd::AddClipMarker { .. } => {} // clip_marker_ops_roundtrip
+        TimelineCmd::RemoveClipMarker { .. } => {}
+        TimelineCmd::SetClipMarker { .. } => {}
+        TimelineCmd::AddMarkerCategory { .. } => {} // marker_category_crud_roundtrips
+        TimelineCmd::RemoveMarkerCategory { .. } => {} // …_reassigns_markers_in_both_scopes
+        TimelineCmd::SetMarkerCategory { .. } => {}
         TimelineCmd::SetWorkRange { .. } => {}
         TimelineCmd::AddBin { .. } => {}
         TimelineCmd::RemoveBin { .. } => {}
@@ -1499,6 +1825,32 @@ fn fully_populated_project_round_trips() {
         s.caption_tracks.push(ct);
         s.markers.push(Marker::new(Tick(100), "cue"));
         s.work_range = Some((Tick(0), Tick(1500)));
+    }
+    // K-A2: the category registry, a categorized RANGED sequence marker, and a
+    // clip-scoped marker must all survive the round-trip. Each is
+    // serde-additive on v5 — no format bump, so a v5 file written before K-A2
+    // still loads (`marker_categories` / `Clip.markers` default to empty and
+    // `duration` to 0, i.e. a point marker).
+    {
+        let p = d.timeline.as_mut().unwrap();
+        p.marker_categories = MarkerCategory::default_seed();
+        let mut cat = p.marker_categories[3].clone();
+        cat.glyph = MarkerGlyph::Flag;
+        let cat_id = cat.id;
+        p.marker_categories[3] = cat;
+        let s = p.sequences.get_mut(&f.seq).unwrap();
+        let mut ranged = Marker::new(Tick(300), "chapter one");
+        ranged.duration = Tick(600);
+        ranged.category = Some(cat_id);
+        ranged.note = "review this".into();
+        assert!(ranged.is_range(), "fixture must exercise the ranged arm");
+        s.markers.push(ranged);
+        // A clip marker referencing a category that is NOT in the registry —
+        // the 35 §1.3 dangling case must survive load verbatim rather than
+        // being repaired or dropped.
+        let mut orphan = Marker::clip_scoped(Tick(10), "orphaned category");
+        orphan.category = Some(MarkerCategoryId::new());
+        s.video_tracks[0].clips[0].markers.push(orphan);
     }
 
     let project = d.timeline.as_ref().unwrap();

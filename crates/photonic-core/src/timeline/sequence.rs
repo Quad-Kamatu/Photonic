@@ -64,6 +64,59 @@ impl TimelineProject {
         self.marker_categories.iter().find(|c| c.id == id)
     }
 
+    /// Display-order position of the category with this id. Used by the
+    /// category commands so a delete/undo pair restores the original ordering;
+    /// never used to *address* a category (35 §1.3).
+    pub fn marker_category_index(&self, id: MarkerCategoryId) -> Option<usize> {
+        self.marker_categories.iter().position(|c| c.id == id)
+    }
+
+    /// Every marker in the project that references `id`, in both scopes
+    /// ([`Sequence::markers`] and [`Clip::markers`](super::clip::Clip)).
+    /// The category-delete op uses this to build its retarget list, so no
+    /// marker is left pointing at a category that is gone without the command
+    /// recording the change (35 §1.3: never silently remapped).
+    pub fn markers_in_category(&self, id: MarkerCategoryId) -> Vec<MarkerRef> {
+        let mut out = Vec::new();
+        // Deterministic order: sequences in UI order first, then any sequence
+        // not in `sequence_order` (a load-time possibility) by id.
+        let mut seq_ids: Vec<SequenceId> = self.sequence_order.clone();
+        let mut rest: Vec<SequenceId> = self
+            .sequences
+            .keys()
+            .copied()
+            .filter(|s| !seq_ids.contains(s))
+            .collect();
+        rest.sort();
+        seq_ids.append(&mut rest);
+        for sid in seq_ids {
+            let Some(s) = self.sequences.get(&sid) else {
+                continue;
+            };
+            for m in &s.markers {
+                if m.category == Some(id) {
+                    out.push(MarkerRef::Sequence {
+                        seq: sid,
+                        marker: m.id,
+                    });
+                }
+            }
+            for t in s.tracks() {
+                for c in &t.clips {
+                    for m in &c.markers {
+                        if m.category == Some(id) {
+                            out.push(MarkerRef::Clip {
+                                clip: c.id,
+                                marker: m.id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Insert a sequence, appending it to the UI order and making it active if
     /// none was.
     pub fn insert_sequence(&mut self, seq: Sequence) -> SequenceId {
@@ -886,6 +939,57 @@ impl Marker {
     #[inline]
     pub fn is_range(&self) -> bool {
         self.duration.0 > 0
+    }
+}
+
+/// A pointer to one marker in either scope (35 §1.5) — sequence markers live on
+/// [`Sequence::markers`], clip markers on [`Clip::markers`](super::clip::Clip).
+///
+/// Exists so a marker-category command can name the markers it retargets
+/// without caring which scope they are in: deleting a category must be able to
+/// reassign *every* referencing marker inside one undo unit, and clip markers
+/// are not reachable from a `(SequenceId, MarkerId)` pair.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "scope")]
+pub enum MarkerRef {
+    Sequence { seq: SequenceId, marker: MarkerId },
+    Clip { clip: ClipId, marker: MarkerId },
+}
+
+impl MarkerRef {
+    /// The marker's own id, whatever the scope.
+    pub fn marker_id(self) -> MarkerId {
+        match self {
+            MarkerRef::Sequence { marker, .. } | MarkerRef::Clip { clip: _, marker } => marker,
+        }
+    }
+}
+
+/// One marker's category reassignment, recorded on a category command so the
+/// command is exactly invertible: `apply` writes `new`, and the inverse command
+/// carries the same entry with `old`/`new` swapped.
+///
+/// This is what makes 35 §1.3's "a missing category renders neutral and is
+/// flagged, never silently remapped" rule enforceable at the *command* layer: a
+/// delete either leaves the reference dangling (and the UI flags it) or
+/// retargets it explicitly and reversibly. It never happens implicitly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MarkerRetarget {
+    pub marker: MarkerRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<MarkerCategoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<MarkerCategoryId>,
+}
+
+impl MarkerRetarget {
+    /// The same retarget, undone: `old` and `new` swapped.
+    pub fn flipped(&self) -> MarkerRetarget {
+        MarkerRetarget {
+            marker: self.marker,
+            old: self.new,
+            new: self.old,
+        }
     }
 }
 
