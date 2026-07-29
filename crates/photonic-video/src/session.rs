@@ -1515,6 +1515,35 @@ const VECTOR_CACHE_CAP: usize = 16;
 /// least-recently-used beyond this, never one on screen this frame.
 // MAX_LIVE_SOURCES re-exported from playback::prefetch.
 
+/// Assets whose decoded bytes could differ between two project snapshots.
+///
+/// Exactly three things change what an asset decodes to: its source (a relink),
+/// its content hash (the bytes behind an unchanged path changed), and its proxy
+/// (attach, detach, or a re-transcode, since the engine decodes the proxy when
+/// one is ready). Everything else on `MediaAsset` — name, bin, rating, tags,
+/// probe — is metadata, and evicting a warm decode source because someone
+/// starred a clip would be a real performance regression.
+///
+/// An asset that is new in `new` is not reported: nothing is cached under an id
+/// that has never been requested. An asset that disappeared is not reported
+/// either — its entries are unreachable rather than wrong, and removal is the
+/// cache budget's business, not correctness'.
+fn changed_media_identities(old: &TimelineProject, new: &TimelineProject) -> HashSet<AssetId> {
+    let mut changed = HashSet::new();
+    for (id, new_asset) in &new.media.assets {
+        let Some(old_asset) = old.media.assets.get(id) else {
+            continue;
+        };
+        if old_asset.source != new_asset.source
+            || old_asset.content_hash != new_asset.content_hash
+            || old_asset.proxy != new_asset.proxy
+        {
+            changed.insert(*id);
+        }
+    }
+    changed
+}
+
 impl MediaSources {
     fn new(tools: Option<FfmpegTools>) -> Self {
         MediaSources {
@@ -1535,7 +1564,27 @@ impl MediaSources {
         }
     }
 
+    /// Adopt a new project snapshot, evicting any cached media whose identity
+    /// changed.
+    ///
+    /// This eviction is load-bearing, not tidiness. Decode sources, uploads and
+    /// the still cache are all keyed on `AssetId` — K-C8 added the requested
+    /// SIZE to the still key, not the asset's identity — so a relink or a proxy
+    /// swap leaves every one of them pointing at the previous file's bytes.
+    /// Swapping the snapshot alone would keep serving the old picture for the
+    /// rest of the session, which is invisible until export.
+    ///
+    /// `EngineCmd::InvalidateRange` is documented (02 §5) as the relink/proxy
+    /// seam, but it has no senders anywhere in the workspace, and
+    /// `invalidate_assets` is reached only from `EngineCmd::Probe`. Diffing here
+    /// means correctness does not depend on a caller remembering to announce the
+    /// change — the same reason [`Self::set_document`] clears the vector cache
+    /// on its own rather than waiting to be told.
     fn set_project(&mut self, project: Arc<TimelineProject>) {
+        if let Some(old) = self.project.as_ref() {
+            let changed = changed_media_identities(old, &project);
+            self.invalidate_assets(&changed);
+        }
         self.project = Some(project);
     }
 
@@ -2435,6 +2484,134 @@ mod tests {
         let id = asset.id;
         project.media.assets.insert(id, asset);
         (Arc::new(project), id)
+    }
+
+    /// A relink must evict the asset's cached media; unrelated metadata edits
+    /// must not.
+    ///
+    /// Before this, `set_project` only swapped the snapshot Arc, so after a
+    /// relink the engine kept serving the OLD file's decoded still for the rest
+    /// of the session — invisible until export. `EngineCmd::InvalidateRange` is
+    /// documented as the seam for exactly this and has no senders anywhere.
+    #[test]
+    fn a_relink_evicts_cached_media_but_a_metadata_edit_does_not() {
+        let Some(gpu) = crate::graph::eval::GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter — skipping relink invalidation test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("photonic-relink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (project, id) = quadrant_still_project(&dir);
+
+        let mut media = MediaSources::new(None);
+        media.set_project(project.clone());
+        media.still_texture(&gpu, id, 64, 64).expect("still");
+        assert_eq!(media.stills.len(), 1, "fixture must warm the cache first");
+
+        // A metadata-only edit: same file, same bytes, same proxy.
+        let mut rated = (*project).clone();
+        rated.media.assets.get_mut(&id).unwrap().rating = Some(5);
+        media.set_project(Arc::new(rated.clone()));
+        assert_eq!(
+            media.stills.len(),
+            1,
+            "a rating edit must not evict a warm decode — over-invalidating here \
+             would be a real performance regression"
+        );
+
+        // A relink: the path now points at a different file.
+        let other = dir.join("relinked.png");
+        std::fs::write(&other, photonic_core::RasterImage::new(8, 8).to_png())
+            .expect("write relink target");
+        let mut relinked = rated;
+        relinked.media.assets.get_mut(&id).unwrap().source = AssetSource::File {
+            path: other,
+            rel_path: None,
+        };
+        media.set_project(Arc::new(relinked));
+        assert_eq!(
+            media.stills.len(),
+            0,
+            "a relink must evict the still decoded from the previous file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The identity diff reports a relink, a byte change and a proxy swap, and
+    /// stays silent for metadata. Pure, so it runs without a GPU.
+    #[test]
+    fn changed_media_identities_tracks_bytes_not_metadata() {
+        use photonic_core::timeline::{AssetKind, MediaAsset, ProxyRef};
+
+        let mut base = TimelineProject::new();
+        let asset = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: std::path::PathBuf::from("/a.mp4"),
+                rel_path: None,
+            },
+        );
+        let id = asset.id;
+        base.media.assets.insert(id, asset);
+
+        let edit = |f: &dyn Fn(&mut MediaAsset)| {
+            let mut p = base.clone();
+            f(p.media.assets.get_mut(&id).unwrap());
+            p
+        };
+
+        // Unchanged: nothing to evict.
+        assert!(changed_media_identities(&base, &base.clone()).is_empty());
+
+        for (label, mutate) in [
+            (
+                "relink",
+                &(|a: &mut MediaAsset| {
+                    a.source = AssetSource::File {
+                        path: std::path::PathBuf::from("/b.mp4"),
+                        rel_path: None,
+                    }
+                }) as &dyn Fn(&mut MediaAsset),
+            ),
+            (
+                "byte change",
+                &(|a: &mut MediaAsset| a.content_hash = Some("deadbeef".into())),
+            ),
+            (
+                "proxy attach",
+                &(|a: &mut MediaAsset| a.proxy = Some(ProxyRef::ready_generated("/a.proxy.mp4"))),
+            ),
+        ] {
+            let changed = changed_media_identities(&base, &edit(mutate));
+            assert!(changed.contains(&id), "{label} must invalidate");
+        }
+
+        for (label, mutate) in [
+            (
+                "rating",
+                &(|a: &mut MediaAsset| a.rating = Some(3)) as &dyn Fn(&mut MediaAsset),
+            ),
+            (
+                "tags",
+                &(|a: &mut MediaAsset| a.tags = vec!["b-roll".into()]),
+            ),
+        ] {
+            let changed = changed_media_identities(&base, &edit(mutate));
+            assert!(changed.is_empty(), "{label} must NOT invalidate");
+        }
+
+        // A brand-new asset has nothing cached under its id.
+        let mut added = base.clone();
+        let fresh = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: std::path::PathBuf::from("/c.mp4"),
+                rel_path: None,
+            },
+        );
+        added.media.assets.insert(fresh.id, fresh);
+        assert!(changed_media_identities(&base, &added).is_empty());
     }
 
     /// Assert a still frame's four quadrants are the fixture's colours, read
