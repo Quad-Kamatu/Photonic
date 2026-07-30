@@ -524,7 +524,10 @@ fn ui_media_pool_interlaced_probe_summary() {
         audio: None,
         container: "mov".into(),
         codec: "dvvideo".into(),
-    });
+                is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
+        });
     let s = probe_summary(&asset);
     assert!(s.contains("interlaced (BFF)"), "got: {s}");
     assert!(s.contains("1920x1080"));

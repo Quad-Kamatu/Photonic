@@ -255,6 +255,10 @@ fn fold(p: FfProbe) -> Result<ProbeDetails, ProbeError> {
             audio: audio_info,
             container,
             codec,
+            // K-C7: persist triage fields so the pool can report without re-probe.
+            is_vfr,
+            pixel_format: pixel_format.clone(),
+            has_alpha,
         },
         pixel_format,
         has_alpha,

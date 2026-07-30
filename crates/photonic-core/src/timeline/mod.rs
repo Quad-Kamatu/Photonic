@@ -81,9 +81,9 @@ pub use ids::{
     MarkerId, SequenceId, TagId, TrackId,
 };
 pub use media::{
-    AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe, MediaTag,
-    ProbedColor, ProxyOrigin, ProxyRef, ProxyStatus, ScanType, VectorRef, VectorStateKey,
-    VideoStreamInfo,
+    triage_max_severity, triage_probe, AssetKind, AssetSource, AudioStreamInfo, MediaAsset,
+    MediaBin, MediaPool, MediaProbe, MediaTag, ProbedColor, ProxyOrigin, ProxyRef, ProxyStatus,
+    ScanType, TriageFinding, TriageSeverity, VectorRef, VectorStateKey, VideoStreamInfo,
 };
 pub use ops::{ClipEdge, EditError};
 pub use prop_registry::{PropEntry, PropTargetKind};

@@ -1601,24 +1601,27 @@ fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, usage: usize) {
                 .color(egui::Color32::from_rgb(235, 100, 90)),
         );
     }
-    // K-G6: interlaced badge + triage consequence on hover (detection is live;
-    // deinterlace node is still open — badge makes the risk visible now).
-    if let Some(v) = asset.probe.as_ref().and_then(|p| p.video.as_ref()) {
-        if v.scan.is_interlaced() {
-            let order = match v.scan {
-                photonic_core::timeline::ScanType::InterlacedTopFirst => "top-field first",
-                photonic_core::timeline::ScanType::InterlacedBottomFirst => "bottom-field first",
-                _ => "interlaced",
+    // K-C7 / K-G6: import triage badges (VFR info, interlaced warn, …).
+    if let Some(probe) = asset.probe.as_ref() {
+        let findings = photonic_core::timeline::triage_probe(probe);
+        for f in &findings {
+            let (label, color) = match f.severity {
+                photonic_core::timeline::TriageSeverity::Info => {
+                    (f.code.to_ascii_uppercase(), egui::Color32::from_rgb(140, 160, 200))
+                }
+                photonic_core::timeline::TriageSeverity::Warn => {
+                    (f.code.to_ascii_uppercase(), egui::Color32::from_rgb(235, 180, 90))
+                }
+                photonic_core::timeline::TriageSeverity::Action => {
+                    (f.code.to_ascii_uppercase(), egui::Color32::from_rgb(235, 100, 90))
+                }
             };
-            let consequence = photonic_video::media::probe::interlaced_consequence(v.scan)
-                .unwrap_or("Interlaced media may comb on progressive timelines.");
-            ui.label(
-                egui::RichText::new("INTERLACED")
-                    .small()
-                    .strong()
-                    .color(egui::Color32::from_rgb(235, 180, 90)),
-            )
-            .on_hover_text(format!("{order}: {consequence}"));
+            let tip = match &f.remedy {
+                Some(r) => format!("{}\n{}\nRemedy: {r}", f.summary, f.consequence),
+                None => format!("{}\n{}", f.summary, f.consequence),
+            };
+            ui.label(egui::RichText::new(label).small().strong().color(color))
+                .on_hover_text(tip);
         }
     }
     if let Some(proxy) = &asset.proxy {
@@ -1745,6 +1748,9 @@ mod tests {
             audio: None,
             container: "mov".into(),
             codec: "prores".into(),
+                    is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
         });
         let s = probe_summary(&asset);
         assert!(

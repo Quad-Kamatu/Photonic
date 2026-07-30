@@ -5844,6 +5844,9 @@ mod tests {
             audio: None,
             container: "mp4".into(),
             codec: "h264".into(),
+                    is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
         };
         let p = doc.timeline.as_ref().unwrap();
         let cmd = set_asset_meta(p, id, Some(probe.clone()), Some("hash-abc".into())).unwrap();
@@ -7024,6 +7027,9 @@ mod tests {
             audio: None,
             container: "mov".into(),
             codec: "h264".into(),
+                    is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
         });
         let p = doc.timeline.as_ref().unwrap();
         let disk = [("/new/a.mp4", "xxh:zzz")];

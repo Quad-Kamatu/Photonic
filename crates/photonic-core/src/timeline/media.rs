@@ -215,6 +215,32 @@ pub struct MediaProbe {
     pub audio: Option<AudioStreamInfo>,
     pub container: String,
     pub codec: String,
+    /// K-C7: container avg vs base rate disagree → VFR. Photonic plays VFR via
+    /// pts-true decode; triage reports it so the user knows. Additive default false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_vfr: bool,
+    /// K-C7: source pixel format string from probe (e.g. `yuv420p`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_format: Option<String>,
+    /// K-C7: whether the source carries alpha.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_alpha: bool,
+}
+
+impl MediaProbe {
+    /// Fixture helper: duration + container/codec only; triage flags clear.
+    pub fn basic(duration: Tick, container: impl Into<String>, codec: impl Into<String>) -> Self {
+        MediaProbe {
+            duration,
+            video: None,
+            audio: None,
+            container: container.into(),
+            codec: codec.into(),
+            is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
+        }
+    }
 }
 
 /// Field / scan type from probe (K-G6 / 32 §6). Default [`ScanType::Progressive`]
@@ -261,6 +287,139 @@ fn is_default_scan(s: &ScanType) -> bool {
 
 fn default_pixel_aspect() -> f32 {
     1.0
+}
+
+// ── K-C7 import-time media triage ────────────────────────────────────────────
+
+/// Severity of one triage finding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriageSeverity {
+    /// Informational — Photonic handles this correctly; user should still know.
+    Info,
+    /// May need attention (interlaced, odd pixel format).
+    Warn,
+    /// Likely needs a user remedy (non-seekable class signals if we had them).
+    Action,
+}
+
+/// One human-readable finding about an imported asset (26 K-C7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriageFinding {
+    pub code: String,
+    pub severity: TriageSeverity,
+    pub summary: String,
+    pub consequence: String,
+    /// Optional remedy text — only when a real fix is needed (not Shotcut's
+    /// blanket "Convert to Edit-friendly").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
+/// Build triage findings from a persisted probe. Pure — no I/O.
+///
+/// Photonic already handles VFR correctly (pts-true); VFR is **Info**, not a
+/// convert demand. Interlaced is **Warn** (deinterlace available). Odd pixel
+/// formats and multi-channel audio mismatches are Info/Warn as appropriate.
+pub fn triage_probe(probe: &MediaProbe) -> Vec<TriageFinding> {
+    let mut out = Vec::new();
+    if probe.is_vfr {
+        out.push(TriageFinding {
+            code: "vfr".into(),
+            severity: TriageSeverity::Info,
+            summary: "Variable frame rate".into(),
+            consequence: "Container average and base rates disagree. Photonic \
+                plays VFR via pts-true decode (no forced convert)."
+                .into(),
+            remedy: None,
+        });
+    }
+    if let Some(v) = &probe.video {
+        if v.scan.is_interlaced() {
+            out.push(TriageFinding {
+                code: "interlaced".into(),
+                severity: TriageSeverity::Warn,
+                summary: "Interlaced video".into(),
+                consequence: "Fields will comb on motion until a deinterlace \
+                    node is applied (K-G6 auto-inserts for interlaced sources)."
+                    .into(),
+                remedy: Some("Keep auto-deinterlace on, or convert offline if you need progressive masters.".into()),
+            });
+        }
+        if (v.pixel_aspect - 1.0).abs() > 0.01 {
+            out.push(TriageFinding {
+                code: "anamorphic".into(),
+                severity: TriageSeverity::Info,
+                summary: format!("Non-square pixels (PAR {:.3})", v.pixel_aspect),
+                consequence: "Display aspect differs from storage dimensions; \
+                    the compositor applies pixel aspect on layout."
+                    .into(),
+                remedy: None,
+            });
+        }
+    }
+    if probe.has_alpha {
+        out.push(TriageFinding {
+            code: "alpha".into(),
+            severity: TriageSeverity::Info,
+            summary: "Source carries alpha".into(),
+            consequence: "Alpha is preserved through the graph; use alpha view \
+                on the program monitor to inspect it."
+                .into(),
+            remedy: None,
+        });
+    }
+    if let Some(fmt) = probe.pixel_format.as_deref() {
+        let f = fmt.to_ascii_lowercase();
+        // Flag uncommon formats that often surprise editors.
+        if f.contains("10le")
+            || f.contains("12le")
+            || f.contains("p010")
+            || f.contains("yuv422")
+            || f.contains("yuv444")
+            || f.contains("gbr")
+        {
+            out.push(TriageFinding {
+                code: "pixel_format".into(),
+                severity: TriageSeverity::Info,
+                summary: format!("Pixel format {fmt}"),
+                consequence: "Unusual packing; decode still works, but proxies \
+                    and some hardware encoders may down-convert."
+                    .into(),
+                remedy: None,
+            });
+        }
+    }
+    if let Some(a) = &probe.audio {
+        if a.sample_rate != 0 && a.sample_rate != 48000 && a.sample_rate != 44100 {
+            out.push(TriageFinding {
+                code: "sample_rate".into(),
+                severity: TriageSeverity::Info,
+                summary: format!("{} Hz audio", a.sample_rate),
+                consequence: "Mixer resamples to the session rate; slight CPU cost.".into(),
+                remedy: None,
+            });
+        }
+        if a.channels > 2 {
+            out.push(TriageFinding {
+                code: "multichannel".into(),
+                severity: TriageSeverity::Info,
+                summary: format!("{}-channel audio", a.channels),
+                consequence: "Use clip channel map / stream selection (K-D3) to pick routes.".into(),
+                remedy: None,
+            });
+        }
+    }
+    out
+}
+
+/// Highest severity present, if any findings.
+pub fn triage_max_severity(findings: &[TriageFinding]) -> Option<TriageSeverity> {
+    findings.iter().map(|f| f.severity).max_by_key(|s| match s {
+        TriageSeverity::Info => 0,
+        TriageSeverity::Warn => 1,
+        TriageSeverity::Action => 2,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -367,6 +526,7 @@ impl MediaBin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::time::FrameRate;
 
     #[test]
     fn media_pool_insert_and_roundtrip() {
@@ -398,6 +558,43 @@ mod tests {
     fn lut3d_is_a_media_asset_kind() {
         let a = MediaAsset::from_file(AssetKind::Lut3d, "/luts/kodak.cube");
         assert_eq!(a.kind, AssetKind::Lut3d);
+    }
+
+    #[test]
+    fn triage_probe_flags_vfr_and_interlace() {
+        let mut probe = MediaProbe::basic(Tick(30_000), "mp4", "h264");
+        probe.is_vfr = true;
+        probe.video = Some(VideoStreamInfo {
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate { num: 30, den: 1 },
+            pixel_aspect: 1.0,
+            color: ProbedColor::default(),
+            keyframe_index_cached: false,
+            scan: ScanType::InterlacedTopFirst,
+        });
+        let findings = triage_probe(&probe);
+        assert!(findings.iter().any(|f| f.code == "vfr"));
+        assert!(findings.iter().any(|f| f.code == "interlaced"));
+        assert_eq!(
+            triage_max_severity(&findings),
+            Some(TriageSeverity::Warn)
+        );
+        // VFR is Info, not a convert demand.
+        let vfr = findings.iter().find(|f| f.code == "vfr").unwrap();
+        assert_eq!(vfr.severity, TriageSeverity::Info);
+        assert!(vfr.remedy.is_none());
+    }
+
+    #[test]
+    fn media_probe_triage_fields_serde_default() {
+        // Older documents without is_vfr/pixel_format/has_alpha still load.
+        let json = r#"{"duration":0,"container":"mp4","codec":"h264"}"#;
+        let p: MediaProbe = serde_json::from_str(json).unwrap();
+        assert!(!p.is_vfr);
+        assert!(p.pixel_format.is_none());
+        assert!(!p.has_alpha);
+        assert!(triage_probe(&p).is_empty());
     }
 
     #[test]

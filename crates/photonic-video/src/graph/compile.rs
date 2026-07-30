@@ -4305,6 +4305,9 @@ mod tests {
             audio: None,
             container: "mp4".into(),
             codec: "h264".into(),
+                    is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
         });
         let id = asset.id;
         project.media.insert(asset);
@@ -4329,6 +4332,9 @@ mod tests {
             audio: None,
             container: "mp4".into(),
             codec: "h264".into(),
+                    is_vfr: false,
+            pixel_format: None,
+            has_alpha: false,
         });
         let id = asset.id;
         project.media.insert(asset);
