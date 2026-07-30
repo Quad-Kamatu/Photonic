@@ -71,6 +71,16 @@ pub struct MediaAsset {
     /// Free-form tags (K-C2). Empty omitted. Full `TagId` registry is follow-up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// K-A8: when set, this pool entry is a **subclip** — a zone-bounded view of
+    /// `parent`. Proxies, waveforms, and `content_hash` are shared with the
+    /// parent (copied at create time; not re-probed). Additive; older files
+    /// load with both fields absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<AssetId>,
+    /// K-A8: half-open source range `[in, out)` on the parent media, in source
+    /// ticks. Only meaningful when `parent` is `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subclip_range: Option<(Tick, Tick)>,
 }
 
 impl MediaAsset {
@@ -87,7 +97,15 @@ impl MediaAsset {
             grade: None,
             rating: None,
             tags: Vec::new(),
+            parent: None,
+            subclip_range: None,
         }
+    }
+
+    /// True when this asset is a K-A8 subclip view of another pool entry.
+    #[inline]
+    pub fn is_subclip(&self) -> bool {
+        self.parent.is_some() && self.subclip_range.is_some()
     }
 
     /// A file-backed asset from an absolute path.

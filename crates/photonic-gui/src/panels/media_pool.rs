@@ -1420,6 +1420,31 @@ fn draw_asset_cell(
                 ctx.action = Some(PanelAction::MediaInsertAtPlayhead { asset: asset.id });
                 ui.close_menu();
             }
+            // K-A8: subclip from first half of media (or 0–1s) — a full zone UI
+            // is follow-up; this lands the verb on the real create_subclip path.
+            if !asset.is_subclip()
+                && matches!(asset.kind, AssetKind::Video | AssetKind::Audio)
+                && ui
+                    .button("Create subclip (first half)…")
+                    .on_hover_text("K-A8: zone-bounded pool entry sharing the parent cache")
+                    .clicked()
+            {
+                let (rin, rout) = asset
+                    .probe
+                    .as_ref()
+                    .map(|p| {
+                        let half = (p.duration.0 / 2).max(1);
+                        (0i64, half)
+                    })
+                    .unwrap_or((0, photonic_core::timeline::TICKS_PER_SECOND));
+                ctx.action = Some(PanelAction::MediaCreateSubclip {
+                    asset: asset.id,
+                    in_ticks: rin,
+                    out_ticks: rout,
+                    name: None,
+                });
+                ui.close_menu();
+            }
             if offline && ui.button("Relink…").clicked() {
                 ctx.action = Some(PanelAction::MediaRelink { asset: asset.id });
                 ui.close_menu();

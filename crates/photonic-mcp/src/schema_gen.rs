@@ -5994,7 +5994,23 @@ pub fn tool_list() -> Value {
         // MediaAsset.bin support landed in core; standard create_/remove_/
         // set_/list_ tools rather than an op-field mega-tool since each maps
         // 1:1 to a distinct TimelineCmd variant, per design rules 1/2)
-        {
+                {
+            "name": "create_subclip",
+            "description": "Create Subclip (26 §9 K-A8): add a zone-bounded pool entry that is a view of parent_asset_id over [in, out). Shares content_hash/proxy/source with the parent (no cache duplication). One undo step (AddAsset). Nested subclips are refused.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parent_asset_id": { "type": "string" },
+                    "in_ticks": { "type": "integer", "description": "Source-range start on the parent." },
+                    "out_ticks": { "type": "integer", "description": "Source-range end (exclusive) on the parent." },
+                    "in_seconds": { "type": "number" },
+                    "out_seconds": { "type": "number" },
+                    "name": { "type": "string", "description": "Optional label stored as a subclip: tag." }
+                },
+                "required": ["parent_asset_id"]
+            }
+        },
+{
             "name": "create_bin",
             "description": "Create a media bin (folder), optionally nested under `parent`. Supports undo.",
             "inputSchema": {

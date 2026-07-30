@@ -639,6 +639,21 @@ pub fn remove_clips_after(
     }
 }
 
+/// K-A8: create a subclip pool entry from a parent asset + source range.
+/// Returns the new asset id when successful.
+pub fn create_subclip(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    parent: AssetId,
+    range: (Tick, Tick),
+    name: Option<String>,
+) -> Option<AssetId> {
+    let p = doc.timeline.as_ref()?;
+    let (cmd, id) = ops::create_subclip(p, parent, range, name).ok()?;
+    commit(history, doc, cmd);
+    Some(id)
+}
+
 // ── Sync-locked track ripple propagation (14 §M-9) ──────────────────────────
 //
 // `Track::sync_lock` + its header toggle already exist (`tracks.rs`); this is

@@ -126,6 +126,24 @@ impl PhotonicApp {
                         }
                     }
                 }
+                PanelAction::MediaCreateSubclip {
+                    asset,
+                    in_ticks,
+                    out_ticks,
+                    name,
+                } => {
+                    use photonic_core::timeline::{ops, Tick};
+                    if let Some(id) = crate::app::timeline::ops_bridge::create_subclip(
+                        doc,
+                        history,
+                        asset,
+                        (Tick(in_ticks), Tick(out_ticks)),
+                        name,
+                    ) {
+                        self.media_pool_ui.selected = Some(id);
+                        doc_modified = true;
+                    }
+                }
                 PanelAction::MediaAssignBin { asset, bin } => {
                     use photonic_core::timeline::ops;
                     if let Some(p) = doc.timeline.as_ref() {

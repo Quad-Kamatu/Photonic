@@ -125,6 +125,61 @@ pub fn remove_asset(p: &TimelineProject, asset: AssetId) -> Result<TimelineCmd, 
     })
 }
 
+/// K-A8: create a subclip pool entry — a zone-bounded view of `parent` that
+/// shares `content_hash` / proxy / probe / source path so caches are not
+/// duplicated. `range` is half-open source ticks `[in, out)` on the parent
+/// media. Optional `name` labels the bin entry (default `Parent · in–out`).
+///
+/// Returns `AddAsset` for the new subclip. Refuses a missing parent, a range
+/// with `out <= in`, or nesting a subclip of a subclip (resolve to the root
+/// parent instead is not done automatically — call with the root).
+pub fn create_subclip(
+    p: &TimelineProject,
+    parent: AssetId,
+    range: (Tick, Tick),
+    name: Option<String>,
+) -> Result<(TimelineCmd, AssetId), EditError> {
+    let (rin, rout) = range;
+    if rout.0 <= rin.0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    let parent_asset = p
+        .media
+        .assets
+        .get(&parent)
+        .ok_or(EditError::NoAsset(parent))?;
+    if parent_asset.is_subclip() {
+        // Nested subclips would require range composition; refuse rather than
+        // silently mis-offset. Callers should use the root parent.
+        return Err(EditError::Overlap);
+    }
+    let mut child = parent_asset.clone();
+    child.id = AssetId::new();
+    child.parent = Some(parent);
+    child.subclip_range = Some((rin, rout));
+    // Display name rides on tags for now (MediaAsset has no name field —
+    // pool UI uses path basename). Put a human label in tags[0] when supplied.
+    if let Some(n) = name {
+        if !n.is_empty() {
+            child.tags.insert(0, format!("subclip:{n}"));
+        }
+    } else {
+        child.tags.insert(
+            0,
+            format!("subclip:{}-{}", rin.0, rout.0),
+        );
+    }
+    let id = child.id;
+    Ok((add_asset(child), id))
+}
+
+/// Default timeline placement for a subclip asset: `source_in` = range start,
+/// duration = range width. Pure helper for GUI/MCP insert.
+pub fn subclip_default_timing(asset: &super::media::MediaAsset) -> Option<(Tick, Tick)> {
+    let (a, b) = asset.subclip_range?;
+    Some((a, Tick(b.0 - a.0)))
+}
+
 /// K-C2: set or clear a 1–5 star rating (`None` / out-of-range clears).
 pub fn set_asset_rating(
     p: &TimelineProject,
@@ -4051,6 +4106,62 @@ mod tests {
 
         let removed = remove_unused_assets(doc.timeline.as_ref().unwrap());
         assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn create_subclip_shares_hash_and_sets_range() {
+        use super::super::media::{AssetKind, AssetSource, MediaAsset};
+        use std::path::PathBuf;
+
+        let mut project = TimelineProject::new();
+        let mut parent = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: PathBuf::from("/long-take.mp4"),
+                rel_path: None,
+            },
+        );
+        parent.content_hash = Some("xxh3:deadbeef".into());
+        let parent_id = parent.id;
+        project.media.insert(parent);
+
+        let (cmd, child_id) = create_subclip(
+            &project,
+            parent_id,
+            (Tick(100), Tick(500)),
+            Some("select-A".into()),
+        )
+        .unwrap();
+        let mut doc = Document::new("t", 1.0, 1.0);
+        doc.timeline = Some(project);
+        cmd.apply(&mut doc);
+        let child = &doc.timeline.as_ref().unwrap().media.assets[&child_id];
+        assert_eq!(child.parent, Some(parent_id));
+        assert_eq!(child.subclip_range, Some((Tick(100), Tick(500))));
+        assert_eq!(child.content_hash.as_deref(), Some("xxh3:deadbeef"));
+        assert!(child.is_subclip());
+        let (sin, dur) = subclip_default_timing(child).unwrap();
+        assert_eq!(sin, Tick(100));
+        assert_eq!(dur, Tick(400));
+        // Nested subclip refused.
+        assert!(matches!(
+            create_subclip(
+                doc.timeline.as_ref().unwrap(),
+                child_id,
+                (Tick(0), Tick(10)),
+                None
+            ),
+            Err(EditError::Overlap)
+        ));
+        assert!(matches!(
+            create_subclip(
+                doc.timeline.as_ref().unwrap(),
+                parent_id,
+                (Tick(10), Tick(10)),
+                None
+            ),
+            Err(EditError::NonPositiveDuration)
+        ));
     }
 
     #[test]

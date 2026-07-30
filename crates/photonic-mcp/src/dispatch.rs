@@ -2674,6 +2674,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::remove_asset(state, a).await,
             ))
         }
+        "create_subclip" => {
+            let a: CreateSubclipArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::create_subclip(state, a).await,
+            ))
+        }
         "create_bin" => {
             let a: CreateBinArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(

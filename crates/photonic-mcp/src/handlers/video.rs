@@ -4231,6 +4231,43 @@ pub async fn remove_asset(state: &AppState, args: RemoveAssetArgs) -> ToolResult
     }
 }
 
+/// K-A8: create a subclip pool entry (zone view of parent media).
+pub async fn create_subclip(state: &AppState, args: CreateSubclipArgs) -> ToolResult {
+    tracing::debug!("tool: create_subclip parent={}", args.parent_asset_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let tps = TICKS_PER_SECOND as f64;
+    let rin = args
+        .in_ticks
+        .or_else(|| args.in_seconds.map(|s| (s * tps).round() as i64));
+    let rout = args
+        .out_ticks
+        .or_else(|| args.out_seconds.map(|s| (s * tps).round() as i64));
+    let (Some(a), Some(b)) = (rin, rout) else {
+        return ToolResult::error("supply in_ticks/out_ticks (or in_seconds/out_seconds)");
+    };
+    match ops::create_subclip(
+        project,
+        args.parent_asset_id,
+        (Tick(a), Tick(b)),
+        args.name,
+    ) {
+        Ok((cmd, id)) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Created subclip").with_data(json!({
+                "asset_id": id,
+                "parent_asset_id": args.parent_asset_id,
+                "in_ticks": a,
+                "out_ticks": b,
+            }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 // ─── Media bins (added for the P2 top-up — not in the original §3.1 table) ──
 
 pub async fn create_bin(state: &AppState, args: CreateBinArgs) -> ToolResult {

@@ -880,6 +880,13 @@ pub enum PanelAction {
         asset: photonic_core::timeline::AssetId,
         rating: Option<u8>,
     },
+    /// K-A8: create a subclip of `asset` over source range `[in_ticks, out_ticks)`.
+    MediaCreateSubclip {
+        asset: photonic_core::timeline::AssetId,
+        in_ticks: i64,
+        out_ticks: i64,
+        name: Option<String>,
+    },
     /// Move an asset to `bin` (`None` = pool root).
     MediaAssignBin {
         asset: photonic_core::timeline::AssetId,

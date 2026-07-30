@@ -880,6 +880,23 @@ pub struct SetEffectParamArgs {
     pub value: PropValue,
 }
 
+/// K-A8: create a subclip (zone-bounded pool entry) of a parent media asset.
+#[derive(Debug, Deserialize)]
+pub struct CreateSubclipArgs {
+    pub parent_asset_id: AssetId,
+    /// Source-range start (ticks on parent media). Prefer ticks over seconds.
+    #[serde(default)]
+    pub in_ticks: Option<i64>,
+    #[serde(default)]
+    pub out_ticks: Option<i64>,
+    #[serde(default)]
+    pub in_seconds: Option<f64>,
+    #[serde(default)]
+    pub out_seconds: Option<f64>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// K-B3: set/clear an effect zone (clip-relative half-open range). Omit both
 /// start and end (or pass null zone) to clear. Supply both start_* and end_*
 /// for a zone; end must be > start.
