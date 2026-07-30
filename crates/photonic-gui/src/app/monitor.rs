@@ -1532,6 +1532,25 @@ impl PhotonicApp {
                 {
                     self.monitor_safe_area = !self.monitor_safe_area;
                 }
+                // K-B17: alpha as luminance — judge a key against something
+                // other than black. Toggles the present channel on the engine
+                // bridge (view state, not an undo unit).
+                {
+                    let alpha_on = self
+                        .engine
+                        .as_ref()
+                        .map(|e| e.alpha_view())
+                        .unwrap_or(false);
+                    if ui
+                        .selectable_label(alpha_on, "α")
+                        .on_hover_text("Alpha view — show the alpha channel as luminance (K-B17)")
+                        .clicked()
+                    {
+                        if let Some(eng) = self.engine.as_mut() {
+                            eng.toggle_alpha_view();
+                        }
+                    }
+                }
                 {
                     let grid_label = match self.monitor_comp_grid {
                         1 => "⅓",

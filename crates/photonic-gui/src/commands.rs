@@ -651,6 +651,14 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Freeze Frame",
         default: None,
     },
+    // K-B17 alpha view — program-monitor present channel (view state, zero
+    // undo units). The util.alpha_view / util.unpremultiply *effects* already
+    // live in the catalogue for per-clip use.
+    CommandDef {
+        id: "video.alpha_view",
+        label: "Toggle Alpha View",
+        default: None,
+    },
     // K-A7 grab item / arrow-key nudge (Shift+G engage; arrows while grabbed;
     // Enter commit; Esc cancel). Arrow keys are handled specially while grab
     // is active so they don't step the playhead.

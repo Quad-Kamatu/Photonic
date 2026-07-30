@@ -46,7 +46,7 @@
 use photonic_core::document::Document;
 use photonic_core::history::CommandHistory;
 use photonic_core::timeline::{SequenceId, Tick};
-use photonic_render::video::VideoPresenter;
+use photonic_render::video::{PresentChannel, VideoPresenter};
 use photonic_video::{
     EngineCmd, EngineSession, EngineStatus, PreviewQuality, PreviewTarget, ProxyMode, VideoEngine,
 };
@@ -95,6 +95,8 @@ pub struct EngineBridge {
     /// The frame the monitor texture currently shows (time + sequence), for
     /// the buffering heuristic.
     pub(crate) presented_frame: Option<(Tick, SequenceId)>,
+    /// K-B17: colour vs alpha-as-luminance present channel.
+    pub(crate) present_channel: PresentChannel,
 
     // ── Reconciler state (last values actually sent to the engine) ──────────
     sent_playing: Option<bool>,
@@ -149,6 +151,7 @@ impl EngineBridge {
             presented: None,
             monitor_tex: None,
             presented_frame: None,
+            present_channel: PresentChannel::Color,
             sent_playing: None,
             sent_loop: None,
             sent_sequence: None,
@@ -348,10 +351,13 @@ impl EngineBridge {
         let Some(frame) = self.session.latest_frame() else {
             return;
         };
+        // Include the present channel so toggling alpha view re-presents the
+        // same frame through the alpha pipeline (K-B17).
         let key: FrameKey = (
             frame.time,
             frame.sequence,
-            Arc::as_ptr(&frame.texture) as usize,
+            Arc::as_ptr(&frame.texture) as usize
+                ^ (self.present_channel as usize).wrapping_mul(0x9e37_79b9),
         );
         if self.presented == Some(key) {
             return;
@@ -367,11 +373,31 @@ impl EngineBridge {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("engine_frame_present"),
         });
-        presenter.present_engine_frame(device, &mut encoder, &src_view, &target.view);
+        presenter.present_engine_frame_channel(
+            device,
+            &mut encoder,
+            &src_view,
+            &target.view,
+            self.present_channel,
+        );
         queue.submit([encoder.finish()]);
 
         self.presented = Some(key);
         self.presented_frame = Some((frame.time, frame.sequence));
+    }
+
+    /// Toggle alpha-as-luminance present (K-B17). Forces the next
+    /// [`present_latest`] to re-encode the current frame.
+    pub fn toggle_alpha_view(&mut self) {
+        self.present_channel = match self.present_channel {
+            PresentChannel::Color => PresentChannel::Alpha,
+            PresentChannel::Alpha => PresentChannel::Color,
+        };
+        self.presented = None; // force re-present
+    }
+
+    pub fn alpha_view(&self) -> bool {
+        self.present_channel == PresentChannel::Alpha
     }
 
     /// (Re)create the intermediate target + egui registration when the

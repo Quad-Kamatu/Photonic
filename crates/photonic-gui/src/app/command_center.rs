@@ -275,6 +275,11 @@ impl PhotonicApp {
             "video.reveal_in_project" => self.timeline_reveal_in_project(doc),
             "video.edit_duration" => self.timeline_open_edit_duration(doc),
             "video.freeze_frame" => self.timeline_freeze_frame(doc, history),
+            "video.alpha_view" => {
+                if let Some(eng) = self.engine.as_mut() {
+                    eng.toggle_alpha_view();
+                }
+            }
             "video.grab_item" => self.timeline_toggle_grab(doc),
             "video.grab_commit" => {
                 self.timeline_grab_commit(doc, history);

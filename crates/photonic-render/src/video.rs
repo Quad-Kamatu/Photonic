@@ -169,7 +169,26 @@ fn fs_present(in: VOut) -> @location(0) vec4<f32> {
     let straight = p.rgb / a;
     return vec4<f32>(straight, p.a);
 }
+
+// K-B17 alpha view: show the alpha channel as luminance so keys are
+// judicable against something other than black. Fully opaque so the
+// checkerboard / compositor behind does not dim the matte.
+@fragment
+fn fs_present_alpha(in: VOut) -> @location(0) vec4<f32> {
+    let p = textureSample(t_src, samp, in.uv);
+    return vec4<f32>(p.a, p.a, p.a, 1.0);
+}
 "#;
+
+/// How the program monitor presents the working-format engine frame (K-B17).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum PresentChannel {
+    /// Colour (unpremultiply → sRGB target). Default.
+    #[default]
+    Color,
+    /// Alpha as luminance, fully opaque.
+    Alpha,
+}
 
 fn plane_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let tex = |binding| wgpu::BindGroupLayoutEntry {
@@ -476,6 +495,8 @@ pub fn convert_yuv_planes_to_working(
 pub struct VideoPresenter {
     bgl: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
+    /// K-B17 alpha-as-luminance present path (same BGL/sampler as colour).
+    pipeline_alpha: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
 }
 
@@ -506,6 +527,8 @@ impl VideoPresenter {
         });
         let pipeline =
             fullscreen_pipeline(device, &bgl, PRESENT_SHADER, "fs_present", target_format);
+        let pipeline_alpha =
+            fullscreen_pipeline(device, &bgl, PRESENT_SHADER, "fs_present_alpha", target_format);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("present_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -517,18 +540,39 @@ impl VideoPresenter {
         Self {
             bgl,
             pipeline,
+            pipeline_alpha,
             sampler,
         }
     }
 
     /// Record the present pass: sample `source` (working format) → unpremultiply
     /// → write linear values to an sRGB `target` (03 §5).
+    ///
+    /// `channel` selects colour (default) or alpha-as-luminance (K-B17).
     pub fn present_engine_frame(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::TextureView,
         target: &wgpu::TextureView,
+    ) {
+        self.present_engine_frame_channel(
+            device,
+            encoder,
+            source,
+            target,
+            PresentChannel::Color,
+        );
+    }
+
+    /// Like [`present_engine_frame`], with an explicit present channel (K-B17).
+    pub fn present_engine_frame_channel(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        channel: PresentChannel,
     ) {
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("present_bg"),
@@ -558,7 +602,11 @@ impl VideoPresenter {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        let pipeline = match channel {
+            PresentChannel::Color => &self.pipeline,
+            PresentChannel::Alpha => &self.pipeline_alpha,
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..6, 0..1);
     }
