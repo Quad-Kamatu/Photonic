@@ -93,7 +93,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-B6** param expressions + reset | ✅ done | `53f4ad3` | `param_expr` evaluator (`+−*/()`, `%name` / bare vars, range **refuse** not clamp); middle-click → seed default; wired clip-inspector effect floats + transform rows + color CDL DragValues |
 | **K-B11** keyframe interchange | ✅ done | `c2299d8` | `KeyframeClipboard` + `copy_keyframes`/`paste_keyframes` (path map + offset/re-anchor, one undo batch); keyframe editor Copy path/all + Paste/Paste@0; MCP `copy_keyframes`/`paste_keyframes` |
 | **K-C2** TagId registry | ✅ done | `deb8945` | `TagId` + `MediaTag` project registry; `MediaAsset.tag_ids`; `set_asset_tags_resolved` upserts names→ids; pool Tags menu + MCP `set_asset_tags` |
-| **K-C7** import triage | ✅ done | *(this commit)* | `MediaProbe` persists `is_vfr`/`pixel_format`/`has_alpha`; pure `triage_probe` (VFR=Info not convert); pool badges from findings; additive serde |
+| **K-C7** import triage | ✅ done | `2fb684e` | `MediaProbe` persists `is_vfr`/`pixel_format`/`has_alpha`; pure `triage_probe` (VFR=Info not convert); pool badges from findings; additive serde |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
