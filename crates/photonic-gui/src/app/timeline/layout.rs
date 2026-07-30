@@ -25,6 +25,10 @@ pub const RULER_HEIGHT_PX: f32 = 24.0;
 pub const EDGE_ZONE_PX: f32 = 6.0;
 /// Snap magnet threshold in *screen* pixels, converted to ticks via zoom (04 §2.5).
 pub const SNAP_THRESHOLD_PX: f32 = 8.0;
+/// K-A10: how far from a lane edge (px) starts continuous auto-pan while dragging.
+pub const EDGE_AUTO_PAN_ZONE_PX: f32 = 32.0;
+/// K-A10: max scroll speed (screen px/frame) when the pointer is flush with the edge.
+pub const EDGE_AUTO_PAN_MAX_PX: f32 = 24.0;
 
 /// Timeline panel zoom/scroll — GUI session state (04 §6), not document state.
 /// `pixels_per_tick` is the one deliberate `f64` time value in the video-editor
@@ -45,6 +49,9 @@ pub struct TimelineView {
     /// `pub(crate)` command methods (04 §6) can reach it without threading a
     /// rect through command dispatch.
     pub last_lane_width_px: f32,
+    /// K-A10: when true during playback, keep the playhead centred and scroll
+    /// the timeline underneath (fixed-playhead mode).
+    pub fixed_playhead: bool,
 }
 
 impl Default for TimelineView {
@@ -55,6 +62,7 @@ impl Default for TimelineView {
             track_scroll_px: 0.0,
             header_width_px: HEADER_DEFAULT_PX,
             last_lane_width_px: 0.0,
+            fixed_playhead: false,
         }
     }
 }
@@ -121,6 +129,48 @@ impl TimelineView {
         self.scroll_ticks = Tick::ZERO;
         self.clamp_zoom();
     }
+
+    /// K-A10: scroll so `playhead` sits at the horizontal centre of the lane.
+    pub fn center_on_playhead(&mut self, playhead: Tick, lane_width_px: f32) {
+        if lane_width_px <= 1.0 || self.pixels_per_tick <= 0.0 {
+            return;
+        }
+        let half = (lane_width_px as f64 / 2.0) / self.pixels_per_tick;
+        let scroll = playhead.0 as f64 - half;
+        self.scroll_ticks = Tick(scroll.max(0.0) as i64);
+    }
+
+    /// K-A10: while dragging near a viewport edge, pan by `px` (positive =
+    /// later times). Returns the tick delta applied to scroll.
+    pub fn edge_auto_pan(&mut self, px: f32) -> Tick {
+        if px.abs() < 0.5 {
+            return Tick::ZERO;
+        }
+        let delta = self.px_to_ticks(px);
+        let next = self.scroll_ticks.0 + delta.0;
+        self.scroll_ticks = Tick(next.max(0));
+        delta
+    }
+
+    /// K-A10: screen-px pan for the current frame given a pointer x over a lane
+    /// of width `lane_width_px` whose left edge is at `lane_left_px`. Positive =
+    /// later times (scroll right). Zero outside the edge zones.
+    pub fn edge_auto_pan_speed(pointer_x: f32, lane_left_px: f32, lane_width_px: f32) -> f32 {
+        if lane_width_px <= EDGE_AUTO_PAN_ZONE_PX * 2.0 {
+            return 0.0;
+        }
+        let rel = pointer_x - lane_left_px;
+        if rel < EDGE_AUTO_PAN_ZONE_PX {
+            let t = (1.0 - rel / EDGE_AUTO_PAN_ZONE_PX).clamp(0.0, 1.0);
+            -EDGE_AUTO_PAN_MAX_PX * t
+        } else if rel > lane_width_px - EDGE_AUTO_PAN_ZONE_PX {
+            let over = rel - (lane_width_px - EDGE_AUTO_PAN_ZONE_PX);
+            let t = (over / EDGE_AUTO_PAN_ZONE_PX).clamp(0.0, 1.0);
+            EDGE_AUTO_PAN_MAX_PX * t
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +185,40 @@ mod tests {
         let back = v.x_to_tick(x, 100.0);
         // Rounding to whole pixels loses sub-pixel ticks; within one pixel worth.
         assert!((back.0 - t.0).abs() < v.px_to_ticks(1.0).0.max(1));
+    }
+
+    #[test]
+    fn center_on_playhead_puts_playhead_near_mid() {
+        let mut v = TimelineView::default();
+        let ph = Tick::from_seconds(10);
+        let lane_w = 400.0_f32;
+        v.center_on_playhead(ph, lane_w);
+        let x = v.tick_to_x(ph, 0.0);
+        assert!(
+            (x - lane_w / 2.0).abs() < 2.0,
+            "playhead should be near centre: x={x}"
+        );
+    }
+
+    #[test]
+    fn edge_auto_pan_moves_scroll_forward() {
+        let mut v = TimelineView::default();
+        let before = v.scroll_ticks;
+        let d = v.edge_auto_pan(50.0);
+        assert!(d.0 > 0);
+        assert!(v.scroll_ticks.0 > before.0);
+    }
+
+    #[test]
+    fn edge_auto_pan_speed_left_negative_right_positive() {
+        let lane_left = 100.0_f32;
+        let lane_w = 400.0_f32;
+        let left = TimelineView::edge_auto_pan_speed(lane_left + 2.0, lane_left, lane_w);
+        let mid = TimelineView::edge_auto_pan_speed(lane_left + lane_w / 2.0, lane_left, lane_w);
+        let right = TimelineView::edge_auto_pan_speed(lane_left + lane_w - 2.0, lane_left, lane_w);
+        assert!(left < 0.0, "left edge should pan earlier: {left}");
+        assert_eq!(mid, 0.0);
+        assert!(right > 0.0, "right edge should pan later: {right}");
     }
 
     #[test]

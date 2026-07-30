@@ -260,6 +260,12 @@ impl PhotonicApp {
         // ── Scroll / zoom over the lane area ────────────────────────────────
         handle_scroll_zoom(ui, full, lane_left, &mut view);
 
+        // K-A10: fixed-playhead mode — keep the playhead centred and scroll
+        // the timeline underneath during transport (view state only).
+        if view.fixed_playhead && self.monitor_playing {
+            view.center_on_playhead(playhead, lanes_rect.width());
+        }
+
         // ── Rows: draw headers + lanes, collect hit rects ───────────────────
         let seq = doc
             .timeline
@@ -530,7 +536,7 @@ impl PhotonicApp {
             doc,
             history,
             seq_id,
-            &view,
+            &mut view,
             &mut playhead,
             &mut selection,
             snap,
@@ -787,7 +793,8 @@ fn paint_grab_ghost(
 /// wires command dispatch (`video.*` `CommandId`s) to these — they are unused
 /// until then, hence the `dead_code` allowance. Exact names are load-bearing:
 /// `timeline_zoom_in`/`timeline_zoom_out`/`timeline_zoom_fit`/
-/// `timeline_toggle_snap`/`timeline_playhead_home`/`timeline_playhead_end`/
+/// `timeline_toggle_snap`/`timeline_toggle_fixed_playhead`/
+/// `timeline_playhead_home`/`timeline_playhead_end`/
 /// `timeline_prev_edit_point`/`timeline_next_edit_point`/
 /// `timeline_prev_snap`/`timeline_next_snap`/
 /// `timeline_split_at_playhead`.
@@ -818,6 +825,12 @@ impl PhotonicApp {
     pub(crate) fn timeline_toggle_snap(&mut self) {
         self.timeline_snap_enabled = !self.timeline_snap_enabled;
         self.prefs.timeline_snap_enabled = self.timeline_snap_enabled;
+    }
+
+    /// Toggle fixed-playhead mode (`video.toggle_fixed_playhead`, K-A10).
+    /// View state only — zero undo units.
+    pub(crate) fn timeline_toggle_fixed_playhead(&mut self) {
+        self.timeline_view.fixed_playhead = !self.timeline_view.fixed_playhead;
     }
 
     /// Move the playhead to the sequence start (`Home`, `video.playhead_home`).
@@ -1038,6 +1051,20 @@ fn draw_mini_toolbar(
         *snap = !*snap;
     }
     x += bh + 28.0;
+
+    // K-A10 fixed playhead — keep playhead centred while transporting.
+    let fix_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 36.0, bh));
+    if put_fixed(
+        ui,
+        fix_rect,
+        egui::SelectableLabel::new(view.fixed_playhead, "Fixed"),
+    )
+    .on_hover_text("Fixed playhead: centre playhead during playback (K-A10)")
+    .clicked()
+    {
+        view.fixed_playhead = !view.fixed_playhead;
+    }
+    x += bh + 40.0;
 
     // Ripple-mode indicator: reflects whether Shift is held live (13 §1.1).
     let shift = ui.input(|i| i.modifiers.shift);
@@ -1427,7 +1454,7 @@ fn self_interact(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq_id: SequenceId,
-    view: &TimelineView,
+    view: &mut TimelineView,
     playhead: &mut Tick,
     selection: &mut Vec<ClipId>,
     snap: bool,
@@ -1517,6 +1544,14 @@ fn self_interact(
         if let Some(mut state) = ui.data(|d| d.get_temp::<DragState>(drag_id)) {
             state.moved = true;
             if let Some(pos) = resp.interact_pointer_pos() {
+                // K-A10: continuous pan when the pointer sits in a lane edge zone
+                // so long-form moves/trims don't stop at the viewport.
+                let pan_px =
+                    TimelineView::edge_auto_pan_speed(pos.x, lane_left, lanes_rect.width());
+                if pan_px.abs() >= 0.5 {
+                    view.edge_auto_pan(pan_px);
+                    ui.ctx().request_repaint();
+                }
                 let seq = doc
                     .timeline
                     .as_ref()

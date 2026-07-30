@@ -255,6 +255,7 @@ impl PhotonicApp {
             "video.extract_frame_to_bin" => self.extract_program_frame(doc, true),
             "video.toggle_razor" => self.timeline_toggle_razor(),
             "video.toggle_snap" => self.timeline_toggle_snap(),
+            "video.toggle_fixed_playhead" => self.timeline_toggle_fixed_playhead(),
             "video.zoom_in" => self.timeline_zoom_in(),
             "video.zoom_out" => self.timeline_zoom_out(),
             "video.zoom_fit" => self.timeline_zoom_fit(doc),

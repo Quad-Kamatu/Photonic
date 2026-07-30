@@ -550,6 +550,12 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Toggle Timeline Snapping",
         default: Some(KeyBinding::plain(Key::N)),
     },
+    // K-A10: fixed playhead + edge auto-pan while dragging (view state).
+    CommandDef {
+        id: "video.toggle_fixed_playhead",
+        label: "Toggle Fixed Playhead",
+        default: None,
+    },
     CommandDef {
         id: "video.zoom_in",
         label: "Timeline Zoom In",
