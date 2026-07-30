@@ -93,6 +93,22 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             clip: clip_id,
         });
     }
+    // K-B14: freeze at the clip's current source_in (inspector has no playhead;
+    // the command / context menu freeze at the playhead).
+    if ui
+        .button(format!("{} Freeze frame", ph::PAUSE))
+        .on_hover_text(
+            "Hold the current source frame for this clip's duration (zero speed; K-B14)",
+        )
+        .clicked()
+    {
+        action = Some(PanelAction::FreezeFrame {
+            seq: seq_id,
+            track: track_id,
+            clip: clip_id,
+            at: Tick::ZERO, // relative to current source_in via existing speed
+        });
+    }
     ui.add_space(4.0);
 
     draw_transform_section(ui, ctx, project, seq_id, track_id, clip, &mut action);

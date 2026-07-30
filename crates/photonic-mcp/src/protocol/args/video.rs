@@ -736,6 +736,21 @@ pub struct SetClipSpeedArgs {
     pub keys: Option<Vec<SpeedKeyArg>>,
 }
 
+/// K-B14 Freeze frame: hold the source frame at clip-relative `at_*` for the
+/// clip's whole duration (zero-rate `SpeedMap`). `at_*` uses the same
+/// precedence as other time args (ticks > tc > seconds); omit for the
+/// clip's first frame.
+#[derive(Debug, Deserialize)]
+pub struct FreezeFrameArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
 /// One control point of a [`SetClipSpeedArgs::keys`] ramp — clip-relative
 /// position (`at_*`, §1 rule 3 precedence) + the exact-rational ratio that
 /// takes effect there.

@@ -2509,6 +2509,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::paste_attributes(state, a).await,
             ))
         }
+        "freeze_frame" => {
+            let a: FreezeFrameArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::freeze_frame(state, a).await,
+            ))
+        }
 
         // Effect presets, custom stacks and favourites (26 §10 K-B4). The
         // library is a config file, so only `effect_preset_apply` is

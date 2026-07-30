@@ -15,8 +15,8 @@
 use super::anim::{AnimProps, Interp, Keyframe, PropPath, PropertyTrack};
 use super::audio::ClipAudio;
 use super::clip::{
-    Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, MulticamAngle, MulticamGroup,
-    TextClipContent,
+    Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, MulticamAngle, MulticamGroup, Ratio,
+    SpeedMap, TextClipContent,
 };
 use super::commands::{
     AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings, VfxOwner,
@@ -1609,6 +1609,61 @@ pub fn set_sequence_start_timecode(
         old: s.start_timecode,
         new,
     })
+}
+
+/// K-B14 Freeze frame: hold a chosen source frame for the clip's entire
+/// timeline duration.
+///
+/// Resolves the source tick visible at clip-relative `at` (clamped into
+/// `[0, duration)` so an out-of-range playhead still freezes the nearest
+/// edge frame), then writes:
+///
+/// - `source_in` ← that source tick
+/// - `speed` ← `SpeedMap::Constant(Ratio { num: 0, den: 1 })`
+///
+/// Zero-rate integration already yields a zero source delta
+/// ([`SpeedMap::source_delta`]), and the compile path treats `ratio.num == 0`
+/// as an unbounded handle (a freeze never "runs out" of source). G-11's audio
+/// contract maps zero speed to silence, not a held DC sample.
+///
+/// One undo unit via [`set_clip_prop`]. Returns `Ok(None)` when the clip is
+/// already frozen at the same source frame (no history entry). Generators
+/// (solid / text / adjustment) freeze the same way — their source is
+/// time-invariant, but the speed flag still marks the clip as a freeze for
+/// handle math and UI.
+///
+/// This is *not* a new effect kind: a zero-rate `SpeedMap` is the model
+/// (26 §10 K-B14). Mid-clip freeze-then-resume is expressible as a keyframed
+/// ramp with a zero-rate segment via `set_clip_speed`; this verb freezes the
+/// whole slot.
+pub fn freeze_frame(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    at: Tick,
+) -> Result<Option<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let t = track(s, track_id)?;
+    let c = clip(t, clip_id)?;
+    if c.duration.0 <= 0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    // Clamp into the half-open clip range so freeze-at-playhead never fails
+    // when the head sits on the out-point.
+    let at_rel = Tick(at.0.clamp(0, (c.duration.0 - 1).max(0)));
+    let freeze_source = c.source_in + c.speed.source_delta(at_rel);
+    let already = matches!(
+        &c.speed,
+        SpeedMap::Constant(r) if r.num == 0 && r.den > 0
+    ) && c.source_in == freeze_source;
+    if already {
+        return Ok(None);
+    }
+    let mut new = c.clone();
+    new.source_in = freeze_source;
+    new.speed = SpeedMap::Constant(Ratio::new(0, 1));
+    Ok(Some(set_clip_prop(p, id, track_id, new)?))
 }
 
 /// All clip ids across the project sharing `group` (14 §M-2 helper — e.g. to
@@ -3311,6 +3366,141 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::history::Command;
+
+    #[test]
+    fn freeze_frame_sets_zero_speed_and_source_in() {
+        let (mut doc, seq_id, track_id, clip_id) = fixture();
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let clip = project
+                .sequences
+                .get_mut(&seq_id)
+                .unwrap()
+                .track_mut(track_id)
+                .unwrap()
+                .clips
+                .iter_mut()
+                .find(|c| c.id == clip_id)
+                .unwrap();
+            // 2× speed from source_in=100: at clip-rel 50 → source 200.
+            clip.source_in = Tick(100);
+            clip.speed = SpeedMap::Constant(Ratio::new(2, 1));
+            clip.duration = Tick(100);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd = freeze_frame(project, seq_id, track_id, clip_id, Tick(50))
+            .unwrap()
+            .expect("should produce a command");
+        cmd.apply(&mut doc);
+        let c = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .unwrap();
+        assert_eq!(c.source_in, Tick(200));
+        assert_eq!(c.speed, SpeedMap::Constant(Ratio::new(0, 1)));
+        // Zero-rate source delta is zero for any timeline span.
+        assert_eq!(c.speed.source_delta(Tick(1_000_000)), Tick(0));
+        // Already frozen at the same frame → no-op.
+        let project = doc.timeline.as_ref().unwrap();
+        assert!(freeze_frame(project, seq_id, track_id, clip_id, Tick(0))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn freeze_frame_clamps_out_of_range_at() {
+        let (doc, seq_id, track_id, clip_id) = fixture();
+        let project = doc.timeline.as_ref().unwrap();
+        let c = project
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .unwrap();
+        let dur = c.duration;
+        // Past the out-point freezes the last frame (duration-1), not an error.
+        let cmd = freeze_frame(project, seq_id, track_id, clip_id, dur + Tick(999))
+            .unwrap()
+            .expect("clamped freeze");
+        match cmd {
+            TimelineCmd::SetClipProp { new, .. } => {
+                assert_eq!(new.speed, SpeedMap::Constant(Ratio::new(0, 1)));
+                // Default fixture speed is 1×, source_in 0 → freeze at duration-1.
+                assert_eq!(new.source_in, Tick((dur.0 - 1).max(0)));
+            }
+            other => panic!("expected SetClipProp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn freeze_frame_inverse_restores_speed() {
+        let (mut doc, seq_id, track_id, clip_id) = fixture();
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let clip = project
+                .sequences
+                .get_mut(&seq_id)
+                .unwrap()
+                .track_mut(track_id)
+                .unwrap()
+                .clips
+                .iter_mut()
+                .find(|c| c.id == clip_id)
+                .unwrap();
+            clip.source_in = Tick(40);
+            clip.speed = SpeedMap::Constant(Ratio::new(1, 1));
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let cmd = freeze_frame(project, seq_id, track_id, clip_id, Tick(10))
+            .unwrap()
+            .unwrap();
+        let inv = cmd.inverse(&doc).expect("SetClipProp always inverts");
+        cmd.apply(&mut doc);
+        let frozen = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .unwrap();
+        assert_eq!(frozen.source_in, Tick(50)); // 40 + 10×1
+        assert_eq!(frozen.speed, SpeedMap::Constant(Ratio::new(0, 1)));
+        inv.apply(&mut doc);
+        let after = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .unwrap();
+        assert_eq!(after.source_in, Tick(40));
+        assert_eq!(after.speed, SpeedMap::Constant(Ratio::ONE));
+    }
 
     #[test]
     fn split_av_link_unlinks_both_members() {

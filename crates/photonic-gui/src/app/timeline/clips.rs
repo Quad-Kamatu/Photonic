@@ -104,6 +104,7 @@ const SPEED_BADGE_COLOR: egui::Color32 = egui::Color32::from_rgb(0xFB, 0xBF, 0x2
 /// when the effect stack is non-empty.
 fn speed_badge_text(clip: &Clip) -> Option<String> {
     match &clip.speed {
+        SpeedMap::Constant(r) if r.num == 0 => Some("FREEZE".to_string()),
         SpeedMap::Constant(r) => {
             let pct = (r.as_f64().abs() * 100.0).round() as i64;
             let reversed = r.num < 0;
@@ -1293,6 +1294,13 @@ mod tests {
             keys: vec![SpeedKey::new(Tick::ZERO, Ratio::ONE)],
         };
         assert_eq!(speed_badge_text(&clip), Some("RAMP".to_string()));
+    }
+
+    #[test]
+    fn speed_badge_shows_freeze_for_zero_rate() {
+        let mut clip = Clip::new(ClipSource::Adjustment, Tick::ZERO, Tick::from_seconds(4));
+        clip.speed = SpeedMap::Constant(Ratio::new(0, 1));
+        assert_eq!(speed_badge_text(&clip), Some("FREEZE".to_string()));
     }
 
     #[test]

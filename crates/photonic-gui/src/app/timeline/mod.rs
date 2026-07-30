@@ -564,6 +564,28 @@ impl PhotonicApp {
             }
         }
 
+        // K-B14 freeze-frame request from the clip context menu.
+        if let Some((fseq, ftrack, fclip)) = ui.data(|d| {
+            d.get_temp::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_b14_freeze_request"))
+        }) {
+            ui.data_mut(|d| {
+                d.remove::<(SequenceId, TrackId, ClipId)>(egui::Id::new("k_b14_freeze_request"));
+            });
+            let at_rel = doc
+                .timeline
+                .as_ref()
+                .and_then(|p| p.sequences.get(&fseq))
+                .and_then(|s| s.track(ftrack))
+                .and_then(|t| t.clips.iter().find(|c| c.id == fclip))
+                .map(|c| {
+                    // Playhead → clip-relative; outside the clip freezes the
+                    // first frame (clamp inside freeze_frame handles the rest).
+                    Tick((playhead.0 - c.start.0).max(0))
+                })
+                .unwrap_or(Tick::ZERO);
+            ops_bridge::freeze_frame(doc, history, fseq, ftrack, fclip, at_rel);
+        }
+
         // ── Media-pool asset drop (05 §2) ───────────────────────────────────
         // A drag started in the media pool drawer carries an `AssetDrag`
         // payload; dropping it over a lane inserts a clip there via the
@@ -1988,6 +2010,20 @@ fn clip_context_menu(
         .clicked()
     {
         *open_edit_duration = Some((track, clip));
+        ui.close_menu();
+    }
+    // K-B14: freeze the source frame under the playhead (or the clip's first
+    // frame if the playhead is outside it) for the clip's whole duration.
+    if ui
+        .button("Freeze frame")
+        .on_hover_text(
+            "Hold the source frame at the playhead for this clip's duration (zero speed; K-B14)",
+        )
+        .clicked()
+    {
+        ui.data_mut(|d| {
+            d.insert_temp(egui::Id::new("k_b14_freeze_request"), (seq_id, track, clip));
+        });
         ui.close_menu();
     }
     // K-A7: keyboard grab (Shift+G) — also offered here for discoverability.

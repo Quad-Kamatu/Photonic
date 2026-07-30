@@ -5675,6 +5675,20 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "freeze_frame",
+            "description": "Freeze Frame (26 §10 K-B14): hold the source frame visible at clip-relative `at_*` for the clip's whole timeline duration. Writes `source_in` to that source tick and sets speed to constant zero — not a new effect kind; the existing zero-rate SpeedMap path is the model. One undo step. Already-frozen at the same frame is a no-op (no history entry). Mid-clip freeze-then-resume is expressible via set_clip_speed with a zero-rate keyframed segment; this tool freezes the whole slot. Generators (solid/text/adjustment) accept the same verb (their source is time-invariant).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip to freeze." },
+                    "at_ticks": { "type": "integer", "description": "Clip-relative tick of the frame to hold. Precedence: at_ticks > at_tc > at_seconds. Omit for the first frame." },
+                    "at_tc": { "type": "string", "description": "Clip-relative timecode of the frame to hold." },
+                    "at_seconds": { "type": "number", "description": "Clip-relative seconds of the frame to hold." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "list_effect_kinds",
             "description": "Registry introspection sourced from the effect manifest catalogue (spec 30 §2.7). Returns `effect_kinds`: one entry per manifest with `id`, `version`, `name`, `category`, `arity`, the legacy `kind` tag, and a `params` table (each `{path, kind, default, range, animatable, ui, group, display}`) — lets an agent discover effects and their param ranges without guessing.",
             "inputSchema": { "type": "object", "properties": {} }

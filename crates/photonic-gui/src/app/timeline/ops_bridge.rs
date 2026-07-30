@@ -555,6 +555,27 @@ pub fn edit_duration(
     }
 }
 
+/// K-B14 Freeze frame — hold the source frame visible at clip-relative `at`
+/// for the clip's whole duration. One undo step; no-op when already frozen
+/// at the same frame.
+pub fn freeze_frame(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    track: TrackId,
+    clip: photonic_core::timeline::ClipId,
+    at: Tick,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    match ops::freeze_frame(p, seq, track, clip, at) {
+        Ok(Some(cmd)) => commit(history, doc, cmd),
+        Ok(None) => {}
+        Err(_) => {}
+    }
+}
+
 // ── Sync-locked track ripple propagation (14 §M-9) ──────────────────────────
 //
 // `Track::sync_lock` + its header toggle already exist (`tracks.rs`); this is

@@ -2859,6 +2859,19 @@ impl PhotonicApp {
                         );
                 }
 
+                PanelAction::FreezeFrame {
+                    seq,
+                    track,
+                    clip,
+                    at,
+                } => {
+                    // K-B14: hold the source frame at `at` for the clip's duration.
+                    crate::app::timeline::ops_bridge::freeze_frame(
+                        doc, history, seq, track, clip, at,
+                    );
+                    doc_modified = true;
+                }
+
                 PanelAction::OpenExportDialog => {
                     // Export (#176): open the export dialog seeded from the
                     // Document-tab settings (format, scale, area).

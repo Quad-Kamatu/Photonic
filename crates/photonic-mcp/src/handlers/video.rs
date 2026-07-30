@@ -2255,6 +2255,44 @@ pub async fn set_clip_speed(state: &AppState, args: SetClipSpeedArgs) -> ToolRes
     }
 }
 
+/// K-B14 Freeze frame: hold the source frame at clip-relative `at_*` for the
+/// clip's whole duration via zero-rate `SpeedMap` (one undo step).
+pub async fn freeze_frame(state: &AppState, args: FreezeFrameArgs) -> ToolResult {
+    tracing::debug!("tool: freeze_frame {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(fr) = project.sequences.get(&seq_id).map(|s| s.frame_rate) else {
+        return ToolResult::error(format!("sequence for clip {} not found", args.clip_id));
+    };
+    let at = if args.at_ticks.is_none() && args.at_tc.is_none() && args.at_seconds.is_none() {
+        Tick::ZERO
+    } else {
+        match resolve_tick(
+            args.at_ticks,
+            args.at_tc.as_deref(),
+            args.at_seconds,
+            Some(fr),
+        ) {
+            Ok(t) => t,
+            Err(e) => return e,
+        }
+    };
+    match ops::freeze_frame(project, seq_id, track_id, args.clip_id, at) {
+        Ok(Some(cmd)) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Froze clip at source frame")
+        }
+        Ok(None) => ToolResult::text("Clip already frozen at that frame"),
+        Err(e) => map_edit_error(e),
+    }
+}
+
 pub async fn set_transition(state: &AppState, args: SetTransitionArgs) -> ToolResult {
     tracing::debug!("tool: set_transition {}", args.clip_id);
     if let Some(t) = &args.transition {

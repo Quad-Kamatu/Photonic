@@ -643,6 +643,14 @@ pub static REGISTRY: &[CommandDef] = &[
         // inspector open the form. Users can rebind in preferences.
         default: None,
     },
+    // K-B14 freeze frame — hold the source frame under the playhead for the
+    // selected clip's duration (zero-rate SpeedMap). Palette / context menu;
+    // no default binding (Shift+F is Match Frame in some NLEs, and F is ours).
+    CommandDef {
+        id: "video.freeze_frame",
+        label: "Freeze Frame",
+        default: None,
+    },
     // K-A7 grab item / arrow-key nudge (Shift+G engage; arrows while grabbed;
     // Enter commit; Esc cancel). Arrow keys are handled specially while grab
     // is active so they don't step the playhead.

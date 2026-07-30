@@ -345,6 +345,13 @@ pub enum PanelAction {
         track: photonic_core::timeline::TrackId,
         clip: photonic_core::timeline::ClipId,
     },
+    /// K-B14: freeze a clip at clip-relative `at` (zero-rate SpeedMap).
+    FreezeFrame {
+        seq: photonic_core::timeline::SequenceId,
+        track: photonic_core::timeline::TrackId,
+        clip: photonic_core::timeline::ClipId,
+        at: photonic_core::timeline::Tick,
+    },
     /// Set the color tag of a layer (None = clear).
     SetLayerColor {
         layer_id: LayerId,

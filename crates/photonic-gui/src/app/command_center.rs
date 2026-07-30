@@ -274,6 +274,7 @@ impl PhotonicApp {
             "video.match_frame" => self.timeline_match_frame(doc),
             "video.reveal_in_project" => self.timeline_reveal_in_project(doc),
             "video.edit_duration" => self.timeline_open_edit_duration(doc),
+            "video.freeze_frame" => self.timeline_freeze_frame(doc, history),
             "video.grab_item" => self.timeline_toggle_grab(doc),
             "video.grab_commit" => {
                 self.timeline_grab_commit(doc, history);
@@ -1969,6 +1970,42 @@ impl PhotonicApp {
                     doc, seq_id, track, clip,
                 );
         }
+    }
+
+    /// K-B14: freeze the primary selected clip (else the clip under the
+    /// playhead) at the source frame currently under the playhead.
+    pub(crate) fn timeline_freeze_frame(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        let Some(seq) = doc.timeline.as_ref().and_then(|p| p.sequences.get(&seq_id)) else {
+            return;
+        };
+        let target = if let Some(&clip_id) = self.timeline_selection.first() {
+            seq.tracks().find_map(|t| {
+                t.clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|c| (t.id, clip_id, c.start))
+            })
+        } else {
+            interact::clip_at_playhead(seq, &self.timeline_selection, self.playhead).and_then(
+                |(track, clip)| {
+                    seq.track(track)
+                        .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+                        .map(|c| (track, clip, c.start))
+                },
+            )
+        };
+        let Some((track, clip, start)) = target else {
+            return;
+        };
+        let at_rel = Tick((self.playhead.0 - start.0).max(0));
+        crate::app::timeline::ops_bridge::freeze_frame(doc, history, seq_id, track, clip, at_rel);
     }
 
     /// Per-frame poll for the timeline-panel keyboard commands (spec 17 G1/G2/G3),
