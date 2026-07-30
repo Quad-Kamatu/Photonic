@@ -94,8 +94,8 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-B11** keyframe interchange | ✅ done | `c2299d8` | `KeyframeClipboard` + `copy_keyframes`/`paste_keyframes` (path map + offset/re-anchor, one undo batch); keyframe editor Copy path/all + Paste/Paste@0; MCP `copy_keyframes`/`paste_keyframes` |
 | **K-C2** TagId registry | ✅ done | `deb8945` | `TagId` + `MediaTag` project registry; `MediaAsset.tag_ids`; `set_asset_tags_resolved` upserts names→ids; pool Tags menu + MCP `set_asset_tags` |
 | **K-C7** import triage | ✅ done | `2fb684e` | `MediaProbe` persists `is_vfr`/`pixel_format`/`has_alpha`; pure `triage_probe` (VFR=Info not convert); pool badges from findings; additive serde |
-| **K-D3** per-stream / channel / offset | ✅ done | *(this commit)* | `ClipAudio.stream` + `offset`; `ChannelMap::{LeftOnly,RightOnly}`; offline mix seeks with offset |
-| **K-D4** stems export | ✅ done | *(this commit)* | `ExportPreset.stems`; `render_export_audio_filtered` per track; `stem_output_path` naming |
+| **K-D3** per-stream / channel / offset | ✅ done | `56892b2` | `ClipAudio.stream` + `offset`; `ChannelMap::{LeftOnly,RightOnly}`; offline mix seeks with offset |
+| **K-D4** stems export | ✅ done | `56892b2` | `ExportPreset.stems`; `render_export_audio_filtered` per track; `stem_output_path` naming |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
