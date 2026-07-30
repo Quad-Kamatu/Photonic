@@ -91,7 +91,7 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-A8** subclips | ✅ done | `ba17ffc` | `MediaAsset.parent` + `subclip_range`; `ops::create_subclip` shares content_hash/proxy; nested refused. MCP `create_subclip`; media-pool context "Create subclip (first half)"; `subclip_default_timing` for insert. Save-zone-from-source-marks UI residual |
 | **K-A10** fixed playhead + edge pan | ✅ done | `8555481` | `TimelineView.fixed_playhead` + `center_on_playhead` during transport; edge-zone auto-pan while clip-dragging; toolbar **Fixed** + command `video.toggle_fixed_playhead` (view state, zero undo) |
 | **K-B6** param expressions + reset | ✅ done | `53f4ad3` | `param_expr` evaluator (`+−*/()`, `%name` / bare vars, range **refuse** not clamp); middle-click → seed default; wired clip-inspector effect floats + transform rows + color CDL DragValues |
-| **K-B11** keyframe interchange | ✅ done | *(this commit)* | `KeyframeClipboard` + `copy_keyframes`/`paste_keyframes` (path map + offset/re-anchor, one undo batch); keyframe editor Copy path/all + Paste/Paste@0; MCP `copy_keyframes`/`paste_keyframes` |
+| **K-B11** keyframe interchange | ✅ done | `c2299d8` | `KeyframeClipboard` + `copy_keyframes`/`paste_keyframes` (path map + offset/re-anchor, one undo batch); keyframe editor Copy path/all + Paste/Paste@0; MCP `copy_keyframes`/`paste_keyframes` |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
