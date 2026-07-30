@@ -268,9 +268,7 @@ impl PhotonicApp {
             "video.close_gaps" => self.timeline_close_all_gaps(doc, history),
             "video.insert_space" => self.timeline_insert_space(doc, history),
             "video.remove_space" => self.timeline_remove_space(doc, history),
-            "video.remove_all_spaces_after" => {
-                self.timeline_remove_all_spaces_after(doc, history)
-            }
+            "video.remove_all_spaces_after" => self.timeline_remove_all_spaces_after(doc, history),
             "video.remove_clips_after" => self.timeline_remove_clips_after(doc, history),
             "video.simplify_sequence" => self.timeline_simplify_sequence(doc, history),
             "video.trim_start_to_playhead" => self.timeline_trim_to_playhead(doc, history, true),
@@ -1561,13 +1559,7 @@ impl PhotonicApp {
         let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
             return;
         };
-        ops_bridge::insert_space(
-            doc,
-            history,
-            seq_id,
-            self.playhead,
-            Tick(TICKS_PER_SECOND),
-        );
+        ops_bridge::insert_space(doc, history, seq_id, self.playhead, Tick(TICKS_PER_SECOND));
     }
 
     /// K-A3 Remove Space: close up to 1 s of pure gap at the playhead across
@@ -1580,13 +1572,7 @@ impl PhotonicApp {
         let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
             return;
         };
-        ops_bridge::remove_space(
-            doc,
-            history,
-            seq_id,
-            self.playhead,
-            Tick(TICKS_PER_SECOND),
-        );
+        ops_bridge::remove_space(doc, history, seq_id, self.playhead, Tick(TICKS_PER_SECOND));
     }
 
     /// K-A3 Remove All Spaces After Playhead: pack unlocked tracks from the

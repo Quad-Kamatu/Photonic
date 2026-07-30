@@ -29,13 +29,13 @@ use egui_phosphor::regular as ph;
 use photonic_core::timeline::clip::SpeedKey;
 // `VfxOwner` (K-B1/K-B2 effect-stack scope) isn't re-exported at `timeline::`
 // root either — same precedent as `SpeedKey` above.
+use super::param_expr;
 use photonic_core::timeline::commands::VfxOwner;
 use photonic_core::timeline::{
     ops, prop_registry, Clip, ClipId, EffectKind, EffectParams, PropTargetKind, PropValue, Ratio,
     SequenceId, SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition, TransitionKind,
     TransitionParams, TICKS_PER_SECOND,
 };
-use super::param_expr;
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
 const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x56, 0xCF); // `primary`
@@ -98,9 +98,7 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     // the command / context menu freeze at the playhead).
     if ui
         .button(format!("{} Freeze frame", ph::PAUSE))
-        .on_hover_text(
-            "Hold the current source frame for this clip's duration (zero speed; K-B14)",
-        )
+        .on_hover_text("Hold the current source frame for this clip's duration (zero speed; K-B14)")
         .clicked()
     {
         action = Some(PanelAction::FreezeFrame {
@@ -1058,8 +1056,7 @@ fn draw_effect_params(
                             Some(PropValue::Float(d)) => *d,
                             _ => param_expr::neutral_float_default(entry.range),
                         };
-                        if param_expr::float_drag(ui, &mut v, default, entry.range, &vars, 0.01)
-                        {
+                        if param_expr::float_drag(ui, &mut v, default, entry.range, &vars, 0.01) {
                             new_value = Some(PropValue::Float(v));
                         }
                     }

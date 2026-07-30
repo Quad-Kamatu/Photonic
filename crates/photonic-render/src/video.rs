@@ -527,8 +527,13 @@ impl VideoPresenter {
         });
         let pipeline =
             fullscreen_pipeline(device, &bgl, PRESENT_SHADER, "fs_present", target_format);
-        let pipeline_alpha =
-            fullscreen_pipeline(device, &bgl, PRESENT_SHADER, "fs_present_alpha", target_format);
+        let pipeline_alpha = fullscreen_pipeline(
+            device,
+            &bgl,
+            PRESENT_SHADER,
+            "fs_present_alpha",
+            target_format,
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("present_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -556,13 +561,7 @@ impl VideoPresenter {
         source: &wgpu::TextureView,
         target: &wgpu::TextureView,
     ) {
-        self.present_engine_frame_channel(
-            device,
-            encoder,
-            source,
-            target,
-            PresentChannel::Color,
-        );
+        self.present_engine_frame_channel(device, encoder, source, target, PresentChannel::Color);
     }
 
     /// Like [`present_engine_frame`], with an explicit present channel (K-B17).

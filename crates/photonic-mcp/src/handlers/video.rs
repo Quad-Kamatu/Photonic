@@ -3760,13 +3760,7 @@ pub async fn paste_keyframes(state: &AppState, args: PasteKeyframesArgs) -> Tool
         .map(|m| (PropPath::new(m.from.clone()), PropPath::new(m.to.clone())))
         .collect();
     let cmds = if let Some(anchor) = args.reanchor_ticks {
-        ops::paste_keyframes_reanchored(
-            project,
-            target,
-            &args.clipboard,
-            &mapping,
-            Tick(anchor),
-        )
+        ops::paste_keyframes_reanchored(project, target, &args.clipboard, &mapping, Tick(anchor))
     } else {
         ops::paste_keyframes(
             project,
@@ -4346,12 +4340,7 @@ pub async fn create_subclip(state: &AppState, args: CreateSubclipArgs) -> ToolRe
     let (Some(a), Some(b)) = (rin, rout) else {
         return ToolResult::error("supply in_ticks/out_ticks (or in_seconds/out_seconds)");
     };
-    match ops::create_subclip(
-        project,
-        args.parent_asset_id,
-        (Tick(a), Tick(b)),
-        args.name,
-    ) {
+    match ops::create_subclip(project, args.parent_asset_id, (Tick(a), Tick(b)), args.name) {
         Ok((cmd, id)) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
             ToolResult::text("Created subclip").with_data(json!({

@@ -58,18 +58,16 @@
 //! user's real choice into the store the first time they opened the library on
 //! a build that lacked the effect.
 //!
-//! # Scope (`Applicability`) is deliberately NOT gated here
+//! # Scope (`Applicability`) is gated in `ops::add_effect_scoped`, not here
 //!
-//! [`apply_commands`] takes any [`VfxOwner`], because the stacks it writes are
-//! the scoped ones K-B1/K-B2 added. It does **not** consult
-//! [`Applicability`](super::effect_manifest::Applicability): every manifest in
-//! this build declares `CLIP_ONLY` and the gate is not implemented anywhere
-//! (see the note above `ops::effect_stack`), so refusing here would refuse
-//! every track/master/asset apply while gating nothing real. When the
-//! catalogue declares honest per-effect scopes, the refusal belongs in
-//! `ops::add_effect_scoped` next to the other pre-command validations, and
-//! this function inherits it for free. `presets_do_not_invent_a_scope_gate`
-//! is the tripwire that fails the day the catalogue changes.
+//! [`apply_commands`] takes any [`VfxOwner`] and appends via
+//! [`ops::add_effect_scoped`](super::ops::add_effect_scoped). That helper
+//! refuses owners outside
+//! [`Applicability`](super::effect_manifest::Applicability) for known
+//! manifests; this module does **not** invent a second gate. The catalogue
+//! currently uses `ALL_SCOPES` (K-B1-compatible); `CLIP_ONLY` remains for
+//! per-id curation. `apply_commands_inherits_applicability_gate` pins the
+//! inheritance.
 
 use std::path::{Path, PathBuf};
 
@@ -1123,20 +1121,55 @@ mod tests {
         }
     }
 
-    /// Tripwire (26 §10 K-B4 / spec 30 §2.3). Every manifest currently declares
-    /// `CLIP_ONLY` and no scope gate is implemented, so `apply_commands`
-    /// deliberately does not consult `Applicability`. The day the catalogue
-    /// declares an honest non-clip scope, this fails and points here: the
-    /// refusal then belongs in `ops::add_effect_scoped`, which this function
-    /// inherits.
+    /// Inheritance pin (26 §10 K-B4 / 30 §2.3 / K-B residual). The gate lives
+    /// only in `ops::add_effect_scoped`; `apply_commands` must not invent a
+    /// parallel check. Catalogue is `ALL_SCOPES` so track/master/asset apply
+    /// succeeds; `CLIP_ONLY` unit semantics stay true for future curation.
     #[test]
-    fn presets_do_not_invent_a_scope_gate() {
-        let clip_only = super::super::effect_manifest::Applicability::CLIP_ONLY;
+    fn apply_commands_inherits_applicability_gate() {
+        use crate::timeline::effect_manifest::Applicability;
+        use crate::timeline::ids::{ClipId, TrackId};
+
+        let clip_only = Applicability::CLIP_ONLY;
         assert!(
-            MANIFESTS.iter().all(|m| m.applies == clip_only),
-            "a manifest now declares a non-clip scope — implement the \
-             Applicability refusal in ops::add_effect_scoped and re-point this \
-             test at it, rather than letting preset apply bypass it"
+            clip_only.allows(VfxOwner::Clip(ClipId::nil())),
+            "CLIP_ONLY must still allow clip"
+        );
+        assert!(
+            !clip_only.allows(VfxOwner::Track(TrackId::nil())),
+            "CLIP_ONLY must still refuse track — curation uses this constant"
+        );
+        assert!(
+            MANIFESTS
+                .iter()
+                .all(|m| m.applies == Applicability::ALL_SCOPES),
+            "catalogue is ALL_SCOPES for K-B1; if a curated CLIP_ONLY lands, \
+             add_effect_scoped already refuses — keep this assert honest or \
+             add a live ApplicabilityDenied fixture for that id"
+        );
+
+        // Track-scoped apply through the preset path must succeed under
+        // ALL_SCOPES (same route as a direct add_effect_scoped call).
+        let (doc, _) = doc_with_one_clip();
+        let p = project(&doc);
+        let track_id = p.sequences.values().next().unwrap().video_tracks[0].id;
+        let preset = EffectPreset::new(
+            "Blur",
+            vec![ClipEffect::from_manifest(EffectId::new_static("blur.gaussian")).unwrap()],
+            None,
+        );
+        let cmds = apply_commands(p, VfxOwner::Track(track_id), &preset)
+            .expect("ALL_SCOPES blur must apply on track via preset path");
+        assert_eq!(cmds.len(), 1);
+
+        // Unknown / unmanifested ids stay allowed (forward-compat) — same as
+        // add_effect_scoped; the gate only consults known manifests.
+        let mut unknown = ClipEffect::new(EffectKind::Blur);
+        unknown.id = EffectId::new("future.scope_test".to_string());
+        let inert_preset = EffectPreset::new("Future", vec![unknown], None);
+        assert!(
+            apply_commands(p, VfxOwner::Track(track_id), &inert_preset).is_ok(),
+            "unmanifested ids must not invent a gate"
         );
     }
 }

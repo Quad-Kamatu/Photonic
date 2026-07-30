@@ -19,7 +19,11 @@ pub enum ExprError {
     UnknownVar(String),
     DivByZero,
     /// Value evaluated fine but sits outside the registry range — refuse.
-    OutOfRange { value: f64, lo: f64, hi: f64 },
+    OutOfRange {
+        value: f64,
+        lo: f64,
+        hi: f64,
+    },
 }
 
 /// Evaluate a parameter expression against `vars`.
@@ -65,11 +69,7 @@ pub fn eval_in_range(
     let v = eval(input, vars)?;
     if let Some((lo, hi)) = range {
         if v < lo || v > hi {
-            return Err(ExprError::OutOfRange {
-                value: v,
-                lo,
-                hi,
-            });
+            return Err(ExprError::OutOfRange { value: v, lo, hi });
         }
     }
     Ok(v)
@@ -77,7 +77,11 @@ pub fn eval_in_range(
 
 /// Seed a variable map from float params keyed by full path (`params.radius`)
 /// and short name (`radius`). Optional sequence frame size as `w`/`h`.
-pub fn vars_from_params<'a, I>(params: I, frame_w: Option<f64>, frame_h: Option<f64>) -> HashMap<String, f64>
+pub fn vars_from_params<'a, I>(
+    params: I,
+    frame_w: Option<f64>,
+    frame_h: Option<f64>,
+) -> HashMap<String, f64>
 where
     I: IntoIterator<Item = (&'a str, f64)>,
 {
@@ -133,9 +137,9 @@ pub fn float_drag(
     if let Some((lo, hi)) = range {
         drag = drag.range(lo..=hi);
     }
-    let resp = ui.add(drag).on_hover_text(
-        "Type arithmetic (e.g. 10+5, %w/2). Middle-click resets to default.",
-    );
+    let resp = ui
+        .add(drag)
+        .on_hover_text("Type arithmetic (e.g. 10+5, %w/2). Middle-click resets to default.");
     let mut changed = resp.changed();
     if resp.middle_clicked() && (*value - default).abs() > f64::EPSILON {
         *value = default;

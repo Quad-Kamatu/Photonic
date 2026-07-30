@@ -135,13 +135,9 @@ pub fn render_export_audio_filtered(
                     clip.start,
                     offset,
                 );
-                if let Ok(source) = FfmpegPcmSource::spawn_stream(
-                    tools,
-                    path,
-                    src_pos,
-                    sample_rate,
-                    stream,
-                ) {
+                if let Ok(source) =
+                    FfmpegPcmSource::spawn_stream(tools, path, src_pos, sample_rate, stream)
+                {
                     pcm.insert(clip.id, source);
                 }
             }
@@ -198,7 +194,10 @@ pub fn render_export_audio_filtered(
 /// Stems are always written as little-endian IEEE float WAV (`.wav`) so they
 /// need no second encode pass and stay independent of the main container.
 pub fn stem_output_path(main: &std::path::Path, track_name: &str) -> std::path::PathBuf {
-    let stem = main.file_stem().and_then(|s| s.to_str()).unwrap_or("export");
+    let stem = main
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("export");
     let safe: String = track_name
         .chars()
         .map(|c| {
@@ -433,25 +432,14 @@ mod tests {
             seq.audio_tracks.push(a);
             seq.audio_tracks.push(b);
         }
-        let dir = std::env::temp_dir().join(format!(
-            "photonic-stems-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("photonic-stems-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let main = dir.join("show.mp4");
         let start = Tick::ZERO;
         let end = Tick::from_seconds(1);
         // tools=None → silent PCM of correct length (real shipped path).
-        let paths = write_stems_for_export(
-            &project,
-            sid,
-            start,
-            end,
-            &main,
-            None,
-            None,
-        )
-        .expect("write stems");
+        let paths = write_stems_for_export(&project, sid, start, end, &main, None, None)
+            .expect("write stems");
         assert_eq!(paths.len(), 2, "one stem per audio track");
         for p in &paths {
             assert!(p.exists(), "stem missing: {}", p.display());

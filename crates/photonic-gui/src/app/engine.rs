@@ -419,13 +419,7 @@ impl EngineBridge {
                 channel,
             );
             if let (Some(cv), Some(ct)) = (clean_view.as_ref(), self.compare_target.as_ref()) {
-                presenter.present_engine_frame_channel(
-                    device,
-                    &mut encoder,
-                    cv,
-                    &ct.view,
-                    channel,
-                );
+                presenter.present_engine_frame_channel(device, &mut encoder, cv, &ct.view, channel);
             }
         }
         queue.submit([encoder.finish()]);

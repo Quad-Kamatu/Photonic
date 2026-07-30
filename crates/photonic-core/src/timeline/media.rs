@@ -343,7 +343,10 @@ pub fn triage_probe(probe: &MediaProbe) -> Vec<TriageFinding> {
                 consequence: "Fields will comb on motion until a deinterlace \
                     node is applied (K-G6 auto-inserts for interlaced sources)."
                     .into(),
-                remedy: Some("Keep auto-deinterlace on, or convert offline if you need progressive masters.".into()),
+                remedy: Some(
+                    "Keep auto-deinterlace on, or convert offline if you need progressive masters."
+                        .into(),
+                ),
             });
         }
         if (v.pixel_aspect - 1.0).abs() > 0.01 {
@@ -405,7 +408,8 @@ pub fn triage_probe(probe: &MediaProbe) -> Vec<TriageFinding> {
                 code: "multichannel".into(),
                 severity: TriageSeverity::Info,
                 summary: format!("{}-channel audio", a.channels),
-                consequence: "Use clip channel map / stream selection (K-D3) to pick routes.".into(),
+                consequence: "Use clip channel map / stream selection (K-D3) to pick routes."
+                    .into(),
                 remedy: None,
             });
         }
@@ -525,8 +529,8 @@ impl MediaBin {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::time::FrameRate;
+    use super::*;
 
     #[test]
     fn media_pool_insert_and_roundtrip() {
@@ -576,10 +580,7 @@ mod tests {
         let findings = triage_probe(&probe);
         assert!(findings.iter().any(|f| f.code == "vfr"));
         assert!(findings.iter().any(|f| f.code == "interlaced"));
-        assert_eq!(
-            triage_max_severity(&findings),
-            Some(TriageSeverity::Warn)
-        );
+        assert_eq!(triage_max_severity(&findings), Some(TriageSeverity::Warn));
         // VFR is Info, not a convert demand.
         let vfr = findings.iter().find(|f| f.code == "vfr").unwrap();
         assert_eq!(vfr.severity, TriageSeverity::Info);

@@ -3263,9 +3263,7 @@ mod tests {
             true,
         );
         let has_effect = |g: &crate::graph::ir::FrameGraph| {
-            g.nodes
-                .iter()
-                .any(|n| matches!(n.op, IrOp::Effect { .. }))
+            g.nodes.iter().any(|n| matches!(n.op, IrOp::Effect { .. }))
         };
         assert!(
             has_effect(&full.graph),
@@ -4305,7 +4303,7 @@ mod tests {
             audio: None,
             container: "mp4".into(),
             codec: "h264".into(),
-                    is_vfr: false,
+            is_vfr: false,
             pixel_format: None,
             has_alpha: false,
         });
@@ -4332,7 +4330,7 @@ mod tests {
             audio: None,
             container: "mp4".into(),
             codec: "h264".into(),
-                    is_vfr: false,
+            is_vfr: false,
             pixel_format: None,
             has_alpha: false,
         });

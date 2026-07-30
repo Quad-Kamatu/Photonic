@@ -590,14 +590,7 @@ fn cdl_editor(
     labelled(ui, "Slope", |ui| {
         for c in 0..3 {
             ui.scope(|ui| {
-                param_expr::float_drag_f32(
-                    ui,
-                    &mut slope[c],
-                    1.0,
-                    Some((0.0, 4.0)),
-                    &empty,
-                    0.005,
-                );
+                param_expr::float_drag_f32(ui, &mut slope[c], 1.0, Some((0.0, 4.0)), &empty, 0.005);
             })
             .response
             .on_hover_text(ch[c]);
@@ -622,14 +615,7 @@ fn cdl_editor(
     labelled(ui, "Power", |ui| {
         for c in 0..3 {
             ui.scope(|ui| {
-                param_expr::float_drag_f32(
-                    ui,
-                    &mut power[c],
-                    1.0,
-                    Some((0.1, 4.0)),
-                    &empty,
-                    0.005,
-                );
+                param_expr::float_drag_f32(ui, &mut power[c], 1.0, Some((0.1, 4.0)), &empty, 0.005);
             })
             .response
             .on_hover_text(ch[c]);

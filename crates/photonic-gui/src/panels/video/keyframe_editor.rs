@@ -482,9 +482,7 @@ fn kf_action_cmds(project: &TimelineProject, action: KfAction) -> Vec<TimelineCm
             reanchor,
         } => {
             let result = match reanchor {
-                Some(at) => {
-                    ops::paste_keyframes_reanchored(project, target, &clipboard, &[], at)
-                }
+                Some(at) => ops::paste_keyframes_reanchored(project, target, &clipboard, &[], at),
                 None => ops::paste_keyframes(project, target, &clipboard, &[], Tick::ZERO),
             };
             result.unwrap_or_default()

@@ -167,10 +167,9 @@ pub fn create_subclip(
             child.tags.insert(0, format!("subclip:{n}"));
         }
     } else {
-        child.tags.insert(
-            0,
-            format!("subclip:{}-{}", rin.0, rout.0),
-        );
+        child
+            .tags
+            .insert(0, format!("subclip:{}-{}", rin.0, rout.0));
     }
     let id = child.id;
     Ok((add_asset(child), id))
@@ -1935,10 +1934,7 @@ pub fn remove_all_spaces_after(
             if let Some(first) = later.first() {
                 if first.start > at {
                     let old = ClipTiming::of(first);
-                    let new = ClipTiming {
-                        start: at,
-                        ..old
-                    };
+                    let new = ClipTiming { start: at, ..old };
                     cmds.push(TimelineCmd::RippleEdit {
                         seq: id,
                         track: t.id,
@@ -2311,12 +2307,7 @@ pub fn paste_keyframes(
         for kf in &src.keyframes {
             let at = Tick((kf.at.0 + time_offset.0).max(0));
             let new_kf = Keyframe::new(at, kf.value, kf.interp);
-            cmds.push(set_keyframe(
-                p,
-                target.clone(),
-                dest_path.clone(),
-                new_kf,
-            ));
+            cmds.push(set_keyframe(p, target.clone(), dest_path.clone(), new_kf));
         }
     }
     Ok(cmds)
@@ -2343,14 +2334,10 @@ pub fn paste_keyframes_reanchored(
 // lives on that track of that sequence — a check the id-addressed scoped form
 // cannot make.
 //
-// NOT gated on manifest `Applicability` (30 §2.3) yet, deliberately: every one
-// of the manifests in `effect_manifest::MANIFESTS` currently declares
-// `Applicability::CLIP_ONLY`, so gating here today would refuse *every*
-// track/master/asset add and make K-B1/K-B2 unreachable. The catalogue has to
-// declare real per-effect scopes first (`effect_manifest.rs`); the refusal then
-// belongs here, next to the other pre-command validations, and in
-// `photonic-video`'s `graph::compile` where the five `TODO(30 §2.3)` markers
-// sit.
+// Gated on manifest `Applicability` (30 §2.3) in `add_effect_scoped`: known
+// manifests refuse owners outside `applies`. The catalogue currently uses
+// `ALL_SCOPES` (K-B1-compatible); `CLIP_ONLY` remains for per-id curation.
+// Unknown / unmanifested ids stay allowed (forward-compat, 39 §2.2).
 
 /// Read the effect stack a [`VfxOwner`] names, or the owner-shaped `EditError`
 /// when it does not resolve.
@@ -4243,18 +4230,35 @@ mod tests {
     }
 
     #[test]
-    fn add_effect_scoped_refuses_clip_only_on_track() {
+    fn add_effect_scoped_honours_applicability() {
         use super::super::effect_manifest::Applicability;
-        // Temporarily gate: build an effect whose manifest applies is CLIP_ONLY
-        // by using the gate helper path with a synthetic owner check.
-        assert!(!Applicability::CLIP_ONLY.allows(VfxOwner::Track(TrackId::nil())));
-        assert!(Applicability::CLIP_ONLY.allows(VfxOwner::Clip(ClipId::nil())));
-        assert!(Applicability::ALL_SCOPES.allows(VfxOwner::Track(TrackId::nil())));
-        let (doc, _seq, track, clip, _asset) = scoped_fixture();
+        // Unit: CLIP_ONLY vs ALL_SCOPES on every owner shape.
+        let track = VfxOwner::Track(TrackId::nil());
+        let clip = VfxOwner::Clip(ClipId::nil());
+        let master = VfxOwner::Master(SequenceId::nil());
+        let asset = VfxOwner::Asset(AssetId::nil());
+        assert!(Applicability::CLIP_ONLY.allows(clip));
+        assert!(!Applicability::CLIP_ONLY.allows(track));
+        assert!(!Applicability::CLIP_ONLY.allows(master));
+        assert!(!Applicability::CLIP_ONLY.allows(asset));
+        for o in [clip, track, master, asset] {
+            assert!(Applicability::ALL_SCOPES.allows(o));
+        }
+        let (doc, seq, track_id, clip_id, asset_id) = scoped_fixture();
         let p = doc.timeline.as_ref().unwrap();
-        // ALL_SCOPES catalogue still allows track attach (widened for K-B1).
-        assert!(add_effect_scoped(p, VfxOwner::Track(track), fx(EffectKind::Blur), None).is_ok());
-        assert!(add_effect_scoped(p, VfxOwner::Clip(clip), fx(EffectKind::Blur), None).is_ok());
+        // Live path under ALL_SCOPES catalogue: all four scopes accept Blur.
+        assert!(add_effect_scoped(p, VfxOwner::Clip(clip_id), fx(EffectKind::Blur), None).is_ok());
+        assert!(
+            add_effect_scoped(p, VfxOwner::Track(track_id), fx(EffectKind::Blur), None).is_ok()
+        );
+        assert!(add_effect_scoped(p, VfxOwner::Master(seq), fx(EffectKind::Blur), None).is_ok());
+        assert!(
+            add_effect_scoped(p, VfxOwner::Asset(asset_id), fx(EffectKind::Blur), None).is_ok()
+        );
+        // Unmanifested id: no gate (forward-compat).
+        let mut unknown = fx(EffectKind::Blur);
+        unknown.id = super::super::effect_manifest::EffectId::new("future.fx".to_string());
+        assert!(add_effect_scoped(p, VfxOwner::Track(track_id), unknown, None).is_ok());
     }
 
     #[test]
@@ -5874,7 +5878,7 @@ mod tests {
             audio: None,
             container: "mp4".into(),
             codec: "h264".into(),
-                    is_vfr: false,
+            is_vfr: false,
             pixel_format: None,
             has_alpha: false,
         };
@@ -7059,7 +7063,7 @@ mod tests {
             audio: None,
             container: "mov".into(),
             codec: "h264".into(),
-                    is_vfr: false,
+            is_vfr: false,
             pixel_format: None,
             has_alpha: false,
         });
@@ -7218,14 +7222,7 @@ mod tests {
         assert!(!clip_board.is_empty());
 
         // Paste with +20 tick offset onto the same path → keys at 30 and 70.
-        let paste = paste_keyframes(
-            p,
-            target.clone(),
-            &clip_board,
-            &[],
-            Tick(20),
-        )
-        .unwrap();
+        let paste = paste_keyframes(p, target.clone(), &clip_board, &[], Tick(20)).unwrap();
         assert_eq!(paste.len(), 2);
         for c in paste {
             Command::Timeline(c).apply(&mut doc);
@@ -7263,12 +7260,7 @@ mod tests {
             Command::Timeline(cmd).apply(&mut doc);
         }
         let p = doc.timeline.as_ref().unwrap();
-        let board = copy_keyframes(
-            p,
-            &target,
-            Some(&[PropPath::new("transform.x")]),
-        )
-        .unwrap();
+        let board = copy_keyframes(p, &target, Some(&[PropPath::new("transform.x")])).unwrap();
         assert_eq!(board.anchor, Tick(100));
 
         // Map transform.x → transform.y, re-anchor so key lands at 0.
@@ -7276,10 +7268,7 @@ mod tests {
             p,
             target.clone(),
             &board,
-            &[(
-                PropPath::new("transform.x"),
-                PropPath::new("transform.y"),
-            )],
+            &[(PropPath::new("transform.x"), PropPath::new("transform.y"))],
             Tick(0),
         )
         .unwrap();

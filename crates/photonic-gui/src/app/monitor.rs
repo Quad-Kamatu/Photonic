@@ -1146,12 +1146,7 @@ impl PhotonicApp {
                                 egui::pos2(uv.min.x + uv.width() * split, uv.min.y),
                                 uv.max,
                             );
-                            content_painter.image(
-                                clean.id,
-                                left,
-                                uv_left,
-                                egui::Color32::WHITE,
-                            );
+                            content_painter.image(clean.id, left, uv_left, egui::Color32::WHITE);
                             content_painter.image(tex.id, right, uv_right, egui::Color32::WHITE);
                             content_painter.line_segment(
                                 [

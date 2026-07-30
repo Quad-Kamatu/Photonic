@@ -490,7 +490,7 @@ fn build_ffmpeg_args_accepts_windows_style_temp_audio_path() {
         alpha: false,
         faststart: true,
         loudness_target: None,
-            stems: false,
+        stems: false,
     };
     let samples: Vec<f32> = vec![0.0; 480];
     let audio_path = stage_audio_tempfile(&samples).expect("stage");

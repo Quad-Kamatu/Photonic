@@ -1606,15 +1606,18 @@ fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, usage: usize) {
         let findings = photonic_core::timeline::triage_probe(probe);
         for f in &findings {
             let (label, color) = match f.severity {
-                photonic_core::timeline::TriageSeverity::Info => {
-                    (f.code.to_ascii_uppercase(), egui::Color32::from_rgb(140, 160, 200))
-                }
-                photonic_core::timeline::TriageSeverity::Warn => {
-                    (f.code.to_ascii_uppercase(), egui::Color32::from_rgb(235, 180, 90))
-                }
-                photonic_core::timeline::TriageSeverity::Action => {
-                    (f.code.to_ascii_uppercase(), egui::Color32::from_rgb(235, 100, 90))
-                }
+                photonic_core::timeline::TriageSeverity::Info => (
+                    f.code.to_ascii_uppercase(),
+                    egui::Color32::from_rgb(140, 160, 200),
+                ),
+                photonic_core::timeline::TriageSeverity::Warn => (
+                    f.code.to_ascii_uppercase(),
+                    egui::Color32::from_rgb(235, 180, 90),
+                ),
+                photonic_core::timeline::TriageSeverity::Action => (
+                    f.code.to_ascii_uppercase(),
+                    egui::Color32::from_rgb(235, 100, 90),
+                ),
             };
             let tip = match &f.remedy {
                 Some(r) => format!("{}\n{}\nRemedy: {r}", f.summary, f.consequence),
@@ -1748,7 +1751,7 @@ mod tests {
             audio: None,
             container: "mov".into(),
             codec: "prores".into(),
-                    is_vfr: false,
+            is_vfr: false,
             pixel_format: None,
             has_alpha: false,
         });
