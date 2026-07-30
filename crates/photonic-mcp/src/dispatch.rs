@@ -2629,6 +2629,18 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::get_keyframes(state, a).await,
             ))
         }
+        "copy_keyframes" => {
+            let a: CopyKeyframesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::copy_keyframes(state, a).await,
+            ))
+        }
+        "paste_keyframes" => {
+            let a: PasteKeyframesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::paste_keyframes(state, a).await,
+            ))
+        }
 
         // Media (P2 subset)
         "import_media" => {

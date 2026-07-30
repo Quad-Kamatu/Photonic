@@ -236,6 +236,36 @@ fn close2(a: [f64; 2], b: [f64; 2]) -> bool {
     (a[0] - b[0]).abs() <= PRESET_EPS && (a[1] - b[1]).abs() <= PRESET_EPS
 }
 
+/// Serializable multi-track keyframe payload for interchange (26 §10 K-B11).
+///
+/// Copy from one effect/clip lane set, paste onto another with path mapping and
+/// a time offset. Not document state — clipboard / MCP wire only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct KeyframeClipboard {
+    /// Tracks exactly as copied (source property paths preserved for mapping).
+    pub tracks: Vec<PropertyTrack>,
+    /// Earliest keyframe time across all tracks (or zero if empty). Paste UIs
+    /// re-anchor by mapping this tick onto a destination time.
+    #[serde(default)]
+    pub anchor: Tick,
+}
+
+impl KeyframeClipboard {
+    /// Build from tracks, computing [`Self::anchor`] as the min keyframe time.
+    pub fn from_tracks(tracks: Vec<PropertyTrack>) -> Self {
+        let anchor = tracks
+            .iter()
+            .flat_map(|t| t.keyframes.iter().map(|k| k.at))
+            .min()
+            .unwrap_or(Tick::ZERO);
+        Self { tracks, anchor }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tracks.iter().all(|t| t.keyframes.is_empty())
+    }
+}
+
 /// One keyframe: a clip-relative time, a value, and the interpolation that
 /// governs the segment leaving it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

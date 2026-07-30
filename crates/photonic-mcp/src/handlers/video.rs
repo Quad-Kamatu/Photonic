@@ -3715,6 +3715,81 @@ pub async fn get_keyframes(state: &AppState, args: GetKeyframesArgs) -> ToolResu
     }
 }
 
+/// K-B11: snapshot keyframe tracks into a serializable clipboard payload.
+pub async fn copy_keyframes(state: &AppState, args: CopyKeyframesArgs) -> ToolResult {
+    tracing::debug!("tool: copy_keyframes {}", args.target.clip_id());
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if let Err(e) = read_target(project, &args.target) {
+        return e;
+    }
+    let target = to_anim_target(&args.target);
+    let paths: Option<Vec<PropPath>> = args
+        .paths
+        .as_ref()
+        .map(|ps| ps.iter().map(|p| PropPath::new(p.clone())).collect());
+    let path_slice = paths.as_deref();
+    match ops::copy_keyframes(project, &target, path_slice) {
+        Ok(board) => {
+            let n = board.tracks.len();
+            let keys: usize = board.tracks.iter().map(|t| t.keyframes.len()).sum();
+            ToolResult::text(format!("Copied {n} track(s), {keys} keyframe(s)"))
+                .with_data(json!({ "clipboard": board }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// K-B11: paste a keyframe clipboard onto a target (one undo batch).
+pub async fn paste_keyframes(state: &AppState, args: PasteKeyframesArgs) -> ToolResult {
+    tracing::debug!("tool: paste_keyframes {}", args.target.clip_id());
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if let Err(e) = read_target(project, &args.target) {
+        return e;
+    }
+    let target = to_anim_target(&args.target);
+    let mapping: Vec<(PropPath, PropPath)> = args
+        .mapping
+        .iter()
+        .map(|m| (PropPath::new(m.from.clone()), PropPath::new(m.to.clone())))
+        .collect();
+    let cmds = if let Some(anchor) = args.reanchor_ticks {
+        ops::paste_keyframes_reanchored(
+            project,
+            target,
+            &args.clipboard,
+            &mapping,
+            Tick(anchor),
+        )
+    } else {
+        ops::paste_keyframes(
+            project,
+            target,
+            &args.clipboard,
+            &mapping,
+            Tick(args.offset_ticks),
+        )
+    };
+    match cmds {
+        Ok(cmds) if cmds.is_empty() => ToolResult::text("Nothing to paste"),
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(
+                Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+                &mut doc,
+            );
+            ToolResult::text(format!("Pasted {n} keyframe(s)"))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 // ─── Media (P2 subset: import/relink/list/remove) ───────────────────────────
 
 fn guess_asset_kind(path: &std::path::Path) -> Option<AssetKind> {

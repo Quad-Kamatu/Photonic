@@ -1157,6 +1157,42 @@ pub struct GetKeyframesArgs {
     pub target: AnimTargetArg,
 }
 
+/// K-B11: copy keyframe tracks off a target (returns a serializable payload).
+#[derive(Debug, Deserialize)]
+pub struct CopyKeyframesArgs {
+    #[serde(flatten)]
+    pub target: AnimTargetArg,
+    /// Optional property-path filter; omit to copy every non-empty track.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+}
+
+/// One source→dest path remap for `paste_keyframes`.
+#[derive(Debug, Deserialize)]
+pub struct KeyframePathMapArg {
+    pub from: String,
+    pub to: String,
+}
+
+/// K-B11: paste a keyframe clipboard onto a target with optional mapping + offset.
+#[derive(Debug, Deserialize)]
+pub struct PasteKeyframesArgs {
+    #[serde(flatten)]
+    pub target: AnimTargetArg,
+    /// Payload from `copy_keyframes` (or any `KeyframeClipboard` JSON).
+    pub clipboard: photonic_core::timeline::KeyframeClipboard,
+    /// Optional path remaps; unmapped sources keep their original path.
+    #[serde(default)]
+    pub mapping: Vec<KeyframePathMapArg>,
+    /// Added to every keyframe time (clip-relative ticks). Ignored when
+    /// `reanchor_ticks` is set.
+    #[serde(default)]
+    pub offset_ticks: i64,
+    /// If set, shift so the clipboard anchor lands at this clip-relative tick.
+    #[serde(default)]
+    pub reanchor_ticks: Option<i64>,
+}
+
 // ─── Media (P2 subset: import/relink/list/remove) ───────────────────────────
 
 /// Registers `MediaAsset`s with `probe: None` (ffprobe integration is P3, 02

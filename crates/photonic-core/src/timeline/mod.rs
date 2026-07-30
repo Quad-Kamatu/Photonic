@@ -35,8 +35,8 @@ pub mod unknown;
 // ── Curated re-exports (the surface most callers use) ───────────────────────
 
 pub use anim::{
-    cubic_bezier_ease, eval, AnimProps, Interp, Keyframe, PropPath, PropSet, PropValue,
-    PropValueKind, PropertyTrack,
+    cubic_bezier_ease, eval, AnimProps, Interp, Keyframe, KeyframeClipboard, PropPath, PropSet,
+    PropValue, PropValueKind, PropertyTrack,
 };
 pub use audio::{
     AudioFade, AudioFxKind, AudioFxUnit, ChannelMap, ClipAudio, ClipAudioParams, FadeShape,

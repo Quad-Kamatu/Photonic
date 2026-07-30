@@ -5925,6 +5925,54 @@ pub fn tool_list() -> Value {
                 "required": ["target","clip_id"]
             }
         },
+        {
+            "name": "copy_keyframes",
+            "description": "K-B11: snapshot keyframe tracks from a target into a serializable clipboard payload (tracks + anchor). Optional `paths` filters which PropPaths to copy. Read-only — returns `{ clipboard }` for paste_keyframes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "enum": ["clip_transform","clip_effect"] },
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer" },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional PropPath filter; omit to copy every non-empty track."
+                    }
+                },
+                "required": ["target","clip_id"]
+            }
+        },
+        {
+            "name": "paste_keyframes",
+            "description": "K-B11: paste a keyframe clipboard onto a target as ONE undo batch. `mapping` remaps source→dest paths (unmapped keep identity). `offset_ticks` adds to every keyframe time, or set `reanchor_ticks` so the clipboard anchor lands at that clip-relative tick.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "enum": ["clip_transform","clip_effect"] },
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer" },
+                    "clipboard": {
+                        "type": "object",
+                        "description": "KeyframeClipboard from copy_keyframes (tracks + anchor)."
+                    },
+                    "mapping": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": { "type": "string" },
+                                "to": { "type": "string" }
+                            },
+                            "required": ["from","to"]
+                        }
+                    },
+                    "offset_ticks": { "type": "integer", "description": "Added to every keyframe at; ignored if reanchor_ticks is set." },
+                    "reanchor_ticks": { "type": "integer", "description": "Land clipboard.anchor at this clip-relative tick." }
+                },
+                "required": ["target","clip_id","clipboard"]
+            }
+        },
 
         // Media (P2 subset — import/relink/list/remove; probe/proxy/transcode are P3 engine jobs)
         {

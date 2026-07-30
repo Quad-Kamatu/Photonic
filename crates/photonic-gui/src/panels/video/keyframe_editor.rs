@@ -41,14 +41,17 @@ use crate::panels::PanelAction;
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::{
-    anim, ops, prop_registry, AnimTarget, Clip, ClipId, FrameRate, Interp, Keyframe, PropPath,
-    PropTargetKind, PropValue, PropValueKind, PropertyTrack, Tick, TimelineCmd, TimelineProject,
+    anim, ops, prop_registry, AnimTarget, Clip, ClipId, FrameRate, Interp, Keyframe,
+    KeyframeClipboard, PropPath, PropTargetKind, PropValue, PropValueKind, PropertyTrack, Tick,
+    TimelineCmd, TimelineProject,
 };
 
 // ── egui memory keys ─────────────────────────────────────────────────────────
 
 const STATE_ID: &str = "photonic_kf_editor_state";
 const DRAG_ID: &str = "photonic_kf_editor_drag";
+/// Session keyframe-interchange clipboard (26 §10 K-B11).
+const KF_CLIPBOARD_ID: &str = "photonic_kf_clipboard";
 
 /// Persistent (session-only) editor UI state, kept in egui memory so this module
 /// needs no new `PhotonicApp` fields. Reset when the targeted clip changes.
@@ -438,6 +441,14 @@ enum KfAction {
         at: Tick,
         interp: Interp,
     },
+    /// K-B11: paste a keyframe clipboard onto `target` (identity mapping).
+    /// `reanchor: Some(t)` lands the clipboard anchor at `t`; `None` uses
+    /// offset 0.
+    PasteKeyframes {
+        target: AnimTarget,
+        clipboard: KeyframeClipboard,
+        reanchor: Option<Tick>,
+    },
 }
 
 fn commit(history: &mut CommandHistory, doc: &mut Document, cmd: TimelineCmd) {
@@ -465,6 +476,19 @@ fn kf_action_cmds(project: &TimelineProject, action: KfAction) -> Vec<TimelineCm
         } => ops::set_keyframe_interp(project, target, path, at, interp)
             .into_iter()
             .collect(),
+        KfAction::PasteKeyframes {
+            target,
+            clipboard,
+            reanchor,
+        } => {
+            let result = match reanchor {
+                Some(at) => {
+                    ops::paste_keyframes_reanchored(project, target, &clipboard, &[], at)
+                }
+                None => ops::paste_keyframes(project, target, &clipboard, &[], Tick::ZERO),
+            };
+            result.unwrap_or_default()
+        }
         KfAction::Move {
             target,
             path,
@@ -777,6 +801,9 @@ fn render_editor(
             };
         });
     });
+    // K-B11: copy / paste keyframes for the selected property row (or all
+    // tracks of its AnimTarget). Clipboard lives in egui memory (session).
+    draw_interchange_bar(ui, clip, rows, st, actions);
     ui.separator();
 
     egui::SidePanel::left("kf_prop_picker")
@@ -789,6 +816,98 @@ fn render_editor(
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
         draw_curve_area(ui, clip, fps, playhead, rows, st, actions);
+    });
+}
+
+/// K-B11 toolbar: copy the selected row's track (or every track on its target)
+/// and paste with identity mapping / re-anchor to clip start or playhead-local.
+fn draw_interchange_bar(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    rows: &[PropRow],
+    st: &EditorState,
+    actions: &mut Vec<KfAction>,
+) {
+    let row = rows.get(st.sel_row);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Interchange").small().weak());
+        let copy_one = ui
+            .add_enabled(row.is_some(), egui::Button::new("Copy path").small())
+            .on_hover_text("Copy the selected property's keyframes (K-B11)");
+        let copy_all = ui
+            .add_enabled(row.is_some(), egui::Button::new("Copy all").small())
+            .on_hover_text("Copy every keyframed track on this target");
+        if let Some(row) = row {
+            if copy_one.clicked() {
+                if let Some(tr) = track_for(clip, &row.target, &row.path) {
+                    if !tr.keyframes.is_empty() {
+                        let board = KeyframeClipboard::from_tracks(vec![tr.clone()]);
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(egui::Id::new(KF_CLIPBOARD_ID), board);
+                        });
+                    }
+                }
+            }
+            if copy_all.clicked() {
+                // Collect non-empty tracks that share this row's AnimTarget.
+                let tracks: Vec<PropertyTrack> = rows
+                    .iter()
+                    .filter(|r| r.target == row.target)
+                    .filter_map(|r| track_for(clip, &r.target, &r.path).cloned())
+                    .filter(|t| !t.keyframes.is_empty())
+                    .collect();
+                if !tracks.is_empty() {
+                    let board = KeyframeClipboard::from_tracks(tracks);
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new(KF_CLIPBOARD_ID), board);
+                    });
+                }
+            }
+        }
+
+        let has_clip = ui
+            .ctx()
+            .data(|d| d.get_temp::<KeyframeClipboard>(egui::Id::new(KF_CLIPBOARD_ID)))
+            .map(|b| !b.is_empty())
+            .unwrap_or(false);
+        let paste = ui
+            .add_enabled(
+                has_clip && row.is_some(),
+                egui::Button::new("Paste").small(),
+            )
+            .on_hover_text("Paste clipboard onto the selected target (identity paths, offset 0)");
+        let paste_re = ui
+            .add_enabled(
+                has_clip && row.is_some(),
+                egui::Button::new("Paste @0").small(),
+            )
+            .on_hover_text("Paste re-anchored so the first key lands at clip start");
+        if let Some(row) = row {
+            if paste.clicked() {
+                if let Some(board) = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<KeyframeClipboard>(egui::Id::new(KF_CLIPBOARD_ID)))
+                {
+                    actions.push(KfAction::PasteKeyframes {
+                        target: row.target.clone(),
+                        clipboard: board,
+                        reanchor: None,
+                    });
+                }
+            }
+            if paste_re.clicked() {
+                if let Some(board) = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<KeyframeClipboard>(egui::Id::new(KF_CLIPBOARD_ID)))
+                {
+                    actions.push(KfAction::PasteKeyframes {
+                        target: row.target.clone(),
+                        clipboard: board,
+                        reanchor: Some(Tick::ZERO),
+                    });
+                }
+            }
+        }
     });
 }
 

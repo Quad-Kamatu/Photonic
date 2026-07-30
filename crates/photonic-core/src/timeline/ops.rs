@@ -12,7 +12,7 @@
 //! caller to wrap in a single `Command::Batch`, mirroring the existing
 //! `GroupNodes` batching idiom.
 
-use super::anim::{AnimProps, Interp, Keyframe, PropPath, PropertyTrack};
+use super::anim::{AnimProps, Interp, Keyframe, KeyframeClipboard, PropPath, PropertyTrack};
 use super::audio::ClipAudio;
 use super::clip::{
     Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, MulticamAngle, MulticamGroup, Ratio,
@@ -2134,6 +2134,95 @@ pub fn set_keyframe_interp(
         old: kf.interp,
         new,
     })
+}
+
+// ── Keyframe interchange (26 §10 K-B11) ─────────────────────────────────────
+//
+// Copy a set of property tracks off any `AnimTarget`, paste them onto another
+// (or the same) target with optional path remapping and a time offset. Paste
+// returns one `SetKeyframe` per key so the caller wraps them in a single
+// `Command::Batch` — one undo unit for the whole interchange.
+
+/// Snapshot the keyframe lanes of `target`. When `paths` is `Some`, only those
+/// properties are copied (unknown paths are skipped); `None` copies every
+/// non-empty track. Empty result is still `Ok` — paste is then a no-op.
+pub fn copy_keyframes(
+    p: &TimelineProject,
+    target: &AnimTarget,
+    paths: Option<&[PropPath]>,
+) -> Result<KeyframeClipboard, EditError> {
+    let tracks = read_tracks(p, target).ok_or(EditError::IndexOutOfRange)?;
+    let selected: Vec<PropertyTrack> = tracks
+        .iter()
+        .filter(|t| {
+            if t.keyframes.is_empty() {
+                return false;
+            }
+            match paths {
+                None => true,
+                Some(want) => want.iter().any(|p| p == &t.property),
+            }
+        })
+        .cloned()
+        .collect();
+    Ok(KeyframeClipboard::from_tracks(selected))
+}
+
+/// Paste `clipboard` onto `target`.
+///
+/// * `mapping` — optional `(source_path, dest_path)` pairs. Unmapped source
+///   tracks paste onto their original path (identity). A source path listed
+///   with an empty dest string is skipped.
+/// * `time_offset` — added to every keyframe `at` (clip-relative). Negative
+///   offsets that would push a key before zero are clamped to `Tick::ZERO`.
+///
+/// Returns `Ok(vec![])` when nothing would change (empty clipboard / all
+/// skipped). Each command is a single-key `SetKeyframe` (upsert).
+pub fn paste_keyframes(
+    p: &TimelineProject,
+    target: AnimTarget,
+    clipboard: &KeyframeClipboard,
+    mapping: &[(PropPath, PropPath)],
+    time_offset: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    // Prove the target exists before building commands.
+    let _ = read_tracks(p, &target).ok_or(EditError::IndexOutOfRange)?;
+
+    let mut cmds = Vec::new();
+    for src in &clipboard.tracks {
+        let dest_path = match mapping
+            .iter()
+            .find(|(s, _)| s == &src.property)
+            .map(|(_, d)| d.clone())
+        {
+            Some(d) if d.as_str().is_empty() => continue,
+            Some(d) => d,
+            None => src.property.clone(),
+        };
+        for kf in &src.keyframes {
+            let at = Tick((kf.at.0 + time_offset.0).max(0));
+            let new_kf = Keyframe::new(at, kf.value, kf.interp);
+            cmds.push(set_keyframe(
+                p,
+                target.clone(),
+                dest_path.clone(),
+                new_kf,
+            ));
+        }
+    }
+    Ok(cmds)
+}
+
+/// Convenience: paste so `clipboard.anchor` lands at `dest_anchor`.
+pub fn paste_keyframes_reanchored(
+    p: &TimelineProject,
+    target: AnimTarget,
+    clipboard: &KeyframeClipboard,
+    mapping: &[(PropPath, PropPath)],
+    dest_anchor: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let offset = Tick(dest_anchor.0 - clipboard.anchor.0);
+    paste_keyframes(p, target, clipboard, mapping, offset)
 }
 
 // ── Effects ─────────────────────────────────────────────────────────────────
@@ -6905,6 +6994,131 @@ mod tests {
                 "/old/c.mp4".into()
             ],
             "one undo restores every relinked asset"
+        );
+    }
+
+    // ── K-B11 keyframe interchange ─────────────────────────────────────────
+
+    #[test]
+    fn copy_paste_keyframes_identity_and_offset() {
+        let (mut doc, _seq, _track, clip, _asset) = scoped_fixture();
+        let target = AnimTarget::ClipTransform { clip };
+        // Seed two opacity keys.
+        {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmds = [
+                set_keyframe(
+                    p,
+                    target.clone(),
+                    PropPath::new("transform.opacity"),
+                    Keyframe::new(
+                        Tick(10),
+                        crate::timeline::PropValue::Float(0.0),
+                        Interp::Linear,
+                    ),
+                ),
+                set_keyframe(
+                    p,
+                    target.clone(),
+                    PropPath::new("transform.opacity"),
+                    Keyframe::new(
+                        Tick(50),
+                        crate::timeline::PropValue::Float(1.0),
+                        Interp::Linear,
+                    ),
+                ),
+            ];
+            for c in cmds {
+                Command::Timeline(c).apply(&mut doc);
+            }
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let clip_board = copy_keyframes(p, &target, None).unwrap();
+        assert_eq!(clip_board.tracks.len(), 1);
+        assert_eq!(clip_board.anchor, Tick(10));
+        assert!(!clip_board.is_empty());
+
+        // Paste with +20 tick offset onto the same path → keys at 30 and 70.
+        let paste = paste_keyframes(
+            p,
+            target.clone(),
+            &clip_board,
+            &[],
+            Tick(20),
+        )
+        .unwrap();
+        assert_eq!(paste.len(), 2);
+        for c in paste {
+            Command::Timeline(c).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let tracks = read_tracks(p, &target).unwrap();
+        let opac = tracks
+            .iter()
+            .find(|t| t.property.as_str() == "transform.opacity")
+            .unwrap();
+        // Original 10,50 plus pasted 30,70.
+        let times: Vec<i64> = opac.keyframes.iter().map(|k| k.at.0).collect();
+        assert!(times.contains(&10));
+        assert!(times.contains(&50));
+        assert!(times.contains(&30));
+        assert!(times.contains(&70));
+    }
+
+    #[test]
+    fn paste_keyframes_path_mapping_and_reanchor() {
+        let (mut doc, _seq, _track, clip, _asset) = scoped_fixture();
+        let target = AnimTarget::ClipTransform { clip };
+        {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd = set_keyframe(
+                p,
+                target.clone(),
+                PropPath::new("transform.x"),
+                Keyframe::new(
+                    Tick(100),
+                    crate::timeline::PropValue::Float(42.0),
+                    Interp::Hold,
+                ),
+            );
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let board = copy_keyframes(
+            p,
+            &target,
+            Some(&[PropPath::new("transform.x")]),
+        )
+        .unwrap();
+        assert_eq!(board.anchor, Tick(100));
+
+        // Map transform.x → transform.y, re-anchor so key lands at 0.
+        let paste = paste_keyframes_reanchored(
+            p,
+            target.clone(),
+            &board,
+            &[(
+                PropPath::new("transform.x"),
+                PropPath::new("transform.y"),
+            )],
+            Tick(0),
+        )
+        .unwrap();
+        assert_eq!(paste.len(), 1);
+        for c in paste {
+            Command::Timeline(c).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        let tracks = read_tracks(p, &target).unwrap();
+        let y = tracks
+            .iter()
+            .find(|t| t.property.as_str() == "transform.y")
+            .expect("mapped track");
+        assert_eq!(y.keyframes.len(), 1);
+        assert_eq!(y.keyframes[0].at, Tick(0));
+        assert_eq!(
+            y.keyframes[0].value,
+            crate::timeline::PropValue::Float(42.0)
         );
     }
 }
