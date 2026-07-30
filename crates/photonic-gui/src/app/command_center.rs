@@ -286,6 +286,11 @@ impl PhotonicApp {
                     eng.toggle_alpha_view();
                 }
             }
+            "video.compare_effects" => {
+                if let Some(eng) = self.engine.as_mut() {
+                    eng.toggle_compare_effects();
+                }
+            }
             "video.grab_item" => self.timeline_toggle_grab(doc),
             "video.grab_commit" => {
                 self.timeline_grab_commit(doc, history);

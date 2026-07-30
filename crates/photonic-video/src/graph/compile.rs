@@ -378,8 +378,35 @@ pub fn compile_with_luts(
     view_override: Option<ViewNodeOverride>,
     luts: Option<&dyn LutProvider>,
 ) -> CompiledFrame {
+    compile_with_luts_and_opts(
+        project,
+        sequence,
+        format_index,
+        tick,
+        quality,
+        view_override,
+        luts,
+        false,
+    )
+}
+
+/// Like [`compile_with_luts`], with K-B5 `skip_clip_looks` for the clean side
+/// of effect compare (clip effect stack + clip grade omitted; asset/track/master
+/// stacks still apply).
+#[allow(clippy::too_many_arguments)]
+pub fn compile_with_luts_and_opts(
+    project: &TimelineProject,
+    sequence: SequenceId,
+    format_index: usize,
+    tick: Tick,
+    quality: Quality,
+    view_override: Option<ViewNodeOverride>,
+    luts: Option<&dyn LutProvider>,
+    skip_clip_looks: bool,
+) -> CompiledFrame {
     let mut b = Builder::new();
     b.luts = luts;
+    b.skip_clip_looks = skip_clip_looks;
 
     let Some(seq) = project.sequences.get(&sequence) else {
         b.diag(CompileDiagnostic::plain(format!(
@@ -478,6 +505,10 @@ struct Builder<'a> {
     clip_taps: Vec<(ClipId, IrNodeId)>,
     /// K-E2: the folded program before `CaptionOverlay` (03 §3.6).
     program_tap: Option<IrNodeId>,
+    /// K-B5 compare: when true, skip each clip's effect stack + grade so the
+    /// clean side of a split compare shares every upstream source node by
+    /// content hash with the graded compile.
+    skip_clip_looks: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -490,6 +521,7 @@ impl<'a> Builder<'a> {
             luts: None,
             clip_taps: Vec::new(),
             program_tap: None,
+            skip_clip_looks: false,
         }
     }
 
@@ -1268,7 +1300,11 @@ fn build_clip_chain(
     );
     // Clip scope (35 §2.4): the clip's own effects/grade, clip-relative keyframes.
     // TODO(30 §2.3): gate on the clip stack's Applicability once a manifest type exists.
-    cur = apply_stack(b, &clip.effects, clip.grade.as_ref(), cur, dt);
+    // K-B5: compare-clean compile omits the look stack so the bypass side shares
+    // every upstream (source/transform) node by content hash with the full compile.
+    if !b.skip_clip_looks {
+        cur = apply_stack(b, &clip.effects, clip.grade.as_ref(), cur, dt);
+    }
     // K-E2 / 07 §5: this node — post-`Grade`, pre-fold — is the per-clip scope
     // tap. Recorded for every lowered clip (including clips inside a nest, which
     // reach here through `fold_sequence`'s recursion), so no second compile is
@@ -3199,6 +3235,49 @@ mod tests {
         assert_eq!(
             eval_clip_transform(&anim, Tick(0)).anchor_space,
             AnchorSpace::Absolute
+        );
+    }
+
+    #[test]
+    fn skip_clip_looks_omits_clip_effect_ops() {
+        // K-B5: clean compile must not emit Effect IR for the clip stack, while
+        // the full compile does — proving the bypass path is real, not a no-op.
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        let mut clip = solid_clip(Color::WHITE, 0, Tick::from_seconds(2).0);
+        clip.effects
+            .push(photonic_core::timeline::ClipEffect::new(EffectKind::Invert));
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(clip);
+
+        let full = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
+        let clean = compile_with_luts_and_opts(
+            &project,
+            seq_id,
+            0,
+            Tick(0),
+            Quality::PREVIEW,
+            None,
+            None,
+            true,
+        );
+        let has_effect = |g: &crate::graph::ir::FrameGraph| {
+            g.nodes
+                .iter()
+                .any(|n| matches!(n.op, IrOp::Effect { .. }))
+        };
+        assert!(
+            has_effect(&full.graph),
+            "full compile must lower the Invert effect"
+        );
+        assert!(
+            !has_effect(&clean.graph),
+            "skip_clip_looks must fold out the clip effect stack"
+        );
+        assert!(
+            full.graph.nodes.len() > clean.graph.nodes.len(),
+            "clean graph should be strictly smaller (fewer ops)"
         );
     }
 

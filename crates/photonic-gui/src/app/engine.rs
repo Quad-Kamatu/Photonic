@@ -90,13 +90,21 @@ pub struct EngineBridge {
     // ── Presentation ────────────────────────────────────────────────────────
     presenter: Option<VideoPresenter>,
     target: Option<PresentTarget>,
+    /// K-B5 clean (no clip looks) present target, when compare is on.
+    compare_target: Option<PresentTarget>,
     presented: Option<FrameKey>,
     pub(crate) monitor_tex: Option<MonitorTexture>,
+    /// K-B5 clean side texture (bypassed clip looks).
+    pub(crate) compare_tex: Option<MonitorTexture>,
     /// The frame the monitor texture currently shows (time + sequence), for
     /// the buffering heuristic.
     pub(crate) presented_frame: Option<(Tick, SequenceId)>,
     /// K-B17: colour vs alpha-as-luminance present channel.
     pub(crate) present_channel: PresentChannel,
+    /// K-B5: dual clean/graded compare requested.
+    pub(crate) compare_effects: bool,
+    /// K-B5: vertical split fraction (0=all clean left, 1=all graded).
+    pub(crate) compare_split: f32,
 
     // ── Reconciler state (last values actually sent to the engine) ──────────
     sent_playing: Option<bool>,
@@ -148,10 +156,14 @@ impl EngineBridge {
             last_synced_revision: None,
             presenter: None,
             target: None,
+            compare_target: None,
             presented: None,
             monitor_tex: None,
+            compare_tex: None,
             presented_frame: None,
             present_channel: PresentChannel::Color,
+            compare_effects: false,
+            compare_split: 0.5,
             sent_playing: None,
             sent_loop: None,
             sent_sequence: None,
@@ -353,33 +365,69 @@ impl EngineBridge {
         };
         // Include the present channel so toggling alpha view re-presents the
         // same frame through the alpha pipeline (K-B17).
+        let clean_ptr = frame
+            .compare_clean
+            .as_ref()
+            .map(|t| Arc::as_ptr(t) as usize)
+            .unwrap_or(0);
         let key: FrameKey = (
             frame.time,
             frame.sequence,
             Arc::as_ptr(&frame.texture) as usize
-                ^ (self.present_channel as usize).wrapping_mul(0x9e37_79b9),
+                ^ (self.present_channel as usize).wrapping_mul(0x9e37_79b9)
+                ^ clean_ptr.wrapping_mul(0x85eb_ca6b)
+                ^ (self.compare_effects as usize),
         );
         if self.presented == Some(key) {
             return;
         }
         let size = (frame.texture.width(), frame.texture.height());
-        self.ensure_target(device, egui_renderer, size);
-        let presenter = self.presenter.get_or_insert_with(|| {
-            VideoPresenter::new(device, wgpu::TextureFormat::Rgba8UnormSrgb)
-        });
-        let target = self.target.as_ref().expect("ensure_target sets target");
-
+        self.ensure_target(device, egui_renderer, size, false);
+        if frame.compare_clean.is_some() {
+            self.ensure_target(device, egui_renderer, size, true);
+        } else {
+            self.compare_tex = None;
+            if let Some(old) = self.compare_target.take() {
+                if let Some(id) = old.egui_id {
+                    egui_renderer.free_texture(&id);
+                }
+            }
+        }
+        if self.presenter.is_none() {
+            self.presenter = Some(VideoPresenter::new(
+                device,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            ));
+        }
+        let channel = self.present_channel;
         let src_view = frame.texture.create_view(&Default::default());
+        let clean_view = frame
+            .compare_clean
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("engine_frame_present"),
         });
-        presenter.present_engine_frame_channel(
-            device,
-            &mut encoder,
-            &src_view,
-            &target.view,
-            self.present_channel,
-        );
+        {
+            let presenter = self.presenter.as_ref().expect("presenter set above");
+            let target = self.target.as_ref().expect("ensure_target sets target");
+            presenter.present_engine_frame_channel(
+                device,
+                &mut encoder,
+                &src_view,
+                &target.view,
+                channel,
+            );
+            if let (Some(cv), Some(ct)) = (clean_view.as_ref(), self.compare_target.as_ref()) {
+                presenter.present_engine_frame_channel(
+                    device,
+                    &mut encoder,
+                    cv,
+                    &ct.view,
+                    channel,
+                );
+            }
+        }
         queue.submit([encoder.finish()]);
 
         self.presented = Some(key);
@@ -400,24 +448,45 @@ impl EngineBridge {
         self.present_channel == PresentChannel::Alpha
     }
 
+    /// K-B5: toggle effect-compare split; sends view-state to the engine.
+    pub fn toggle_compare_effects(&mut self) {
+        self.compare_effects = !self.compare_effects;
+        self.session
+            .send(photonic_video::EngineCmd::SetCompareEffects(
+                self.compare_effects,
+            ));
+        self.presented = None;
+    }
+
     /// (Re)create the intermediate target + egui registration when the
-    /// physical frame size changes.
+    /// physical frame size changes. `for_compare` selects the clean-side target.
     fn ensure_target(
         &mut self,
         device: &wgpu::Device,
         egui_renderer: &mut egui_wgpu::Renderer,
         size: (u32, u32),
+        for_compare: bool,
     ) {
-        if self.target.as_ref().is_some_and(|t| t.size == size) {
+        let slot = if for_compare {
+            &mut self.compare_target
+        } else {
+            &mut self.target
+        };
+        if slot.as_ref().is_some_and(|t| t.size == size) {
             return;
         }
-        if let Some(old) = self.target.take() {
+        if let Some(old) = slot.take() {
             if let Some(id) = old.egui_id {
                 egui_renderer.free_texture(&id);
             }
         }
+        let label = if for_compare {
+            "engine_monitor_compare_target"
+        } else {
+            "engine_monitor_target"
+        };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("engine_monitor_target"),
+            label: Some(label),
             size: wgpu::Extent3d {
                 width: size.0.max(1),
                 height: size.1.max(1),
@@ -436,11 +505,16 @@ impl EngineBridge {
         let view = texture.create_view(&Default::default());
         let egui_id =
             egui_renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
-        self.monitor_tex = Some(MonitorTexture {
+        let mon = MonitorTexture {
             id: egui_id,
             physical: size,
-        });
-        self.target = Some(PresentTarget {
+        };
+        if for_compare {
+            self.compare_tex = Some(mon);
+        } else {
+            self.monitor_tex = Some(mon);
+        }
+        *slot = Some(PresentTarget {
             texture,
             view,
             size,

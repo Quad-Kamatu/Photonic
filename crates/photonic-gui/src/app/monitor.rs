@@ -1119,14 +1119,82 @@ impl PhotonicApp {
         // native texture; paint it cropped to the format's logical size (the
         // engine texture is pool-bucket padded — facade note).
         let mut drew_frame = false;
+        let mut split_drag: Option<f32> = None;
         if let Some(bridge) = &self.engine {
             if let (Some(tex), Some((_, fseq))) = (&bridge.monitor_tex, bridge.presented_frame) {
                 let active = doc.timeline.as_ref().and_then(|p| p.active_sequence);
                 if active == Some(fseq) {
                     let uv = engine::padded_uv((format.width, format.height), tex.physical);
-                    content_painter.image(tex.id, video_rect, uv, egui::Color32::WHITE);
+                    // K-B5: vertical wipe — left clean (no clip looks), right graded.
+                    if bridge.compare_effects {
+                        if let Some(clean) = &bridge.compare_tex {
+                            let split = bridge.compare_split.clamp(0.05, 0.95);
+                            let mid = video_rect.left() + video_rect.width() * split;
+                            let left = egui::Rect::from_min_max(
+                                video_rect.min,
+                                egui::pos2(mid, video_rect.bottom()),
+                            );
+                            let right = egui::Rect::from_min_max(
+                                egui::pos2(mid, video_rect.top()),
+                                video_rect.max,
+                            );
+                            let uv_left = egui::Rect::from_min_max(
+                                uv.min,
+                                egui::pos2(uv.min.x + uv.width() * split, uv.max.y),
+                            );
+                            let uv_right = egui::Rect::from_min_max(
+                                egui::pos2(uv.min.x + uv.width() * split, uv.min.y),
+                                uv.max,
+                            );
+                            content_painter.image(
+                                clean.id,
+                                left,
+                                uv_left,
+                                egui::Color32::WHITE,
+                            );
+                            content_painter.image(tex.id, right, uv_right, egui::Color32::WHITE);
+                            content_painter.line_segment(
+                                [
+                                    egui::pos2(mid, video_rect.top()),
+                                    egui::pos2(mid, video_rect.bottom()),
+                                ],
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(240, 240, 250)),
+                            );
+                            let handle = egui::Rect::from_center_size(
+                                egui::pos2(mid, video_rect.center().y),
+                                egui::vec2(10.0, 48.0),
+                            );
+                            let resp = ui.interact(
+                                handle,
+                                ui.id().with("k_b5_compare_split"),
+                                egui::Sense::drag(),
+                            );
+                            if resp.dragged() {
+                                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                                    split_drag = Some(
+                                        ((p.x - video_rect.left()) / video_rect.width())
+                                            .clamp(0.05, 0.95),
+                                    );
+                                }
+                            }
+                            content_painter.rect_filled(
+                                handle,
+                                3.0,
+                                egui::Color32::from_rgba_unmultiplied(240, 240, 250, 180),
+                            );
+                        } else {
+                            content_painter.image(tex.id, video_rect, uv, egui::Color32::WHITE);
+                        }
+                    } else {
+                        content_painter.image(tex.id, video_rect, uv, egui::Color32::WHITE);
+                    }
                     drew_frame = true;
                 }
+            }
+        }
+        if let Some(s) = split_drag {
+            if let Some(eng) = self.engine.as_mut() {
+                eng.compare_split = s;
             }
         }
 
@@ -1548,6 +1616,25 @@ impl PhotonicApp {
                     {
                         if let Some(eng) = self.engine.as_mut() {
                             eng.toggle_alpha_view();
+                        }
+                    }
+                }
+                // K-B5: vertical wipe — clean (no clip looks) | graded.
+                {
+                    let cmp_on = self
+                        .engine
+                        .as_ref()
+                        .map(|e| e.compare_effects)
+                        .unwrap_or(false);
+                    if ui
+                        .selectable_label(cmp_on, "A|B")
+                        .on_hover_text(
+                            "Compare effects — left clean (no clip effects/grade), right graded; drag the divider (K-B5)",
+                        )
+                        .clicked()
+                    {
+                        if let Some(eng) = self.engine.as_mut() {
+                            eng.toggle_compare_effects();
                         }
                     }
                 }

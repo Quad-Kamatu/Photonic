@@ -680,6 +680,11 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Toggle Alpha View",
         default: None,
     },
+    CommandDef {
+        id: "video.compare_effects",
+        label: "Toggle Effect Compare (A|B)",
+        default: None,
+    },
     // K-A7 grab item / arrow-key nudge (Shift+G engage; arrows while grabbed;
     // Enter commit; Esc cancel). Arrow keys are handled specially while grab
     // is active so they don't step the playhead.

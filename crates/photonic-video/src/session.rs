@@ -52,8 +52,8 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
-    compile_asset_peek, compile_with_luts, fit_long_edge, CompileDiagnostic, DiagSeverity,
-    LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
+    compile_asset_peek, compile_with_luts, compile_with_luts_and_opts, fit_long_edge,
+    CompileDiagnostic, DiagSeverity, LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
 use crate::graph::ir::IrOp;
@@ -205,6 +205,9 @@ pub enum EngineCmd {
     /// state, like [`EngineCmd::SetPreviewTarget`]: it changes nothing the
     /// document can observe, so it is not a `Command` and has no undo unit.
     SetScopeTap(ScopeTapPoint),
+    /// K-B5: enable/disable compare-effect mode (second clean compile without
+    /// clip looks). View state only — not a document Command.
+    SetCompareEffects(bool),
     /// Source-space seek while `PreviewTarget::Asset` (ignored for Sequence).
     SeekSource {
         asset: AssetId,
@@ -247,6 +250,10 @@ pub struct EngineFrame {
     /// not over the requested clip). The UI labels from this, never from the
     /// request, so "Scoping: <clip>" cannot lie.
     pub scope_tap_point: ScopeTapPoint,
+    /// K-B5: when compare-effects is on, the clean (no clip effects/grade)
+    /// evaluation for the same tick. `None` when compare is off or the clean
+    /// path failed.
+    pub compare_clean: Option<Arc<wgpu::Texture>>,
 }
 
 /// Engine → GUI state (02 §1: playhead, dropped frames, cache stats, xruns).
@@ -592,6 +599,9 @@ struct EngineThread {
     /// mutation; defaults to the program tap so scopes stop reading the
     /// post-`CaptionOverlay` presented frame even before a clip is chosen.
     scope_tap: ScopeTapPoint,
+    /// K-B5: when true, each present also evaluates a clean compile (no clip
+    /// looks) into [`EngineFrame::compare_clean`].
+    compare_effects: bool,
 
     audio: AudioEngine,
     feeder: Option<AudioFeeder>,
@@ -651,6 +661,7 @@ impl EngineThread {
             last_error: None,
             scrubbing: false,
             scope_tap: ScopeTapPoint::Program,
+            compare_effects: false,
             audio: AudioEngine::new(),
             feeder: None,
             xruns: None,
@@ -794,6 +805,10 @@ impl EngineThread {
                 // The re-present is a cache-hit replay of the same graph (the tap
                 // changes no content hash), not a re-render.
                 self.scope_tap = point;
+                self.controller.request_present();
+            }
+            EngineCmd::SetCompareEffects(on) => {
+                self.compare_effects = on;
                 self.controller.request_present();
             }
             EngineCmd::SeekSource { asset, time } => {
@@ -1194,6 +1209,25 @@ impl EngineThread {
                     &mut self.media,
                     tap_node,
                 );
+                // K-B5: second compile with clip looks skipped. Upstream source
+                // nodes share content hashes with the full compile so the node
+                // cache pays only the look-stack delta.
+                let compare_clean = if self.compare_effects && preview_asset.is_none() {
+                    let clean = compile_with_luts_and_opts(
+                        project.as_ref(),
+                        seq_id,
+                        format_index,
+                        t,
+                        quality,
+                        None,
+                        Some(&self.lut_cache),
+                        true,
+                    );
+                    self.evaluator
+                        .evaluate(&clean.graph, canvas, &mut self.media)
+                } else {
+                    None
+                };
                 if let Some(texture) = frame_tex {
                     self.frame_out.store(Some(Arc::new(EngineFrame {
                         texture,
@@ -1202,6 +1236,7 @@ impl EngineThread {
                         preview_asset,
                         scope_tap: tap_tex,
                         scope_tap_point: tap_point,
+                        compare_clean,
                     })));
                     self.frames_published = self.frames_published.saturating_add(1);
                     self.buffering = false;
