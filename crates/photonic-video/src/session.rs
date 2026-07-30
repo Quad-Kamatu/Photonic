@@ -2365,10 +2365,21 @@ fn feeder_main(
                 else {
                     continue;
                 };
-                // Trim mapping: source_in + elapsed. Speed maps are a seam
-                // (audio resampling for non-1:1 speed is the P8 DSP story).
-                let src_pos = clip.source_in + (t - clip.start);
-                if let Ok(source) = FfmpegPcmSource::spawn(tools, path, src_pos, sample_rate) {
+                // K-D3: stream + offset; speed maps remain a seam (P8 DSP).
+                let (offset, stream) = clip
+                    .audio
+                    .as_ref()
+                    .map(|a| (a.offset, a.stream))
+                    .unwrap_or((Tick::ZERO, None));
+                let src_pos = crate::playback::pcm::source_seek_with_offset(
+                    clip.source_in,
+                    t,
+                    clip.start,
+                    offset,
+                );
+                if let Ok(source) =
+                    FfmpegPcmSource::spawn_stream(tools, path, src_pos, sample_rate, stream)
+                {
                     pcm.insert(clip.id, source);
                 }
             }

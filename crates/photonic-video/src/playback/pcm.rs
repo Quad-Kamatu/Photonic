@@ -32,34 +32,33 @@ pub struct FfmpegPcmSource {
 }
 
 impl FfmpegPcmSource {
-    /// Spawn a decoder for `input`'s first audio stream, seeked to `start`,
-    /// emitting interleaved stereo f32 at `sample_rate`.
+    /// Spawn a decoder for `input`'s audio, seeked to `start`, emitting
+    /// interleaved stereo f32 at `sample_rate`.
+    ///
+    /// `stream` (K-D3) selects demuxed audio stream index `0:a:N`. `None` uses
+    /// the first audio stream (ffmpeg default for a lone audio input).
     pub fn spawn(
         tools: &FfmpegTools,
         input: &Path,
         start: Tick,
         sample_rate: u32,
     ) -> std::io::Result<FfmpegPcmSource> {
+        Self::spawn_stream(tools, input, start, sample_rate, None)
+    }
+
+    /// Like [`spawn`] with an explicit multi-stream selector (26 K-D3).
+    pub fn spawn_stream(
+        tools: &FfmpegTools,
+        input: &Path,
+        start: Tick,
+        sample_rate: u32,
+        stream: Option<u32>,
+    ) -> std::io::Result<FfmpegPcmSource> {
         let mut command = Command::new(&tools.ffmpeg);
+        for a in pcm_ffmpeg_argv(input, start, sample_rate, stream) {
+            command.arg(a);
+        }
         command
-            .arg("-v")
-            .arg("error")
-            .arg("-accurate_seek")
-            .arg("-ss")
-            .arg(format!("{:.6}", start.as_seconds_f64().max(0.0)))
-            .arg("-i")
-            .arg(input)
-            // Audio only.
-            .arg("-vn")
-            .arg("-sn")
-            .arg("-dn")
-            .arg("-ac")
-            .arg("2")
-            .arg("-ar")
-            .arg(sample_rate.to_string())
-            .arg("-f")
-            .arg("f32le")
-            .arg("pipe:1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -75,6 +74,53 @@ impl FfmpegPcmSource {
             finished: false,
         })
     }
+}
+
+/// Pure argv for the PCM sidecar (K-D3). Tested without spawning ffmpeg.
+pub fn pcm_ffmpeg_argv(
+    input: &Path,
+    start: Tick,
+    sample_rate: u32,
+    stream: Option<u32>,
+) -> Vec<String> {
+    let mut args = vec![
+        "-v".into(),
+        "error".into(),
+        "-accurate_seek".into(),
+        "-ss".into(),
+        format!("{:.6}", start.as_seconds_f64().max(0.0)),
+        "-i".into(),
+        input.display().to_string(),
+    ];
+    // K-D3: pick a specific demuxed audio stream when the clip asks for one.
+    if let Some(n) = stream {
+        args.push("-map".into());
+        args.push(format!("0:a:{n}"));
+    }
+    args.extend([
+        "-vn".into(),
+        "-sn".into(),
+        "-dn".into(),
+        "-ac".into(),
+        "2".into(),
+        "-ar".into(),
+        sample_rate.to_string(),
+        "-f".into(),
+        "f32le".into(),
+        "pipe:1".into(),
+    ]);
+    args
+}
+
+/// K-D3: clip-relative timeline position → source seek tick given sync offset.
+/// Positive `offset` delays audio (seek earlier in the source).
+pub fn source_seek_with_offset(
+    source_in: Tick,
+    timeline_t: Tick,
+    clip_start: Tick,
+    offset: Tick,
+) -> Tick {
+    Tick((source_in.0 + (timeline_t.0 - clip_start.0) - offset.0).max(0))
 }
 
 impl PcmSource for FfmpegPcmSource {
@@ -139,6 +185,33 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn pcm_argv_maps_stream_index_when_set() {
+        let args = pcm_ffmpeg_argv(Path::new("/a.mp4"), Tick::ZERO, 48_000, Some(2));
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("-map 0:a:2"),
+            "expected demux map for stream 2, got {joined}"
+        );
+        let no_map = pcm_ffmpeg_argv(Path::new("/a.mp4"), Tick::ZERO, 48_000, None);
+        assert!(
+            !no_map.iter().any(|a| a == "-map"),
+            "default first stream must not force -map"
+        );
+    }
+
+    #[test]
+    fn source_seek_with_offset_delays_audio() {
+        // Clip at timeline 100, source_in 0, t=100, offset=50 → seek 50 earlier.
+        let seek = source_seek_with_offset(Tick(0), Tick(100), Tick(100), Tick(50));
+        assert_eq!(seek, Tick(0)); // clamped: 0+0-50
+        let seek2 = source_seek_with_offset(Tick(200), Tick(150), Tick(100), Tick(50));
+        // source_in 200 + (150-100) - 50 = 200
+        assert_eq!(seek2, Tick(200));
+        let seek3 = source_seek_with_offset(Tick(0), Tick(200), Tick(100), Tick(0));
+        assert_eq!(seek3, Tick(100));
     }
 
     #[test]

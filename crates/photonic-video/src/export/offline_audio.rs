@@ -123,16 +123,25 @@ pub fn render_export_audio_filtered(
                 else {
                     continue;
                 };
-                // K-D3: `ClipAudio.offset` delays audio relative to picture —
-                // positive offset seeks the source earlier so audio arrives late.
-                let offset = clip
+                // K-D3: stream index + sync offset on the source read.
+                let (offset, stream) = clip
                     .audio
                     .as_ref()
-                    .map(|a| a.offset)
-                    .unwrap_or(Tick::ZERO);
-                let src_pos = clip.source_in + (t - clip.start) - offset;
-                let src_pos = Tick(src_pos.0.max(0));
-                if let Ok(source) = FfmpegPcmSource::spawn(tools, path, src_pos, sample_rate) {
+                    .map(|a| (a.offset, a.stream))
+                    .unwrap_or((Tick::ZERO, None));
+                let src_pos = crate::playback::pcm::source_seek_with_offset(
+                    clip.source_in,
+                    t,
+                    clip.start,
+                    offset,
+                );
+                if let Ok(source) = FfmpegPcmSource::spawn_stream(
+                    tools,
+                    path,
+                    src_pos,
+                    sample_rate,
+                    stream,
+                ) {
                     pcm.insert(clip.id, source);
                 }
             }
@@ -186,13 +195,10 @@ pub fn render_export_audio_filtered(
 }
 
 /// K-D4: sidecar path for a stem export next to the main output.
-/// `main` is the primary export path; `track_name` is sanitized for the FS.
+/// Stems are always written as little-endian IEEE float WAV (`.wav`) so they
+/// need no second encode pass and stay independent of the main container.
 pub fn stem_output_path(main: &std::path::Path, track_name: &str) -> std::path::PathBuf {
     let stem = main.file_stem().and_then(|s| s.to_str()).unwrap_or("export");
-    let ext = main
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("wav");
     let safe: String = track_name
         .chars()
         .map(|c| {
@@ -203,9 +209,86 @@ pub fn stem_output_path(main: &std::path::Path, track_name: &str) -> std::path::
             }
         })
         .collect();
-    let safe = if safe.is_empty() { "track".into() } else { safe };
+    let safe = if safe.is_empty() {
+        "track".into()
+    } else {
+        safe
+    };
     let parent = main.parent().unwrap_or_else(|| std::path::Path::new("."));
-    parent.join(format!("{stem}_stem_{safe}.{ext}"))
+    parent.join(format!("{stem}_stem_{safe}.wav"))
+}
+
+/// Write interleaved stereo f32 PCM as a WAV file (IEEE float format 3).
+pub fn write_stem_wav(
+    path: &std::path::Path,
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<(), ExportError> {
+    let channels: u16 = 2;
+    let bits: u16 = 32;
+    let data_bytes = samples.len() * 4;
+    let byte_rate = sample_rate * u32::from(channels) * u32::from(bits) / 8;
+    let block_align = channels * bits / 8;
+    let mut out = Vec::with_capacity(44 + data_bytes);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_bytes as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // PCM/float chunk size
+    out.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, out).map_err(|e| ExportError::Encode(super::encoder::EncodeError::Io(e)))
+}
+
+/// K-D4: render one stem WAV per enabled audio track beside `main_out`.
+/// Returns the written paths (empty when the sequence has no audio tracks).
+/// Tools may be `None` (silent PCM of correct length — still a real file).
+pub fn write_stems_for_export(
+    project: &TimelineProject,
+    sequence: SequenceId,
+    start: Tick,
+    end: Tick,
+    main_out: &std::path::Path,
+    tools: Option<&FfmpegTools>,
+    loudness: Option<&LoudnessTarget>,
+) -> Result<Vec<std::path::PathBuf>, ExportError> {
+    let seq = project.sequences.get(&sequence).ok_or_else(|| {
+        ExportError::Resolve(format!("sequence {sequence} not found for stem export"))
+    })?;
+    let sample_rate = if project.settings.audio_sample_rate > 0 {
+        project.settings.audio_sample_rate
+    } else {
+        DEFAULT_EXPORT_SAMPLE_RATE
+    };
+    let mut written = Vec::new();
+    for track in seq
+        .audio_tracks
+        .iter()
+        .filter(|t| t.enabled && t.audio.is_some())
+    {
+        let pcm = render_export_audio_filtered(
+            project,
+            sequence,
+            start,
+            end,
+            tools,
+            loudness,
+            Some(track.id),
+        )?;
+        let path = stem_output_path(main_out, &track.name);
+        write_stem_wav(&path, &pcm, sample_rate)?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 /// Convert a tick duration to a sample-frame count at `sample_rate` (exact
@@ -331,8 +414,61 @@ mod tests {
         let p = stem_output_path(std::path::Path::new("/tmp/out.mp4"), "A1 Dialogue!");
         assert_eq!(
             p,
-            std::path::PathBuf::from("/tmp/out_stem_A1_Dialogue_.mp4")
+            std::path::PathBuf::from("/tmp/out_stem_A1_Dialogue_.wav")
         );
+    }
+
+    #[test]
+    fn write_stems_for_export_writes_one_wav_per_audio_track() {
+        let (project, sid) = empty_audio_seq();
+        // Replace with two named audio tracks so the count is exact.
+        let mut project = project;
+        {
+            let seq = project.sequences.get_mut(&sid).unwrap();
+            seq.audio_tracks.clear();
+            let mut a = Track::new(TrackKind::Audio, "A1 Dialogue");
+            a.audio = Some(TrackAudio::new());
+            let mut b = Track::new(TrackKind::Audio, "A2 Music");
+            b.audio = Some(TrackAudio::new());
+            seq.audio_tracks.push(a);
+            seq.audio_tracks.push(b);
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "photonic-stems-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let main = dir.join("show.mp4");
+        let start = Tick::ZERO;
+        let end = Tick::from_seconds(1);
+        // tools=None → silent PCM of correct length (real shipped path).
+        let paths = write_stems_for_export(
+            &project,
+            sid,
+            start,
+            end,
+            &main,
+            None,
+            None,
+        )
+        .expect("write stems");
+        assert_eq!(paths.len(), 2, "one stem per audio track");
+        for p in &paths {
+            assert!(p.exists(), "stem missing: {}", p.display());
+            assert!(
+                p.extension().and_then(|e| e.to_str()) == Some("wav"),
+                "stems must be wav: {}",
+                p.display()
+            );
+            let bytes = std::fs::read(p).unwrap();
+            assert!(bytes.starts_with(b"RIFF"), "WAV header");
+            assert!(bytes.len() > 44, "payload present");
+        }
+        // Cleanup.
+        for p in paths {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -310,7 +310,22 @@ pub fn run_export_job(
         // `export_frames` returned Ok(Cancelled) off the poisoned flag.
         (_, Some(msg)) => Err(ExportError::RenderTimeout(msg)),
         (Err(e), None) => Err(e),
-        (Ok(()), None) => Ok(()),
+        (Ok(()), None) => {
+            // K-D4: when the preset asks for stems, write one WAV per audio track
+            // beside the main output (independent encode path, same offline mix).
+            if r.preset.stems {
+                let _paths = offline_audio::write_stems_for_export(
+                    &project,
+                    job.sequence,
+                    r.start,
+                    r.end,
+                    &r.out_path,
+                    Some(tools),
+                    r.preset.loudness_target.as_ref(),
+                )?;
+            }
+            Ok(())
+        }
     }
 }
 
