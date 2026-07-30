@@ -17,6 +17,7 @@ pub mod cache;
 pub mod compile;
 pub mod eval;
 pub mod eval_cpu;
+pub mod luma_wipe;
 pub mod ops;
 pub mod panorama;
 pub mod panorama_gpu;

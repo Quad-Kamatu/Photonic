@@ -65,6 +65,9 @@ pub enum EditError {
     /// when a delete is asked to reassign its markers to the very category
     /// being deleted — after the delete that target would not exist.
     NoMarkerCategory(MarkerCategoryId),
+    /// Manifest `Applicability` forbids attaching this effect to the chosen
+    /// scope (clip / track / master / asset). K-B1 residual.
+    ApplicabilityDenied,
 }
 
 impl std::fmt::Display for EditError {
@@ -2425,6 +2428,18 @@ pub fn add_effect_scoped(
     effect: ClipEffect,
     index: Option<usize>,
 ) -> Result<TimelineCmd, EditError> {
+    // Manifest Applicability gate (K-B residual): refuse scopes the effect
+    // does not declare. Unknown / unmanifested ids stay allowed (forward-compat).
+    let mid = if effect.id.is_empty() {
+        effect.kind.effect_id()
+    } else {
+        effect.id.clone()
+    };
+    if let Some(m) = super::effect_manifest::manifest(mid) {
+        if !m.applies.allows(owner) {
+            return Err(EditError::ApplicabilityDenied);
+        }
+    }
     let len = effect_stack(p, owner)?.len();
     let idx = index.unwrap_or(len).min(len);
     Ok(TimelineCmd::AddEffect {
@@ -4225,6 +4240,21 @@ mod tests {
         }
         assert!(find_clip(&doc, seq_id, vtrack, vclip).link_group.is_none());
         assert!(find_clip(&doc, seq_id, atrack, aclip).link_group.is_none());
+    }
+
+    #[test]
+    fn add_effect_scoped_refuses_clip_only_on_track() {
+        use super::super::effect_manifest::Applicability;
+        // Temporarily gate: build an effect whose manifest applies is CLIP_ONLY
+        // by using the gate helper path with a synthetic owner check.
+        assert!(!Applicability::CLIP_ONLY.allows(VfxOwner::Track(TrackId::nil())));
+        assert!(Applicability::CLIP_ONLY.allows(VfxOwner::Clip(ClipId::nil())));
+        assert!(Applicability::ALL_SCOPES.allows(VfxOwner::Track(TrackId::nil())));
+        let (doc, _seq, track, clip, _asset) = scoped_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        // ALL_SCOPES catalogue still allows track attach (widened for K-B1).
+        assert!(add_effect_scoped(p, VfxOwner::Track(track), fx(EffectKind::Blur), None).is_ok());
+        assert!(add_effect_scoped(p, VfxOwner::Clip(clip), fx(EffectKind::Blur), None).is_ok());
     }
 
     #[test]

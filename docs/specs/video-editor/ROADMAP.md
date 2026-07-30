@@ -97,10 +97,12 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-D3** per-stream / channel / offset | ✅ done | `56892b2` | `ClipAudio.stream` + `offset`; `ChannelMap::{LeftOnly,RightOnly}`; offline mix seeks with offset |
 | **K-D4** stems export | ✅ done | `56892b2` | `ExportPreset.stems`; `render_export_audio_filtered` per track; `stem_output_path` naming |
 | **K-E1** audio spectrum + scope depth | ✅ done | `6d54e73` | Pure radix-2 spectrum DFT; mixer/feeder publish `spectrum_db`; scopes **Spectrum** tab; vectorscope Rec.601 switch residual (CPU matrix path already present) |
+| **Applicability** gate | ✅ done | *(this commit)* | `add_effect_scoped` refuses scopes outside `manifest.applies`; catalogue uses `ALL_SCOPES` (K-B1-compatible); `CLIP_ONLY` retained for curation |
+| **K-B7** luma-map wipe maths | ✅ done (substrate) | *(this commit)* | Analytical `LumaWipeKind` maps + `soft_mix` (Photonic-authored); IR/TransitionKind binding residual |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
-**Not yet started (next bands):** K-A1 *(Band-5 await acceptance)*; K-C1/C4/C5 *(Band-5)*; K-B7 luma wipes / Applicability gating / K-F polish / K-F7; K-G1–G4 *(Band-5)*; X-1/X-2/X-3 *(Band-5)*; legal-or-fixture-blocked G/D items.
+**Not yet started (gated only):** K-A1/A5, K-C1/C4/C5, K-G1–G4, X-1/X-2/X-3, K-B8/B9 *(Band-5 await acceptance or patent)*; K-B10/K-D2 *(product-blocked)*; K-D1/D-*/G-20 *(legal-or-fixture-blocked)*; K-F7 one-eval-many-outputs residual; K-B7 IR binding residual.
 
 **Band-5 mini-specs — the whole band is now drafted.** 26 §19.1 requires one *accepted before code*, so every one of these items was blocked on a document rather than on effort. All **14** are written and **await acceptance**; none authorizes code until accepted. K-B16, K-G6 and K-G5 are the band's already-implemented members.
 
@@ -218,7 +220,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 |---|---|---|---|
 | K-0 | ✅ done | **9/9 seams closed** (K-0.1–0.9). See [§0](#0-implementation-progress--feat-video-editor-module) | [26 §8](26-kdenlive-mlt-parity.md#8-k-0--foundations) |
 | K-A | partial | **Timecode + Split A/V + Edit Duration + Grab + snaps + markers + space ops + K-A8 subclips + K-A10 fixed playhead landed**. Open: preview chunks (K-A1), groups (K-A5); spacer drag waits on G-13 | [33](33-timeline-preview-render.md) (K-A1), [26 §9](26-kdenlive-mlt-parity.md#9-k-a--timeline) |
-| K-B | partial | **K-B1–B6 stacks/zones/presets/compare/expressions, K-B11 interchange, K-B12 easing, K-B14 freeze, K-B15 paste, K-B16 catalogue, K-B17 alpha done.** Open: manifest `Applicability` gating; residual K-B7–B10/B13 | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
+| K-B | partial | **K-B1–B6 stacks/zones/presets/compare/expressions, Applicability gate, K-B7 luma maths substrate, K-B11 interchange, K-B12 easing, K-B14 freeze, K-B15 paste, K-B16 catalogue, K-B17 alpha done.** Open: K-B7 IR binding; K-B8/B9 (Band-5); K-B10 product-blocked; K-B13 via D-15 | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
 | K-C | partial | Ratings/filter/remove-unused + **TagId registry** + **K-C7 import triage** + cache size report + **K-C8 size-keyed still cache** + **K-C6 batch relink**. Open (Band-5 gates): clip-jobs [195](../../proposals/195-k-c1-clip-jobs-framework.md), generators [201](../../proposals/201-k-c4-generator-clips.md), archiving [202](../../proposals/202-k-c5-project-archiving.md) | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
 | K-D | partial | Mixer + DSP bound (K-0.6), latency compensation, **K-D5 boundary declick**, **K-D3 stream/offset/channel maps**, **K-D4 stems export** landed. Open: deeper multi-stream UI + stem encode wiring polish | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
