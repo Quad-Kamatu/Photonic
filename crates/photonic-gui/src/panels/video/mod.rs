@@ -50,6 +50,7 @@ pub(crate) mod keyframe_editor;
 pub(crate) mod markers;
 pub(crate) mod multicam;
 pub(crate) mod node_editor;
+pub(crate) mod param_expr;
 pub(crate) mod render_queue_panel;
 pub(crate) mod seq_tabs;
 pub(crate) mod source_monitor;

@@ -38,6 +38,8 @@ use photonic_core::timeline::{
 };
 
 use photonic_video::graph::ScopeTapPoint;
+
+use super::param_expr;
 use photonic_video::session::EngineFrame;
 
 use crate::panels::{eyedropper_btn, EyedropperTarget, PanelAction};
@@ -582,33 +584,54 @@ fn cdl_editor(
     sat: &mut f32,
 ) {
     let ch = ["R", "G", "B"];
+    // K-B6: arithmetic / middle-click reset. CDL channel defaults: slope 1,
+    // offset 0, power 1 (identity grade).
+    let empty = std::collections::HashMap::new();
     labelled(ui, "Slope", |ui| {
         for c in 0..3 {
-            ui.add(
-                egui::DragValue::new(&mut slope[c])
-                    .speed(0.005)
-                    .range(0.0..=4.0),
-            )
+            ui.scope(|ui| {
+                param_expr::float_drag_f32(
+                    ui,
+                    &mut slope[c],
+                    1.0,
+                    Some((0.0, 4.0)),
+                    &empty,
+                    0.005,
+                );
+            })
+            .response
             .on_hover_text(ch[c]);
         }
     });
     labelled(ui, "Offset", |ui| {
         for c in 0..3 {
-            ui.add(
-                egui::DragValue::new(&mut offset[c])
-                    .speed(0.002)
-                    .range(-1.0..=1.0),
-            )
+            ui.scope(|ui| {
+                param_expr::float_drag_f32(
+                    ui,
+                    &mut offset[c],
+                    0.0,
+                    Some((-1.0, 1.0)),
+                    &empty,
+                    0.002,
+                );
+            })
+            .response
             .on_hover_text(ch[c]);
         }
     });
     labelled(ui, "Power", |ui| {
         for c in 0..3 {
-            ui.add(
-                egui::DragValue::new(&mut power[c])
-                    .speed(0.005)
-                    .range(0.1..=4.0),
-            )
+            ui.scope(|ui| {
+                param_expr::float_drag_f32(
+                    ui,
+                    &mut power[c],
+                    1.0,
+                    Some((0.1, 4.0)),
+                    &empty,
+                    0.005,
+                );
+            })
+            .response
             .on_hover_text(ch[c]);
         }
     });

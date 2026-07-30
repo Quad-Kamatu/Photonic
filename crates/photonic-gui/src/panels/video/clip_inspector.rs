@@ -31,10 +31,11 @@ use photonic_core::timeline::clip::SpeedKey;
 // root either — same precedent as `SpeedKey` above.
 use photonic_core::timeline::commands::VfxOwner;
 use photonic_core::timeline::{
-    ops, prop_registry, Clip, ClipId, EffectKind, PropTargetKind, PropValue, Ratio, SequenceId,
-    SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition, TransitionKind,
+    ops, prop_registry, Clip, ClipId, EffectKind, EffectParams, PropTargetKind, PropValue, Ratio,
+    SequenceId, SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition, TransitionKind,
     TransitionParams, TICKS_PER_SECOND,
 };
+use super::param_expr;
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
 const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x56, 0xCF); // `primary`
@@ -263,11 +264,12 @@ fn transform_row(
     range: Option<std::ops::RangeInclusive<f64>>,
 ) -> bool {
     ui.label(label);
-    let mut drag = egui::DragValue::new(v).speed(0.5).fixed_decimals(2);
-    if let Some(r) = range {
-        drag = drag.range(r);
-    }
-    ui.add(drag).changed()
+    // K-B6: arithmetic / %vars + middle-click reset. Transform siblings are not
+    // threaded here — frame size alone is enough for `%w`/`%h` style maths.
+    let range_tuple = range.as_ref().map(|r| (*r.start(), *r.end()));
+    let default = param_expr::neutral_float_default(range_tuple);
+    let vars = param_expr::vars_from_params([], None, None);
+    param_expr::float_drag(ui, v, default, range_tuple, &vars, 0.5)
 }
 
 /// Same as [`transform_row`] with a unit suffix — used for `rotation`, which
@@ -1024,6 +1026,21 @@ fn draw_effect_params(
         ui.label(RichText::new("No parameters.").color(MUTED).small());
         return;
     }
+    // K-B6: cross-param refs (`%radius`, bare `amount`) + optional frame size.
+    let float_pairs: Vec<(&str, f64)> = effect
+        .params
+        .base
+        .entries
+        .iter()
+        .filter_map(|(p, v)| match v {
+            PropValue::Float(f) => Some((p.as_str(), *f)),
+            _ => None,
+        })
+        .collect();
+    let (frame_w, frame_h) = active_frame_size(project);
+    let vars = param_expr::vars_from_params(float_pairs, frame_w, frame_h);
+    let seeded = EffectParams::seed(PropTargetKind::Effect(effect.kind));
+
     egui::Grid::new(("fx_params_grid", scope_salt(owner), effect_idx))
         .num_columns(2)
         .spacing([4.0, 2.0])
@@ -1037,17 +1054,25 @@ fn draw_effect_params(
                 match *cur {
                     PropValue::Float(f) => {
                         let mut v = f;
-                        let mut drag = egui::DragValue::new(&mut v).speed(0.01);
-                        if let Some((lo, hi)) = entry.range {
-                            drag = drag.range(lo..=hi);
-                        }
-                        if ui.add(drag).changed() {
+                        let default = match seeded.get(entry.path) {
+                            Some(PropValue::Float(d)) => *d,
+                            _ => param_expr::neutral_float_default(entry.range),
+                        };
+                        if param_expr::float_drag(ui, &mut v, default, entry.range, &vars, 0.01)
+                        {
                             new_value = Some(PropValue::Float(v));
                         }
                     }
                     PropValue::Bool(b) => {
                         let mut v = b;
-                        if ui.checkbox(&mut v, "").changed() {
+                        let resp = ui.checkbox(&mut v, "");
+                        let mut changed = resp.changed();
+                        // Middle-click reset → seed default (false for bools).
+                        if resp.middle_clicked() && v {
+                            v = false;
+                            changed = true;
+                        }
+                        if changed {
                             new_value = Some(PropValue::Bool(v));
                         }
                     }
@@ -1085,6 +1110,24 @@ fn draw_effect_params(
                 ui.end_row();
             }
         });
+}
+
+/// Active sequence frame size for K-B6 `%w`/`%h` expressions, if known.
+fn active_frame_size(project: &TimelineProject) -> (Option<f64>, Option<f64>) {
+    let Some(seq_id) = project.active_sequence else {
+        return (None, None);
+    };
+    let Some(seq) = project.sequences.get(&seq_id) else {
+        return (None, None);
+    };
+    let fmt = seq
+        .formats
+        .get(seq.active_format)
+        .or_else(|| seq.formats.first());
+    match fmt {
+        Some(f) => (Some(f.width as f64), Some(f.height as f64)),
+        None => (None, None),
+    }
 }
 
 /// `"params.radius"` → `"radius"` for a compact grid label.
