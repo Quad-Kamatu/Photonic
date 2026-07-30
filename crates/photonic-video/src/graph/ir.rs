@@ -140,6 +140,7 @@ pub fn threading_for_op(op: &IrOp) -> Threading {
         | IrOp::Merge { .. }
         | IrOp::WipeMix { .. }
         | IrOp::PushMix { .. }
+        | IrOp::LumaWipeMix { .. }
         | IrOp::Crop
         | IrOp::Resize { .. }
         | IrOp::ChannelSplit { .. }
@@ -242,6 +243,16 @@ pub enum IrOp {
     /// [incoming, outgoing]. `t == 0` is `outgoing`, `t == 1` is `incoming`.
     PushMix {
         direction: WipeDirection,
+        t: f32,
+    },
+    /// Analytical luma-map wipe (26 K-B7): per-pixel switch time from a
+    /// Photonic-authored map (`kind`), mixed with `soft_mix(t, m, softness)`.
+    /// Inputs: [incoming, outgoing]. `t == 0` is `outgoing`, `t == 1` is
+    /// `incoming`. Invert flips the map so white switches first.
+    LumaWipeMix {
+        kind: crate::graph::luma_wipe::LumaWipeKind,
+        softness: f32,
+        invert: bool,
         t: f32,
     },
     CaptionOverlay {

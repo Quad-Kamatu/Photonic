@@ -4496,7 +4496,12 @@ fn engine_status_json(status: &photonic_video::EngineStatus) -> serde_json::Valu
         "audio_xruns": status.audio_xruns,
         "doc_revision": status.doc_revision,
         "active_sequence": status.active_sequence,
-        "last_error": status.last_error,
+        "last_error": status.last_error.as_ref().map(|d| json!({
+            "code": d.code.as_str(),
+            "severity": format!("{:?}", d.severity),
+            "message": d.message,
+            "consequence": d.consequence,
+        })),
     })
 }
 

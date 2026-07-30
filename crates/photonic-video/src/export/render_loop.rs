@@ -101,6 +101,10 @@ pub struct ResolvedExport {
     pub encoder_speed: Option<String>,
     /// K-F5: free-form encoder args.
     pub raw_encoder_args: Vec<String>,
+    /// K-F polish: burn sequence timecode into the picture via ffmpeg drawtext.
+    pub burn_in_timecode: bool,
+    /// K-F polish: two-pass encode hint.
+    pub two_pass: bool,
 }
 
 impl ResolvedExport {
@@ -123,6 +127,8 @@ impl ResolvedExport {
             prefer_hardware: false,
             encoder_speed: None,
             raw_encoder_args: Vec::new(),
+            burn_in_timecode: false,
+            two_pass: false,
         }
     }
 }
@@ -159,6 +165,8 @@ pub fn export_frames(
         prefer_hardware: resolved.prefer_hardware,
         encoder_speed: resolved.encoder_speed.as_deref(),
         raw_encoder_args: &resolved.raw_encoder_args,
+        burn_in_timecode: resolved.burn_in_timecode,
+        two_pass: resolved.two_pass,
     };
     let mut proc = EncoderProcess::spawn(tools, &caps, &spec, audio_samples)?;
 
@@ -321,6 +329,8 @@ mod tests {
             prefer_hardware: false,
             encoder_speed: None,
             raw_encoder_args: vec![],
+            burn_in_timecode: false,
+            two_pass: false,
         };
         let audio = vec![0.0f32; 48_000 / 10 * 2 * 5]; // 5 frames' worth of silence
         let cancel = AtomicBool::new(false);
@@ -373,6 +383,8 @@ mod tests {
             prefer_hardware: false,
             encoder_speed: None,
             raw_encoder_args: vec![],
+            burn_in_timecode: false,
+            two_pass: false,
         };
         let mut preset = preset;
         preset.audio = None;
@@ -412,6 +424,8 @@ mod tests {
             prefer_hardware: false,
             encoder_speed: None,
             raw_encoder_args: vec![],
+            burn_in_timecode: false,
+            two_pass: false,
         };
         let cancel = AtomicBool::new(false);
 

@@ -1089,6 +1089,19 @@ fn transition_mix(
                 (outgoing, OutPort::default()),
             ],
         ),
+        // Analytical luma-map wipe (26 K-B7): Photonic-authored maps, no asset.
+        TransitionKind::LumaWipe => b.push(
+            IrOp::LumaWipeMix {
+                kind: luma_wipe_kind(params.luma_map),
+                softness: params.softness,
+                invert: params.invert,
+                t,
+            },
+            vec![
+                (incoming, OutPort::default()),
+                (outgoing, OutPort::default()),
+            ],
+        ),
         // Forward-compat (39 §2.2): an unknown transition renders as a HARD CUT
         // — the incoming clip directly, no blend — never a guessed dissolve.
         // `TransitionKind` is `#[non_exhaustive]`, so this wildcard also catches
@@ -1101,6 +1114,17 @@ fn transition_mix(
             )));
             incoming
         }
+    }
+}
+
+fn luma_wipe_kind(m: timeline::LumaWipeMap) -> crate::graph::luma_wipe::LumaWipeKind {
+    use crate::graph::luma_wipe::LumaWipeKind;
+    match m {
+        timeline::LumaWipeMap::LinearH => LumaWipeKind::LinearH,
+        timeline::LumaWipeMap::LinearV => LumaWipeKind::LinearV,
+        timeline::LumaWipeMap::Radial => LumaWipeKind::Radial,
+        timeline::LumaWipeMap::BarnDoorH => LumaWipeKind::BarnDoorH,
+        timeline::LumaWipeMap::Clock => LumaWipeKind::Clock,
     }
 }
 
@@ -2789,6 +2813,18 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[*direction as u8]);
             f32b(h, *t);
         }
+        IrOp::LumaWipeMix {
+            kind,
+            softness,
+            invert,
+            t,
+        } => {
+            h.update(&[19]);
+            h.update(&[*kind as u8]);
+            f32b(h, *softness);
+            h.update(&[*invert as u8]);
+            f32b(h, *t);
+        }
         IrOp::CaptionOverlay { cue_batch } => {
             h.update(&[8]);
             hash_caption_batch(h, cue_batch);
@@ -4243,6 +4279,7 @@ mod tests {
             IrOp::Merge { .. } => "Merge",
             IrOp::WipeMix { .. } => "WipeMix",
             IrOp::PushMix { .. } => "PushMix",
+            IrOp::LumaWipeMix { .. } => "LumaWipeMix",
             IrOp::CaptionOverlay { .. } => "CaptionOverlay",
             IrOp::Crop => "Crop",
             IrOp::Resize { .. } => "Resize",
@@ -5463,5 +5500,62 @@ mod tests {
                 .any(|n| matches!(n.op, IrOp::PushMix { .. })),
             "a PushMix node lowers for a Push transition"
         );
+    }
+
+    /// K-B7: a `LumaWipe` transition lowers to `LumaWipeMix` with no diagnostic.
+    #[test]
+    fn luma_wipe_transition_lowers_without_diagnostic() {
+        use photonic_core::timeline::{LumaWipeMap, TransitionParams};
+        let mut project = TimelineProject::new();
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 4, 4);
+        let seq_id = seq.id;
+        let mut t = Track::new(TrackKind::Video, "V1");
+        t.clips.push(solid_clip(
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            0,
+            100,
+        ));
+        let mut b = solid_clip(
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            100,
+            100,
+        );
+        let mut tr = Transition::new(TransitionKind::LumaWipe, Tick(40));
+        tr.params = TransitionParams {
+            luma_map: LumaWipeMap::Radial,
+            softness: 0.05,
+            invert: true,
+            ..Default::default()
+        };
+        b.transition_in = Some(tr);
+        t.clips.push(b);
+        seq.video_tracks.push(t);
+        project.insert_sequence(seq);
+
+        let out = compile(&project, seq_id, 0, Tick(120), Quality::FULL, None);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let found = out.graph.nodes.iter().find_map(|n| match &n.op {
+            IrOp::LumaWipeMix {
+                kind,
+                softness,
+                invert,
+                ..
+            } => Some((*kind, *softness, *invert)),
+            _ => None,
+        });
+        let (kind, soft, inv) = found.expect("a LumaWipeMix node lowers for LumaWipe");
+        assert_eq!(kind, crate::graph::luma_wipe::LumaWipeKind::Radial);
+        assert!((soft - 0.05).abs() < 1e-5);
+        assert!(inv);
     }
 }

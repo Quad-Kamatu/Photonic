@@ -144,6 +144,19 @@ pub struct RenderJobOptions {
     pub raw_encoder_args: Vec<String>,
     /// FFmpeg `-preset` speed string when supported (e.g. `"veryfast"`).
     pub encoder_speed: Option<String>,
+    /// Burn sequence timecode / frame number into the picture (K-F polish).
+    /// Implemented as an ffmpeg `drawtext` filter on the encode path when
+    /// tools are available; no-op when drawtext is missing.
+    pub burn_in_timecode: bool,
+    /// After a successful render, the GUI should offer / perform "add result
+    /// to media bin" (K-F polish). The engine records the path; the host acts.
+    pub add_to_bin: bool,
+    /// Request a two-pass encode when the preset codec supports it (K-F polish).
+    /// Surfaces as an encoder hint; software path may ignore if unsupported.
+    pub two_pass: bool,
+    /// Inhibit system sleep while this job runs (K-F polish). Best-effort;
+    /// platforms without a known inhibit API no-op.
+    pub inhibit_sleep: bool,
 }
 
 /// An export request (02 §7). Carried by [`EngineCmd::Export`]: the engine
@@ -281,8 +294,9 @@ pub struct EngineStatus {
     /// (02 §1's `doc_generation`).
     pub doc_revision: u64,
     pub active_sequence: Option<SequenceId>,
-    /// Most recent command failure (e.g. the P3 `Export`/`Probe` stubs).
-    pub last_error: Option<String>,
+    /// Most recent command failure as a first-class diagnostic (36).
+    /// GUI badge surface: `panels/video/diagnostics::diag_badge`.
+    pub last_error: Option<photonic_core::diag::Diagnostic>,
     /// Current single-monitor target (24 §3).
     pub preview_target: PreviewTarget,
     /// Draft / Full interactive quality (24 §4).
@@ -594,7 +608,7 @@ struct EngineThread {
     preview_quality: PreviewQuality,
     /// Set when present requested a frame but eval produced none (24 §5).
     buffering: bool,
-    last_error: Option<String>,
+    last_error: Option<photonic_core::diag::Diagnostic>,
     /// True while the GUI is actively dragging the playhead (between a
     /// `ScrubSeek` and the settling `Seek`). Selects the cheap keyframe-preview
     /// decode path and lets the compositor hold the last frame between previews.
@@ -884,45 +898,61 @@ impl EngineThread {
     }
 
     fn fail(&mut self, msg: String) {
+        self.fail_diag(photonic_core::diag::DiagCode::ExportEncoderFailed, msg);
+    }
+
+    fn fail_diag(&mut self, code: photonic_core::diag::DiagCode, msg: String) {
         tracing::warn!(target: "photonic_video::session", "{msg}");
-        self.last_error = Some(msg);
+        self.last_error = Some(photonic_core::diag::Diagnostic::new(
+            code,
+            photonic_core::diag::Subject::Engine,
+            msg,
+        ));
     }
 
     /// K-0.8: run `ffprobe` on `asset`'s file, write probe + content hash into
     /// the document via `set_asset_meta`, and drop any open decode source so the
     /// next present re-opens against the fresh meta.
     fn probe_asset(&mut self, asset: AssetId) {
+        use photonic_core::diag::DiagCode;
         let Some(tools) = self.tools.clone() else {
-            self.fail(format!(
-                "EngineCmd::Probe({asset}): ffmpeg/ffprobe tools are not available"
-            ));
+            self.fail_diag(
+                DiagCode::MediaProbeFailed,
+                format!("EngineCmd::Probe({asset}): ffmpeg/ffprobe tools are not available"),
+            );
             return;
         };
         let Some(project) = self.snapshot.as_ref() else {
-            self.fail(format!(
-                "EngineCmd::Probe({asset}): no timeline snapshot is loaded yet"
-            ));
+            self.fail_diag(
+                DiagCode::MediaProbeFailed,
+                format!("EngineCmd::Probe({asset}): no timeline snapshot is loaded yet"),
+            );
             return;
         };
         let Some(media_asset) = project.media.assets.get(&asset) else {
-            self.fail(format!(
-                "EngineCmd::Probe({asset}): asset not in media pool"
-            ));
+            self.fail_diag(
+                DiagCode::MediaNotFound,
+                format!("EngineCmd::Probe({asset}): asset not in media pool"),
+            );
             return;
         };
         let path = match &media_asset.source {
             AssetSource::File { path, .. } => path.clone(),
             other => {
-                self.fail(format!(
-                    "EngineCmd::Probe({asset}): source is not a file ({other:?})"
-                ));
+                self.fail_diag(
+                    DiagCode::MediaProbeFailed,
+                    format!("EngineCmd::Probe({asset}): source is not a file ({other:?})"),
+                );
                 return;
             }
         };
         let details = match probe_details(&tools, &path) {
             Ok(d) => d,
             Err(e) => {
-                self.fail(format!("EngineCmd::Probe({asset}): {e}"));
+                self.fail_diag(
+                    DiagCode::MediaProbeFailed,
+                    format!("EngineCmd::Probe({asset}): {e}"),
+                );
                 return;
             }
         };
@@ -954,7 +984,10 @@ impl EngineThread {
             }
         };
         if let Some(msg) = apply_err {
-            self.fail(format!("EngineCmd::Probe({asset}): {msg}"));
+            self.fail_diag(
+                photonic_core::diag::DiagCode::MediaProbeFailed,
+                format!("EngineCmd::Probe({asset}): {msg}"),
+            );
             return;
         }
         // Force decode reopen against the updated meta.

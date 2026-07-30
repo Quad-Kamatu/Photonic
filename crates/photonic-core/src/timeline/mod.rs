@@ -47,8 +47,8 @@ pub use captions::{
     KaraokeMode, KaraokeStyle,
 };
 pub use clip::{
-    AnchorSpace, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, Ratio, SpeedMap,
-    TextClipContent, Transition, TransitionKind, TransitionParams, WipeDirection,
+    AnchorSpace, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, LumaWipeMap, Ratio,
+    SpeedMap, TextClipContent, Transition, TransitionKind, TransitionParams, WipeDirection,
 };
 pub use commands::{
     AnimTarget, AudioCmd, CaptionCmd, ClipTiming, FadeEdge, FormatOp, FxOwner, GraphCmd,

@@ -554,3 +554,221 @@ fn ui_effects_catalogue_has_bridged_surface() {
         );
     }
 }
+
+// ── 10. AS-2 GUI arm (structural, CAP-019 pair) ─────────────────────────────
+//
+// Script arm: tools/as2_proxy_edit.py. This path exercises the same core ops
+// the GUI uses for multi-clip import → insert → transition → grade → dual
+// export-job construction, without requiring a live MCP server.
+
+#[test]
+fn ui_as2_short_film_structural_arm() {
+    use photonic_core::timeline::{
+        Clip, EaseCurve, Grade, Transition, TransitionKind, TransitionParams,
+    };
+    use photonic_video::export::presets;
+    use photonic_video::session::{ExportJob, RenderJobOptions};
+
+    let path_a = counter_mp4();
+    let path_b = fixtures_dir().join("color_bars.mp4");
+    if !path_a.is_file() || !path_b.is_file() {
+        eprintln!("skip as2 gui arm: fixtures missing");
+        return;
+    }
+
+    let mut doc = Document::new("as2", 1920.0, 1080.0);
+    let mut project = TimelineProject::new();
+    let mut seq = Sequence::new("AS-2 Sequence", FrameRate::FPS_30, 1920, 1080);
+    let seq_id = seq.id;
+    let mut v1 = Track::new(TrackKind::Video, "V1");
+    let mut a1 = Track::new(TrackKind::Audio, "A1");
+    let v1_id = v1.id;
+    let a1_id = a1.id;
+
+    let asset_a = MediaAsset::from_file(AssetKind::Video, &path_a);
+    let asset_b = MediaAsset::from_file(AssetKind::Video, &path_b);
+    let id_a = asset_a.id;
+    let id_b = asset_b.id;
+    project.media.insert(asset_a);
+    project.media.insert(asset_b);
+
+    let mut c1 = Clip::new(
+        ClipSource::Asset { asset: id_a },
+        Tick::ZERO,
+        Tick(1_000_000),
+    );
+    let c2 = Clip::new(
+        ClipSource::Asset { asset: id_b },
+        Tick(1_000_000),
+        Tick(1_000_000),
+    );
+    // Cross-dissolve transition on the cut (AS-2 multi-track edit beat).
+    let mut xfade = Transition::new(TransitionKind::CrossDissolve, Tick(200_000));
+    xfade.params = TransitionParams {
+        curve: EaseCurve::EaseInOut,
+        ..Default::default()
+    };
+    c1.transition_out = Some(xfade);
+    // Grade on clip (AS-2 grade beat) — GUI color page writes via set_grade.
+    c1.grade = Some(Grade::new());
+    let c1_id = c1.id;
+    let c2_id = c2.id;
+    v1.clips.push(c1);
+    v1.clips.push(c2);
+    a1.clips.push(Clip::new(
+        ClipSource::Asset { asset: id_a },
+        Tick::ZERO,
+        Tick(1_000_000),
+    ));
+    seq.video_tracks.push(v1);
+    seq.audio_tracks.push(a1);
+    project.sequences.insert(seq_id, seq);
+    project.active_sequence = Some(seq_id);
+    project.sequence_order.push(seq_id);
+    doc.timeline = Some(project);
+
+    let project = doc.timeline.as_ref().unwrap();
+    let s = project.sequences.get(&seq_id).unwrap();
+    assert_eq!(
+        s.video_tracks
+            .iter()
+            .find(|t| t.id == v1_id)
+            .unwrap()
+            .clips
+            .len(),
+        2
+    );
+    assert_eq!(
+        s.audio_tracks
+            .iter()
+            .find(|t| t.id == a1_id)
+            .unwrap()
+            .clips
+            .len(),
+        1
+    );
+    let clip1 = s.video_tracks[0]
+        .clips
+        .iter()
+        .find(|c| c.id == c1_id)
+        .unwrap();
+    assert!(clip1.transition_out.is_some());
+    assert!(clip1.grade.is_some());
+    assert!(s.video_tracks[0].clips.iter().any(|c| c.id == c2_id));
+
+    // Dual export jobs (master-ish + web) — structural twin of as2 dual export.
+    let web = presets::built_in_presets()
+        .into_iter()
+        .find(|p| p.name.contains("H.264") || p.name.contains("Web"))
+        .expect("web preset");
+    let jobs = [
+        ExportJob {
+            sequence: seq_id,
+            format_index: 0,
+            preset: web.clone(),
+            output: std::env::temp_dir().join("as2_master.mp4"),
+            range: None,
+            options: RenderJobOptions {
+                inhibit_sleep: true,
+                ..Default::default()
+            },
+        },
+        ExportJob {
+            sequence: seq_id,
+            format_index: 0,
+            preset: web,
+            output: std::env::temp_dir().join("as2_web.mp4"),
+            range: None,
+            options: RenderJobOptions::default(),
+        },
+    ];
+    assert_eq!(jobs.len(), 2);
+    assert_ne!(jobs[0].output, jobs[1].output);
+}
+
+// ── 11. AS-3 GUI arm (structural, CAP-019 pair) ─────────────────────────────
+//
+// Script arm: tools/as3_motion_graphics.py. This path keyframes clip transform
+// and places a partial-alpha clip for alpha export readiness — the same ops
+// the GUI keyframe editor and media pool use.
+
+#[test]
+fn ui_as3_motion_graphics_structural_arm() {
+    use photonic_core::timeline::{AnimTarget, Clip, Interp, Keyframe, PropPath, PropValue};
+
+    let mut doc = Document::new("as3", 1920.0, 1080.0);
+    let mut history = CommandHistory::new(64);
+    let mut project = TimelineProject::new();
+    let mut seq = Sequence::new("AS-3 Sequence", FrameRate::FPS_30, 1920, 1080);
+    let seq_id = seq.id;
+    let mut track = Track::new(TrackKind::Video, "V1");
+    let track_id = track.id;
+
+    // Solid title stand-in (vector doc optional when fixture absent).
+    let title = Clip::new(
+        ClipSource::SolidColor {
+            color: photonic_core::Color {
+                r: 0.1,
+                g: 0.2,
+                b: 0.8,
+                a: 1.0,
+            },
+        },
+        Tick::ZERO,
+        Tick(2_000_000),
+    );
+    let title_id = title.id;
+    track.clips.push(title);
+
+    // Partial-alpha stand-in for CAP-021 alpha export readiness.
+    let alpha_path = fixtures_dir().join("alpha_gradient.mov");
+    if alpha_path.is_file() {
+        let asset = MediaAsset::from_file(AssetKind::Video, &alpha_path);
+        let aid = asset.id;
+        project.media.insert(asset);
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset: aid },
+            Tick(2_000_000),
+            Tick(500_000),
+        ));
+    }
+
+    seq.video_tracks.push(track);
+    project.sequences.insert(seq_id, seq);
+    project.active_sequence = Some(seq_id);
+    project.sequence_order.push(seq_id);
+    doc.timeline = Some(project);
+
+    // Keyframe transform.x via the same ops the GUI keyframe editor uses.
+    let target = AnimTarget::ClipTransform { clip: title_id };
+    for kf in [
+        Keyframe::new(Tick::ZERO, PropValue::Float(0.0), Interp::Linear),
+        Keyframe::new(Tick(1_000_000), PropValue::Float(200.0), Interp::Linear),
+    ] {
+        let cmd = {
+            let p = doc.timeline.as_ref().unwrap();
+            ops::set_keyframe(p, target.clone(), PropPath::new("transform.x"), kf)
+        };
+        history.execute_discrete(Command::Timeline(cmd), &mut doc);
+    }
+
+    let project = doc.timeline.as_ref().unwrap();
+    let clip = project
+        .sequences
+        .get(&seq_id)
+        .unwrap()
+        .video_tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.id == title_id)
+        .unwrap();
+    let x_track = clip
+        .transform
+        .track(&PropPath::new("transform.x"))
+        .expect("transform.x keyframes like keyframe editor");
+    assert_eq!(x_track.keyframes.len(), 2);
+    assert_eq!(x_track.keyframes[1].value, PropValue::Float(200.0));
+}

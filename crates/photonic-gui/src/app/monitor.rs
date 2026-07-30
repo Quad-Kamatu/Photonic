@@ -1275,12 +1275,14 @@ impl PhotonicApp {
                 );
             }
             if let Some(err) = &status.last_error {
+                // 36: Diagnostic → badge mapping (code + severity colour).
+                let badge = crate::panels::video::diagnostics::diag_badge(err);
                 painter.text(
                     video_rect.left_bottom() + egui::vec2(6.0, -6.0),
                     egui::Align2::LEFT_BOTTOM,
-                    err,
+                    format!("{} · {}", badge.severity_label, badge.text),
                     egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(235, 130, 100),
+                    badge.color,
                 );
             }
         }

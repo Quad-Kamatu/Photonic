@@ -452,14 +452,15 @@ fn unserviceable_engine_cmd_surfaces_an_error_on_status() {
     loop {
         let status = session.status();
         if let Some(err) = &status.last_error {
+            let text = err.to_string();
             assert!(
-                !err.contains("not implemented"),
+                !text.contains("not implemented"),
                 "Probe is implemented since K-0.8; a 'not implemented' error \
-                 means the command regressed to a stub: {err}"
+                 means the command regressed to a stub: {text}"
             );
             assert!(
-                !err.trim().is_empty(),
-                "the surfaced error must say something actionable"
+                !err.message.trim().is_empty(),
+                "the surfaced Diagnostic must say something actionable"
             );
             break;
         }

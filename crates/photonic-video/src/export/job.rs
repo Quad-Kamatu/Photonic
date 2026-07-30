@@ -30,6 +30,53 @@ use crate::graph::eval::{read_texture_rgba16f, GpuContext};
 use crate::media::ffmpeg_locate::FfmpegTools;
 use crate::session::{EngineCmd, ExportJob, ProxyMode, VideoEngine};
 
+/// Best-effort system sleep inhibitor for export (K-F polish).
+///
+/// On Linux, spawns `systemd-inhibit --what=idle:sleep --who=Photonic
+/// --why=export sleep infinity` and kills it on drop. Other platforms no-op.
+struct SleepInhibit {
+    child: Option<std::process::Child>,
+}
+
+impl SleepInhibit {
+    fn acquire() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            match std::process::Command::new("systemd-inhibit")
+                .args([
+                    "--what=idle:sleep",
+                    "--who=Photonic",
+                    "--why=export",
+                    "sleep",
+                    "infinity",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(child) => return SleepInhibit { child: Some(child) },
+                Err(e) => {
+                    tracing::debug!(
+                        target: "photonic_video::export",
+                        "sleep inhibit unavailable: {e}"
+                    );
+                }
+            }
+        }
+        SleepInhibit { child: None }
+    }
+}
+
+impl Drop for SleepInhibit {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Everything an [`ExportJob`]'s abstract preset resolves to against a concrete
 /// sequence (05 §3.2/§3.3): concrete output/format sizes, the output frame
 /// rate, the exact work range, the frame count, and the (unmodified) preset —
@@ -221,6 +268,13 @@ pub fn run_export_job(
         (None, None)
     };
 
+    // K-F polish: best-effort sleep inhibit for the duration of this job.
+    let _sleep_guard = if job.options.inhibit_sleep {
+        Some(SleepInhibit::acquire())
+    } else {
+        None
+    };
+
     let resolved = ResolvedExport {
         width: r.out_size.0,
         height: r.out_size.1,
@@ -231,6 +285,8 @@ pub fn run_export_job(
         prefer_hardware: job.options.prefer_hardware,
         encoder_speed: job.options.encoder_speed.clone(),
         raw_encoder_args: job.options.raw_encoder_args.clone(),
+        burn_in_timecode: job.options.burn_in_timecode,
+        two_pass: job.options.two_pass,
     };
     let (fw, fh) = r.format_size;
     let (ow, oh) = r.out_size;

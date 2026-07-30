@@ -257,6 +257,18 @@ fn eval_op(
             (Some(only), None) | (None, Some(only)) => (*only).clone(),
             (None, None) => Image::new(cw, ch),
         },
+        IrOp::LumaWipeMix {
+            kind,
+            softness,
+            invert,
+            t,
+        } => match (inputs.first(), inputs.get(1)) {
+            (Some(incoming), Some(outgoing)) => {
+                ops::luma_wipe(incoming, outgoing, *kind, *softness, *invert, *t)
+            }
+            (Some(only), None) | (None, Some(only)) => (*only).clone(),
+            (None, None) => Image::new(cw, ch),
+        },
         IrOp::Crop => match inputs.first() {
             Some(input) => ops::crop(input),
             None => Image::new(cw, ch),

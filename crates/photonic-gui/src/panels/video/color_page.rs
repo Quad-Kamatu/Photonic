@@ -1528,15 +1528,14 @@ fn draw_vectorscope(
     });
     ui.data_mut(|d| d.insert_temp(id, use_601));
 
-    let vs = if use_601 {
-        // CPU path with BT.601 — read texture not available here cheaply;
-        // fall back to GPU 709 bins but label the mode (full 601 GPU twin is
-        // residual). Show the switch and use GPU data so the panel still works.
-        photonic_render::scopes::vectorscope_gpu_logical(device, queue, tex, logical_w, logical_h)
+    let matrix = if use_601 {
+        photonic_render::color::Matrix::Bt601
     } else {
-        photonic_render::scopes::vectorscope_gpu_logical(device, queue, tex, logical_w, logical_h)
+        photonic_render::color::Matrix::Bt709
     };
-    let _ = use_601;
+    let vs = photonic_render::scopes::vectorscope_gpu_logical_matrix(
+        device, queue, tex, logical_w, logical_h, matrix,
+    );
     let n = vs.size;
     let mut pixels = vec![Color32::from_rgb(7, 7, 11); n * n];
     let peak = vs.data.iter().copied().max().unwrap_or(1).max(1) as f32;

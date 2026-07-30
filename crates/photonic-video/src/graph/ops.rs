@@ -724,6 +724,42 @@ fn sweep_coord(dir: WipeDirection, x: u32, y: u32, w: u32, h: u32) -> f32 {
     }
 }
 
+/// Analytical luma-map wipe (26 K-B7): per-pixel switch time from
+/// [`crate::graph::luma_wipe`], blended with [`crate::graph::luma_wipe::soft_mix`].
+/// Premultiplied lerp; `t == 0` → `outgoing`, `t == 1` → `incoming`. WGSL twin is
+/// `eval::Passes::luma_wipe`.
+pub fn luma_wipe(
+    incoming: &Image,
+    outgoing: &Image,
+    kind: crate::graph::luma_wipe::LumaWipeKind,
+    softness: f32,
+    invert: bool,
+    t: f32,
+) -> Image {
+    use crate::graph::luma_wipe::{luma_at, soft_mix};
+    let w = incoming.width.max(outgoing.width);
+    let h = incoming.height.max(outgoing.height);
+    let mut out = Image::new(w, h);
+    let wf = w.max(1) as f32;
+    let hf = h.max(1) as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let u = (x as f32 + 0.5) / wf;
+            let v = (y as f32 + 0.5) / hf;
+            let m = luma_at(kind, u, v, invert);
+            let reveal = soft_mix(t, m, softness);
+            let ip = sample_clamped(incoming, x, y);
+            let op = sample_clamped(outgoing, x, y);
+            let mut px = [0.0f32; 4];
+            for c in 0..4 {
+                px[c] = op[c] * (1.0 - reveal) + ip[c] * reveal;
+            }
+            out.set(x, y, px);
+        }
+    }
+    out
+}
+
 /// `WipeMix` (08 §2.0b): a directional `smoothstep` wipe between `incoming` and
 /// `outgoing` at eased factor `t`; `softness` is the edge half-width (canvas-
 /// normalised). The edge is remapped to sweep the full `[-s, 1+s]` range so the
@@ -1337,6 +1373,31 @@ mod tests {
         WipeDirection::TopToBottom,
         WipeDirection::BottomToTop,
     ];
+
+    /// K-B7: luma-wipe endpoints are bit-exact even with softness.
+    #[test]
+    fn luma_wipe_endpoints_are_exact() {
+        let incoming = solid(4, 4, RED);
+        let outgoing = solid(4, 4, BLUE);
+        let out0 = luma_wipe(
+            &incoming,
+            &outgoing,
+            crate::graph::luma_wipe::LumaWipeKind::LinearH,
+            0.1,
+            false,
+            0.0,
+        );
+        let out1 = luma_wipe(
+            &incoming,
+            &outgoing,
+            crate::graph::luma_wipe::LumaWipeKind::LinearH,
+            0.1,
+            false,
+            1.0,
+        );
+        assert_eq!(out0.pixels, outgoing.pixels, "t=0 == outgoing");
+        assert_eq!(out1.pixels, incoming.pixels, "t=1 == incoming");
+    }
 
     /// The wipe endpoints are bit-exact for every direction (even with softness):
     /// `t == 0` is the outgoing frame, `t == 1` the incoming.

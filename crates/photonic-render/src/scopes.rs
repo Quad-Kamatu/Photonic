@@ -265,14 +265,26 @@ fn cs_wave(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Vectorscope compute kernel: Rec.709 Cb×Cr scatter,
-/// `bins[cr*256 + cb]` (07 §5).
+/// Vectorscope compute kernel: Cb×Cr scatter with selectable matrix,
+/// `bins[cr*256 + cb]` (07 §5 / K-E1). `logical.z == 1` selects BT.601;
+/// otherwise BT.709. Denominators match `crate::color::{BT709_*, BT601_*}`.
 pub const VECTORSCOPE_SHADER: &str = r#"
 __PRELUDE__
-fn cbcr(s: vec3<f32>) -> vec2<u32> {
-    let y = luma709(s);
-    let cb = (s.b - y) / 1.8556;
-    let cr = (s.r - y) / 1.5748;
+fn cbcr(s: vec3<f32>, use_601: bool) -> vec2<u32> {
+    var y: f32;
+    var cb_b: f32;
+    var cr_r: f32;
+    if (use_601) {
+        y = 0.299 * s.r + 0.587 * s.g + 0.114 * s.b;
+        cb_b = 1.772;
+        cr_r = 1.402;
+    } else {
+        y = luma709(s);
+        cb_b = 1.8556;
+        cr_r = 1.5748;
+    }
+    let cb = (s.b - y) / cb_b;
+    let cr = (s.r - y) / cr_r;
     let cbn = u32(clamp(round((cb + 0.5) * 255.0), 0.0, 255.0));
     let crn = u32(clamp(round((cr + 0.5) * 255.0), 0.0, 255.0));
     return vec2<u32>(cbn, crn);
@@ -282,7 +294,7 @@ fn cs_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_scope(gid)) { return; }
     let px = textureLoad(t_src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
     let s = signal(px);
-    let b = cbcr(s);
+    let b = cbcr(s, logical.z != 0u);
     atomicAdd(&bins[b.y * 256u + b.x], 1u);
 }
 "#;
@@ -319,6 +331,21 @@ fn run_scope(
     out_len: usize,
     logical: (u32, u32),
 ) -> Vec<u32> {
+    run_scope_ex(device, queue, tex, shader_src, entry, out_len, logical, 0)
+}
+
+/// Like [`run_scope`], with an extra uniform `z` packed into the logical
+/// buffer (vectorscope matrix: 0 = BT.709, 1 = BT.601).
+fn run_scope_ex(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    shader_src: &str,
+    entry: &str,
+    out_len: usize,
+    logical: (u32, u32),
+    extra_z: u32,
+) -> Vec<u32> {
     let bins = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("scope_bins"),
         contents: bytemuck::cast_slice(&vec![0u32; out_len]),
@@ -326,7 +353,7 @@ fn run_scope(
     });
     let logical_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("scope_logical"),
-        contents: bytemuck::cast_slice(&[logical.0, logical.1, 0u32, 0u32]),
+        contents: bytemuck::cast_slice(&[logical.0, logical.1, extra_z, 0u32]),
         usage: wgpu::BufferUsages::UNIFORM,
     });
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -514,6 +541,7 @@ pub fn vectorscope_gpu(
 }
 
 /// [`vectorscope_gpu`] restricted to the image's logical `w × h` (K-E2).
+/// Defaults to BT.709 (HD).
 pub fn vectorscope_gpu_logical(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -521,7 +549,20 @@ pub fn vectorscope_gpu_logical(
     w: u32,
     h: u32,
 ) -> Vectorscope {
-    let data = run_scope(
+    vectorscope_gpu_logical_matrix(device, queue, tex, w, h, color::Matrix::Bt709)
+}
+
+/// Vectorscope over logical `w × h` with a selectable YCbCr matrix (K-E1).
+pub fn vectorscope_gpu_logical_matrix(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    w: u32,
+    h: u32,
+    matrix: color::Matrix,
+) -> Vectorscope {
+    let use_601 = matches!(matrix, color::Matrix::Bt601) as u32;
+    let data = run_scope_ex(
         device,
         queue,
         tex,
@@ -529,6 +570,7 @@ pub fn vectorscope_gpu_logical(
         "cs_vector",
         VECTORSCOPE_SIZE * VECTORSCOPE_SIZE,
         (w, h),
+        use_601,
     );
     Vectorscope {
         size: VECTORSCOPE_SIZE,

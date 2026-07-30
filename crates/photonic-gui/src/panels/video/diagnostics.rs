@@ -5,17 +5,10 @@
 //! `code — message` line — plus a tiny renderer. This is the GUI-side of the
 //! 36 diagnostic taxonomy: the *shape* a status-bar badge / toast renders.
 //!
-//! ## Wiring status (trust-the-code note)
-//! Spec 36 anticipates `EngineStatus.last_error` carrying a `Diagnostic`, but
-//! as committed [`photonic_video::EngineStatus::last_error`] is still an
-//! `Option<String>` — no `Diagnostic` reaches the GUI yet. The program monitor
-//! (`app/monitor.rs`) already surfaces that `String` as an error line, so the
-//! *surface* exists. This module supplies the ready-to-consume badge mapping so
-//! that the moment the engine publishes a real `Diagnostic` on `EngineStatus`,
-//! rendering it (code + message + severity colour) is a one-line call to
-//! [`diag_badge`] — no view-model work left. Until then the mapping is verified
-//! purely by its own tests.
-#![allow(dead_code)] // wired-but-unconsumed until `EngineStatus` carries a `Diagnostic`.
+//! ## Wiring status
+//! `EngineStatus.last_error` is now `Option<Diagnostic>` (36 residual closed).
+//! Call [`diag_badge`] on it for the status-bar badge; the program monitor still
+//! paints `Display` as a one-line fallback.
 
 use egui::{Color32, RichText};
 use photonic_core::diag::{Diagnostic, Severity};

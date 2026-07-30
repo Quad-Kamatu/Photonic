@@ -84,6 +84,10 @@ struct DialogState {
     prefer_hardware: bool,
     encoder_speed: Option<String>,
     raw_encoder_args: String,
+    burn_in_timecode: bool,
+    add_to_bin: bool,
+    two_pass: bool,
+    inhibit_sleep: bool,
     save_as_name: String,
     job: Option<JobState>,
 }
@@ -262,6 +266,10 @@ impl DialogState {
             prefer_hardware: false,
             encoder_speed: None,
             raw_encoder_args: String::new(),
+            burn_in_timecode: false,
+            add_to_bin: false,
+            two_pass: false,
+            inhibit_sleep: true,
             save_as_name: String::new(),
             job: None,
         }
@@ -1126,6 +1134,20 @@ fn draw_job_options(ui: &mut egui::Ui, state: &mut DialogState) {
              available for this codec. Errors if none is present — never \
              silently falls back (K-F5 / 23 §10.3).",
         );
+        ui.checkbox(
+            &mut state.burn_in_timecode,
+            "Burn-in timecode / frame number",
+        )
+        .on_hover_text("Overlays sequence timecode on the encode path (K-F polish).");
+        ui.checkbox(&mut state.add_to_bin, "Add result to media bin when done")
+            .on_hover_text("Host imports the finished file into the media pool (K-F polish).");
+        ui.checkbox(&mut state.two_pass, "Two-pass encode (when supported)")
+            .on_hover_text("Hint for software encoders that support multipass (K-F polish).");
+        ui.checkbox(
+            &mut state.inhibit_sleep,
+            "Inhibit system sleep during render",
+        )
+        .on_hover_text("Best-effort: keeps the machine awake while the job runs.");
         ui.horizontal(|ui| {
             ui.label("Encoder speed:");
             let mut speed = state.encoder_speed.clone().unwrap_or_default();
@@ -1231,6 +1253,10 @@ fn build_export_jobs(doc: &Document, seq_id: SequenceId, state: &DialogState) ->
                         .map(str::to_string)
                         .collect(),
                     encoder_speed: state.encoder_speed.clone(),
+                    burn_in_timecode: state.burn_in_timecode,
+                    add_to_bin: state.add_to_bin,
+                    two_pass: state.two_pass,
+                    inhibit_sleep: state.inhibit_sleep,
                 },
             });
         }

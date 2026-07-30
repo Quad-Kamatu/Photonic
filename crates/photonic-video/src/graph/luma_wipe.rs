@@ -2,12 +2,12 @@
 //!
 //! Produces per-pixel switch times in `[0, 1]` (black first → white last) at
 //! any resolution, full float precision — Photonic-authored maths, not
-//! bundled GPL assets. Used by future `TransitionKind::LumaWipe` / `IrOp`
-//! binding; pure + unit-tested now so the catalogue can grow without asset
-//! drop-ins.
+//! bundled GPL assets. Bound by `TransitionKind::LumaWipe` → `IrOp::LumaWipeMix`
+//! (26 K-B7).
 
 /// Built-in wipe families (MLT-style type 0/1/3 patterns restated in Photonic
 /// vocabulary — clean-room).
+#[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LumaWipeKind {
     /// Left-to-right linear bar.

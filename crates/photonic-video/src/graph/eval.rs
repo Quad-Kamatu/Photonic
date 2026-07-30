@@ -251,6 +251,65 @@ struct W { params: vec4<f32>, dims: vec4<f32> }
 }
 "#;
 
+/// `LumaWipeMix` fragment shader (26 K-B7) — WGSL twin of `graph::ops::luma_wipe`.
+/// Analytical map (kind 0..4) + soft_mix(t, m, soft); premultiplied lerp.
+const LUMA_WIPE_FS: &str = r#"
+@group(0) @binding(0) var t_in: texture_2d<f32>;
+@group(0) @binding(1) var t_out: texture_2d<f32>;
+@group(0) @binding(2) var s: sampler;
+struct W { params: vec4<f32>, dims: vec4<f32> }
+@group(0) @binding(3) var<uniform> u: W;
+fn soft_mix(t: f32, m: f32, soft: f32) -> f32 {
+  if (soft < 1e-6) {
+    if (t >= m) { return 1.0; }
+    return 0.0;
+  }
+  let lo = m - soft;
+  let hi = m + soft;
+  if (t <= lo) { return 0.0; }
+  if (t >= hi) { return 1.0; }
+  let x = clamp((t - lo) / (hi - lo), 0.0, 1.0);
+  return x * x * (3.0 - 2.0 * x);
+}
+fn luma_map(kind: i32, uv: vec2<f32>, invert: bool) -> f32 {
+  let u = clamp(uv.x, 0.0, 1.0);
+  let v = clamp(uv.y, 0.0, 1.0);
+  var t = 0.0;
+  if (kind == 0) { t = u; }
+  else if (kind == 1) { t = v; }
+  else if (kind == 2) {
+    let dx = u - 0.5;
+    let dy = v - 0.5;
+    let r = sqrt(dx * dx + dy * dy);
+    t = clamp(r / 0.70710678118, 0.0, 1.0);
+  } else if (kind == 3) {
+    t = clamp(2.0 * abs(u - 0.5), 0.0, 1.0);
+  } else {
+    let dx = u - 0.5;
+    let dy = v - 0.5;
+    let a = atan2(dy, dx);
+    var tt = (-a + 3.14159265359) / (2.0 * 3.14159265359);
+    if (tt >= 1.0) { tt = 0.0; }
+    t = tt;
+  }
+  t = clamp(t, 0.0, 1.0);
+  if (invert) { return 1.0 - t; }
+  return t;
+}
+@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+  let kind = i32(u.params.x + 0.5);
+  let soft = u.params.y;
+  let inv = u.params.z > 0.5;
+  let t = u.params.w;
+  let uv = vec2<f32>(i.pos.x / u.dims.x, i.pos.y / u.dims.y);
+  let m = luma_map(kind, uv, inv);
+  let reveal = soft_mix(t, m, soft);
+  let inc = textureSample(t_in, s, i.uv);
+  let outg = textureSample(t_out, s, i.uv);
+  return mix(outg, inc, reveal);
+}
+"#;
+
 /// `PushMix` fragment shader (08 §2.0b) — the WGSL twin of `graph::ops::push`.
 /// Both layers translate along the direction axis by `t`; each output pixel picks
 /// the incoming or outgoing layer and bilinear-samples it at the translated
@@ -729,6 +788,29 @@ impl Evaluator {
                     logical_h,
                     incoming.width,
                     incoming.height,
+                ),
+                (Some(only), None) | (None, Some(only)) => {
+                    self.passes.blit(&self.gpu, &only.texture, target)
+                }
+                (None, None) => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::LumaWipeMix {
+                kind,
+                softness,
+                invert,
+                t,
+            } => match (inputs.first(), inputs.get(1)) {
+                (Some(incoming), Some(outgoing)) => self.passes.luma_wipe(
+                    &self.gpu,
+                    &incoming.texture,
+                    &outgoing.texture,
+                    *kind,
+                    *softness,
+                    *invert,
+                    *t,
+                    target,
+                    logical_w,
+                    logical_h,
                 ),
                 (Some(only), None) | (None, Some(only)) => {
                     self.passes.blit(&self.gpu, &only.texture, target)
@@ -1343,6 +1425,8 @@ struct Passes {
     /// `WipeMix` (08 §2.0b): binary directional smoothstep wipe. Reuses the merge
     /// BGL (two textures + sampler + a params uniform). WGSL twin of `ops::wipe`.
     wipe_pipeline: wgpu::RenderPipeline,
+    /// `LumaWipeMix` (26 K-B7): analytical map wipe. Reuses the merge BGL.
+    luma_wipe_pipeline: wgpu::RenderPipeline,
     /// `PushMix` (08 §2.0b): binary directional slide. Its own BGL (two textures +
     /// a params uniform; textureLoad, no sampler). WGSL twin of `ops::push`.
     push_pipeline: wgpu::RenderPipeline,
@@ -1727,6 +1811,10 @@ impl Passes {
         let wipe_src = format!("{QUAD_VS}\n{WIPE_FS}");
         let wipe_pipeline = make_pipeline(device, &merge_bgl, &wipe_src, "fs");
 
+        // LumaWipeMix (26 K-B7): analytical map wipe, same BGL as Wipe/Merge.
+        let luma_wipe_src = format!("{QUAD_VS}\n{LUMA_WIPE_FS}");
+        let luma_wipe_pipeline = make_pipeline(device, &merge_bgl, &luma_wipe_src, "fs");
+
         // PushMix (08 §2.0b): binary directional slide via textureLoad (no
         // sampler) — its own BGL (two textures + a params uniform). WGSL twin of
         // `ops::push`.
@@ -1790,6 +1878,7 @@ impl Passes {
             merge_pipeline,
             merge_bgl,
             wipe_pipeline,
+            luma_wipe_pipeline,
             push_pipeline,
             push_bgl,
             sampler,
@@ -3311,6 +3400,65 @@ impl Passes {
             ],
         });
         self.run(gpu, &self.wipe_pipeline, &bind, target);
+    }
+
+    /// `LumaWipeMix` pass (26 K-B7): WGSL twin of `ops::luma_wipe`.
+    #[allow(clippy::too_many_arguments)]
+    fn luma_wipe(
+        &self,
+        gpu: &GpuContext,
+        incoming: &wgpu::Texture,
+        outgoing: &wgpu::Texture,
+        kind: crate::graph::luma_wipe::LumaWipeKind,
+        softness: f32,
+        invert: bool,
+        t: f32,
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+    ) {
+        let uniform = [
+            kind as u8 as f32,
+            softness.clamp(0.0, 0.5),
+            if invert { 1.0 } else { 0.0 },
+            t,
+            logical_w as f32,
+            logical_h as f32,
+            0.0,
+            0.0,
+        ];
+        let iv = incoming.create_view(&Default::default());
+        let ov = outgoing.create_view(&Default::default());
+        let buf = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("luma_wipe_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("luma_wipe_bg"),
+            layout: &self.merge_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&iv),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ov),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.luma_wipe_pipeline, &bind, target);
     }
 
     /// `PushMix` pass (08 §2.0b): the WGSL twin of `ops::push`. `dims.zw` is the

@@ -742,12 +742,35 @@ pub enum TransitionKind {
     DipToColor,
     Wipe,
     Push,
+    /// Analytical luma-map wipe (26 K-B7): Photonic-authored switch maps, not
+    /// bundled image assets. Map family / invert / softness live on
+    /// [`TransitionParams`].
+    LumaWipe,
     /// Forward-compat (39 §2.2): a variant this build does not know. The
     /// original serialized tag is preserved verbatim and re-emitted on save.
     /// An unknown transition renders as a hard cut (never a guessed dissolve).
     /// Declared last so serde tries the known snake_case tags first.
     #[serde(untagged)]
     Unknown(UnknownTag),
+}
+
+/// Built-in luma wipe map families (26 K-B7). Clean-room analytical generators
+/// — runtime synthesis, no bundled GPL maps. Softness / invert ride
+/// [`TransitionParams`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LumaWipeMap {
+    /// Left-to-right linear bar (black first).
+    #[default]
+    LinearH,
+    /// Top-to-bottom linear bar.
+    LinearV,
+    /// Radial iris from centre.
+    Radial,
+    /// Barn-door: opens from the centre outward horizontally.
+    BarnDoorH,
+    /// Clock sweep (angle from +x, clockwise).
+    Clock,
 }
 
 impl TransitionKind {
@@ -778,9 +801,15 @@ pub struct TransitionParams {
     /// Direction for `Wipe`/`Push`.
     #[serde(default)]
     pub direction: WipeDirection,
-    /// Edge softness for `Wipe`.
+    /// Edge softness for `Wipe` / `LumaWipe` (map units, 0..0.5).
     #[serde(default)]
     pub softness: f32,
+    /// Built-in map family for `LumaWipe` (26 K-B7).
+    #[serde(default)]
+    pub luma_map: LumaWipeMap,
+    /// Invert the luma map so white switches first.
+    #[serde(default)]
+    pub invert: bool,
 }
 
 impl Default for TransitionParams {
@@ -790,6 +819,8 @@ impl Default for TransitionParams {
             color: None,
             direction: WipeDirection::default(),
             softness: 0.0,
+            luma_map: LumaWipeMap::default(),
+            invert: false,
         }
     }
 }
@@ -1231,6 +1262,7 @@ mod tests {
             (TransitionKind::DipToColor, "\"dip_to_color\""),
             (TransitionKind::Wipe, "\"wipe\""),
             (TransitionKind::Push, "\"push\""),
+            (TransitionKind::LumaWipe, "\"luma_wipe\""),
         ] {
             assert_eq!(serde_json::to_string(&k).unwrap(), tag);
             let back: TransitionKind = serde_json::from_str(tag).unwrap();
