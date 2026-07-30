@@ -1638,6 +1638,10 @@ fn variant_exhaustiveness_guard(cmd: &TimelineCmd) {
         TimelineCmd::SetAssetMeta { .. } => {}
         TimelineCmd::SetAssetRating { .. } => {} // K-C2
         TimelineCmd::SetAssetTags { .. } => {}   // K-C2
+        TimelineCmd::SetAssetTagIds { .. } => {} // K-C2 TagId registry
+        TimelineCmd::AddMediaTag { .. } => {}    // K-C2
+        TimelineCmd::RemoveMediaTag { .. } => {} // K-C2
+        TimelineCmd::SetMediaTag { .. } => {}    // K-C2
         TimelineCmd::SetGenerateProxiesOnImport { .. } => {}
         // Sequences / formats / tracks.
         TimelineCmd::AddSequence { .. } => {}

@@ -33,7 +33,7 @@ use super::clip::{Clip, ClipEffect};
 use super::grade::Grade;
 use super::graph::{GraphEdge, GraphNode, GraphNodeParams, NodePos};
 use super::ids::*;
-use super::media::{AssetSource, MediaAsset, MediaBin, MediaProbe, ProxyRef};
+use super::media::{AssetSource, MediaAsset, MediaBin, MediaProbe, MediaTag, ProxyRef};
 use super::sequence::{
     Marker, MarkerCategory, MarkerRef, MarkerRetarget, Sequence, SequenceFormat, TimelineProject,
     Track, TrackKind,
@@ -444,6 +444,28 @@ pub enum TimelineCmd {
         asset: AssetId,
         old: Vec<String>,
         new: Vec<String>,
+    },
+    /// K-C2: replace the asset's stable tag-id list (registry addresses).
+    SetAssetTagIds {
+        asset: AssetId,
+        old: Vec<TagId>,
+        new: Vec<TagId>,
+    },
+    /// K-C2: insert a project media tag at `index` (display order).
+    AddMediaTag {
+        tag: MediaTag,
+        index: usize,
+    },
+    /// K-C2: remove a project media tag (assets keep dangling ids; UI soft-fails).
+    RemoveMediaTag {
+        tag: MediaTag,
+        index: usize,
+    },
+    /// K-C2: rename / recolour a media tag in place (id never changes).
+    SetMediaTag {
+        id: TagId,
+        old: MediaTag,
+        new: MediaTag,
     },
     /// Toggle project-wide "generate proxies on import" (G-15C / 24 L7).
     /// Document policy only — does not start or cancel running jobs.
@@ -1744,6 +1766,10 @@ impl TimelineCmd {
             TimelineCmd::SetAssetMeta { .. } => "Update media metadata".into(),
             TimelineCmd::SetAssetRating { .. } => "Rate media".into(),
             TimelineCmd::SetAssetTags { .. } => "Tag media".into(),
+            TimelineCmd::SetAssetTagIds { .. } => "Tag media (ids)".into(),
+            TimelineCmd::AddMediaTag { .. } => "Add media tag".into(),
+            TimelineCmd::RemoveMediaTag { .. } => "Remove media tag".into(),
+            TimelineCmd::SetMediaTag { .. } => "Edit media tag".into(),
             TimelineCmd::SetGenerateProxiesOnImport { new, .. } => {
                 if *new {
                     "Enable generate proxies on import".into()
@@ -1882,6 +1908,25 @@ impl TimelineCmd {
             TimelineCmd::SetAssetTags { asset, new, .. } => {
                 if let Some(a) = p.media.assets.get_mut(asset) {
                     a.tags = new.clone();
+                }
+            }
+            TimelineCmd::SetAssetTagIds { asset, new, .. } => {
+                if let Some(a) = p.media.assets.get_mut(asset) {
+                    a.tag_ids = new.clone();
+                }
+            }
+            TimelineCmd::AddMediaTag { tag, index } => {
+                if !p.media_tags.iter().any(|t| t.id == tag.id) {
+                    let at = (*index).min(p.media_tags.len());
+                    p.media_tags.insert(at, tag.clone());
+                }
+            }
+            TimelineCmd::RemoveMediaTag { tag, .. } => {
+                p.media_tags.retain(|t| t.id != tag.id);
+            }
+            TimelineCmd::SetMediaTag { id, new, .. } => {
+                if let Some(t) = p.media_tags.iter_mut().find(|t| t.id == *id) {
+                    *t = new.clone();
                 }
             }
             TimelineCmd::SetGenerateProxiesOnImport { new, .. } => {
@@ -2346,6 +2391,24 @@ impl TimelineCmd {
             },
             TimelineCmd::SetAssetTags { asset, old, new } => TimelineCmd::SetAssetTags {
                 asset: *asset,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::SetAssetTagIds { asset, old, new } => TimelineCmd::SetAssetTagIds {
+                asset: *asset,
+                old: new.clone(),
+                new: old.clone(),
+            },
+            TimelineCmd::AddMediaTag { tag, index } => TimelineCmd::RemoveMediaTag {
+                tag: tag.clone(),
+                index: *index,
+            },
+            TimelineCmd::RemoveMediaTag { tag, index } => TimelineCmd::AddMediaTag {
+                tag: tag.clone(),
+                index: *index,
+            },
+            TimelineCmd::SetMediaTag { id, old, new } => TimelineCmd::SetMediaTag {
+                id: *id,
                 old: new.clone(),
                 new: old.clone(),
             },

@@ -6043,6 +6043,18 @@ pub fn tool_list() -> Value {
         // set_/list_ tools rather than an op-field mega-tool since each maps
         // 1:1 to a distinct TimelineCmd variant, per design rules 1/2)
                 {
+            "name": "set_asset_tags",
+            "description": "K-C2: replace free-form tags on a media asset, upserting each name into the project TagId registry and assigning MediaAsset.tag_ids. Empty tags clears. ONE undo batch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "asset_id": { "type": "string" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Replacement tag names; empty clears." }
+                },
+                "required": ["asset_id"]
+            }
+        },
+        {
             "name": "create_subclip",
             "description": "Create Subclip (26 §9 K-A8): add a zone-bounded pool entry that is a view of parent_asset_id over [in, out). Shares content_hash/proxy/source with the parent (no cache duplication). One undo step (AddAsset). Nested subclips are refused.",
             "inputSchema": {

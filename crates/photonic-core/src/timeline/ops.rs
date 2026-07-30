@@ -200,6 +200,9 @@ pub fn set_asset_rating(
 }
 
 /// K-C2: replace free-form tags (deduped, trimmed, non-empty).
+///
+/// Prefer [`set_asset_tags_resolved`] when you want the registry + `tag_ids`
+/// list updated in the same batch.
 pub fn set_asset_tags(
     p: &TimelineProject,
     asset: AssetId,
@@ -220,6 +223,109 @@ pub fn set_asset_tags(
     Ok(TimelineCmd::SetAssetTags {
         asset,
         old: a.tags.clone(),
+        new,
+    })
+}
+
+/// K-C2: ensure each name exists in the media-tag registry, assign `tag_ids`,
+/// and refresh free-form names. Returns a batch of commands (registry adds +
+/// asset updates). One call → one undo unit when wrapped in `Command::Batch`.
+pub fn set_asset_tags_resolved(
+    p: &TimelineProject,
+    asset: AssetId,
+    tags: Vec<String>,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    use super::media::MediaTag;
+
+    let a = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?;
+    let mut names: Vec<String> = tags
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+
+    let mut cmds = Vec::new();
+    let mut ids = Vec::new();
+    // Work on a virtual registry so multiple new names in one call don't collide.
+    let mut virtual_tags = p.media_tags.clone();
+    for name in &names {
+        if let Some(existing) = virtual_tags
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+        {
+            ids.push(existing.id);
+            continue;
+        }
+        let tag = MediaTag::new(name.clone());
+        ids.push(tag.id);
+        let index = virtual_tags.len();
+        virtual_tags.push(tag.clone());
+        cmds.push(TimelineCmd::AddMediaTag { tag, index });
+    }
+    ids.sort_by_key(|id| id.0);
+    ids.dedup();
+
+    if names != a.tags {
+        cmds.push(TimelineCmd::SetAssetTags {
+            asset,
+            old: a.tags.clone(),
+            new: names,
+        });
+    }
+    if ids != a.tag_ids {
+        cmds.push(TimelineCmd::SetAssetTagIds {
+            asset,
+            old: a.tag_ids.clone(),
+            new: ids,
+        });
+    }
+    Ok(cmds)
+}
+
+/// K-C2: add a named tag to the project registry (no-op if name already exists).
+pub fn add_media_tag(
+    p: &TimelineProject,
+    name: impl Into<String>,
+) -> Result<Option<TimelineCmd>, EditError> {
+    use super::media::MediaTag;
+    let name = name.into().trim().to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if p.media_tag_by_name(&name).is_some() {
+        return Ok(None);
+    }
+    let tag = MediaTag::new(name);
+    Ok(Some(TimelineCmd::AddMediaTag {
+        tag,
+        index: p.media_tags.len(),
+    }))
+}
+
+/// K-C2: replace an asset's tag-id list (deduped). Unknown ids are kept — the
+/// registry may reintroduce them later (same orphan rule as marker categories).
+pub fn set_asset_tag_ids(
+    p: &TimelineProject,
+    asset: AssetId,
+    tag_ids: Vec<super::ids::TagId>,
+) -> Result<TimelineCmd, EditError> {
+    let a = p
+        .media
+        .assets
+        .get(&asset)
+        .ok_or(EditError::NoAsset(asset))?;
+    let mut new = tag_ids;
+    new.sort_by_key(|id| id.0);
+    new.dedup();
+    Ok(TimelineCmd::SetAssetTagIds {
+        asset,
+        old: a.tag_ids.clone(),
         new,
     })
 }
@@ -4119,6 +4225,41 @@ mod tests {
         }
         assert!(find_clip(&doc, seq_id, vtrack, vclip).link_group.is_none());
         assert!(find_clip(&doc, seq_id, atrack, aclip).link_group.is_none());
+    }
+
+    #[test]
+    fn media_tag_registry_resolves_names_to_ids() {
+        let (mut doc, _seq, _track, _clip, asset) = scoped_fixture();
+        let p = doc.timeline.as_ref().unwrap();
+        let cmds = set_asset_tags_resolved(
+            p,
+            asset,
+            vec!["Hero".into(), "hero".into(), "B-roll".into()],
+        )
+        .unwrap();
+        // One AddMediaTag per unique name (case-insensitive) + SetAssetTags + SetAssetTagIds.
+        assert!(
+            cmds.iter()
+                .filter(|c| matches!(c, TimelineCmd::AddMediaTag { .. }))
+                .count()
+                >= 2
+        );
+        for c in cmds {
+            Command::Timeline(c).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        assert_eq!(p.media_tags.len(), 2);
+        let a = p.media.assets.get(&asset).unwrap();
+        assert_eq!(a.tag_ids.len(), 2);
+        assert!(a.tags.iter().any(|t| t.eq_ignore_ascii_case("Hero")));
+        // Second resolve reuses registry, no new tags.
+        let again = set_asset_tags_resolved(p, asset, vec!["Hero".into()]).unwrap();
+        assert!(
+            !again
+                .iter()
+                .any(|c| matches!(c, TimelineCmd::AddMediaTag { .. })),
+            "existing tag must not re-create"
+        );
     }
 
     #[test]

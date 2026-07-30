@@ -1475,6 +1475,32 @@ fn draw_asset_cell(
                     }
                 }
             });
+            // K-C2 tags → project TagId registry via set_asset_tags_resolved.
+            ui.menu_button("Tags", |ui| {
+                if ui.button("Clear tags").clicked() {
+                    ctx.action = Some(PanelAction::MediaSetTags {
+                        asset: asset.id,
+                        tags: Vec::new(),
+                    });
+                    ui.close_menu();
+                }
+                for preset in ["Hero", "B-roll", "Selects", "Audio"] {
+                    let on = asset.tags.iter().any(|t| t.eq_ignore_ascii_case(preset));
+                    if ui.selectable_label(on, preset).clicked() {
+                        let mut tags = asset.tags.clone();
+                        if on {
+                            tags.retain(|t| !t.eq_ignore_ascii_case(preset));
+                        } else {
+                            tags.push(preset.to_string());
+                        }
+                        ctx.action = Some(PanelAction::MediaSetTags {
+                            asset: asset.id,
+                            tags,
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
             // G-15A: attach a user-owned proxy without re-encoding; detach never
             // deletes Attached files (handler / set_asset_proxy only clears ref).
             if asset.kind == AssetKind::Video
@@ -1534,6 +1560,14 @@ fn move_to_bin_items(
 }
 
 fn badges(ui: &mut Ui, asset: &MediaAsset, offline: bool, usage: usize) {
+    if !asset.tags.is_empty() {
+        let label = if asset.tags.len() == 1 {
+            asset.tags[0].clone()
+        } else {
+            format!("{}+{}", asset.tags[0], asset.tags.len() - 1)
+        };
+        ui.label(egui::RichText::new(label).small().weak());
+    }
     if let Some(r) = asset.rating {
         ui.label(
             egui::RichText::new(format!("{}★", r.min(5)))

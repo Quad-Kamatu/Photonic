@@ -6,9 +6,9 @@ use super::clip::{Clip, ClipEffect};
 use super::grade::Grade;
 use super::graph::NodeGraph;
 use super::ids::{
-    ClipId, CueId, GraphId, GroupId, MarkerCategoryId, MarkerId, SequenceId, TrackId,
+    ClipId, CueId, GraphId, GroupId, MarkerCategoryId, MarkerId, SequenceId, TagId, TrackId,
 };
-use super::media::MediaPool;
+use super::media::{MediaPool, MediaTag};
 use super::time::{FrameRate, Tick};
 use crate::layer::BlendMode;
 use crate::Color;
@@ -40,6 +40,10 @@ pub struct TimelineProject {
     /// carries none until the command layer seeds them on first use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marker_categories: Vec<MarkerCategory>,
+    /// Project-level media-pool tag registry (26 K-C2). Same id-addressed
+    /// taxonomy pattern as [`Self::marker_categories`]. Display order only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_tags: Vec<MediaTag>,
 }
 
 impl TimelineProject {
@@ -54,7 +58,24 @@ impl TimelineProject {
             project_graph: None,
             settings: ProjectVideoSettings::default(),
             marker_categories: Vec::new(),
+            media_tags: Vec::new(),
         }
+    }
+
+    /// Lookup a media tag by stable id.
+    pub fn media_tag(&self, id: TagId) -> Option<&MediaTag> {
+        self.media_tags.iter().find(|t| t.id == id)
+    }
+
+    /// Case-insensitive name match for registry upsert (K-C2).
+    pub fn media_tag_by_name(&self, name: &str) -> Option<&MediaTag> {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        self.media_tags
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(needle))
     }
 
     /// The category with this id, if present. Categories are addressed by

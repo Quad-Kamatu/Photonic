@@ -126,6 +126,18 @@ impl PhotonicApp {
                         }
                     }
                 }
+                PanelAction::MediaSetTags { asset, tags } => {
+                    use photonic_core::timeline::ops;
+                    if let Some(p) = doc.timeline.as_ref() {
+                        if let Ok(cmds) = ops::set_asset_tags_resolved(p, asset, tags) {
+                            if !cmds.is_empty() {
+                                let batch = cmds.into_iter().map(Command::Timeline).collect();
+                                history.execute_discrete(Command::Batch(batch), doc);
+                                doc_modified = true;
+                            }
+                        }
+                    }
+                }
                 PanelAction::MediaCreateSubclip {
                     asset,
                     in_ticks,

@@ -880,6 +880,15 @@ pub struct SetEffectParamArgs {
     pub value: PropValue,
 }
 
+/// K-C2: set free-form tags on an asset (resolved into the TagId registry).
+#[derive(Debug, Deserialize)]
+pub struct SetAssetTagsArgs {
+    pub asset_id: AssetId,
+    /// Replacement tag names (deduped). Empty clears.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
 /// K-A8: create a subclip (zone-bounded pool entry) of a parent media asset.
 #[derive(Debug, Deserialize)]
 pub struct CreateSubclipArgs {

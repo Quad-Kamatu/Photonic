@@ -87,6 +87,11 @@ id_newtype! {
     /// Identifies a [`GroupNode`](crate::timeline::GroupNode) in
     /// [`Sequence::groups`](crate::timeline::Sequence) (35 §3).
     GroupId,
+    /// Identifies a media-pool tag in
+    /// [`TimelineProject::media_tags`](crate::timeline::TimelineProject)
+    /// (26 K-C2). Referenced by stable id, never by index — same taxonomy
+    /// pattern as [`MarkerCategoryId`].
+    TagId,
 }
 
 #[cfg(test)]

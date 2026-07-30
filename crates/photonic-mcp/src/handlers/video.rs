@@ -4306,6 +4306,28 @@ pub async fn remove_asset(state: &AppState, args: RemoveAssetArgs) -> ToolResult
     }
 }
 
+/// K-C2: set asset tags, upserting the project TagId registry as needed.
+pub async fn set_asset_tags(state: &AppState, args: SetAssetTagsArgs) -> ToolResult {
+    tracing::debug!("tool: set_asset_tags {}", args.asset_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    match ops::set_asset_tags_resolved(project, args.asset_id, args.tags) {
+        Ok(cmds) if cmds.is_empty() => ToolResult::text("Tags unchanged"),
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(
+                Command::Batch(cmds.into_iter().map(Command::Timeline).collect()),
+                &mut doc,
+            );
+            ToolResult::text(format!("Set tags ({n} command(s))"))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 /// K-A8: create a subclip pool entry (zone view of parent media).
 pub async fn create_subclip(state: &AppState, args: CreateSubclipArgs) -> ToolResult {
     tracing::debug!("tool: create_subclip parent={}", args.parent_asset_id);

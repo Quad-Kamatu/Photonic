@@ -9,12 +9,44 @@
 
 use super::clip::ClipEffect;
 use super::grade::Grade;
-use super::ids::{AssetId, BinId};
+use super::ids::{AssetId, BinId, TagId};
 use super::time::{FrameRate, Tick};
 use crate::node::NodeId;
+use crate::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// One entry in the project media-tag registry (26 K-C2).
+///
+/// Mirrors [`super::sequence::MarkerCategory`]: addressed by stable
+/// [`TagId`], never by index. Name is the display label; colour is optional
+/// pool UI chrome.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MediaTag {
+    pub id: TagId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+}
+
+impl MediaTag {
+    pub fn new(name: impl Into<String>) -> Self {
+        MediaTag {
+            id: TagId::new(),
+            name: name.into(),
+            color: None,
+        }
+    }
+
+    pub fn with_color(name: impl Into<String>, color: Color) -> Self {
+        MediaTag {
+            id: TagId::new(),
+            name: name.into(),
+            color: Some(color),
+        }
+    }
+}
 
 /// The asset pool plus its folder (bin) hierarchy.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -68,9 +100,15 @@ pub struct MediaAsset {
     /// Star rating 1–5 (K-C2). `None` = unrated. Additive; omitted in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<u8>,
-    /// Free-form tags (K-C2). Empty omitted. Full `TagId` registry is follow-up.
+    /// Free-form tag *names* (K-C2 legacy display). Prefer [`Self::tag_ids`] +
+    /// the project [`MediaTag`](crate::timeline::MediaTag) registry; names are
+    /// kept so older documents and simple UIs still round-trip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Stable tag ids into `TimelineProject::media_tags` (26 K-C2 registry).
+    /// Additive; older files load with this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tag_ids: Vec<TagId>,
     /// K-A8: when set, this pool entry is a **subclip** — a zone-bounded view of
     /// `parent`. Proxies, waveforms, and `content_hash` are shared with the
     /// parent (copied at create time; not re-probed). Additive; older files
@@ -97,6 +135,7 @@ impl MediaAsset {
             grade: None,
             rating: None,
             tags: Vec::new(),
+            tag_ids: Vec::new(),
             parent: None,
             subclip_range: None,
         }

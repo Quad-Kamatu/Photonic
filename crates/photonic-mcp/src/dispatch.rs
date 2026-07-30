@@ -2692,6 +2692,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::create_subclip(state, a).await,
             ))
         }
+        "set_asset_tags" => {
+            let a: SetAssetTagsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::set_asset_tags(state, a).await,
+            ))
+        }
         "create_bin" => {
             let a: CreateBinArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(

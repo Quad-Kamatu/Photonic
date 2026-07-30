@@ -78,10 +78,10 @@ pub use graph::{
 };
 pub use ids::{
     AssetId, BinId, ClipId, CueId, GradeOpId, GraphId, GraphNodeId, GroupId, MarkerCategoryId,
-    MarkerId, SequenceId, TrackId,
+    MarkerId, SequenceId, TagId, TrackId,
 };
 pub use media::{
-    AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe,
+    AssetKind, AssetSource, AudioStreamInfo, MediaAsset, MediaBin, MediaPool, MediaProbe, MediaTag,
     ProbedColor, ProxyOrigin, ProxyRef, ProxyStatus, ScanType, VectorRef, VectorStateKey,
     VideoStreamInfo,
 };
