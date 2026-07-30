@@ -1302,6 +1302,11 @@ fn apply_stack(
         if !fx.enabled || fx.inert {
             continue;
         }
+        // K-B3: fold out-of-zone effects entirely (same as disabled) so the
+        // NodeCache never pays for an inactive segment of the stack.
+        if !fx.active_at(dt) {
+            continue;
+        }
         // Keyframe-resolve the effect's params at the scope's `dt` (K-0.2). The op
         // discriminant, kind, AND resolved params all participate in the content
         // hash (`hash_op`), so two clips differing only in e.g. Blur radius are

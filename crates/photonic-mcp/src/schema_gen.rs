@@ -5695,6 +5695,21 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "set_effect_zone",
+            "description": "Set or clear an effect zone (26 §10 K-B3): half-open clip-relative [start_ticks, end_ticks). Outside the zone the effect is folded out of the graph at that tick (same as disabled). Pass clear=true to remove the zone. One undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string" },
+                    "effect_index": { "type": "integer" },
+                    "clear": { "type": "boolean", "description": "When true, remove the zone (whole-clip effect)." },
+                    "start_ticks": { "type": "integer", "description": "Clip-relative zone start (inclusive)." },
+                    "end_ticks": { "type": "integer", "description": "Clip-relative zone end (exclusive)." }
+                },
+                "required": ["clip_id","effect_index"]
+            }
+        },
+        {
             "name": "effect_stack",
             "description": "Edit any of the four video effect stacks (26 §10 K-B1/K-B2): a timeline `clip`, a whole `track`, the sequence `master`, or a bin `asset` (inherited by every instance of that media). Evaluation order is asset -> clip -> track -> master. `op=list` is read-only; `add`/`remove`/`reorder`/`set_param`/`set_grade` are each one undo step. The clip-only add_effect/remove_effect/reorder_effects/set_effect_param tools remain as shorthand for scope=clip.",
             "inputSchema": {

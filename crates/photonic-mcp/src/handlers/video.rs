@@ -2754,6 +2754,54 @@ pub async fn set_effect_param(state: &AppState, args: SetEffectParamArgs) -> Too
     }
 }
 
+/// K-B3 set/clear effect zone on a clip stack entry (one undo step).
+pub async fn set_effect_zone(state: &AppState, args: SetEffectZoneArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: set_effect_zone {} [{}]",
+        args.clip_id,
+        args.effect_index
+    );
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    if locate_clip(project, args.clip_id).is_none() {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    }
+    let zone = if args.clear {
+        None
+    } else {
+        match (args.start_ticks, args.end_ticks) {
+            (Some(a), Some(b)) => Some((Tick(a), Tick(b))),
+            (None, None) => {
+                return ToolResult::error(
+                    "supply start_ticks and end_ticks, or clear=true to remove the zone",
+                );
+            }
+            _ => {
+                return ToolResult::error("both start_ticks and end_ticks are required for a zone");
+            }
+        }
+    };
+    match ops::set_effect_zone(
+        project,
+        VfxOwner::Clip(args.clip_id),
+        args.effect_index,
+        zone,
+    ) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text(if zone.is_some() {
+                "Set effect zone"
+            } else {
+                "Cleared effect zone"
+            })
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 // ─── Scoped effect stacks — track / master / asset (26 §10 K-B1/K-B2) ────────
 
 /// Resolve one [`VfxOwner`] from the four addressing fields `effect_stack`

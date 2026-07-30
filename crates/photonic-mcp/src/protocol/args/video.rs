@@ -880,6 +880,22 @@ pub struct SetEffectParamArgs {
     pub value: PropValue,
 }
 
+/// K-B3: set/clear an effect zone (clip-relative half-open range). Omit both
+/// start and end (or pass null zone) to clear. Supply both start_* and end_*
+/// for a zone; end must be > start.
+#[derive(Debug, Deserialize)]
+pub struct SetEffectZoneArgs {
+    pub clip_id: ClipId,
+    pub effect_index: usize,
+    /// Clear the zone when true (effect applies to whole clip).
+    #[serde(default)]
+    pub clear: bool,
+    #[serde(default)]
+    pub start_ticks: Option<i64>,
+    #[serde(default)]
+    pub end_ticks: Option<i64>,
+}
+
 /// Which of the four video effect stacks an `effect_stack` call addresses
 /// (26 §10 K-B1/K-B2, 35 §2). Deliberately the same vocabulary as
 /// `photonic_core::timeline::commands::VfxOwner`.

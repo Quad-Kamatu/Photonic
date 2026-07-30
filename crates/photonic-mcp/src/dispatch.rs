@@ -2517,6 +2517,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::set_effect_param(state, a).await,
             ))
         }
+        "set_effect_zone" => {
+            let a: SetEffectZoneArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::set_effect_zone(state, a).await,
+            ))
+        }
         "effect_stack" => {
             let a: EffectStackArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             let readonly = a.op == EffectStackOp::List;

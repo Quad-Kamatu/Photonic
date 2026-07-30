@@ -640,6 +640,13 @@ pub struct ClipEffect {
     /// same way a disabled effect is (§2.6).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inert: bool,
+    /// K-B3 effect zone: half-open range `[start, end)` in the **same domain
+    /// as keyframe evaluation** for the stack this effect sits on — clip-
+    /// relative ticks for clip/asset stacks (`dt = tick − clip.start`),
+    /// sequence-relative for track/master. `None` = whole span (default).
+    /// Additive; older files load without a zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<(Tick, Tick)>,
     pub params: AnimProps<EffectParams>,
 }
 
@@ -652,6 +659,7 @@ impl ClipEffect {
             version: 0,
             enabled: true,
             inert: false,
+            zone: None,
             params: AnimProps::new(EffectParams::seed(kind.target_kind())),
         }
     }
@@ -676,8 +684,20 @@ impl ClipEffect {
             version: m.version,
             enabled: true,
             inert: false,
+            zone: None,
             params: AnimProps::new(params),
         })
+    }
+
+    /// Whether this effect is active at evaluation domain tick `dt` (K-B3).
+    /// Whole-span (`zone: None`) and disabled checks are the caller's job for
+    /// `enabled`/`inert`; this only answers the zone half-open range.
+    #[inline]
+    pub fn active_at(&self, dt: Tick) -> bool {
+        match self.zone {
+            None => true,
+            Some((a, b)) => dt >= a && dt < b,
+        }
     }
 
     fn default_id() -> EffectId {
@@ -1254,5 +1274,33 @@ mod tests {
         let src: ClipSource = serde_json::from_str(bad).unwrap();
         assert!(src.is_unknown());
         assert_eq!(src.unknown_tag(), Some("solid_color"));
+    }
+
+    #[test]
+    fn effect_zone_active_at_is_half_open() {
+        let mut fx = ClipEffect::new(EffectKind::Blur);
+        assert!(fx.active_at(Tick(0)));
+        assert!(fx.active_at(Tick(9999)));
+        fx.zone = Some((Tick(10), Tick(20)));
+        assert!(!fx.active_at(Tick(9)));
+        assert!(fx.active_at(Tick(10)));
+        assert!(fx.active_at(Tick(19)));
+        assert!(!fx.active_at(Tick(20)));
+    }
+
+    #[test]
+    fn effect_zone_serde_omits_none_and_roundtrips_some() {
+        let plain = ClipEffect::new(EffectKind::Blur);
+        let j = serde_json::to_string(&plain).unwrap();
+        assert!(!j.contains("zone"), "default None must not serialize: {j}");
+        let mut zoned = plain.clone();
+        zoned.zone = Some((Tick(0), Tick(50)));
+        let j2 = serde_json::to_string(&zoned).unwrap();
+        assert!(j2.contains("zone"), "Some zone must serialize: {j2}");
+        let back: ClipEffect = serde_json::from_str(&j2).unwrap();
+        assert_eq!(back.zone, Some((Tick(0), Tick(50))));
+        // Re-load a serialized plain effect (no zone key) → None.
+        let legacy: ClipEffect = serde_json::from_str(&j).unwrap();
+        assert_eq!(legacy.zone, None);
     }
 }

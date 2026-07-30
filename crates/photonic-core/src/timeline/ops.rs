@@ -2237,6 +2237,29 @@ pub fn set_effect_scoped(
     })
 }
 
+/// K-B3: set (or clear) the effect zone on stack entry `index`.
+/// `zone` is half-open `[start, end)` in the stack's evaluation domain.
+/// `None` clears the zone (effect applies to the whole span).
+/// Refuses non-positive ranges (`end <= start`).
+pub fn set_effect_zone(
+    p: &TimelineProject,
+    owner: VfxOwner,
+    index: usize,
+    zone: Option<(Tick, Tick)>,
+) -> Result<TimelineCmd, EditError> {
+    if let Some((a, b)) = zone {
+        if b.0 <= a.0 {
+            return Err(EditError::NonPositiveDuration);
+        }
+    }
+    let mut new = effect_stack(p, owner)?
+        .get(index)
+        .ok_or(EditError::IndexOutOfRange)?
+        .clone();
+    new.zone = zone;
+    set_effect_scoped(p, owner, index, new)
+}
+
 pub fn set_grade_scoped(
     p: &TimelineProject,
     owner: VfxOwner,
@@ -5892,6 +5915,36 @@ mod tests {
         let other_scope =
             set_effect_scoped(p, VfxOwner::Clip(clip), 0, fx(EffectKind::Blur)).unwrap_err();
         assert_eq!(other_scope, EditError::IndexOutOfRange);
+    }
+
+    #[test]
+    fn set_effect_zone_writes_half_open_range_and_refuses_bad() {
+        let (mut doc, _seq, _track, clip, _asset) = scoped_fixture();
+        {
+            let p = doc.timeline.as_ref().unwrap();
+            let cmd =
+                add_effect_scoped(p, VfxOwner::Clip(clip), fx(EffectKind::Blur), None).unwrap();
+            Command::Timeline(cmd).apply(&mut doc);
+        }
+        let p = doc.timeline.as_ref().unwrap();
+        assert!(matches!(
+            set_effect_zone(p, VfxOwner::Clip(clip), 0, Some((Tick(10), Tick(10)))),
+            Err(EditError::NonPositiveDuration)
+        ));
+        let cmd = set_effect_zone(p, VfxOwner::Clip(clip), 0, Some((Tick(10), Tick(40)))).unwrap();
+        Command::Timeline(cmd).apply(&mut doc);
+        let stack = effect_stack(doc.timeline.as_ref().unwrap(), VfxOwner::Clip(clip)).unwrap();
+        assert_eq!(stack[0].zone, Some((Tick(10), Tick(40))));
+        assert!(stack[0].active_at(Tick(10)));
+        assert!(!stack[0].active_at(Tick(40)));
+        // Clear.
+        let p = doc.timeline.as_ref().unwrap();
+        let clear = set_effect_zone(p, VfxOwner::Clip(clip), 0, None).unwrap();
+        Command::Timeline(clear).apply(&mut doc);
+        assert_eq!(
+            effect_stack(doc.timeline.as_ref().unwrap(), VfxOwner::Clip(clip)).unwrap()[0].zone,
+            None
+        );
     }
 
     // ── Paste Attributes (26 §10 K-B15) ─────────────────────────────────────
