@@ -97,8 +97,8 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-D3** per-stream / channel / offset | ✅ done | `56892b2` | `ClipAudio.stream` + `offset`; `ChannelMap::{LeftOnly,RightOnly}`; offline mix seeks with offset |
 | **K-D4** stems export | ✅ done | `56892b2` | `ExportPreset.stems`; `render_export_audio_filtered` per track; `stem_output_path` naming |
 | **K-E1** audio spectrum + scope depth | ✅ done | `6d54e73` | Pure radix-2 spectrum DFT; mixer/feeder publish `spectrum_db`; scopes **Spectrum** tab; vectorscope Rec.601 switch residual (CPU matrix path already present) |
-| **Applicability** gate | ✅ done | *(this commit)* | `add_effect_scoped` refuses scopes outside `manifest.applies`; catalogue uses `ALL_SCOPES` (K-B1-compatible); `CLIP_ONLY` retained for curation |
-| **K-B7** luma-map wipe maths | ✅ done (substrate) | *(this commit)* | Analytical `LumaWipeKind` maps + `soft_mix` (Photonic-authored); IR/TransitionKind binding residual |
+| **Applicability** gate | ✅ done | `ff6ea4f` | `add_effect_scoped` refuses scopes outside `manifest.applies`; catalogue uses `ALL_SCOPES` (K-B1-compatible); `CLIP_ONLY` retained for curation |
+| **K-B7** luma-map wipe maths | ✅ done (substrate) | `ff6ea4f` | Analytical `LumaWipeKind` maps + `soft_mix` (Photonic-authored); IR/TransitionKind binding residual |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
