@@ -32,6 +32,10 @@ pub struct ExportPreset {
     pub faststart: bool,
     /// LUFS target, per 09-audio-mixer.md's normalization step.
     pub loudness_target: Option<LoudnessTarget>,
+    /// K-D4: also write one audio file per sequence audio track (stems).
+    /// Additive default false; older presets deserialize as full-mix only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stems: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -230,6 +234,7 @@ fn social(name: &str) -> ExportPreset {
         alpha: false,
         faststart: true,
         loudness_target: Some(SOCIAL_LOUDNESS),
+        stems: false,
     }
 }
 
@@ -253,6 +258,7 @@ fn master_av1_high() -> ExportPreset {
         faststart: false, // MKV has no moov atom / faststart concept.
         // Archival/mezzanine master: not loudness-normalized by default.
         loudness_target: None,
+        stems: false,
     }
 }
 
@@ -279,6 +285,7 @@ fn web_h264() -> ExportPreset {
         alpha: false,
         faststart: true,
         loudness_target: None,
+        stems: false,
     }
 }
 
@@ -299,6 +306,7 @@ fn webm_vp9_alpha() -> ExportPreset {
         alpha: true,
         faststart: false,
         loudness_target: None,
+        stems: false,
     }
 }
 
@@ -322,6 +330,7 @@ fn prores_mezzanine() -> ExportPreset {
         alpha: true, // "alpha on by default" per §3.5.
         faststart: false,
         loudness_target: None,
+        stems: false,
     }
 }
 
@@ -342,6 +351,7 @@ fn gif() -> ExportPreset {
         alpha: false, // GIF explicitly excluded from §3.4's alpha allow-list.
         faststart: false,
         loudness_target: None,
+        stems: false,
     }
 }
 
@@ -359,6 +369,7 @@ fn png_sequence() -> ExportPreset {
         alpha: true, // "alpha always on" per §3.5.
         faststart: false,
         loudness_target: None,
+        stems: false,
     }
 }
 

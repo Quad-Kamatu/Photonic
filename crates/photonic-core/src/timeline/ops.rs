@@ -6380,6 +6380,8 @@ mod tests {
             }),
             fade_out: None,
             channel_map: ChannelMap::MonoDownmix,
+            stream: None,
+            offset: Tick::ZERO,
         });
         let src_id = src.id;
 

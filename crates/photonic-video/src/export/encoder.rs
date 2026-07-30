@@ -970,6 +970,7 @@ mod tests {
             alpha: false,
             faststart: true,
             loudness_target: None::<LoudnessTarget>,
+            stems: false,
         }
     }
 

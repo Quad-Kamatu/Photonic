@@ -235,6 +235,14 @@ fn read_channel_mapped(
             let m = 0.5 * (buf[idx] + buf[idx + 1]);
             (m, m)
         }
+        ChannelMap::LeftOnly => {
+            let l = buf[idx];
+            (l, l)
+        }
+        ChannelMap::RightOnly => {
+            let r = buf[idx + 1];
+            (r, r)
+        }
     }
 }
 

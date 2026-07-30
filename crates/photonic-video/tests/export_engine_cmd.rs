@@ -74,6 +74,7 @@ fn h264_preset() -> ExportPreset {
         alpha: false,
         faststart: false,
         loudness_target: None,
+            stems: false,
     }
 }
 

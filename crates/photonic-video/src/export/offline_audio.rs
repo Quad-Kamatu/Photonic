@@ -45,6 +45,20 @@ pub fn render_export_audio(
     tools: Option<&FfmpegTools>,
     loudness: Option<&LoudnessTarget>,
 ) -> Result<Vec<f32>, ExportError> {
+    render_export_audio_filtered(project, sequence, start, end, tools, loudness, None)
+}
+
+/// K-D4: render one audio track as a stem (`only_track = Some`). `None` mixes
+/// every enabled audio track (same as [`render_export_audio`]).
+pub fn render_export_audio_filtered(
+    project: &TimelineProject,
+    sequence: SequenceId,
+    start: Tick,
+    end: Tick,
+    tools: Option<&FfmpegTools>,
+    loudness: Option<&LoudnessTarget>,
+    only_track: Option<photonic_core::timeline::TrackId>,
+) -> Result<Vec<f32>, ExportError> {
     if end <= start {
         return Ok(Vec::new());
     }
@@ -81,6 +95,7 @@ pub fn render_export_audio(
             .audio_tracks
             .iter()
             .filter(|track| track.enabled && track.audio.is_some())
+            .filter(|track| only_track.map(|id| track.id == id).unwrap_or(true))
             .flat_map(|track| {
                 track
                     .clips
@@ -108,7 +123,15 @@ pub fn render_export_audio(
                 else {
                     continue;
                 };
-                let src_pos = clip.source_in + (t - clip.start);
+                // K-D3: `ClipAudio.offset` delays audio relative to picture —
+                // positive offset seeks the source earlier so audio arrives late.
+                let offset = clip
+                    .audio
+                    .as_ref()
+                    .map(|a| a.offset)
+                    .unwrap_or(Tick::ZERO);
+                let src_pos = clip.source_in + (t - clip.start) - offset;
+                let src_pos = Tick(src_pos.0.max(0));
                 if let Ok(source) = FfmpegPcmSource::spawn(tools, path, src_pos, sample_rate) {
                     pcm.insert(clip.id, source);
                 }
@@ -124,6 +147,7 @@ pub fn render_export_audio(
             .audio_tracks
             .iter()
             .filter(|track| track.enabled && track.audio.is_some())
+            .filter(|track| only_track.map(|id| track.id == id).unwrap_or(true))
         {
             let track_audio = track.audio.as_ref().expect("filtered to Some");
             let mut clips: Vec<ClipVoice<'_>> = Vec::new();
@@ -159,6 +183,29 @@ pub fn render_export_audio(
         apply_loudness_gain(&mut out_pcm, &measured, target);
     }
     Ok(out_pcm)
+}
+
+/// K-D4: sidecar path for a stem export next to the main output.
+/// `main` is the primary export path; `track_name` is sanitized for the FS.
+pub fn stem_output_path(main: &std::path::Path, track_name: &str) -> std::path::PathBuf {
+    let stem = main.file_stem().and_then(|s| s.to_str()).unwrap_or("export");
+    let ext = main
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("wav");
+    let safe: String = track_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = if safe.is_empty() { "track".into() } else { safe };
+    let parent = main.parent().unwrap_or_else(|| std::path::Path::new("."));
+    parent.join(format!("{stem}_stem_{safe}.{ext}"))
 }
 
 /// Convert a tick duration to a sample-frame count at `sample_rate` (exact
@@ -277,6 +324,15 @@ mod tests {
         let id = seq.id;
         project.insert_sequence(seq);
         (project, id)
+    }
+
+    #[test]
+    fn stem_output_path_sanitizes_track_name() {
+        let p = stem_output_path(std::path::Path::new("/tmp/out.mp4"), "A1 Dialogue!");
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/tmp/out_stem_A1_Dialogue_.mp4")
+        );
     }
 
     #[test]

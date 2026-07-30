@@ -76,6 +76,18 @@ pub struct ClipAudio {
     pub fade_out: Option<AudioFade>,
     #[serde(default)]
     pub channel_map: ChannelMap,
+    /// K-D3: which demuxed audio stream of a multi-stream source to use
+    /// (`None` = first / default). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<u32>,
+    /// K-D3: sync offset applied to the *source read* — positive delays audio
+    /// relative to picture (camera lag fix). Additive; omitted = zero.
+    #[serde(default, skip_serializing_if = "is_zero_tick")]
+    pub offset: super::time::Tick,
+}
+
+fn is_zero_tick(t: &super::time::Tick) -> bool {
+    t.0 == 0
 }
 
 impl ClipAudio {
@@ -85,6 +97,8 @@ impl ClipAudio {
             fade_in: None,
             fade_out: None,
             channel_map: ChannelMap::AsSource,
+            stream: None,
+            offset: super::time::Tick::ZERO,
         }
     }
 }
@@ -130,7 +144,8 @@ pub enum FadeShape {
 }
 
 /// Source→bus channel mapping. v1: mono/stereo sources only (surround is a SPEC
-/// non-goal); custom per-pair remap deferred.
+/// non-goal); custom per-pair remap deferred. K-D3 adds explicit swap / mono
+/// downmix controls for dual-mono and reverse-polarity cameras.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelMap {
@@ -139,6 +154,10 @@ pub enum ChannelMap {
     MonoDownmix,
     StereoLR,
     ChannelSwap,
+    /// K-D3: force left channel only (duplicate to both bus channels).
+    LeftOnly,
+    /// K-D3: force right channel only.
+    RightOnly,
 }
 
 /// Sequence master bus (09 §4). Seeded with a `Limiter` at creation (§6.5).
@@ -342,6 +361,26 @@ mod tests {
             mb.fx_chain[0].params.base.get("params.ceiling_db"),
             Some(&super::super::anim::PropValue::Float(-1.0))
         );
+    }
+
+    #[test]
+    fn clip_audio_stream_and_offset_default_and_serde() {
+        let a = ClipAudio::new();
+        assert!(a.stream.is_none());
+        assert_eq!(a.offset, super::super::time::Tick::ZERO);
+        let j = serde_json::to_string(&a).unwrap();
+        // Additive: zero offset and None stream omitted from JSON.
+        assert!(!j.contains("stream"));
+        assert!(!j.contains("offset"));
+        let mut b = ClipAudio::new();
+        b.stream = Some(1);
+        b.offset = super::super::time::Tick(1500); // 50 ms at 30k ticks/s? ticks are flicks-scale
+        let j2 = serde_json::to_string(&b).unwrap();
+        let back: ClipAudio = serde_json::from_str(&j2).unwrap();
+        assert_eq!(back.stream, Some(1));
+        assert_eq!(back.offset.0, 1500);
+        // LeftOnly / RightOnly are first-class channel maps (K-D3).
+        assert_ne!(ChannelMap::LeftOnly, ChannelMap::AsSource);
     }
 
     #[test]

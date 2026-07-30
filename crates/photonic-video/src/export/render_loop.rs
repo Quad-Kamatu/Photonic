@@ -291,6 +291,7 @@ mod tests {
             alpha: false,
             faststart: false,
             loudness_target: None,
+            stems: false,
         }
     }
 

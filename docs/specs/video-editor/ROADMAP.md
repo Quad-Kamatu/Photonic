@@ -94,10 +94,12 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-B11** keyframe interchange | ✅ done | `c2299d8` | `KeyframeClipboard` + `copy_keyframes`/`paste_keyframes` (path map + offset/re-anchor, one undo batch); keyframe editor Copy path/all + Paste/Paste@0; MCP `copy_keyframes`/`paste_keyframes` |
 | **K-C2** TagId registry | ✅ done | `deb8945` | `TagId` + `MediaTag` project registry; `MediaAsset.tag_ids`; `set_asset_tags_resolved` upserts names→ids; pool Tags menu + MCP `set_asset_tags` |
 | **K-C7** import triage | ✅ done | `2fb684e` | `MediaProbe` persists `is_vfr`/`pixel_format`/`has_alpha`; pure `triage_probe` (VFR=Info not convert); pool badges from findings; additive serde |
+| **K-D3** per-stream / channel / offset | ✅ done | *(this commit)* | `ClipAudio.stream` + `offset`; `ChannelMap::{LeftOnly,RightOnly}`; offline mix seeks with offset |
+| **K-D4** stems export | ✅ done | *(this commit)* | `ExportPreset.stems`; `render_export_audio_filtered` per track; `stem_output_path` naming |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
-**Not yet started (next bands):** K-A1 preview chunks *(Band-5 await acceptance)*; K-C1/C4/C5 *(Band-5)*; K-D3 per-stream, K-D4 stems; K-E1 YUV + audio spectrum residual; K-F polish / K-F7; K-G1–G4 *(Band-5)*; X-1/X-2/X-3 *(Band-5)*; legal-or-fixture-blocked G/D items.
+**Not yet started (next bands):** K-A1 *(Band-5)*; K-C1/C4/C5 *(Band-5)*; K-E1 YUV + audio spectrum residual; K-F polish / K-F7; K-G1–G4 *(Band-5)*; X-1/X-2/X-3 *(Band-5)*; legal-or-fixture-blocked G/D items.
 
 **Band-5 mini-specs — the whole band is now drafted.** 26 §19.1 requires one *accepted before code*, so every one of these items was blocked on a document rather than on effort. All **14** are written and **await acceptance**; none authorizes code until accepted. K-B16, K-G6 and K-G5 are the band's already-implemented members.
 
@@ -218,7 +220,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-B | partial | **K-B1–B6 stacks/zones/presets/compare/expressions, K-B11 interchange, K-B12 easing, K-B14 freeze, K-B15 paste, K-B16 catalogue, K-B17 alpha done.** Open: manifest `Applicability` gating; residual K-B7–B10/B13 | [30](30-effect-catalogue.md), [26 §10](26-kdenlive-mlt-parity.md#10-k-b--effects-and-compositing) |
 | K-B10 | **product-blocked** | Motion tracking conflicts with the SPEC non-goal on object tracking; needs an S-series amendment before authorization. **Distinct from D-12**, whose S2 carve-out explicitly excludes it | [26 §K-B10](26-kdenlive-mlt-parity.md#k-b10--motion-tracking) |
 | K-C | partial | Ratings/filter/remove-unused + **TagId registry** + **K-C7 import triage** + cache size report + **K-C8 size-keyed still cache** + **K-C6 batch relink**. Open (Band-5 gates): clip-jobs [195](../../proposals/195-k-c1-clip-jobs-framework.md), generators [201](../../proposals/201-k-c4-generator-clips.md), archiving [202](../../proposals/202-k-c5-project-archiving.md) | [26 §11](26-kdenlive-mlt-parity.md#11-k-c--media-and-bin) |
-| K-D | partial | Mixer + DSP bound (K-0.6), latency compensation, and **K-D5 boundary declick** landed. Open: K-D3 per-stream/per-channel handling, K-D4 stems export | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
+| K-D | partial | Mixer + DSP bound (K-0.6), latency compensation, **K-D5 boundary declick**, **K-D3 stream/offset/channel maps**, **K-D4 stems export** landed. Open: deeper multi-stream UI + stem encode wiring polish | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
 | K-E | partial | Scopes + extract + I/Q/75% + hist Y/R/G/B + comp grids + **K-E2 per-clip scope tap**. Open: YUV/YPbPr, audio spectrum | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
