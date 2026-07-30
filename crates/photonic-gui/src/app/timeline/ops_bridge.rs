@@ -576,6 +576,69 @@ pub fn freeze_frame(
     }
 }
 
+/// K-A3 Insert Space at `at` (sequence-relative) of `amount` ticks across
+/// all unlocked tracks. One undo step.
+pub fn insert_space(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+    amount: Tick,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmds) = ops::insert_space(p, seq, at, amount) {
+        commit_batch(history, doc, cmds);
+    }
+}
+
+/// K-A3 Remove Space of `amount` at `at` across unlocked tracks.
+pub fn remove_space(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+    amount: Tick,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmds) = ops::remove_space(p, seq, at, amount) {
+        commit_batch(history, doc, cmds);
+    }
+}
+
+/// K-A3 pack unlocked tracks from `at` onward (remove all internal spaces).
+pub fn remove_all_spaces_after(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmds) = ops::remove_all_spaces_after(p, seq, at) {
+        commit_batch(history, doc, cmds);
+    }
+}
+
+/// K-A3 delete every clip on unlocked tracks with `start >= at`.
+pub fn remove_clips_after(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    if let Ok(cmds) = ops::remove_clips_after(p, seq, at) {
+        commit_batch(history, doc, cmds);
+    }
+}
+
 // ── Sync-locked track ripple propagation (14 §M-9) ──────────────────────────
 //
 // `Track::sync_lock` + its header toggle already exist (`tracks.rs`); this is

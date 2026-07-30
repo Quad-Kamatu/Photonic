@@ -2401,6 +2401,30 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::close_gap(state, a).await,
             ))
         }
+        "insert_space" => {
+            let a: InsertSpaceArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::insert_space(state, a).await,
+            ))
+        }
+        "remove_space" => {
+            let a: RemoveSpaceArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::remove_space(state, a).await,
+            ))
+        }
+        "remove_all_spaces_after" => {
+            let a: SpaceAfterArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::remove_all_spaces_after(state, a).await,
+            ))
+        }
+        "remove_clips_after" => {
+            let a: SpaceAfterArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::remove_clips_after(state, a).await,
+            ))
+        }
         "match_frame" => {
             let a: MatchFrameArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::readonly(

@@ -8,7 +8,7 @@ use super::*;
 use crate::app::timeline::{interact, ops_bridge};
 use crate::commands::{self, CommandId};
 use photonic_core::timeline::{
-    ops, Clip, ClipSource, ClipTiming, Sequence, SequenceId, Tick, TrackKind,
+    ops, Clip, ClipSource, ClipTiming, Sequence, SequenceId, Tick, TrackKind, TICKS_PER_SECOND,
 };
 
 /// One clip captured on the timeline clipboard (Ctrl+C / Ctrl+X, NLE parity
@@ -265,6 +265,12 @@ impl PhotonicApp {
             "video.split_all_tracks" => self.timeline_split_all_tracks(doc, history),
             "video.close_gap" => self.timeline_close_gap_at_playhead(doc, history),
             "video.close_gaps" => self.timeline_close_all_gaps(doc, history),
+            "video.insert_space" => self.timeline_insert_space(doc, history),
+            "video.remove_space" => self.timeline_remove_space(doc, history),
+            "video.remove_all_spaces_after" => {
+                self.timeline_remove_all_spaces_after(doc, history)
+            }
+            "video.remove_clips_after" => self.timeline_remove_clips_after(doc, history),
             "video.simplify_sequence" => self.timeline_simplify_sequence(doc, history),
             "video.trim_start_to_playhead" => self.timeline_trim_to_playhead(doc, history, true),
             "video.trim_end_to_playhead" => self.timeline_trim_to_playhead(doc, history, false),
@@ -1537,6 +1543,69 @@ impl PhotonicApp {
             return;
         };
         ops_bridge::close_all_gaps(doc, history, seq_id);
+    }
+
+    /// K-A3 Insert Space: open 1 s of empty timeline at the playhead on every
+    /// unlocked track (one undo step).
+    pub(crate) fn timeline_insert_space(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::insert_space(
+            doc,
+            history,
+            seq_id,
+            self.playhead,
+            Tick(TICKS_PER_SECOND),
+        );
+    }
+
+    /// K-A3 Remove Space: close up to 1 s of pure gap at the playhead across
+    /// unlocked tracks (one undo step).
+    pub(crate) fn timeline_remove_space(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::remove_space(
+            doc,
+            history,
+            seq_id,
+            self.playhead,
+            Tick(TICKS_PER_SECOND),
+        );
+    }
+
+    /// K-A3 Remove All Spaces After Playhead: pack unlocked tracks from the
+    /// playhead onward.
+    pub(crate) fn timeline_remove_all_spaces_after(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::remove_all_spaces_after(doc, history, seq_id, self.playhead);
+    }
+
+    /// K-A3 Remove All Clips After Playhead.
+    pub(crate) fn timeline_remove_clips_after(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(seq_id) = doc.timeline.as_ref().and_then(|p| p.active_sequence) else {
+            return;
+        };
+        ops_bridge::remove_clips_after(doc, history, seq_id, self.playhead);
     }
 
     /// **Simplify Sequence** (G1): merge back through-edits — adjacent clips that

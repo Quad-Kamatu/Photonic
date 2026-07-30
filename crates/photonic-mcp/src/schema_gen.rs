@@ -5438,6 +5438,66 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "insert_space",
+            "description": "Insert Space (26 §9 K-A3): open empty timeline of `amount` (default 1s) at `at` on every unlocked track — later clips shift right. Sequence markers at/after the point shift with the space. One undo step. Locked tracks are skipped.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer", "description": "Sequence-relative insert point. Precedence: at_ticks > at_tc > at_seconds." },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" },
+                    "amount_ticks": { "type": "integer", "description": "Gap width in ticks. Prefer over amount_seconds." },
+                    "amount_seconds": { "type": "number", "description": "Gap width in seconds (default 1.0 if neither amount_* supplied)." }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "remove_space",
+            "description": "Remove Space (26 §9 K-A3): close up to `amount` of pure gap at `at` across unlocked tracks (later clips shift left). Refuses when a clip covers `at` or the shared free gap is shorter than amount. One undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" },
+                    "amount_ticks": { "type": "integer" },
+                    "amount_seconds": { "type": "number", "description": "Default 1.0s when amount_* omitted." }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "remove_all_spaces_after",
+            "description": "Remove All Spaces After (26 §9 K-A3): pack every unlocked track from `at` onward so later clips are contiguous (no internal gaps). One undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
+            "name": "remove_clips_after",
+            "description": "Remove All Clips After (26 §9 K-A3): delete every clip on every unlocked track whose start is at or after `at`. One undo step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sequence_id": { "type": "string" },
+                    "at_ticks": { "type": "integer" },
+                    "at_tc": { "type": "string" },
+                    "at_seconds": { "type": "number" }
+                },
+                "required": ["sequence_id"]
+            }
+        },
+        {
             "name": "close_gap",
             "description": "Close Gap (G-1): close the gap containing `at` — on just track_id when supplied, or on every unlocked track in the sequence when omitted — as ONE undo step either way. A no-op (no history entry) when there is nothing to close.",
             "inputSchema": {

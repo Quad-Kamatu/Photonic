@@ -591,6 +591,53 @@ pub struct CloseGapArgs {
     pub at_seconds: Option<f64>,
 }
 
+/// K-A3 Insert Space: open `amount` of empty timeline at `at` across every
+/// unlocked track (shifts later clips right). One undo step.
+#[derive(Debug, Deserialize)]
+pub struct InsertSpaceArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    /// Gap width. Prefer `amount_ticks`; else `amount_seconds` (default 1.0).
+    #[serde(default)]
+    pub amount_ticks: Option<i64>,
+    #[serde(default)]
+    pub amount_seconds: Option<f64>,
+}
+
+/// K-A3 Remove Space: close up to `amount` of pure gap at `at` across unlocked
+/// tracks. Refuses when a clip covers `at` or the shared free gap is shorter.
+#[derive(Debug, Deserialize)]
+pub struct RemoveSpaceArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+    #[serde(default)]
+    pub amount_ticks: Option<i64>,
+    #[serde(default)]
+    pub amount_seconds: Option<f64>,
+}
+
+/// K-A3 Remove All Spaces After / Remove All Clips After: sequence + point.
+#[derive(Debug, Deserialize)]
+pub struct SpaceAfterArgs {
+    pub sequence_id: SequenceId,
+    #[serde(default)]
+    pub at_ticks: Option<i64>,
+    #[serde(default)]
+    pub at_tc: Option<String>,
+    #[serde(default)]
+    pub at_seconds: Option<f64>,
+}
+
 /// Args for `match_frame` (G-3, Premiere F): from `clip_id`, compute the
 /// source-media tick that lines up with timeline position `at` (which must
 /// fall within the clip's span). Read-only — does not mutate the project or

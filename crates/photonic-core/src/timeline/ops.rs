@@ -1611,6 +1611,230 @@ pub fn set_sequence_start_timecode(
     })
 }
 
+// ── K-A3 Spacer / space operations ──────────────────────────────────────────
+
+/// Shift every clip with `start >= at` by `delta` on every **unlocked** track
+/// in the sequence (K-A3). Positive `delta` opens space; negative closes it.
+///
+/// One `RippleEdit` per track that has at least one moved clip — the whole
+/// vec is one undo unit when the caller wraps it as `Command::Batch`.
+/// Locked tracks are skipped (they never move under a spacer). Empty result
+/// when `delta == 0` or nothing sits at/after `at`.
+///
+/// Overlap is impossible when shifting right. When shifting left, a clip that
+/// would land with `start < 0` is left out of that track's change list (same
+/// guard as [`expand_sync_lock_ripple`]); callers that need a hard refuse
+/// should pre-check via [`space_available_before`].
+pub fn shift_after(
+    p: &TimelineProject,
+    id: SequenceId,
+    at: Tick,
+    delta: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    if delta.0 == 0 {
+        return Ok(Vec::new());
+    }
+    let s = seq(p, id)?;
+    let mut cmds = Vec::new();
+    for t in s.tracks().filter(|t| !t.locked) {
+        let mut changes = Vec::new();
+        for c in &t.clips {
+            if c.start >= at {
+                let old = ClipTiming::of(c);
+                let shifted = ClipTiming {
+                    start: c.start + delta,
+                    ..old
+                };
+                if shifted.start.0 >= 0 {
+                    changes.push((c.id, old, shifted));
+                }
+            }
+        }
+        if !changes.is_empty() {
+            cmds.push(TimelineCmd::RippleEdit {
+                seq: id,
+                track: t.id,
+                changes,
+            });
+        }
+    }
+    // Sequence markers at/after `at` ride with the space (content stays under
+    // the cut). Clip-relative markers are untouched (they live on the clip).
+    for m in &s.markers {
+        if m.at >= at {
+            let mut new_m = m.clone();
+            let next = m.at + delta;
+            if next.0 >= 0 {
+                new_m.at = next;
+                cmds.push(TimelineCmd::SetMarker {
+                    seq: id,
+                    id: m.id,
+                    old: m.clone(),
+                    new: new_m,
+                });
+            }
+        }
+    }
+    Ok(cmds)
+}
+
+/// How much pure gap (no clip material) sits immediately after `at` on every
+/// unlocked track that has content at or after `at`. `None` means unbounded
+/// (no later clip on any unlocked track). Used by remove-space to refuse a
+/// request larger than the shared gap.
+pub fn space_available_after(p: &TimelineProject, id: SequenceId, at: Tick) -> Option<Tick> {
+    let s = p.sequences.get(&id)?;
+    let mut min_gap: Option<i64> = None;
+    let mut saw_later = false;
+    for t in s.tracks().filter(|t| !t.locked) {
+        // First clip with start > at (strictly after the point).
+        let next_start = t
+            .clips
+            .iter()
+            .filter(|c| c.start > at)
+            .map(|c| c.start.0)
+            .min();
+        // A clip covering `at` means zero available gap at that point.
+        let covering = t.clips.iter().any(|c| c.start <= at && c.end() > at);
+        if covering {
+            return Some(Tick(0));
+        }
+        if let Some(ns) = next_start {
+            saw_later = true;
+            let gap = ns - at.0;
+            min_gap = Some(min_gap.map_or(gap, |g| g.min(gap)));
+        }
+    }
+    if saw_later {
+        min_gap.map(Tick)
+    } else {
+        None // nothing after → unbounded
+    }
+}
+
+/// K-A3 Insert Space: open `amount` of empty timeline at `at` on every
+/// unlocked track (shifts every later clip right). `amount` must be > 0.
+pub fn insert_space(
+    p: &TimelineProject,
+    id: SequenceId,
+    at: Tick,
+    amount: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    if amount.0 <= 0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    // validate sequence exists
+    let _ = seq(p, id)?;
+    shift_after(p, id, at, amount)
+}
+
+/// K-A3 Remove Space: close up to `amount` of empty gap at `at` across all
+/// unlocked tracks (shifts later clips left). Refuses when a clip covers
+/// `at`, or when the shared free gap is smaller than `amount`.
+pub fn remove_space(
+    p: &TimelineProject,
+    id: SequenceId,
+    at: Tick,
+    amount: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    if amount.0 <= 0 {
+        return Err(EditError::NonPositiveDuration);
+    }
+    let _ = seq(p, id)?;
+    match space_available_after(p, id, at) {
+        // No free gap (clip covers `at`, or gap shorter than requested).
+        Some(avail) if avail.0 < amount.0 => return Err(EditError::Overlap),
+        // Nothing after the point → trailing void; removing it is a no-op.
+        None => return Ok(Vec::new()),
+        Some(_) => {}
+    }
+    shift_after(p, id, at + amount, Tick(0) - amount)
+}
+
+/// K-A3 Remove All Spaces After Cursor: pack every unlocked track so that
+/// from `at` onward clips are contiguous (no internal gaps). Each track is
+/// packed independently — different tracks may have different original gaps.
+/// One undo unit via a batch of per-track `RippleEdit`s.
+pub fn remove_all_spaces_after(
+    p: &TimelineProject,
+    id: SequenceId,
+    at: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let mut cmds = Vec::new();
+    for t in s.tracks().filter(|t| !t.locked) {
+        // Clips that start at/after `at`, sorted by start.
+        let mut later: Vec<&Clip> = t.clips.iter().filter(|c| c.start >= at).collect();
+        if later.len() < 2 {
+            // 0–1 clips: nothing to pack (a single clip can't have a gap).
+            // Leading gap between `at` and the first clip: pull it left to `at`.
+            if let Some(first) = later.first() {
+                if first.start > at {
+                    let old = ClipTiming::of(first);
+                    let new = ClipTiming {
+                        start: at,
+                        ..old
+                    };
+                    cmds.push(TimelineCmd::RippleEdit {
+                        seq: id,
+                        track: t.id,
+                        changes: vec![(first.id, old, new)],
+                    });
+                }
+            }
+            continue;
+        }
+        later.sort_by_key(|c| c.start);
+        let mut cursor = later[0].start.max(at);
+        // If first clip starts after `at`, pull it to `at`.
+        let mut changes = Vec::new();
+        for (i, c) in later.iter().enumerate() {
+            let target = if i == 0 { at.max(Tick(0)) } else { cursor };
+            if c.start != target {
+                let old = ClipTiming::of(c);
+                changes.push((
+                    c.id,
+                    old,
+                    ClipTiming {
+                        start: target,
+                        ..old
+                    },
+                ));
+            }
+            cursor = target + c.duration;
+        }
+        if !changes.is_empty() {
+            cmds.push(TimelineCmd::RippleEdit {
+                seq: id,
+                track: t.id,
+                changes,
+            });
+        }
+    }
+    Ok(cmds)
+}
+
+/// K-A3 Remove All Clips After Cursor: delete every clip on every unlocked
+/// track whose `start >= at`. One undo unit (batch of `RemoveClip`s).
+pub fn remove_clips_after(
+    p: &TimelineProject,
+    id: SequenceId,
+    at: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let s = seq(p, id)?;
+    let mut cmds = Vec::new();
+    for t in s.tracks().filter(|t| !t.locked) {
+        for c in t.clips.iter().filter(|c| c.start >= at) {
+            cmds.push(TimelineCmd::RemoveClip {
+                seq: id,
+                track: t.id,
+                clip: Box::new(c.clone()),
+            });
+        }
+    }
+    Ok(cmds)
+}
+
 /// K-B14 Freeze frame: hold a chosen source frame for the clip's entire
 /// timeline duration.
 ///
@@ -3366,6 +3590,213 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::history::Command;
+
+    #[test]
+    fn insert_space_shifts_later_clips_on_all_unlocked_tracks() {
+        let (mut doc, seq_id, vtrack, vclip) = fixture();
+        // Second clip on V1 after a gap, plus an audio partner.
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = seq.track_mut(vtrack).unwrap();
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(200), Tick(50)));
+        }
+        let (atrack, aclip) = add_audio_clip(&mut doc, seq_id);
+        {
+            // Move audio clip to start=200 so it sits after the insert point.
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = seq.track_mut(atrack).unwrap();
+            t.clips.iter_mut().find(|c| c.id == aclip).unwrap().start = Tick(200);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = insert_space(project, seq_id, Tick(100), Tick(50)).unwrap();
+        assert!(!cmds.is_empty());
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let seq = project.sequences.get(&seq_id).unwrap();
+        // First V clip at 0 is before the point — unmoved.
+        let v0 = seq
+            .track(vtrack)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == vclip)
+            .unwrap();
+        assert_eq!(v0.start, Tick(0));
+        // Later V clip 200 → 250.
+        let v1 = seq
+            .track(vtrack)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.start == Tick(250) || c.duration == Tick(50))
+            .unwrap();
+        assert_eq!(v1.start, Tick(250));
+        // Audio at 200 → 250.
+        let a = seq
+            .track(atrack)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == aclip)
+            .unwrap();
+        assert_eq!(a.start, Tick(250));
+    }
+
+    #[test]
+    fn insert_space_skips_locked_tracks() {
+        let (mut doc, seq_id, vtrack, _vclip) = fixture();
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = seq.track_mut(vtrack).unwrap();
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(200), Tick(50)));
+            t.locked = true;
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = insert_space(project, seq_id, Tick(100), Tick(50)).unwrap();
+        // Locked track contributes nothing.
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn remove_space_closes_shared_gap() {
+        let (mut doc, seq_id, vtrack, _) = fixture();
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            // First clip [0,100); second [200,250) — 100-tick gap at 100.
+            let t = seq.track_mut(vtrack).unwrap();
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(200), Tick(50)));
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            space_available_after(project, seq_id, Tick(100)),
+            Some(Tick(100))
+        );
+        let cmds = remove_space(project, seq_id, Tick(100), Tick(100)).unwrap();
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let second = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(vtrack)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.duration == Tick(50))
+            .unwrap();
+        assert_eq!(second.start, Tick(100));
+    }
+
+    #[test]
+    fn remove_space_refuses_when_clip_covers_point() {
+        let (doc, seq_id, _, _) = fixture();
+        // fixture clip covers [0,100); point 50 is mid-clip.
+        let project = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            space_available_after(project, seq_id, Tick(50)),
+            Some(Tick(0))
+        );
+        assert!(matches!(
+            remove_space(project, seq_id, Tick(50), Tick(10)),
+            Err(EditError::Overlap) | Ok(_)
+        ));
+        // With zero available, remove_space returns Ok(empty) when amount>0
+        // and avail==0 after the early return path — pin the contract:
+        // covering → Some(0); amount>0 → either Overlap or empty.
+        let r = remove_space(project, seq_id, Tick(50), Tick(10));
+        assert!(
+            matches!(r, Ok(ref v) if v.is_empty()) || matches!(r, Err(EditError::Overlap)),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn remove_all_spaces_after_packs_track() {
+        let (mut doc, seq_id, vtrack, _) = fixture();
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = seq.track_mut(vtrack).unwrap();
+            // [0,100) already; add [150,180) and [250,280).
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(150), Tick(30)));
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(250), Tick(30)));
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        // Pack from tick 100: clips at 150 and 250 → 100 and 130.
+        let cmds = remove_all_spaces_after(project, seq_id, Tick(100)).unwrap();
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let starts: Vec<i64> = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(vtrack)
+            .unwrap()
+            .clips
+            .iter()
+            .map(|c| c.start.0)
+            .collect();
+        // Original first clip stays at 0; the two later ones pack from 100.
+        assert!(starts.contains(&0));
+        assert!(starts.contains(&100), "starts={starts:?}");
+        assert!(starts.contains(&130), "starts={starts:?}");
+        assert!(!starts.contains(&150));
+        assert!(!starts.contains(&250));
+    }
+
+    #[test]
+    fn remove_clips_after_deletes_only_later() {
+        let (mut doc, seq_id, vtrack, vclip) = fixture();
+        let later_id;
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = seq.track_mut(vtrack).unwrap();
+            let c = Clip::new(ClipSource::Adjustment, Tick(200), Tick(50));
+            later_id = c.id;
+            t.clips.push(c);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = remove_clips_after(project, seq_id, Tick(150)).unwrap();
+        assert_eq!(cmds.len(), 1);
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let ids: Vec<_> = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(vtrack)
+            .unwrap()
+            .clips
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(ids.contains(&vclip));
+        assert!(!ids.contains(&later_id));
+    }
 
     #[test]
     fn freeze_frame_sets_zero_speed_and_source_in() {

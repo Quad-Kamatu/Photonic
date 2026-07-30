@@ -1953,6 +1953,160 @@ pub async fn close_gap(state: &AppState, args: CloseGapArgs) -> ToolResult {
     }
 }
 
+fn resolve_amount_ticks(amount_ticks: Option<i64>, amount_seconds: Option<f64>) -> Tick {
+    if let Some(t) = amount_ticks {
+        return Tick(t);
+    }
+    let secs = amount_seconds.unwrap_or(1.0);
+    Tick((secs * photonic_core::timeline::TICKS_PER_SECOND as f64).round() as i64)
+}
+
+/// K-A3 Insert Space: open `amount` at `at` across unlocked tracks (one undo).
+pub async fn insert_space(state: &AppState, args: InsertSpaceArgs) -> ToolResult {
+    tracing::debug!("tool: insert_space on sequence {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let amount = resolve_amount_ticks(args.amount_ticks, args.amount_seconds);
+    if amount.0 <= 0 {
+        return ToolResult::error("amount must be > 0");
+    }
+    match ops::insert_space(project, args.sequence_id, at, amount) {
+        Ok(cmds) if cmds.is_empty() => ToolResult::text("Nothing after the point — no shift")
+            .with_data(json!({ "commands": 0 })),
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text(format!("Inserted space ({n} command(s))"))
+                .with_data(json!({ "commands": n, "amount_ticks": amount.0 }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// K-A3 Remove Space: close up to `amount` of pure gap at `at` (one undo).
+pub async fn remove_space(state: &AppState, args: RemoveSpaceArgs) -> ToolResult {
+    tracing::debug!("tool: remove_space on sequence {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let amount = resolve_amount_ticks(args.amount_ticks, args.amount_seconds);
+    if amount.0 <= 0 {
+        return ToolResult::error("amount must be > 0");
+    }
+    match ops::remove_space(project, args.sequence_id, at, amount) {
+        Ok(cmds) if cmds.is_empty() => {
+            ToolResult::text("No space to remove").with_data(json!({ "commands": 0 }))
+        }
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text(format!("Removed space ({n} command(s))"))
+                .with_data(json!({ "commands": n, "amount_ticks": amount.0 }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// K-A3 Remove All Spaces After: pack unlocked tracks from `at` onward.
+pub async fn remove_all_spaces_after(state: &AppState, args: SpaceAfterArgs) -> ToolResult {
+    tracing::debug!(
+        "tool: remove_all_spaces_after on sequence {}",
+        args.sequence_id
+    );
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    match ops::remove_all_spaces_after(project, args.sequence_id, at) {
+        Ok(cmds) if cmds.is_empty() => {
+            ToolResult::text("Already packed — nothing to do").with_data(json!({ "commands": 0 }))
+        }
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text(format!("Packed spaces after point ({n} track edit(s))"))
+                .with_data(json!({ "commands": n }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// K-A3 Remove All Clips After: delete clips with `start >= at` on unlocked tracks.
+pub async fn remove_clips_after(state: &AppState, args: SpaceAfterArgs) -> ToolResult {
+    tracing::debug!("tool: remove_clips_after on sequence {}", args.sequence_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some(seq) = project.sequences.get(&args.sequence_id) else {
+        return ToolResult::error(format!("sequence {} not found", args.sequence_id));
+    };
+    let at = match resolve_tick(
+        args.at_ticks,
+        args.at_tc.as_deref(),
+        args.at_seconds,
+        Some(seq.frame_rate),
+    ) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    match ops::remove_clips_after(project, args.sequence_id, at) {
+        Ok(cmds) if cmds.is_empty() => {
+            ToolResult::text("No clips after the point").with_data(json!({ "removed": 0 }))
+        }
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text(format!("Removed {n} clip(s) after the point"))
+                .with_data(json!({ "removed": n }))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 /// **Match Frame** (G-3, Premiere F): from `clip_id`, compute the source-media
 /// tick that lines up with timeline position `at` (`source_in +
 /// speed.source_delta(at - clip.start)`, exact-rational — mirrors the GUI's

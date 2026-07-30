@@ -596,6 +596,27 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Close All Gaps",
         default: None,
     },
+    // K-A3 spacer / space operations (across all unlocked tracks).
+    CommandDef {
+        id: "video.insert_space",
+        label: "Insert Space at Playhead (1s)",
+        default: None,
+    },
+    CommandDef {
+        id: "video.remove_space",
+        label: "Remove Space at Playhead (1s)",
+        default: None,
+    },
+    CommandDef {
+        id: "video.remove_all_spaces_after",
+        label: "Remove All Spaces After Playhead",
+        default: None,
+    },
+    CommandDef {
+        id: "video.remove_clips_after",
+        label: "Remove All Clips After Playhead",
+        default: None,
+    },
     CommandDef {
         id: "video.simplify_sequence",
         label: "Simplify Sequence (remove through-edits)",
