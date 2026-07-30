@@ -1244,6 +1244,7 @@ pub(crate) fn draw_scopes_panel(
                     (ScopeKind::Parade, "Parade"),
                     (ScopeKind::Vectorscope, "Vectorscope"),
                     (ScopeKind::Histogram, "Histogram"),
+                    (ScopeKind::AudioSpectrum, "Spectrum"),
                 ] {
                     if ui.selectable_label(*kind == k, name).clicked() {
                         *kind = k;
@@ -1283,6 +1284,11 @@ pub(crate) fn draw_scopes_panel(
             );
             ui.separator();
 
+            // K-E1 audio spectrum is independent of the video tap.
+            if *kind == ScopeKind::AudioSpectrum {
+                draw_audio_spectrum(ui, ctx);
+                return;
+            }
             let Some(tap) = frame.and_then(|f| f.scope_tap.as_ref()) else {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
@@ -1301,6 +1307,7 @@ pub(crate) fn draw_scopes_panel(
                 ScopeKind::Parade => draw_parade(ui, device, queue, tex, w, h),
                 ScopeKind::Waveform => draw_waveform(ui, device, queue, tex, w, h),
                 ScopeKind::Vectorscope => draw_vectorscope(ui, device, queue, tex, w, h),
+                ScopeKind::AudioSpectrum => draw_audio_spectrum(ui, ctx),
             }
         });
 
@@ -1566,6 +1573,49 @@ fn draw_vectorscope(
         pixels,
         Some(draw_vectorscope_guides),
     );
+}
+
+/// K-E1: audio spectrum (dB vs frequency) from the engine feeder's latest
+/// master-bus DFT. Pure drawing over a status snapshot — zero document state.
+fn draw_audio_spectrum(ui: &mut Ui, ctx: &egui::Context) {
+    // Session bridge stores spectrum via PhotonicApp → status; fall back to
+    // empty. The window call site has no engine handle, so we read egui temp
+    // filled by the app each frame when scopes are open.
+    let bins: Vec<f32> = ctx
+        .data(|d| d.get_temp::<Vec<f32>>(egui::Id::new("ke1_spectrum_db")))
+        .unwrap_or_default();
+    ui.label(
+        RichText::new("Audio spectrum (master bus, dBFS)")
+            .small()
+            .color(muted(ui)),
+    );
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 200.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(7, 7, 11));
+    if bins.is_empty() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "No audio — play the sequence",
+            egui::FontId::proportional(12.0),
+            muted(ui),
+        );
+        return;
+    }
+    let n = bins.len().max(1) as f32;
+    let bar_w = rect.width() / n;
+    // Map -96..0 dB into full height.
+    let floor = -96.0f32;
+    for (i, &db) in bins.iter().enumerate() {
+        let t = ((db - floor) / -floor).clamp(0.0, 1.0);
+        let h = t * rect.height();
+        let x = rect.left() + i as f32 * bar_w;
+        let r = Rect::from_min_max(
+            pos2(x, rect.bottom() - h),
+            pos2(x + bar_w.max(1.0) - 0.5, rect.bottom()),
+        );
+        painter.rect_filled(r, 0.0, Color32::from_rgb(0x6E, 0xA0, 0xE0));
+    }
 }
 
 /// K-E1 vectorscope guides: I/Q axes (skin-tone on I), 75% / 100% boxes, and

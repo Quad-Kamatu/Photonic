@@ -846,6 +846,8 @@ pub struct Mixer {
     track_post_fader_meters: HashMap<TrackId, Arc<StereoMeter>>,
     master_post_fx_meter: Arc<StereoMeter>,
     output_meter: Arc<StereoMeter>,
+    /// K-E1: latest master-bus magnitude spectrum (linear, half of BLOCK_FRAMES).
+    last_spectrum: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
     // Instantiated fx chains (31 §8 step 2), synced from the model each block.
     track_fx: HashMap<TrackId, FxChainState>,
     master_fx: FxChainState,
@@ -882,6 +884,7 @@ impl Mixer {
             track_post_fader_meters: HashMap::new(),
             master_post_fx_meter: Arc::new(StereoMeter::default()),
             output_meter: Arc::new(StereoMeter::default()),
+            last_spectrum: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             track_fx: HashMap::new(),
             master_fx: FxChainState::new(),
             tail_cache: HashMap::new(),
@@ -1063,6 +1066,11 @@ impl Mixer {
     /// "Output".
     pub fn output_meter(&self) -> Arc<StereoMeter> {
         self.output_meter.clone()
+    }
+
+    /// K-E1: latest power spectrum of the master bus (linear magnitudes).
+    pub fn last_spectrum(&self) -> std::sync::Arc<std::sync::Mutex<Vec<f32>>> {
+        self.last_spectrum.clone()
     }
 
     /// Render exactly one [`BLOCK_FRAMES`]-frame block (09 §5).
@@ -1300,6 +1308,15 @@ impl Mixer {
 
         // Tap: output, post `MasterBusParams.volume_db` (09 §4 tap table).
         self.output_meter.update(out);
+
+        // K-E1: master-bus power spectrum for the scopes panel (pure DFT).
+        {
+            let mono = crate::audio::spectrum::to_mono(out, CHANNELS);
+            let mags = crate::audio::spectrum::power_spectrum(&mono);
+            if let Ok(mut slot) = self.last_spectrum.lock() {
+                *slot = mags;
+            }
+        }
 
         // 31 §3: publish total graph latency *after* process so units that
         // allocate lookahead on first process report correctly.

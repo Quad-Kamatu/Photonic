@@ -298,6 +298,9 @@ pub struct EngineStatus {
     /// sampled from the mixer feeder's `StereoMeter` each status publish.
     /// `None` when no feeder is running (paused / no audio device).
     pub master_level: Option<MasterMeterSnapshot>,
+    /// K-E1: latest master-bus spectrum in dBFS (downsampled to 64 bins).
+    /// `None` when the mixer feeder is not running.
+    pub spectrum_db: Option<Vec<f32>>,
     /// Total graph latency in samples (31 §3): max track-path latency + master
     /// chain. Published for A/V clock offset; 0 when no feeder is running.
     pub graph_latency_samples: u32,
@@ -334,6 +337,7 @@ impl Default for EngineStatus {
             buffering: false,
             export: None,
             master_level: None,
+            spectrum_db: None,
             graph_latency_samples: 0,
             scope_tap: ScopeTapPoint::Program,
         }
@@ -627,6 +631,8 @@ struct EngineThread {
     export_job_counter: u64,
     /// Live master-bus meter handle published by the mixer feeder (G-4).
     master_meter: Arc<ArcSwapOption<crate::audio::mixer::StereoMeter>>,
+    /// K-E1: latest master-bus spectrum (dB) from the mixer feeder.
+    spectrum_db: Arc<ArcSwapOption<Vec<f32>>>,
     /// Live graph latency samples published by the mixer feeder (31 §3).
     graph_latency: Arc<std::sync::atomic::AtomicU32>,
 }
@@ -675,6 +681,7 @@ impl EngineThread {
             export_cancel: None,
             export_job_counter: 0,
             master_meter: Arc::new(ArcSwapOption::from(None)),
+            spectrum_db: Arc::new(ArcSwapOption::from(None)),
             graph_latency: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
@@ -1308,6 +1315,7 @@ impl EngineThread {
                             producer,
                             self.tools.clone(),
                             Arc::clone(&self.master_meter),
+                            Arc::clone(&self.spectrum_db),
                             Arc::clone(&self.graph_latency),
                         ));
                     }
@@ -1332,6 +1340,7 @@ impl EngineThread {
         self.audio.stop();
         // Clear live meter / latency so the GUI settles to silence (G-4).
         self.master_meter.store(None);
+        self.spectrum_db.store(None);
         self.graph_latency.store(0, Ordering::Relaxed);
     }
 
@@ -1354,6 +1363,7 @@ impl EngineThread {
             peak: m.peak(),
             rms: m.rms(),
         });
+        let spectrum_db = self.spectrum_db.load_full().map(|v| (*v).clone());
         let graph_latency_samples = self.graph_latency.load(Ordering::Relaxed);
         // Cheap signature: skip Arc allocation when the GUI-visible fields are
         // unchanged (idle paused loops were allocating status every 100 ms).
@@ -1435,6 +1445,7 @@ impl EngineThread {
             buffering: self.buffering,
             export: export.as_ref().map(|e| (**e).clone()),
             master_level,
+            spectrum_db,
             graph_latency_samples,
             scope_tap: self.scope_tap,
         }));
@@ -2246,6 +2257,7 @@ fn spawn_audio_feeder(
     producer: RingProducer,
     tools: Option<FfmpegTools>,
     master_meter: Arc<ArcSwapOption<crate::audio::mixer::StereoMeter>>,
+    spectrum_db: Arc<ArcSwapOption<Vec<f32>>>,
     graph_latency: Arc<std::sync::atomic::AtomicU32>,
 ) -> AudioFeeder {
     let stop = Arc::new(AtomicBool::new(false));
@@ -2262,6 +2274,7 @@ fn spawn_audio_feeder(
                 tools,
                 stop_flag,
                 master_meter,
+                spectrum_db,
                 graph_latency,
             )
         })
@@ -2281,6 +2294,7 @@ fn feeder_main(
     tools: Option<FfmpegTools>,
     stop: Arc<AtomicBool>,
     master_meter: Arc<ArcSwapOption<crate::audio::mixer::StereoMeter>>,
+    spectrum_db: Arc<ArcSwapOption<Vec<f32>>>,
     graph_latency: Arc<std::sync::atomic::AtomicU32>,
 ) {
     let sample_rate = sample_rate.max(1);
@@ -2395,6 +2409,23 @@ fn feeder_main(
         mixer.render_block(t, &mut voices, &seq.audio_master, &mut out);
         // 31 §3: publish total graph latency for A/V clock offset.
         graph_latency.store(mixer.last_graph_latency_samples(), Ordering::Relaxed);
+        // K-E1: publish dB spectrum (downsampled) for the scopes panel.
+        if let Ok(mags) = mixer.last_spectrum().lock() {
+            if !mags.is_empty() {
+                let db = crate::audio::spectrum::to_db(&mags, 1.0);
+                let n = 64usize.min(db.len());
+                let step = (db.len() / n).max(1);
+                let mut bins = Vec::with_capacity(n);
+                for i in 0..n {
+                    let start = i * step;
+                    let end = ((i + 1) * step).min(db.len());
+                    let slice = &db[start..end];
+                    let peak = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    bins.push(peak);
+                }
+                spectrum_db.store(Some(Arc::new(bins)));
+            }
+        }
         producer.push_block(&out);
         t = t + block_ticks;
     }

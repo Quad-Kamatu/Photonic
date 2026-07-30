@@ -90,6 +90,8 @@ pub(crate) enum ScopeKind {
     Vectorscope,
     /// Luma/RGB histogram (07 §6 histogram).
     Histogram,
+    /// K-E1: audio spectrum (dB vs frequency) during playback.
+    AudioSpectrum,
 }
 
 /// The slice of `PhotonicApp` video-editor session state the video panels read

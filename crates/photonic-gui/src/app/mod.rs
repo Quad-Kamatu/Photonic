@@ -3854,6 +3854,14 @@ impl PhotonicApp {
                     .engine
                     .as_ref()
                     .and_then(|b| b.session().latest_frame());
+                // K-E1: publish latest master-bus spectrum for the Spectrum scope.
+                if let Some(spec) = self
+                    .engine
+                    .as_ref()
+                    .and_then(|b| b.session().status().spectrum_db.clone())
+                {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("ke1_spectrum_db"), spec));
+                }
                 let device = renderer.device_arc();
                 let queue = renderer.queue_arc();
                 let want = panels::video::color_page::draw_scopes_panel(

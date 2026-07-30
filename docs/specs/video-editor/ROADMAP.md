@@ -96,10 +96,11 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-C7** import triage | ✅ done | `2fb684e` | `MediaProbe` persists `is_vfr`/`pixel_format`/`has_alpha`; pure `triage_probe` (VFR=Info not convert); pool badges from findings; additive serde |
 | **K-D3** per-stream / channel / offset | ✅ done | `56892b2` | `ClipAudio.stream` + `offset`; `ChannelMap::{LeftOnly,RightOnly}`; offline mix seeks with offset |
 | **K-D4** stems export | ✅ done | `56892b2` | `ExportPreset.stems`; `render_export_audio_filtered` per track; `stem_output_path` naming |
+| **K-E1** audio spectrum + scope depth | ✅ done | *(this commit)* | Pure radix-2 spectrum DFT; mixer/feeder publish `spectrum_db`; scopes **Spectrum** tab; vectorscope Rec.601 switch residual (CPU matrix path already present) |
 
 **K-Band 1 is closed.** 26 §19.1's "cheap and structural" band required each listed verb to have a GUI route, an MCP tool and a test; K-B12, K-B15, K-C8 and K-E2 were the last four open and all four now meet it.
 
-**Not yet started (next bands):** K-A1 *(Band-5)*; K-C1/C4/C5 *(Band-5)*; K-E1 YUV + audio spectrum residual; K-F polish / K-F7; K-G1–G4 *(Band-5)*; X-1/X-2/X-3 *(Band-5)*; legal-or-fixture-blocked G/D items.
+**Not yet started (next bands):** K-A1 *(Band-5 await acceptance)*; K-C1/C4/C5 *(Band-5)*; K-B7 luma wipes / Applicability gating / K-F polish / K-F7; K-G1–G4 *(Band-5)*; X-1/X-2/X-3 *(Band-5)*; legal-or-fixture-blocked G/D items.
 
 **Band-5 mini-specs — the whole band is now drafted.** 26 §19.1 requires one *accepted before code*, so every one of these items was blocked on a document rather than on effort. All **14** are written and **await acceptance**; none authorizes code until accepted. K-B16, K-G6 and K-G5 are the band's already-implemented members.
 
@@ -223,7 +224,7 @@ Owner: [26-kdenlive-mlt-parity.md](26-kdenlive-mlt-parity.md). Round-3 parity pa
 | K-D | partial | Mixer + DSP bound (K-0.6), latency compensation, **K-D5 boundary declick**, **K-D3 stream/offset/channel maps**, **K-D4 stems export** landed. Open: deeper multi-stream UI + stem encode wiring polish | [31](31-audio-architecture.md), [26 §12](26-kdenlive-mlt-parity.md#12-k-d--audio) |
 | K-D1 | legal-or-fixture-blocked | Dual-system-sound align of an arbitrary two-clip selection. Reuses G-20's engine but sits **outside** S4's multicam carve-out, so it needs its own tracking | [26 §K-D1](26-kdenlive-mlt-parity.md#k-d1--align-by-sound-and-by-timecode) |
 | K-D2 | **product-blocked** | Timeline audio recording conflicts with the SPEC non-goals "Audio recording (import + TTS only in v1)" and "Live capture / streaming input". Needs an **S13** amendment | [26 §K-D2](26-kdenlive-mlt-parity.md#k-d2--timeline-audio-recording--product-blocked) |
-| K-E | partial | Scopes + extract + I/Q/75% + hist Y/R/G/B + comp grids + **K-E2 per-clip scope tap**. Open: YUV/YPbPr, audio spectrum | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
+| K-E | partial | Scopes + extract + I/Q/75% + hist Y/R/G/B + comp grids + **K-E2 per-clip scope tap** + **K-E1 audio spectrum**. Open: full GPU Rec.601 vectorscope twin | [26 §13](26-kdenlive-mlt-parity.md#13-k-e--monitor-and-scopes) |
 | K-F | partial | **K-F1–F5 done** for the export/render band (queue + inspector, multi-format/marker, job options, HW preflight). Remaining polish: sleep-inhibit, add-to-bin, burn-in overlay, 2-pass, K-F7 one-eval-many-outputs | [26 §14](26-kdenlive-mlt-parity.md#14-k-f--render-and-export) |
 | K-G | partial | **K-G5 undo-history surface done** (edit-tree browser, keyboard nav, branch tips) and **K-G6 detection + deinterlace node landed**. Open: K-G1 profiles, K-G2 notes, K-G3 layouts, K-G4 templates (S11-gated) | [26 §15](26-kdenlive-mlt-parity.md#15-k-g--project) |
 | K-H | partial | Continuous MCP trail for landed K-* verbs; sweeps the pre-existing multicam / nested-sequence / duplicate-sequence tool gaps and `get_audio_meters`. `partial` by construction, as G-21/D-9 are | [26 §16](26-kdenlive-mlt-parity.md#16-k-h--mcp-trail) |

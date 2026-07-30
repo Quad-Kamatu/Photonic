@@ -26,6 +26,7 @@
 pub mod engine;
 pub mod mixer;
 pub mod ring;
+pub mod spectrum;
 pub mod waveform;
 
 /// Mixer block size in frames (09 §5): ~10.7 ms @ 48 kHz. Params/coefficients
