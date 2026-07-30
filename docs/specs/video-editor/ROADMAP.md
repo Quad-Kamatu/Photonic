@@ -94,8 +94,8 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-B11** keyframe interchange | ✅ done | `c2299d8` | `KeyframeClipboard` + `copy_keyframes`/`paste_keyframes` (path map + offset/re-anchor, one undo batch); keyframe editor Copy path/all + Paste/Paste@0; MCP `copy_keyframes`/`paste_keyframes` |
 | **K-C2** TagId registry | ✅ done | `deb8945` | `TagId` + `MediaTag` project registry; `MediaAsset.tag_ids`; `set_asset_tags_resolved` upserts names→ids; pool Tags menu + MCP `set_asset_tags` |
 | **K-C7** import triage | ✅ done | `2fb684e` | `MediaProbe` persists `is_vfr`/`pixel_format`/`has_alpha`; pure `triage_probe` (VFR=Info not convert); pool badges from findings; additive serde |
-| **K-D3** per-stream / channel / offset | ✅ done | *(this commit)* | `ClipAudio.stream` → ffmpeg `-map 0:a:N`; `offset` via `source_seek_with_offset` on offline + feeder; `ChannelMap::{LeftOnly,RightOnly}` |
-| **K-D4** stems export | ✅ done | *(this commit)* | `ExportPreset.stems` → `write_stems_for_export` from `job` path (one WAV per audio track); `render_export_audio_filtered` + real file test |
+| **K-D3** per-stream / channel / offset | ✅ done | `0f23028` | `ClipAudio.stream` → ffmpeg `-map 0:a:N`; `offset` via `source_seek_with_offset` on offline + feeder; `ChannelMap::{LeftOnly,RightOnly}` |
+| **K-D4** stems export | ✅ done | `0f23028` | `ExportPreset.stems` → `write_stems_for_export` from `job` path (one WAV per audio track); `render_export_audio_filtered` + real file test |
 | **K-E1** audio spectrum + scope depth | ✅ done | `6d54e73` | Pure radix-2 spectrum DFT; mixer/feeder publish `spectrum_db`; scopes **Spectrum** tab; vectorscope Rec.601 switch residual (CPU matrix path already present) |
 | **Applicability** gate | ✅ done | `ff6ea4f` | `add_effect_scoped` refuses scopes outside `manifest.applies`; catalogue uses `ALL_SCOPES` (K-B1-compatible); `CLIP_ONLY` retained for curation |
 | **K-B7** luma-map wipe maths | ✅ done (substrate) | `ff6ea4f` | Analytical `LumaWipeKind` maps + `soft_mix` (Photonic-authored); IR/TransitionKind binding residual |
