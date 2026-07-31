@@ -508,6 +508,9 @@ fn build_ffmpeg_args_accepts_windows_style_temp_audio_path() {
         prefer_hardware: false,
         encoder_speed: None,
         raw_encoder_args: &[],
+        // K-F polish options off: this case pins the baseline arg chain.
+        burn_in_timecode: false,
+        two_pass: false,
     };
     let args = build_ffmpeg_args(&caps, &s, "yuv420p", Some(audio_path.as_path()))
         .expect("build_ffmpeg_args");

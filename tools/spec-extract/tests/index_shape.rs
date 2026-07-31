@@ -123,6 +123,10 @@ fn indexes_const_enum_and_fields_in_order() {
             // commands. The literal list caught this addition, which is exactly
             // the notice-me behaviour the note below asks of it.
             "SetScopeTap",
+            // K-B5 compare-effect mode — view state too, declared next to
+            // `SetScopeTap` for that reason. The literal list caught this one
+            // as well, on the same terms as the note below.
+            "SetCompareEffects",
             "SeekSource",
             "InvalidateRange",
             "Export",

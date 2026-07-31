@@ -231,6 +231,8 @@ fn decoded_media_exports_to_a_well_formed_clip() {
         prefer_hardware: false,
         encoder_speed: None,
         raw_encoder_args: vec![],
+        burn_in_timecode: false,
+        two_pass: false,
     };
 
     let cancel = AtomicBool::new(false);

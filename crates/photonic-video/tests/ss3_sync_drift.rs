@@ -432,6 +432,8 @@ fn ss3_sync_drift_ten_minute_export_under_one_frame() {
         prefer_hardware: false,
         encoder_speed: None,
         raw_encoder_args: vec![],
+        burn_in_timecode: false,
+        two_pass: false,
     };
     let cancel = AtomicBool::new(false);
     let mut done = false;
