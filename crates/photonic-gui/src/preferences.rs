@@ -319,6 +319,14 @@ impl AppPreferences {
     }
 
     /// Load from disk, falling back to Default on any error.
+    ///
+    /// Drawer groups written by a *newer* build deserialize to the
+    /// `#[serde(other)] Unknown` arm rather than failing the whole struct, and
+    /// are normalized to this build's defaults here. Without that pair, a user
+    /// who opened a drawer this build lacks and then downgraded would lose
+    /// **every** preference — keymap, hotbar usage, widths, snap toggles — not
+    /// just the drawer choice, because `unwrap_or_default()` below cannot tell
+    /// "one unrecognised token" from "corrupt file".
     pub fn load() -> Self {
         let path = match Self::prefs_path() {
             Some(p) => p,
@@ -328,7 +336,14 @@ impl AppPreferences {
             Ok(j) => j,
             Err(_) => return Self::default(),
         };
-        serde_json::from_str(&json).unwrap_or_default()
+        let mut prefs: Self = serde_json::from_str(&json).unwrap_or_default();
+        if prefs.open_drawer == Some(DrawerGroup::Unknown) {
+            prefs.open_drawer = default_open_drawer();
+        }
+        if prefs.open_right_drawer == Some(RightDrawerGroup::Unknown) {
+            prefs.open_right_drawer = default_open_right_drawer();
+        }
+        prefs
     }
 
     /// Serialize and write to disk, silently ignoring errors.
@@ -348,6 +363,7 @@ impl AppPreferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::mode::AppMode;
 
     /// 37 §2.5 lowered the autosave default to two minutes. The `Default` impl
     /// and the serde `default = ...` fn must agree on that single number.
@@ -355,5 +371,97 @@ mod tests {
     fn autosave_default_is_two_minutes() {
         assert_eq!(AppPreferences::default().autosave_interval_secs, 120.0);
         assert_eq!(default_autosave_interval_secs(), 120.0);
+    }
+
+    /// T15 (205 §4.5 / 206 §3.3): a `preferences.json` naming a drawer group
+    /// this build lacks — as a downgrade after using a newer build's drawer
+    /// produces — must load with every *other* field intact and only the
+    /// drawer defaulted. Before the `#[serde(other)] Unknown` arms, the parse
+    /// failed outright and `unwrap_or_default()` discarded the lot.
+    #[test]
+    fn unknown_drawer_group_does_not_discard_other_preferences() {
+        let json = r#"{
+            "dark_mode": false,
+            "ui_scale": 1.5,
+            "show_grid": true,
+            "grid_size": 32,
+            "snap_to_grid": true,
+            "grid_color": [0.1, 0.2, 0.3, 0.4],
+            "show_rulers": true,
+            "default_fill_color": [1.0, 0.0, 0.0, 1.0],
+            "default_stroke_enabled": true,
+            "default_stroke_color": [0.0, 1.0, 0.0, 1.0],
+            "default_stroke_width": 3.5,
+            "console_open_on_start": true,
+            "nudge_distance": 7.0,
+            "open_drawer": "ProjectNotes",
+            "drawer_width": 321.0,
+            "open_right_drawer": "SomeFutureGroup",
+            "right_drawer_width": 432.0
+        }"#;
+
+        let mut prefs: AppPreferences =
+            serde_json::from_str(json).expect("unknown drawer tokens must not fail the parse");
+
+        // The unknown tokens land on the catch-all rather than erroring.
+        assert_eq!(prefs.open_drawer, Some(DrawerGroup::Unknown));
+        assert_eq!(prefs.open_right_drawer, Some(RightDrawerGroup::Unknown));
+
+        // Everything else survived — this is the actual regression being pinned.
+        assert_eq!(prefs.ui_scale, 1.5);
+        assert_eq!(prefs.grid_size, 32);
+        assert_eq!(prefs.nudge_distance, 7.0);
+        assert_eq!(prefs.drawer_width, 321.0);
+        assert_eq!(prefs.right_drawer_width, 432.0);
+        assert_eq!(prefs.default_stroke_width, 3.5);
+        assert_eq!(prefs.grid_color, [0.1, 0.2, 0.3, 0.4]);
+
+        // `load()` then normalizes the unknown drawers to this build's defaults.
+        // (Mirrors the tail of `load`, which is not callable here because it
+        // reads the real config dir.)
+        if prefs.open_drawer == Some(DrawerGroup::Unknown) {
+            prefs.open_drawer = default_open_drawer();
+        }
+        if prefs.open_right_drawer == Some(RightDrawerGroup::Unknown) {
+            prefs.open_right_drawer = default_open_right_drawer();
+        }
+        assert_eq!(prefs.open_drawer, default_open_drawer());
+        assert_eq!(prefs.open_right_drawer, default_open_right_drawer());
+    }
+
+    /// The catch-all must not swallow *known* tokens — a round-trip of every
+    /// rail-offered group in both modes still resolves to itself.
+    #[test]
+    fn known_drawer_groups_still_round_trip() {
+        for g in DrawerGroup::ALL
+            .iter()
+            .chain(DrawerGroup::VIDEO_ALL.iter())
+            .copied()
+        {
+            let s = serde_json::to_string(&g).unwrap();
+            let back: DrawerGroup = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, g, "DrawerGroup {g:?} round-tripped to {back:?}");
+        }
+        for g in RightDrawerGroup::ALL
+            .iter()
+            .chain(RightDrawerGroup::VIDEO_ALL.iter())
+            .copied()
+        {
+            let s = serde_json::to_string(&g).unwrap();
+            let back: RightDrawerGroup = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, g, "RightDrawerGroup {g:?} round-tripped to {back:?}");
+        }
+    }
+
+    /// The catch-all is a *load* concern only — it must never be offered on a
+    /// rail, or the user could select "Unknown" as a drawer.
+    #[test]
+    fn unknown_is_never_offered_on_a_rail() {
+        for mode in [AppMode::Vector, AppMode::Video] {
+            assert!(!DrawerGroup::all_for_mode(mode).contains(&DrawerGroup::Unknown));
+            assert!(!RightDrawerGroup::all_for_mode(mode).contains(&RightDrawerGroup::Unknown));
+        }
+        assert!(!DrawerGroup::Unknown.has_content(0));
+        assert!(!DrawerGroup::Unknown.has_content(5));
     }
 }

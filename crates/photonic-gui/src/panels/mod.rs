@@ -1295,6 +1295,20 @@ pub enum DrawerGroup {
     /// word range, ripple the matching timeline clip range (17 G-18 —
     /// Larger, nice-to-have). Interior owned by `panels/video/transcript.rs`.
     Transcript,
+    /// A group written by a newer build. Never offered by [`all_for_mode`], and
+    /// normalized to the default in [`crate::preferences::AppPreferences::load`]
+    /// so one unknown token cannot discard the whole preferences file.
+    ///
+    /// Without this arm, serde's `#[serde(default = …)]` does not help: it
+    /// covers a *missing* field, not one that fails to deserialize, so a single
+    /// unrecognised drawer token fails the whole struct and `load`'s
+    /// `unwrap_or_default()` throws away every other preference the user set —
+    /// keymap, hotbar usage, drawer widths, snap toggles. Same forward-compat
+    /// rule as `MarkerAnchor`/`GroupKind` (39 §2.2).
+    ///
+    /// [`all_for_mode`]: DrawerGroup::all_for_mode
+    #[serde(other)]
+    Unknown,
 }
 
 impl DrawerGroup {
@@ -1357,6 +1371,7 @@ impl DrawerGroup {
             DrawerGroup::SourceMonitor => ph::MONITOR_PLAY,
             DrawerGroup::Multicam => ph::SQUARES_FOUR,
             DrawerGroup::Transcript => ph::ARTICLE,
+            DrawerGroup::Unknown => ph::QUESTION,
         }
     }
 
@@ -1380,6 +1395,7 @@ impl DrawerGroup {
             DrawerGroup::SourceMonitor => "Source Monitor",
             DrawerGroup::Multicam => "Multicam",
             DrawerGroup::Transcript => "Transcript",
+            DrawerGroup::Unknown => "Unknown",
         }
     }
 
@@ -1421,6 +1437,12 @@ impl DrawerGroup {
             DrawerGroup::Modify | DrawerGroup::Arrange | DrawerGroup::ClipInspector => {
                 selection_count >= 1
             }
+            // A group this build does not know has no sections to render, so it
+            // never has content: the rail icon stays disabled and an `Unknown`
+            // that survives to the UI auto-collapses instead of drawing an empty
+            // drawer. `AppPreferences::load` normalizes it away first; this is
+            // the second line of defence.
+            DrawerGroup::Unknown => false,
         }
     }
 }
@@ -1442,6 +1464,15 @@ pub enum RightDrawerGroup {
     /// Video mode (04 §4.1): track fader strips, master bus meters, per-track
     /// EQ/comp/automation entry points. Interior owned by 09-audio-mixer.md.
     AudioMixer,
+    /// A group written by a newer build. Never offered by [`all_for_mode`], and
+    /// normalized to the default in [`crate::preferences::AppPreferences::load`]
+    /// so one unknown token cannot discard the whole preferences file. Same
+    /// forward-compat rule as [`DrawerGroup::Unknown`] — this enum has the
+    /// identical bug, and fixing one of the two would only look done.
+    ///
+    /// [`all_for_mode`]: RightDrawerGroup::all_for_mode
+    #[serde(other)]
+    Unknown,
 }
 
 impl RightDrawerGroup {
@@ -1479,6 +1510,7 @@ impl RightDrawerGroup {
             RightDrawerGroup::History => ph::CLOCK_COUNTER_CLOCKWISE,
             RightDrawerGroup::ColorControls => ph::PALETTE,
             RightDrawerGroup::AudioMixer => ph::SLIDERS,
+            RightDrawerGroup::Unknown => ph::QUESTION,
         }
     }
 
@@ -1490,6 +1522,7 @@ impl RightDrawerGroup {
             RightDrawerGroup::History => "History",
             RightDrawerGroup::ColorControls => "Color Controls",
             RightDrawerGroup::AudioMixer => "Audio Mixer",
+            RightDrawerGroup::Unknown => "Unknown",
         }
     }
 }
@@ -1628,6 +1661,11 @@ pub(crate) fn draw_drawer(
         // Tools is rendered by the app layer (it needs tool state, not the
         // property ctx), so it is never routed through draw_drawer.
         DrawerGroup::Tools => {}
+        // A group written by a newer build has no sections here to render.
+        // `AppPreferences::load` normalizes it to the default and `has_content`
+        // reports false, so this arm is unreachable in practice — it exists so
+        // the catch-all can never draw a half-populated drawer.
+        DrawerGroup::Unknown => {}
     }
 
     ctx.action.take()

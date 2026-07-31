@@ -3786,6 +3786,10 @@ impl PhotonicApp {
                                 );
                             });
                     }
+                    // A group written by a newer build: normalized to the
+                    // default at load, so this renders nothing rather than
+                    // showing an empty right drawer.
+                    RightDrawerGroup::Unknown => {}
                 }
             });
             if fully_open {
