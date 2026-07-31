@@ -5969,13 +5969,21 @@ impl PhotonicApp {
                 }
 
                 PanelAction::SaveWorkspace { name, search_query } => {
-                    if let Some(ws) = doc.workspaces.iter_mut().find(|w| w.name == name) {
+                    // `doc.workspaces` is persisted, so this goes through the
+                    // history like any other document edit rather than mutating
+                    // the vec in place (SPEC: every document mutation, without
+                    // exception, is undoable).
+                    let old = doc.workspaces.clone();
+                    let mut new = old.clone();
+                    if let Some(ws) = new.iter_mut().find(|w| w.name == name) {
                         ws.search_query = search_query;
                     } else {
-                        doc.workspaces
-                            .push(photonic_core::Workspace { name, search_query });
+                        new.push(photonic_core::Workspace { name, search_query });
                     }
-                    doc_modified = true;
+                    if new != old {
+                        history.execute(Command::SetWorkspaces { old, new }, doc);
+                        doc_modified = true;
+                    }
                     self.workspace_name_input.clear();
                 }
 
@@ -5986,8 +5994,12 @@ impl PhotonicApp {
                 }
 
                 PanelAction::DeleteWorkspace { name } => {
-                    doc.workspaces.retain(|w| w.name != name);
-                    doc_modified = true;
+                    let old = doc.workspaces.clone();
+                    let new: Vec<_> = old.iter().filter(|w| w.name != name).cloned().collect();
+                    if new.len() != old.len() {
+                        history.execute(Command::SetWorkspaces { old, new }, doc);
+                        doc_modified = true;
+                    }
                 }
 
                 PanelAction::SetTextArea {

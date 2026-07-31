@@ -862,7 +862,10 @@ impl DimensionAnnotation {
 // ─── Workspace ────────────────────────────────────────────────────────────────
 
 /// A named workspace preset that stores a properties-panel search filter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` lets the save/delete call sites skip a no-op history entry when
+/// the list is unchanged — an undo step that undoes nothing is worse than none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     /// Unique workspace name.
     pub name: String,

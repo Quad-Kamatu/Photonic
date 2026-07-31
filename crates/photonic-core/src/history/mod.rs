@@ -2161,6 +2161,125 @@ mod tests {
         assert_eq!(doc.nodes[&rid].name, "renamed");
         assert!(px_ok(&doc), "pixels lost on redo of meta edit");
     }
+
+    // ── SetWorkspaces ────────────────────────────────────────────────────────
+
+    fn ws(name: &str, q: &str) -> crate::Workspace {
+        crate::Workspace {
+            name: name.to_string(),
+            search_query: q.to_string(),
+        }
+    }
+
+    fn set_ws(h: &mut CommandHistory, doc: &mut Document, new: Vec<crate::Workspace>) {
+        let old = doc.workspaces.clone();
+        h.execute(Command::SetWorkspaces { old, new }, doc);
+    }
+
+    /// `Document.workspaces` is persisted, so save/delete must be undoable —
+    /// SPEC's "every document mutation, without exception, is undoable". Before
+    /// `SetWorkspaces` both call sites mutated the vec in place and left no
+    /// history entry at all, so undo silently skipped past them.
+    #[test]
+    fn workspace_save_and_delete_round_trip_through_history() {
+        let mut doc = make_doc();
+        let mut h = CommandHistory::new(200);
+        assert!(doc.workspaces.is_empty());
+
+        // Save two.
+        set_ws(&mut h, &mut doc, vec![ws("Draft", "fill")]);
+        set_ws(
+            &mut h,
+            &mut doc,
+            vec![ws("Draft", "fill"), ws("Final", "text")],
+        );
+        assert_eq!(doc.workspaces.len(), 2);
+
+        // Delete the first.
+        set_ws(&mut h, &mut doc, vec![ws("Final", "text")]);
+        assert_eq!(doc.workspaces, vec![ws("Final", "text")]);
+
+        // Undo walks back through every step.
+        h.undo(&mut doc);
+        assert_eq!(
+            doc.workspaces,
+            vec![ws("Draft", "fill"), ws("Final", "text")],
+            "undo of a delete must restore the workspace"
+        );
+        h.undo(&mut doc);
+        assert_eq!(doc.workspaces, vec![ws("Draft", "fill")]);
+        h.undo(&mut doc);
+        assert!(
+            doc.workspaces.is_empty(),
+            "undo of the first save must leave no workspaces"
+        );
+
+        // And redo replays them.
+        h.redo(&mut doc);
+        assert_eq!(doc.workspaces, vec![ws("Draft", "fill")]);
+        h.redo(&mut doc);
+        h.redo(&mut doc);
+        assert_eq!(doc.workspaces, vec![ws("Final", "text")]);
+    }
+
+    /// Re-saving an existing name edits it in place rather than duplicating,
+    /// and that edit is undoable too.
+    #[test]
+    fn workspace_resave_updates_query_and_is_undoable() {
+        let mut doc = make_doc();
+        let mut h = CommandHistory::new(200);
+
+        set_ws(&mut h, &mut doc, vec![ws("Draft", "fill")]);
+        set_ws(&mut h, &mut doc, vec![ws("Draft", "stroke")]);
+        assert_eq!(doc.workspaces, vec![ws("Draft", "stroke")]);
+
+        h.undo(&mut doc);
+        assert_eq!(
+            doc.workspaces,
+            vec![ws("Draft", "fill")],
+            "undo must restore the previous search query"
+        );
+    }
+
+    /// The undo stack has to say *which* workspace step it is, or a user cannot
+    /// tell three "Update workspaces" entries apart.
+    #[test]
+    fn workspace_step_descriptions_name_the_action() {
+        let save = Command::SetWorkspaces {
+            old: vec![],
+            new: vec![ws("A", "")],
+        };
+        let delete = Command::SetWorkspaces {
+            old: vec![ws("A", "")],
+            new: vec![],
+        };
+        let update = Command::SetWorkspaces {
+            old: vec![ws("A", "x")],
+            new: vec![ws("A", "y")],
+        };
+        assert_eq!(save.description(), "Save workspace");
+        assert_eq!(delete.description(), "Delete workspace");
+        assert_eq!(update.description(), "Update workspace");
+    }
+
+    /// Workspace edits are discrete clicks, not a drag, so two of them must
+    /// stay two undo steps. Coalescing is bounded only by pointer-down/up, so
+    /// an accidental merge here would swallow an independent save.
+    #[test]
+    fn workspace_edits_do_not_coalesce() {
+        let a = Command::SetWorkspaces {
+            old: vec![],
+            new: vec![ws("A", "")],
+        };
+        let b = Command::SetWorkspaces {
+            old: vec![ws("A", "")],
+            new: vec![ws("A", ""), ws("B", "")],
+        };
+        assert!(
+            Command::coalesce(&a, &b).is_none(),
+            "two workspace edits must remain two undo steps"
+        );
+    }
 }
 
 /// A reversible command that can be applied to a Document.
@@ -2355,6 +2474,19 @@ pub enum Command {
     SetArtboards {
         old: Vec<crate::Artboard>,
         new: Vec<crate::Artboard>,
+    },
+
+    /// Replace the entire workspace-preset list (save/rename/delete of a named
+    /// properties-panel filter). Stores old and new for self-contained undo,
+    /// exactly like [`Command::SetArtboards`].
+    ///
+    /// `Document.workspaces` is persisted in the `.photon` file, so mutating it
+    /// without a command violated SPEC's "every document mutation, without
+    /// exception, is undoable" — saving or deleting a workspace was silently
+    /// unundoable and left no history entry.
+    SetWorkspaces {
+        old: Vec<crate::Workspace>,
+        new: Vec<crate::Workspace>,
     },
 
     /// Replace the persisted document state in one self-contained undo step.
@@ -2588,6 +2720,7 @@ impl Command {
             Command::ReparentNode { node_id, .. } => smallvec![*node_id],
             Command::SetGuides { .. } => SmallVec::new(),
             Command::SetArtboards { .. } => SmallVec::new(),
+            Command::SetWorkspaces { .. } => SmallVec::new(),
             // A whole-document swap is not "no nodes changed" — every node on
             // either side is suspect, so report the union rather than an empty
             // set, which `changes_since` would otherwise trust as "nothing to
@@ -2665,6 +2798,14 @@ impl Command {
             Command::ReparentNode { .. } => "Reparent node".to_string(),
             Command::SetGuides { .. } => "Update guides".to_string(),
             Command::SetArtboards { .. } => "Update artboards".to_string(),
+            // Save/delete/rename are all one list swap, so name the step from
+            // the delta — an undo stack reading "Update workspaces" three times
+            // tells the user nothing about which step to go back to.
+            Command::SetWorkspaces { old, new } => match new.len().cmp(&old.len()) {
+                std::cmp::Ordering::Greater => "Save workspace".to_string(),
+                std::cmp::Ordering::Less => "Delete workspace".to_string(),
+                std::cmp::Ordering::Equal => "Update workspace".to_string(),
+            },
             Command::ReplaceDocument { description, .. } => description.clone(),
             Command::SetWidthProfiles { .. } => "Edit width profile".to_string(),
             Command::ResizeCanvas {
@@ -2981,6 +3122,10 @@ impl Command {
                 doc.guides = new.clone();
             }
 
+            Command::SetWorkspaces { new, .. } => {
+                doc.workspaces = new.clone();
+            }
+
             Command::SetArtboards { new, .. } => {
                 doc.artboards = new.clone();
                 if doc
@@ -3029,6 +3174,11 @@ impl Command {
     /// - `SetWidthProfiles`, `SetGuides`, `SetArtboards`, `ResizeCanvas`: whole-
     ///   document value replacements — keep `old` from the anchor, `new` from the
     ///   incoming.
+    ///
+    /// `SetWorkspaces` is deliberately **absent**: it is also a whole-list swap,
+    /// but it is produced by discrete button clicks rather than a drag, and
+    /// coalescing is bounded only by pointer-down/pointer-up. Merging it would
+    /// collapse two independent saves into one undo step.
     ///
     /// Everything else (adds, removes, reorders, grouping, layer moves, batches,
     /// mismatched variants, different node ids) returns `None`.
@@ -3299,6 +3449,11 @@ impl Command {
             }),
 
             Command::SetArtboards { old, new } => Some(Command::SetArtboards {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+
+            Command::SetWorkspaces { old, new } => Some(Command::SetWorkspaces {
                 old: new.clone(),
                 new: old.clone(),
             }),
