@@ -383,6 +383,7 @@ mod tests {
         let loaded: AppPreferences =
             serde_json::from_value(old_preferences).expect("older preferences deserialize");
         assert!(!loaded.force_x11_backend);
+    }
 
     #[test]
     fn keymap_file_roundtrips_without_other_preferences() {
