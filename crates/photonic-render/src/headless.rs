@@ -2227,18 +2227,6 @@ mod blend_tests {
         t.font_size = 48.0;
         t.fill = Fill::solid(Color::new(1.0, 1.0, 1.0, 1.0));
 
-        // Resolve the generic request once, then pin this raster fixture to a
-        // concrete face that is actually installed on the runner. This keeps the
-        // test about raster export rather than a particular OS font inventory;
-        // generic-family resolution is exercised separately by text-outline tests.
-        let mut font_system = glyphon::FontSystem::new();
-        let Some(resolved) = crate::resolve_document_font(&mut font_system, &t) else {
-            eprintln!("no system font available — skipping raster text export test");
-            return;
-        };
-        t.font_family = resolved.family;
-        t.font_weight = resolved.weight;
-
         let mut text_node = SceneNode::new("label", layer, SceneNodeKind::Text(t));
         text_node.transform = Transform::new(1.0, 0.0, 0.0, 1.0, 20.0, 15.0);
         doc.add_node(text_node, None);
@@ -2257,7 +2245,7 @@ mod blend_tests {
         let even_odd_mesh = crate::tessellator::tessellate_fill(&debug_path.path_data, true, 0.1);
         let non_zero_mesh = crate::tessellator::tessellate_fill(&debug_path.path_data, false, 0.1);
         eprintln!(
-            "text fixture family={} path={} even_odd={} non_zero={}",
+            "text fixture path={} svg={} even_odd={} non_zero={}",
             debug_path.path_data.to_bez_path().elements().len(),
             debug_path.path_data.to_bez_path().to_svg().len(),
             even_odd_mesh.vertices.len(),
