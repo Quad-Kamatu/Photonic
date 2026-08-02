@@ -20,7 +20,7 @@ Instead, report them privately using one of the following:
    ["Report a vulnerability"](https://github.com/unn-corp/Photonic/security/advisories/new)
    button on the repository's Security tab. This keeps the report private until a
    fix is ready.
-2. **Email** — send details to **joecheitman@gmail.com** with "Photonic
+2. **Email** — send details to **security@theunnamed.dev** with "Photonic
    security" in the subject line.
 
 Please include as much of the following as you can:
@@ -43,6 +43,16 @@ especially valuable:
 - Lua scripts and opened documents are treated as **trusted input** today;
   sandbox-escape or arbitrary-code-execution reports via untrusted scripts or
   malicious files are welcome and in scope.
+
+## Safe harbour
+
+Photonic is maintained by The Unnamed Corp. Good faith research on this project
+is authorised under our published
+[Vulnerability Disclosure Policy](https://theunnamed.dev/security#vulnerability-disclosure)
+on the same terms as the rest of our systems, and our
+[Acceptable Use Policy](https://theunnamed.dev/legal/aup) treats research
+conducted within that policy's scope and rules as permitted rather than as a
+violation. Reporting to the addresses above keeps you inside that protection.
 
 ## Our Commitment
 
