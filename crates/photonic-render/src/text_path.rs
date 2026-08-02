@@ -6,11 +6,13 @@
 //! outlines with `ttf-parser` and emit them as ordinary vector fills, which the
 //! existing fill pipeline already renders with arbitrary transforms.
 
-use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as GlyphonStyle, Weight};
+use glyphon::{Attrs, Buffer, FontSystem, Metrics, Shaping, Style as GlyphonStyle, Weight};
 use kurbo::{Affine, BezPath};
 use photonic_core::node::{FontStyle, TextAlign};
 use photonic_core::path::PathData;
 use ttf_parser::{GlyphId, OutlineBuilder};
+
+use crate::text_outline::cosmic_family;
 
 /// Parameters describing the text run to lay out along a path. All sizes are in
 /// document units (the spine is in the same space).
@@ -77,7 +79,7 @@ pub fn layout_text_on_path(
         FontStyle::Normal => GlyphonStyle::Normal,
     };
     let attrs = Attrs::new()
-        .family(Family::Name(params.font_family))
+        .family(cosmic_family(params.font_family))
         .weight(Weight(params.font_weight))
         .style(glyph_style);
     buf.set_text(font_system, params.content, attrs, Shaping::Advanced);

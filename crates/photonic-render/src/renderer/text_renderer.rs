@@ -33,7 +33,7 @@ impl PhotonicRenderer {
                 _ => GlyphonStyle::Normal,
             };
             let attrs = Attrs::new()
-                .family(Family::Name(&snap.font_family))
+                .family(crate::text_outline::cosmic_family(&snap.font_family))
                 .weight(Weight(snap.font_weight))
                 .style(glyph_style);
             buf.set_text(
