@@ -2188,24 +2188,33 @@ mod export_pdf_real_path_tests {
         assert!(!text.contains("/Type /Font"), "outline_text must leave zero fonts");
 
         // If the preflight tooling is present, the real artifact must PASS X-1a.
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/preflight-pdfx.sh");
-        if std::path::Path::new(script).exists() {
-            if let Ok(out) = std::process::Command::new("bash")
-                .arg(script)
-                .arg(&tmp)
-                .arg("--quiet")
-                .output()
-            {
-                // Only assert when the script's own deps (qpdf/pdfinfo) are present;
-                // exit code 2 means a tool was missing → skip, don't fail CI.
-                let code = out.status.code().unwrap_or(2);
-                if code != 2 {
-                    assert_eq!(
-                        code, 0,
-                        "preflight-pdfx.sh must PASS on the CMYK card back:\n{}\n{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr),
-                    );
+        // The repository's dedicated preflight gate runs this shell script on
+        // Ubuntu. On Windows, `bash` resolves to the WSL launcher in CI and can
+        // fail before the script is reached, so keep the structural PDF checks
+        // above portable and run this optional shell check on Unix only.
+        #[cfg(not(windows))]
+        {
+            let script =
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/preflight-pdfx.sh");
+            if std::path::Path::new(script).exists() {
+                if let Ok(out) = std::process::Command::new("bash")
+                    .arg(script)
+                    .arg(&tmp)
+                    .arg("--quiet")
+                    .output()
+                {
+                    // Only assert when the script's own deps (qpdf/pdfinfo) are present;
+                    // exit code 2 means a tool was missing → skip, don't fail CI.
+                    let code = out.status.code().unwrap_or(2);
+                    if code != 2 {
+                        assert_eq!(
+                            code,
+                            0,
+                            "preflight-pdfx.sh must PASS on the CMYK card back:\n{}\n{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr),
+                        );
+                    }
                 }
             }
         }

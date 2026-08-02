@@ -2215,7 +2215,8 @@ mod blend_tests {
         // transform origin and ~font_size below it (baseline-anchored), so this
         // lands well inside the artboard.
         let mut t = TextNode::new("ABCDEF");
-        t.font_family = "DejaVu Sans".to_string();
+        // Use a generic family so the test uses each platform's available fallback.
+        t.font_family = "sans-serif".to_string();
         t.font_size = 48.0;
         t.fill = Fill::solid(Color::new(1.0, 1.0, 1.0, 1.0));
         let mut text_node = SceneNode::new("label", layer, SceneNodeKind::Text(t));
