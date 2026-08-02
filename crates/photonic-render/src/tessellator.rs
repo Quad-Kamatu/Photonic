@@ -10,13 +10,32 @@ const MAX_EFFECTIVE_SCALE: f64 = 64.0;
 /// Return a path-space flattening tolerance for a view and object transform.
 ///
 /// Lyon and kurbo flatten paths before the object and camera transforms are
-/// applied. Scale the tolerance inversely so their device-space error remains
+/// applied. Scale the tolerance inversely by a conservative upper bound on the
+/// linear transform's operator norm so their device-space error remains
 /// bounded, while clamping the scale to keep extreme transforms practical.
 pub fn adaptive_tolerance(view_scale: f64, matrix: &[f64; 6]) -> f32 {
     let [a, b, c, d, _, _] = *matrix;
-    let object_scale = (a * d - b * c).abs().sqrt();
-    let effective_scale = (view_scale.abs() * object_scale)
-        .clamp(MIN_EFFECTIVE_SCALE, MAX_EFFECTIVE_SCALE);
+    // The largest singular value is the exact operator norm for this 2×2
+    // linear transform. The determinant/geometric mean is not a valid bound
+    // for anisotropic or sheared transforms: it can report scale 1 while one
+    // axis is stretched by 100x.
+    let frobenius_sq = a * a + b * b + c * c + d * d;
+    let determinant = a * d - b * c;
+    let discriminant = (frobenius_sq * frobenius_sq - 4.0 * determinant * determinant).max(0.0);
+    let singular_sq = 0.5 * (frobenius_sq + discriminant.sqrt());
+    let object_scale = if singular_sq.is_finite() && singular_sq >= 0.0 {
+        singular_sq.sqrt()
+    } else {
+        // Preserve a finite, conservative fallback for very large finite
+        // matrices whose squared values overflow f64.
+        a.hypot(b).hypot(c.hypot(d))
+    };
+    let raw_scale = view_scale.abs() * object_scale;
+    let effective_scale = if raw_scale.is_nan() {
+        1.0
+    } else {
+        raw_scale.clamp(MIN_EFFECTIVE_SCALE, MAX_EFFECTIVE_SCALE)
+    };
     (TARGET_FLATTENING_ERROR_PX / effective_scale) as f32
 }
 
@@ -1012,7 +1031,10 @@ mod refine_diag {
                 maxe = maxe.max((dx * dx + dy * dy).sqrt());
             }
         }
-        assert!(maxe <= target * 1.05, "max edge {maxe} exceeds target {target}");
+        assert!(
+            maxe <= target * 1.05,
+            "max edge {maxe} exceeds target {target}"
+        );
         assert!(tris < 60_000, "triangle count {tris} hit the budget");
     }
 }
@@ -1037,13 +1059,18 @@ mod adaptive_tolerance_tests {
     }
 
     #[test]
-    fn adaptive_tolerance_tracks_anisotropic_object_scale() {
+    fn adaptive_tolerance_is_conservative_for_anisotropic_and_shear() {
         let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        // sqrt(|det|) for this non-uniform scale is sqrt(9 * 4) = 6.
-        let anisotropic = [9.0, 0.0, 0.0, 4.0, 0.0, 0.0];
-        let tolerance = adaptive_tolerance(1.0, &anisotropic);
+        let anisotropic = [32.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let shear = [1.0, 32.0, 0.0, 1.0, 0.0, 0.0];
 
-        assert!((tolerance - adaptive_tolerance(1.0, &identity) / 6.0).abs() < 1e-6);
+        // The transform's largest singular value is at least 32 in both
+        // cases. That is below the practical scale cap, so tolerance must be
+        // no larger than target / 32.
+        let max_safe_tolerance = TARGET_FLATTENING_ERROR_PX as f32 / 32.0;
+        assert!(adaptive_tolerance(1.0, &anisotropic) <= max_safe_tolerance);
+        assert!(adaptive_tolerance(1.0, &shear) <= max_safe_tolerance);
+        assert!(adaptive_tolerance(1.0, &identity) > max_safe_tolerance);
     }
 
     #[test]
