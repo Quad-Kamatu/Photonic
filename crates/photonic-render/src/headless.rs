@@ -11,7 +11,7 @@ use crate::{
         draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform, DrawSegment,
         Vertex, SEPARABLE_BLEND_MODES,
     },
-    tessellator::{tessellate_fill, tessellate_stroke},
+    tessellator::{adaptive_tolerance, tessellate_fill, tessellate_stroke},
 };
 use image::{ImageBuffer, Rgba};
 use photonic_core::{
@@ -234,17 +234,20 @@ impl HeadlessRenderer {
             document
         };
 
-        let include_artboard_bg = opts.background == ExportBackground::Artboard;
-        let (verts, idxs, segments, blur_jobs) =
-            build_geometry(document, include_artboard_bg, opts.overprint_preview);
-
         // Camera: an explicit region (per-artboard export) wins; otherwise fit
         // the content bounding box or the full document to the output size.
+        let include_artboard_bg = opts.background == ExportBackground::Artboard;
         let mut view = CanvasView::new(w, h);
         if let Some((rx, ry, rw, rh)) = opts.region {
             view.fit_to_rect(rx, ry, rw, rh);
         } else if opts.crop_to_content {
-            if let Some((cx, cy, cw, ch)) = content_bounds(&verts, include_artboard_bg, document) {
+            // The crop bounds require geometry, but the final geometry must use
+            // the resulting view scale. This preliminary pass is only for bounds.
+            let (bounds_verts, _, _, _) =
+                build_geometry(document, include_artboard_bg, opts.overprint_preview, 1.0);
+            if let Some((cx, cy, cw, ch)) =
+                content_bounds(&bounds_verts, include_artboard_bg, document)
+            {
                 view.fit_to_rect(cx, cy, cw, ch);
             } else {
                 view.fit_to_rect(0.0, 0.0, document.width, document.height);
@@ -252,6 +255,13 @@ impl HeadlessRenderer {
         } else {
             view.fit_to_rect(0.0, 0.0, document.width, document.height);
         }
+
+        let (verts, idxs, segments, blur_jobs) = build_geometry(
+            document,
+            include_artboard_bg,
+            opts.overprint_preview,
+            view.zoom,
+        );
 
         let cam = CameraUniform::from_viewport(view.pan_x, view.pan_y, view.zoom, w, h);
         self.queue
@@ -1022,8 +1032,9 @@ fn silhouette_job(
     offset: (f64, f64),
     color: [f32; 4],
     radius_doc: f64,
+    view_scale: f64,
 ) -> Option<BlurJob> {
-    let mesh = tessellate_fill(path, false);
+    let mesh = tessellate_fill(path, false, adaptive_tolerance(view_scale, m));
     if mesh.is_empty() {
         return None;
     }
@@ -1049,6 +1060,7 @@ fn build_geometry(
     doc: &Document,
     include_artboard_bg: bool,
     overprint_preview: bool,
+    view_scale: f64,
 ) -> (Vec<Vertex>, Vec<u32>, Vec<DrawSegment>, Vec<BlurJob>) {
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idxs: Vec<u32> = Vec::new();
@@ -1122,6 +1134,7 @@ fn build_geometry(
                 (s.dx as f64, s.dy as f64),
                 [s.color.r, s.color.g, s.color.b, alpha],
                 s.blur as f64,
+                view_scale,
             ) {
                 blur_jobs.push(job);
             }
@@ -1147,6 +1160,7 @@ fn build_geometry(
                     (0.0, 0.0),
                     [col.r, col.g, col.b, alpha],
                     blur_radius as f64,
+                    view_scale,
                 ) {
                     blur_jobs.push(job);
                     fill_blurred = true;
@@ -1160,7 +1174,11 @@ fn build_geometry(
             && !matches!(&path_node.fill.kind, FillKind::None)
         {
             let opacity = path_node.fill.opacity * node.opacity * gop;
-            let mesh = tessellate_fill(&path_node.path_data, false);
+            let mesh = tessellate_fill(
+                &path_node.path_data,
+                false,
+                adaptive_tolerance(view_scale, &node.transform.matrix),
+            );
             if !mesh.is_empty() {
                 // Non-linear fills sample per vertex → refine the triangulation.
                 let mesh = if path_node.fill.kind.is_nonlinear() {
@@ -1298,6 +1316,7 @@ fn build_geometry(
                 sc.line_cap,
                 sc.line_join,
                 sc.miter_limit as f32,
+                adaptive_tolerance(view_scale, &node.transform.matrix),
             );
             if !mesh.is_empty() {
                 let base = verts.len() as u32;
@@ -1573,6 +1592,30 @@ mod blend_tests {
             srgb_to_linear(px[1] as f32 / 255.0),
             srgb_to_linear(px[2] as f32 / 255.0),
         ]
+    }
+
+    #[test]
+    fn export_geometry_uses_fitted_view_scale_for_curve_tessellation() {
+        let mut doc = Document::new("zoomed-export", 200.0, 200.0);
+        let node = SceneNode::new(
+            "circle",
+            doc.active_layer_id.unwrap(),
+            SceneNodeKind::Path(
+                PathNode::new(PathData::ellipse(100.0, 100.0, 80.0, 80.0))
+                    .with_fill(Fill::solid(Color::new(0.0, 0.0, 0.0, 1.0))),
+            ),
+        );
+        doc.add_node(node, None);
+
+        let (_, one_x_indices, _, _) = build_geometry(&doc, false, false, 1.0);
+        let (_, high_zoom_indices, _, _) = build_geometry(&doc, false, false, 32.0);
+
+        assert!(
+            high_zoom_indices.len() > one_x_indices.len(),
+            "high-resolution export should tessellate curves more densely: {} <= {}",
+            high_zoom_indices.len(),
+            one_x_indices.len()
+        );
     }
 
     fn expected(mode: BlendMode) -> [f32; 3] {

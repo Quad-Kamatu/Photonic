@@ -8,7 +8,7 @@ use crate::{
         draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform,
         CompositeParams, DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
-    tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
+    tessellator::{adaptive_tolerance, tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
 };
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -1100,7 +1100,11 @@ impl PhotonicRenderer {
             }
             let [a, b, c, d, e, f] = node.matrix;
             let opacity = node.fill_opacity * node.node_opacity;
-            let mesh = tessellate_fill(&node.path_data, node.is_compound);
+            let mesh = tessellate_fill(
+                &node.path_data,
+                node.is_compound,
+                adaptive_tolerance(self.view.zoom, &node.matrix),
+            );
             if mesh.is_empty() {
                 return;
             }
@@ -1234,6 +1238,7 @@ impl PhotonicRenderer {
                     photonic_core::style::LineCap::Round,
                     join,
                     4.0,
+                    adaptive_tolerance(self.view.zoom, matrix),
                 );
                 if mesh.is_empty() {
                     continue;
@@ -1276,7 +1281,11 @@ impl PhotonicRenderer {
                     Some(widths) if node.stroke_width > 0.0 => {
                         let scale = (width / node.stroke_width) as f64;
                         let scaled: Vec<f64> = widths.iter().map(|w| w * scale).collect();
-                        tessellate_stroke_variable(&node.path_data, &scaled)
+                        tessellate_stroke_variable(
+                            &node.path_data,
+                            &scaled,
+                            adaptive_tolerance(self.view.zoom, &node.matrix) as f64,
+                        )
                     }
                     _ => tessellate_stroke(
                         &node.path_data,
@@ -1284,6 +1293,7 @@ impl PhotonicRenderer {
                         node.stroke_cap,
                         node.stroke_join,
                         node.stroke_miter,
+                        adaptive_tolerance(self.view.zoom, &node.matrix),
                     ),
                 };
                 if mesh.is_empty() {
@@ -1468,7 +1478,11 @@ impl PhotonicRenderer {
                              color: [f32; 4],
                              radius_doc: f64|
          -> Option<BlurJob> {
-            let mesh = tessellate_fill(&node.path_data, node.is_compound);
+            let mesh = tessellate_fill(
+                &node.path_data,
+                node.is_compound,
+                adaptive_tolerance(self.view.zoom, &node.matrix),
+            );
             if mesh.is_empty() {
                 return None;
             }
@@ -1631,7 +1645,11 @@ impl PhotonicRenderer {
                 if rgba[3] <= 0.0 {
                     continue;
                 }
-                let mesh = tessellate_fill(&node.path_data, node.is_compound);
+                let mesh = tessellate_fill(
+                    &node.path_data,
+                    node.is_compound,
+                    adaptive_tolerance(self.view.zoom, &node.matrix),
+                );
                 if mesh.is_empty() {
                     continue;
                 }
@@ -1663,6 +1681,7 @@ impl PhotonicRenderer {
                     photonic_core::style::LineCap::Butt,
                     photonic_core::style::LineJoin::Miter,
                     4.0,
+                    adaptive_tolerance(self.view.zoom, &node.matrix),
                 );
                 if mesh.is_empty() {
                     continue;
@@ -1738,7 +1757,11 @@ impl PhotonicRenderer {
             // ── Gaussian glow job ─────────────────────────────────────────────
             if let Some(([gr, gg, gb, ga], radius_doc)) = node.gaussian_glow {
                 let [a, b, c, d, e, f] = node.matrix;
-                let mesh = tessellate_fill(&node.path_data, node.is_compound);
+                let mesh = tessellate_fill(
+                    &node.path_data,
+                    node.is_compound,
+                    adaptive_tolerance(self.view.zoom, &node.matrix),
+                );
                 if !mesh.is_empty() {
                     let glow_color = [gr, gg, gb, ga];
                     let mut gverts = Vec::with_capacity(mesh.vertices.len());
@@ -1776,7 +1799,11 @@ impl PhotonicRenderer {
         let text_seg_start = idxs.len() as u32;
         for (glyphs, rgba) in &self.pending_path_text {
             for glyph in glyphs {
-                let mesh = tessellate_fill(glyph, false);
+                let mesh = tessellate_fill(
+                    glyph,
+                    false,
+                    adaptive_tolerance(self.view.zoom, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                );
                 if mesh.is_empty() {
                     continue;
                 }
