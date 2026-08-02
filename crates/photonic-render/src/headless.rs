@@ -2211,6 +2211,14 @@ mod blend_tests {
         );
         doc.add_node(backdrop, None);
 
+        // Capture the backdrop-only result before adding text. Comparing against
+        // this baseline is more portable than assuming that every font backend
+        // produces fully covered (near-255) pixels for a particular glyph.
+        let backdrop_png = r.render_png_at_size(&doc, w, h);
+        let backdrop_img = image::load_from_memory(&backdrop_png)
+            .expect("decode backdrop png")
+            .to_rgba8();
+
         // Large white text near the top-left. The glyph outline sits between the
         // transform origin and ~font_size below it (baseline-anchored), so this
         // lands well inside the artboard.
@@ -2230,23 +2238,28 @@ mod blend_tests {
             .expect("decode png")
             .to_rgba8();
 
-        // Count near-white pixels anywhere in the exported artboard. Font
-        // backends can legitimately place a glyph at slightly different y
-        // coordinates, so a fixed pixel bounding box would make this regression
-        // test unnecessarily platform-specific. With the bug present the whole
-        // image is black and this count is zero.
-        let mut white = 0u32;
+        // Count pixels that became brighter than the backdrop. Font backends can
+        // legitimately produce different coverage values and glyph positions, so
+        // compare the rendered result to its own black-backdrop baseline instead
+        // of imposing a fixed glyph bbox or near-white threshold. With the bug
+        // present both images are identical.
+        let mut changed = 0u32;
         for y in 0..h {
             for x in 0..w {
-                let p = img.get_pixel(x, y).0;
-                if p[0] > 200 && p[1] > 200 && p[2] > 200 {
-                    white += 1;
+                let current = img.get_pixel(x, y).0;
+                let backdrop = backdrop_img.get_pixel(x, y).0;
+                let current_luma =
+                    u16::from(current[0]) + u16::from(current[1]) + u16::from(current[2]);
+                let backdrop_luma =
+                    u16::from(backdrop[0]) + u16::from(backdrop[1]) + u16::from(backdrop[2]);
+                if current_luma > backdrop_luma + 6 {
+                    changed += 1;
                 }
             }
         }
         assert!(
-            white > 0,
-            "raster export must contain text pixels — found {white} white pixels"
+            changed > 0,
+            "raster export must contain text pixels — no pixels changed from the backdrop"
         );
     }
 }
