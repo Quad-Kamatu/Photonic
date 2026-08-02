@@ -1186,15 +1186,20 @@ fn build_geometry(
                     let (x, y) = if rotated {
                         (p[0] as f64, p[1] as f64)
                     } else {
-                        (a * p[0] as f64 + c * p[1] as f64 + e, b * p[0] as f64 + d * p[1] as f64 + f)
+                        (
+                            a * p[0] as f64 + c * p[1] as f64 + e,
+                            b * p[0] as f64 + d * p[1] as f64 + f,
+                        )
                     };
                     minx = minx.min(x);
                     miny = miny.min(y);
                     maxx = maxx.max(x);
                     maxy = maxy.max(y);
                 }
-                let fill_kind =
-                    path_node.fill.kind.for_bbox(minx, miny, maxx - minx, maxy - miny);
+                let fill_kind = path_node
+                    .fill
+                    .kind
+                    .for_bbox(minx, miny, maxx - minx, maxy - miny);
 
                 // Mesh fills: cut along grid lines for clean cell boundaries.
                 if let FillKind::MeshGradient(mg) = &*fill_kind {

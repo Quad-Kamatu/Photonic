@@ -113,4 +113,3 @@ impl PhotonicRenderer {
         self.text_atlas.trim();
     }
 }
-

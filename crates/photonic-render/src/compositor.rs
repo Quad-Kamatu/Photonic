@@ -286,7 +286,9 @@ fn render_color_overlay(
     let mesh = tessellate_fill(&pn.path_data, false);
     if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
         let rgb = [overlay.color.r, overlay.color.g, overlay.color.b];
-        composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |_, _| (rgb, a));
+        composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |_, _| {
+            (rgb, a)
+        });
     }
 }
 
@@ -318,7 +320,12 @@ fn build_overlay_gradient(
             let theta = (angle_deg as f64).to_radians();
             let (dx, dy) = (theta.cos(), theta.sin());
             let half = 0.5 * scale * ((bw * dx).abs() + (bh * dy).abs());
-            g.coords = vec![cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half];
+            g.coords = vec![
+                cx - dx * half,
+                cy - dy * half,
+                cx + dx * half,
+                cy + dy * half,
+            ];
         }
         GradientKind::Radial => {
             let r = 0.5 * scale * bw.hypot(bh);
@@ -471,7 +478,10 @@ fn render_path_node(
                     let (sx, sy) = if rotated && inv_ok {
                         let dx = cx - m[4];
                         let dy = cy - m[5];
-                        ((m[3] * dx - m[2] * dy) / det, (-m[1] * dx + m[0] * dy) / det)
+                        (
+                            (m[3] * dx - m[2] * dy) / det,
+                            (-m[1] * dx + m[0] * dy) / det,
+                        )
                     } else {
                         (cx, cy)
                     };
@@ -511,7 +521,9 @@ fn render_path_node(
                     }
                     None => {
                         let rgb = [sc.color.r, sc.color.g, sc.color.b];
-                        composite_coverage(base, w, view, cov, bbox, blend_mode, |_, _| (rgb, alpha));
+                        composite_coverage(base, w, view, cov, bbox, blend_mode, |_, _| {
+                            (rgb, alpha)
+                        });
                     }
                 }
             }
@@ -868,7 +880,10 @@ mod tests {
         let mut group = GroupNode::new();
         group.children = vec![aid, bid];
         group.live_boolean = Some(BooleanOp::Subtract);
-        doc.add_node(SceneNode::new("bool", lid, SceneNodeKind::Group(group)), None);
+        doc.add_node(
+            SceneNode::new("bool", lid, SceneNodeKind::Group(group)),
+            None,
+        );
 
         let (w, h) = (W as u32, H as u32);
         let mut view = CanvasView::new(w, h);
@@ -1073,9 +1088,7 @@ mod tests {
         let c = composite_center(&doc, 8, 8);
         // ~50% blue over opaque red → roughly (128, 0, 128).
         assert!(
-            (c[0] as i32 - 128).abs() < 24
-                && c[1] < 24
-                && (c[2] as i32 - 128).abs() < 24,
+            (c[0] as i32 - 128).abs() < 24 && c[1] < 24 && (c[2] as i32 - 128).abs() < 24,
             "half-opacity blue over red should be ~purple, got {c:?}"
         );
     }
