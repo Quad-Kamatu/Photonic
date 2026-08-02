@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="456.96" height="456.96" viewBox="27.52 27.52 456.96 456.96">
+  <defs>
+    <radialGradient id="grad-0" cx="256" cy="256" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.333" stop-color="#B8DCFF"/>
+      <stop offset="0.667" stop-color="#3A8AD4"/>
+      <stop offset="1" stop-color="#0E2A50"/>
+    </radialGradient>
+    <radialGradient id="grad-1" cx="256" cy="256" r="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.25" stop-color="#D0ECFF"/>
+      <stop offset="0.5" stop-color="#5CB4F5"/>
+      <stop offset="0.75" stop-color="#1E5FA8"/>
+      <stop offset="1" stop-color="#0C2A56"/>
+    </radialGradient>
+    <radialGradient id="grad-2" cx="256" cy="256" r="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E8F5FF"/>
+    </radialGradient>
+  </defs>
+  <path id="twinkle-star" opacity="0.5500" fill="url(#grad-0)" stroke="none" d="M151 151L256 248L361 151L264 256L361 361L256 264L151 361L248 256Z"/>
+  <path id="photonic-star" fill="url(#grad-1)" stroke="none" d="M256 52L270 242L460 256L270 270L256 460L242 270L52 256L242 242Z"/>
+  <path id="core" fill="url(#grad-2)" stroke="none" d="M256 238L274 256L256 274L238 256Z"/>
+</svg>

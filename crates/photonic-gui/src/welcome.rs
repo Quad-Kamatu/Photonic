@@ -816,6 +816,8 @@ pub struct WelcomeState {
     /// the one-shot entrance reveal.
     appeared_at: Option<f64>,
     thumbs: Thumbnailer,
+    /// Lazily-uploaded transparent logo mark shown above the hub wordmark.
+    logo_tex: Option<TextureHandle>,
     // ── Open panel ──
     open_tab: OpenTab,
     disk_roots: Vec<PathBuf>,
@@ -833,6 +835,7 @@ impl WelcomeState {
             view: WelcomeView::Hub,
             appeared_at: None,
             thumbs: Thumbnailer::new(),
+            logo_tex: None,
             open_tab: OpenTab::Recent,
             disk_roots: load_disk_roots(),
             disk_filter: String::new(),
@@ -946,7 +949,33 @@ impl WelcomeState {
         let r_card2 = reveal(elapsed, 0.28, 0.55);
 
         let avail = ui.available_height();
-        ui.add_space(avail * 0.18);
+        ui.add_space(avail * 0.11);
+
+        // ── Logo mark (the transparent Photonic sparkle) ──
+        // Lazily upload the embedded mark once, then draw it centered above the
+        // wordmark, fading in on the same reveal clock.
+        if self.logo_tex.is_none() {
+            if let Ok(img) = photonic_core::raster::image::RasterImage::from_encoded(
+                include_bytes!("../assets/logo_mark.png"),
+            ) {
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.pixels,
+                );
+                self.logo_tex =
+                    Some(ctx.load_texture("photonic_logo_mark", color, TextureOptions::LINEAR));
+            }
+        }
+        if let Some(tex) = &self.logo_tex {
+            ui.vertical_centered(|ui| {
+                let sz = 96.0;
+                ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(tex.id(), Vec2::splat(sz)))
+                        .tint(Color32::from_white_alpha((255.0 * r_word) as u8)),
+                );
+            });
+            ui.add_space(10.0);
+        }
 
         // Wordmark + subtitle.
         ui.vertical_centered(|ui| {

@@ -1,0 +1,5509 @@
+{
+  "format_version": 2,
+  "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+  "name": "Photonic Logo",
+  "width": 512.0,
+  "height": 512.0,
+  "layer_order": [
+    "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+  ],
+  "layers": {
+    "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+      "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+      "name": "Layer 1",
+      "visible": true,
+      "locked": false,
+      "opacity": 1.0,
+      "blend_mode": "normal",
+      "color": null,
+      "is_template": false,
+      "print": true,
+      "lock_transparency": false,
+      "lock_pixels": false,
+      "lock_position": false,
+      "node_ids": [
+        "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+        "79040289-055e-47d3-80b0-f0047c064626",
+        "7ae8efaa-e668-49db-872b-65ddc480b3cb"
+      ]
+    }
+  },
+  "nodes": {
+    "79040289-055e-47d3-80b0-f0047c064626": {
+      "id": "79040289-055e-47d3-80b0-f0047c064626",
+      "name": "Photonic Star",
+      "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+      "kind": {
+        "type": "path",
+        "path_data": {
+          "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+        },
+        "fill": {
+          "kind": {
+            "type": "gradient",
+            "kind": "radial",
+            "stops": [
+              {
+                "offset": 0.0,
+                "color": {
+                  "r": 1.0,
+                  "g": 1.0,
+                  "b": 1.0,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 0.25,
+                "color": {
+                  "r": 0.8156863,
+                  "g": 0.9254902,
+                  "b": 1.0,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 0.5,
+                "color": {
+                  "r": 0.36078432,
+                  "g": 0.7058824,
+                  "b": 0.9607843,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 0.75,
+                "color": {
+                  "r": 0.11764706,
+                  "g": 0.37254903,
+                  "b": 0.65882355,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 1.0,
+                "color": {
+                  "r": 0.047058824,
+                  "g": 0.16470589,
+                  "b": 0.3372549,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              }
+            ],
+            "coords": [
+              256.0,
+              256.0,
+              256.0,
+              256.0,
+              212.0
+            ],
+            "interpolation": "srgb",
+            "units": "user_space_on_use"
+          },
+          "opacity": 1.0,
+          "enabled": true
+        },
+        "stroke": {
+          "color": {
+            "r": 0.0,
+            "g": 0.0,
+            "b": 0.0,
+            "a": 1.0
+          },
+          "width": 1.0,
+          "opacity": 1.0,
+          "line_cap": "butt",
+          "line_join": "miter",
+          "miter_limit": 4.0,
+          "dash_array": [],
+          "dash_offset": 0.0,
+          "enabled": false,
+          "align": "center",
+          "dash_corner_alignment": false,
+          "arrowhead_start": "none",
+          "arrowhead_end": "none",
+          "width_profile_id": null,
+          "paint": null
+        },
+        "is_compound": false
+      }
+    },
+    "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+      "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+      "name": "Core",
+      "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+      "kind": {
+        "type": "path",
+        "path_data": {
+          "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+        },
+        "fill": {
+          "kind": {
+            "type": "gradient",
+            "kind": "radial",
+            "stops": [
+              {
+                "offset": 0.0,
+                "color": {
+                  "r": 1.0,
+                  "g": 1.0,
+                  "b": 1.0,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 1.0,
+                "color": {
+                  "r": 0.9098039,
+                  "g": 0.9607843,
+                  "b": 1.0,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              }
+            ],
+            "coords": [
+              256.0,
+              256.0,
+              256.0,
+              256.0,
+              20.0
+            ],
+            "interpolation": "srgb",
+            "units": "user_space_on_use"
+          },
+          "opacity": 1.0,
+          "enabled": true
+        },
+        "stroke": {
+          "color": {
+            "r": 0.0,
+            "g": 0.0,
+            "b": 0.0,
+            "a": 1.0
+          },
+          "width": 1.0,
+          "opacity": 1.0,
+          "line_cap": "butt",
+          "line_join": "miter",
+          "miter_limit": 4.0,
+          "dash_array": [],
+          "dash_offset": 0.0,
+          "enabled": false,
+          "align": "center",
+          "dash_corner_alignment": false,
+          "arrowhead_start": "none",
+          "arrowhead_end": "none",
+          "width_profile_id": null,
+          "paint": null
+        },
+        "is_compound": false
+      }
+    },
+    "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+      "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+      "name": "Twinkle Star",
+      "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+      "kind": {
+        "type": "path",
+        "path_data": {
+          "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+        },
+        "fill": {
+          "kind": {
+            "type": "gradient",
+            "kind": "radial",
+            "stops": [
+              {
+                "offset": 0.0,
+                "color": {
+                  "r": 1.0,
+                  "g": 1.0,
+                  "b": 1.0,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 0.33333334,
+                "color": {
+                  "r": 0.72156864,
+                  "g": 0.8627451,
+                  "b": 1.0,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 0.6666667,
+                "color": {
+                  "r": 0.22745098,
+                  "g": 0.5411765,
+                  "b": 0.83137256,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              },
+              {
+                "offset": 1.0,
+                "color": {
+                  "r": 0.05490196,
+                  "g": 0.16470589,
+                  "b": 0.3137255,
+                  "a": 1.0
+                },
+                "midpoint": 0.5
+              }
+            ],
+            "coords": [
+              256.0,
+              256.0,
+              256.0,
+              256.0,
+              150.0
+            ],
+            "interpolation": "srgb",
+            "units": "user_space_on_use"
+          },
+          "opacity": 1.0,
+          "enabled": true
+        },
+        "stroke": {
+          "color": {
+            "r": 0.0,
+            "g": 0.0,
+            "b": 0.0,
+            "a": 1.0
+          },
+          "width": 1.0,
+          "opacity": 1.0,
+          "line_cap": "butt",
+          "line_join": "miter",
+          "miter_limit": 4.0,
+          "dash_array": [],
+          "dash_offset": 0.0,
+          "enabled": false,
+          "align": "center",
+          "dash_corner_alignment": false,
+          "arrowhead_start": "none",
+          "arrowhead_end": "none",
+          "width_profile_id": null,
+          "paint": null
+        },
+        "is_compound": false
+      },
+      "opacity": 0.55
+    }
+  },
+  "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+  "annotations": {},
+  "guides": [],
+  "recent_colors": [],
+  "export_profiles": [],
+  "character_styles": [],
+  "paragraph_styles": [],
+  "color_swatches": [],
+  "variables": [],
+  "symbols": [],
+  "gradient_swatches": [],
+  "spot_colors": [],
+  "graphic_styles": [],
+  "width_profiles": [],
+  "patterns": [],
+  "constraints": [],
+  "grammar_rules": [],
+  "action_sets": [],
+  "bleed_mm": 0.0,
+  "slug_mm": 0.0,
+  "margin_top": 0.0,
+  "margin_right": 0.0,
+  "margin_bottom": 0.0,
+  "margin_left": 0.0,
+  "history_max_mb": 250.0,
+  "event_triggers": [],
+  "workspaces": [],
+  "artboards": [
+    {
+      "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+      "name": "Artboard 1",
+      "x": 0.0,
+      "y": 0.0,
+      "width": 512.0,
+      "height": 512.0
+    }
+  ],
+  "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+  "dpi": 72.0,
+  "display_unit": "px",
+  "color_mode": "rgb",
+  "photon_format": 1,
+  "photon_history": {
+    "undo_stack": [
+      {
+        "ResizeCanvas": {
+          "old_width": 1200.0,
+          "old_height": 1200.0,
+          "new_width": 512.0,
+          "new_height": 512.0
+        }
+      },
+      {
+        "AddNode": {
+          "node": {
+            "id": "216f592d-b348-4e80-b1ad-d0bc6532a10c",
+            "name": "alphatest",
+            "layer_id": "00000000-0000-0000-0000-000000000000",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M180,140 C180,162.09138999323173 162.09138999323173,180 140,180 C117.90861000676827,180 100,162.09138999323173 100,140 C100,117.90861000676827 117.90861000676826,100 140,100 C162.09138999323173,100 180,117.90861000676826 180,140"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 0.24313726,
+                        "g": 0.5254902,
+                        "b": 0.8392157,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.039215688,
+                        "g": 0.09411765,
+                        "b": 0.1882353,
+                        "a": 0.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    140.0,
+                    140.0,
+                    140.0,
+                    140.0,
+                    40.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "layer_id": null
+        }
+      },
+      {
+        "Batch": [
+          {
+            "RemoveNodeFull": {
+              "node": {
+                "id": "216f592d-b348-4e80-b1ad-d0bc6532a10c",
+                "name": "alphatest",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M180,140 C180,162.09138999323173 162.09138999323173,180 140,180 C117.90861000676827,180 100,162.09138999323173 100,140 C100,117.90861000676827 117.90861000676826,100 140,100 C162.09138999323173,100 180,117.90861000676826 180,140"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        140.0,
+                        140.0,
+                        140.0,
+                        140.0,
+                        40.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "AddNode": {
+          "node": {
+            "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+            "name": "Halo Glow",
+            "layer_id": "00000000-0000-0000-0000-000000000000",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 0.24313726,
+                        "g": 0.5254902,
+                        "b": 0.8392157,
+                        "a": 0.6901961
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.5,
+                      "color": {
+                        "r": 0.11764706,
+                        "g": 0.30980393,
+                        "b": 0.5803922,
+                        "a": 0.2509804
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.039215688,
+                        "g": 0.09411765,
+                        "b": 0.1882353,
+                        "a": 0.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    190.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "layer_id": null
+        }
+      },
+      {
+        "AddNode": {
+          "node": {
+            "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+            "name": "Twinkle Star",
+            "layer_id": "00000000-0000-0000-0000-000000000000",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 1.0,
+                        "g": 1.0,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.33333334,
+                      "color": {
+                        "r": 0.72156864,
+                        "g": 0.8627451,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.6666667,
+                      "color": {
+                        "r": 0.22745098,
+                        "g": 0.5411765,
+                        "b": 0.83137256,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.05490196,
+                        "g": 0.16470589,
+                        "b": 0.3137255,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    150.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "layer_id": null
+        }
+      },
+      {
+        "AddNode": {
+          "node": {
+            "id": "79040289-055e-47d3-80b0-f0047c064626",
+            "name": "Photonic Star",
+            "layer_id": "00000000-0000-0000-0000-000000000000",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 1.0,
+                        "g": 1.0,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.25,
+                      "color": {
+                        "r": 0.8156863,
+                        "g": 0.9254902,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.5,
+                      "color": {
+                        "r": 0.36078432,
+                        "g": 0.7058824,
+                        "b": 0.9607843,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.75,
+                      "color": {
+                        "r": 0.11764706,
+                        "g": 0.37254903,
+                        "b": 0.65882355,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.047058824,
+                        "g": 0.16470589,
+                        "b": 0.3372549,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    212.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "layer_id": null
+        }
+      },
+      {
+        "AddNode": {
+          "node": {
+            "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+            "name": "Core",
+            "layer_id": "00000000-0000-0000-0000-000000000000",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 1.0,
+                        "g": 1.0,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.9098039,
+                        "g": 0.9607843,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    20.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "layer_id": null
+        }
+      },
+      {
+        "UpdateNode": {
+          "old": {
+            "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+            "name": "Twinkle Star",
+            "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 1.0,
+                        "g": 1.0,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.33333334,
+                      "color": {
+                        "r": 0.72156864,
+                        "g": 0.8627451,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.6666667,
+                      "color": {
+                        "r": 0.22745098,
+                        "g": 0.5411765,
+                        "b": 0.83137256,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.05490196,
+                        "g": 0.16470589,
+                        "b": 0.3137255,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    150.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "new": {
+            "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+            "name": "Twinkle Star",
+            "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 1.0,
+                        "g": 1.0,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.33333334,
+                      "color": {
+                        "r": 0.72156864,
+                        "g": 0.8627451,
+                        "b": 1.0,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.6666667,
+                      "color": {
+                        "r": 0.22745098,
+                        "g": 0.5411765,
+                        "b": 0.83137256,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.05490196,
+                        "g": 0.16470589,
+                        "b": 0.3137255,
+                        "a": 1.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    150.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            },
+            "opacity": 0.55
+          }
+        }
+      },
+      {
+        "SetArtboards": {
+          "old": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1200.0,
+              "height": 1200.0
+            }
+          ],
+          "new": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 512.0,
+              "height": 512.0
+            }
+          ]
+        }
+      },
+      {
+        "UpdateNode": {
+          "old": {
+            "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+            "name": "Halo Glow",
+            "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 0.24313726,
+                        "g": 0.5254902,
+                        "b": 0.8392157,
+                        "a": 0.6901961
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.5,
+                      "color": {
+                        "r": 0.11764706,
+                        "g": 0.30980393,
+                        "b": 0.5803922,
+                        "a": 0.2509804
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.039215688,
+                        "g": 0.09411765,
+                        "b": 0.1882353,
+                        "a": 0.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    190.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          },
+          "new": {
+            "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+            "name": "Halo Glow",
+            "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 0.24313726,
+                        "g": 0.5254902,
+                        "b": 0.8392157,
+                        "a": 0.6901961
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.5,
+                      "color": {
+                        "r": 0.11764706,
+                        "g": 0.30980393,
+                        "b": 0.5803922,
+                        "a": 0.2509804
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.039215688,
+                        "g": 0.09411765,
+                        "b": 0.1882353,
+                        "a": 0.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    190.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            },
+            "visible": false
+          }
+        }
+      },
+      {
+        "UpdateNode": {
+          "old": {
+            "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+            "name": "Halo Glow",
+            "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 0.24313726,
+                        "g": 0.5254902,
+                        "b": 0.8392157,
+                        "a": 0.6901961
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.5,
+                      "color": {
+                        "r": 0.11764706,
+                        "g": 0.30980393,
+                        "b": 0.5803922,
+                        "a": 0.2509804
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.039215688,
+                        "g": 0.09411765,
+                        "b": 0.1882353,
+                        "a": 0.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    190.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            },
+            "visible": false
+          },
+          "new": {
+            "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+            "name": "Halo Glow",
+            "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+            "kind": {
+              "type": "path",
+              "path_data": {
+                "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+              },
+              "fill": {
+                "kind": {
+                  "type": "gradient",
+                  "kind": "radial",
+                  "stops": [
+                    {
+                      "offset": 0.0,
+                      "color": {
+                        "r": 0.24313726,
+                        "g": 0.5254902,
+                        "b": 0.8392157,
+                        "a": 0.6901961
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 0.5,
+                      "color": {
+                        "r": 0.11764706,
+                        "g": 0.30980393,
+                        "b": 0.5803922,
+                        "a": 0.2509804
+                      },
+                      "midpoint": 0.5
+                    },
+                    {
+                      "offset": 1.0,
+                      "color": {
+                        "r": 0.039215688,
+                        "g": 0.09411765,
+                        "b": 0.1882353,
+                        "a": 0.0
+                      },
+                      "midpoint": 0.5
+                    }
+                  ],
+                  "coords": [
+                    256.0,
+                    256.0,
+                    256.0,
+                    256.0,
+                    190.0
+                  ],
+                  "interpolation": "srgb",
+                  "units": "user_space_on_use"
+                },
+                "opacity": 1.0,
+                "enabled": true
+              },
+              "stroke": {
+                "color": {
+                  "r": 0.0,
+                  "g": 0.0,
+                  "b": 0.0,
+                  "a": 1.0
+                },
+                "width": 1.0,
+                "opacity": 1.0,
+                "line_cap": "butt",
+                "line_join": "miter",
+                "miter_limit": 4.0,
+                "dash_array": [],
+                "dash_offset": 0.0,
+                "enabled": false,
+                "align": "center",
+                "dash_corner_alignment": false,
+                "arrowhead_start": "none",
+                "arrowhead_end": "none",
+                "width_profile_id": null,
+                "paint": null
+              },
+              "is_compound": false
+            }
+          }
+        }
+      },
+      {
+        "Batch": [
+          {
+            "RemoveNodeFull": {
+              "node": {
+                "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "name": "Halo Glow",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 0.6901961
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.30980393,
+                            "b": 0.5803922,
+                            "a": 0.2509804
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        190.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "redo_stack": [],
+    "checkpoints": [
+      {
+        "id": "a5bcf0c6-f00a-4f86-abf5-d9cb733b20cb",
+        "name": "Resize canvas to 512×512",
+        "created_at": 1784516427,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": []
+            }
+          },
+          "nodes": {},
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1200.0,
+              "height": 1200.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      },
+      {
+        "id": "147ed85d-d27d-44cd-b9bd-763c0ea49a39",
+        "name": "Add Core",
+        "created_at": 1784516473,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": [
+                "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "79040289-055e-47d3-80b0-f0047c064626",
+                "7ae8efaa-e668-49db-872b-65ddc480b3cb"
+              ]
+            }
+          },
+          "nodes": {
+            "79040289-055e-47d3-80b0-f0047c064626": {
+              "id": "79040289-055e-47d3-80b0-f0047c064626",
+              "name": "Photonic Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.25,
+                        "color": {
+                          "r": 0.8156863,
+                          "g": 0.9254902,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.36078432,
+                          "g": 0.7058824,
+                          "b": 0.9607843,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.75,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.37254903,
+                          "b": 0.65882355,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.047058824,
+                          "g": 0.16470589,
+                          "b": 0.3372549,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      212.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+              "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+              "name": "Core",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.9098039,
+                          "g": 0.9607843,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      20.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "e3d1920e-698b-4df3-9e4d-d6ebe356abc7": {
+              "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+              "name": "Halo Glow",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 0.24313726,
+                          "g": 0.5254902,
+                          "b": 0.8392157,
+                          "a": 0.6901961
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.30980393,
+                          "b": 0.5803922,
+                          "a": 0.2509804
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.039215688,
+                          "g": 0.09411765,
+                          "b": 0.1882353,
+                          "a": 0.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      190.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+              "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+              "name": "Twinkle Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.33333334,
+                        "color": {
+                          "r": 0.72156864,
+                          "g": 0.8627451,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.6666667,
+                        "color": {
+                          "r": 0.22745098,
+                          "g": 0.5411765,
+                          "b": 0.83137256,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.05490196,
+                          "g": 0.16470589,
+                          "b": 0.3137255,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      150.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            }
+          },
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1200.0,
+              "height": 1200.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      },
+      {
+        "id": "1a3da999-3919-40f3-8040-fa1b3fe874b0",
+        "name": "Update artboards",
+        "created_at": 1784516536,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": [
+                "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "79040289-055e-47d3-80b0-f0047c064626",
+                "7ae8efaa-e668-49db-872b-65ddc480b3cb"
+              ]
+            }
+          },
+          "nodes": {
+            "79040289-055e-47d3-80b0-f0047c064626": {
+              "id": "79040289-055e-47d3-80b0-f0047c064626",
+              "name": "Photonic Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.25,
+                        "color": {
+                          "r": 0.8156863,
+                          "g": 0.9254902,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.36078432,
+                          "g": 0.7058824,
+                          "b": 0.9607843,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.75,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.37254903,
+                          "b": 0.65882355,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.047058824,
+                          "g": 0.16470589,
+                          "b": 0.3372549,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      212.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+              "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+              "name": "Core",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.9098039,
+                          "g": 0.9607843,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      20.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "e3d1920e-698b-4df3-9e4d-d6ebe356abc7": {
+              "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+              "name": "Halo Glow",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 0.24313726,
+                          "g": 0.5254902,
+                          "b": 0.8392157,
+                          "a": 0.6901961
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.30980393,
+                          "b": 0.5803922,
+                          "a": 0.2509804
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.039215688,
+                          "g": 0.09411765,
+                          "b": 0.1882353,
+                          "a": 0.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      190.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+              "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+              "name": "Twinkle Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.33333334,
+                        "color": {
+                          "r": 0.72156864,
+                          "g": 0.8627451,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.6666667,
+                        "color": {
+                          "r": 0.22745098,
+                          "g": 0.5411765,
+                          "b": 0.83137256,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.05490196,
+                          "g": 0.16470589,
+                          "b": 0.3137255,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      150.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              },
+              "opacity": 0.55
+            }
+          },
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 512.0,
+              "height": 512.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      },
+      {
+        "id": "3f2bcb91-af47-4248-8681-48875cf7334c",
+        "name": "update_artboard",
+        "created_at": 1784516567,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": [
+                "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "79040289-055e-47d3-80b0-f0047c064626",
+                "7ae8efaa-e668-49db-872b-65ddc480b3cb"
+              ]
+            }
+          },
+          "nodes": {
+            "79040289-055e-47d3-80b0-f0047c064626": {
+              "id": "79040289-055e-47d3-80b0-f0047c064626",
+              "name": "Photonic Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.25,
+                        "color": {
+                          "r": 0.8156863,
+                          "g": 0.9254902,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.36078432,
+                          "g": 0.7058824,
+                          "b": 0.9607843,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.75,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.37254903,
+                          "b": 0.65882355,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.047058824,
+                          "g": 0.16470589,
+                          "b": 0.3372549,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      212.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+              "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+              "name": "Core",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.9098039,
+                          "g": 0.9607843,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      20.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "e3d1920e-698b-4df3-9e4d-d6ebe356abc7": {
+              "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+              "name": "Halo Glow",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 0.24313726,
+                          "g": 0.5254902,
+                          "b": 0.8392157,
+                          "a": 0.6901961
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.30980393,
+                          "b": 0.5803922,
+                          "a": 0.2509804
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.039215688,
+                          "g": 0.09411765,
+                          "b": 0.1882353,
+                          "a": 0.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      190.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+              "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+              "name": "Twinkle Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.33333334,
+                        "color": {
+                          "r": 0.72156864,
+                          "g": 0.8627451,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.6666667,
+                        "color": {
+                          "r": 0.22745098,
+                          "g": 0.5411765,
+                          "b": 0.83137256,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.05490196,
+                          "g": 0.16470589,
+                          "b": 0.3137255,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      150.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              },
+              "opacity": 0.55
+            }
+          },
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 512.0,
+              "height": 512.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      },
+      {
+        "id": "a286bc60-8154-43c4-8b20-4ed96bba46e2",
+        "name": "Show Halo Glow",
+        "created_at": 1784516647,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": [
+                "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "79040289-055e-47d3-80b0-f0047c064626",
+                "7ae8efaa-e668-49db-872b-65ddc480b3cb"
+              ]
+            }
+          },
+          "nodes": {
+            "79040289-055e-47d3-80b0-f0047c064626": {
+              "id": "79040289-055e-47d3-80b0-f0047c064626",
+              "name": "Photonic Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.25,
+                        "color": {
+                          "r": 0.8156863,
+                          "g": 0.9254902,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.36078432,
+                          "g": 0.7058824,
+                          "b": 0.9607843,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.75,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.37254903,
+                          "b": 0.65882355,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.047058824,
+                          "g": 0.16470589,
+                          "b": 0.3372549,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      212.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+              "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+              "name": "Core",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.9098039,
+                          "g": 0.9607843,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      20.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "e3d1920e-698b-4df3-9e4d-d6ebe356abc7": {
+              "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+              "name": "Halo Glow",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 0.24313726,
+                          "g": 0.5254902,
+                          "b": 0.8392157,
+                          "a": 0.6901961
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.30980393,
+                          "b": 0.5803922,
+                          "a": 0.2509804
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.039215688,
+                          "g": 0.09411765,
+                          "b": 0.1882353,
+                          "a": 0.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      190.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+              "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+              "name": "Twinkle Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.33333334,
+                        "color": {
+                          "r": 0.72156864,
+                          "g": 0.8627451,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.6666667,
+                        "color": {
+                          "r": 0.22745098,
+                          "g": 0.5411765,
+                          "b": 0.83137256,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.05490196,
+                          "g": 0.16470589,
+                          "b": 0.3137255,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      150.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              },
+              "opacity": 0.55
+            }
+          },
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 512.0,
+              "height": 512.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      },
+      {
+        "id": "aef74e81-145b-4b76-92c1-fb80116837a8",
+        "name": "set_visibility",
+        "created_at": 1784516677,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": [
+                "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "79040289-055e-47d3-80b0-f0047c064626",
+                "7ae8efaa-e668-49db-872b-65ddc480b3cb"
+              ]
+            }
+          },
+          "nodes": {
+            "79040289-055e-47d3-80b0-f0047c064626": {
+              "id": "79040289-055e-47d3-80b0-f0047c064626",
+              "name": "Photonic Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.25,
+                        "color": {
+                          "r": 0.8156863,
+                          "g": 0.9254902,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.36078432,
+                          "g": 0.7058824,
+                          "b": 0.9607843,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.75,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.37254903,
+                          "b": 0.65882355,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.047058824,
+                          "g": 0.16470589,
+                          "b": 0.3372549,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      212.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+              "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+              "name": "Core",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.9098039,
+                          "g": 0.9607843,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      20.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "e3d1920e-698b-4df3-9e4d-d6ebe356abc7": {
+              "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+              "name": "Halo Glow",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 0.24313726,
+                          "g": 0.5254902,
+                          "b": 0.8392157,
+                          "a": 0.6901961
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.30980393,
+                          "b": 0.5803922,
+                          "a": 0.2509804
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.039215688,
+                          "g": 0.09411765,
+                          "b": 0.1882353,
+                          "a": 0.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      190.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+              "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+              "name": "Twinkle Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.33333334,
+                        "color": {
+                          "r": 0.72156864,
+                          "g": 0.8627451,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.6666667,
+                        "color": {
+                          "r": 0.22745098,
+                          "g": 0.5411765,
+                          "b": 0.83137256,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.05490196,
+                          "g": 0.16470589,
+                          "b": 0.3137255,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      150.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              },
+              "opacity": 0.55
+            }
+          },
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 512.0,
+              "height": 512.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      },
+      {
+        "id": "673e9398-76c5-4dd5-a557-edb00213d293",
+        "name": "Remove Halo Glow",
+        "created_at": 1784516971,
+        "snapshot": {
+          "format_version": 2,
+          "id": "2e6de077-14cb-4287-9dff-ac24c626c65b",
+          "name": "Photonic Logo",
+          "width": 512.0,
+          "height": 512.0,
+          "layer_order": [
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f"
+          ],
+          "layers": {
+            "3e101e9d-bce4-44a5-bc63-8b1655d0963f": {
+              "id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "name": "Layer 1",
+              "visible": true,
+              "locked": false,
+              "opacity": 1.0,
+              "blend_mode": "normal",
+              "color": null,
+              "is_template": false,
+              "print": true,
+              "lock_transparency": false,
+              "lock_pixels": false,
+              "lock_position": false,
+              "node_ids": [
+                "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "79040289-055e-47d3-80b0-f0047c064626",
+                "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+                "e3d1920e-698b-4df3-9e4d-d6ebe356abc7"
+              ]
+            }
+          },
+          "nodes": {
+            "79040289-055e-47d3-80b0-f0047c064626": {
+              "id": "79040289-055e-47d3-80b0-f0047c064626",
+              "name": "Photonic Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.25,
+                        "color": {
+                          "r": 0.8156863,
+                          "g": 0.9254902,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.36078432,
+                          "g": 0.7058824,
+                          "b": 0.9607843,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.75,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.37254903,
+                          "b": 0.65882355,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.047058824,
+                          "g": 0.16470589,
+                          "b": 0.3372549,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      212.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "7ae8efaa-e668-49db-872b-65ddc480b3cb": {
+              "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+              "name": "Core",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.9098039,
+                          "g": 0.9607843,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      20.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              }
+            },
+            "e3d1920e-698b-4df3-9e4d-d6ebe356abc7": {
+              "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+              "name": "Halo Glow",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 0.24313726,
+                          "g": 0.5254902,
+                          "b": 0.8392157,
+                          "a": 0.6901961
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.5,
+                        "color": {
+                          "r": 0.11764706,
+                          "g": 0.30980393,
+                          "b": 0.5803922,
+                          "a": 0.2509804
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.039215688,
+                          "g": 0.09411765,
+                          "b": 0.1882353,
+                          "a": 0.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      190.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              },
+              "visible": false
+            },
+            "cfef551c-3fb1-4615-99c0-f7d965e0190d": {
+              "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+              "name": "Twinkle Star",
+              "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+              "kind": {
+                "type": "path",
+                "path_data": {
+                  "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                },
+                "fill": {
+                  "kind": {
+                    "type": "gradient",
+                    "kind": "radial",
+                    "stops": [
+                      {
+                        "offset": 0.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 1.0,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.33333334,
+                        "color": {
+                          "r": 0.72156864,
+                          "g": 0.8627451,
+                          "b": 1.0,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 0.6666667,
+                        "color": {
+                          "r": 0.22745098,
+                          "g": 0.5411765,
+                          "b": 0.83137256,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      },
+                      {
+                        "offset": 1.0,
+                        "color": {
+                          "r": 0.05490196,
+                          "g": 0.16470589,
+                          "b": 0.3137255,
+                          "a": 1.0
+                        },
+                        "midpoint": 0.5
+                      }
+                    ],
+                    "coords": [
+                      256.0,
+                      256.0,
+                      256.0,
+                      256.0,
+                      150.0
+                    ],
+                    "interpolation": "srgb",
+                    "units": "user_space_on_use"
+                  },
+                  "opacity": 1.0,
+                  "enabled": true
+                },
+                "stroke": {
+                  "color": {
+                    "r": 0.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  },
+                  "width": 1.0,
+                  "opacity": 1.0,
+                  "line_cap": "butt",
+                  "line_join": "miter",
+                  "miter_limit": 4.0,
+                  "dash_array": [],
+                  "dash_offset": 0.0,
+                  "enabled": false,
+                  "align": "center",
+                  "dash_corner_alignment": false,
+                  "arrowhead_start": "none",
+                  "arrowhead_end": "none",
+                  "width_profile_id": null,
+                  "paint": null
+                },
+                "is_compound": false
+              },
+              "opacity": 0.55
+            }
+          },
+          "active_layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+          "annotations": {},
+          "guides": [],
+          "recent_colors": [],
+          "export_profiles": [],
+          "character_styles": [],
+          "paragraph_styles": [],
+          "color_swatches": [],
+          "variables": [],
+          "symbols": [],
+          "gradient_swatches": [],
+          "spot_colors": [],
+          "graphic_styles": [],
+          "width_profiles": [],
+          "patterns": [],
+          "constraints": [],
+          "grammar_rules": [],
+          "action_sets": [],
+          "bleed_mm": 0.0,
+          "slug_mm": 0.0,
+          "margin_top": 0.0,
+          "margin_right": 0.0,
+          "margin_bottom": 0.0,
+          "margin_left": 0.0,
+          "history_max_mb": 250.0,
+          "event_triggers": [],
+          "workspaces": [],
+          "artboards": [
+            {
+              "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+              "name": "Artboard 1",
+              "x": 0.0,
+              "y": 0.0,
+              "width": 512.0,
+              "height": 512.0
+            }
+          ],
+          "active_artboard": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+          "dpi": 72.0,
+          "display_unit": "px",
+          "color_mode": "rgb"
+        }
+      }
+    ],
+    "branches": {},
+    "tree": {
+      "nodes": [
+        {
+          "id": 9,
+          "parent": 8,
+          "command": {
+            "SetArtboards": {
+              "old": [
+                {
+                  "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+                  "name": "Artboard 1",
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1200.0,
+                  "height": 1200.0
+                }
+              ],
+              "new": [
+                {
+                  "id": "ecfb6038-ca7c-4dcd-b5d5-6627e8537ba4",
+                  "name": "Artboard 1",
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 512.0,
+                  "height": 512.0
+                }
+              ]
+            }
+          },
+          "children": [
+            10
+          ],
+          "primary_child": 10
+        },
+        {
+          "id": 6,
+          "parent": 5,
+          "command": {
+            "AddNode": {
+              "node": {
+                "id": "79040289-055e-47d3-80b0-f0047c064626",
+                "name": "Photonic Star",
+                "layer_id": "00000000-0000-0000-0000-000000000000",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M 256 52 L 270 242 L 460 256 L 270 270 L 256 460 L 242 270 L 52 256 L 242 242 Z"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 1.0,
+                            "g": 1.0,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.25,
+                          "color": {
+                            "r": 0.8156863,
+                            "g": 0.9254902,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.36078432,
+                            "g": 0.7058824,
+                            "b": 0.9607843,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.75,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.37254903,
+                            "b": 0.65882355,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.047058824,
+                            "g": 0.16470589,
+                            "b": 0.3372549,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        212.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "layer_id": null
+            }
+          },
+          "children": [
+            7
+          ],
+          "primary_child": 7
+        },
+        {
+          "id": 7,
+          "parent": 6,
+          "command": {
+            "AddNode": {
+              "node": {
+                "id": "7ae8efaa-e668-49db-872b-65ddc480b3cb",
+                "name": "Core",
+                "layer_id": "00000000-0000-0000-0000-000000000000",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M 256 238 L 274 256 L 256 274 L 238 256 Z"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 1.0,
+                            "g": 1.0,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.9098039,
+                            "g": 0.9607843,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        20.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "layer_id": null
+            }
+          },
+          "children": [
+            8
+          ],
+          "primary_child": 8
+        },
+        {
+          "id": 2,
+          "parent": 1,
+          "command": {
+            "AddNode": {
+              "node": {
+                "id": "216f592d-b348-4e80-b1ad-d0bc6532a10c",
+                "name": "alphatest",
+                "layer_id": "00000000-0000-0000-0000-000000000000",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M180,140 C180,162.09138999323173 162.09138999323173,180 140,180 C117.90861000676827,180 100,162.09138999323173 100,140 C100,117.90861000676827 117.90861000676826,100 140,100 C162.09138999323173,100 180,117.90861000676826 180,140"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        140.0,
+                        140.0,
+                        140.0,
+                        140.0,
+                        40.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "layer_id": null
+            }
+          },
+          "children": [
+            3
+          ],
+          "primary_child": 3
+        },
+        {
+          "id": 8,
+          "parent": 7,
+          "command": {
+            "UpdateNode": {
+              "old": {
+                "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "name": "Twinkle Star",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 1.0,
+                            "g": 1.0,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.33333334,
+                          "color": {
+                            "r": 0.72156864,
+                            "g": 0.8627451,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.6666667,
+                          "color": {
+                            "r": 0.22745098,
+                            "g": 0.5411765,
+                            "b": 0.83137256,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.05490196,
+                            "g": 0.16470589,
+                            "b": 0.3137255,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        150.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "new": {
+                "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "name": "Twinkle Star",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 1.0,
+                            "g": 1.0,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.33333334,
+                          "color": {
+                            "r": 0.72156864,
+                            "g": 0.8627451,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.6666667,
+                          "color": {
+                            "r": 0.22745098,
+                            "g": 0.5411765,
+                            "b": 0.83137256,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.05490196,
+                            "g": 0.16470589,
+                            "b": 0.3137255,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        150.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                },
+                "opacity": 0.55
+              }
+            }
+          },
+          "children": [
+            9
+          ],
+          "primary_child": 9
+        },
+        {
+          "id": 1,
+          "parent": 0,
+          "command": {
+            "ResizeCanvas": {
+              "old_width": 1200.0,
+              "old_height": 1200.0,
+              "new_width": 512.0,
+              "new_height": 512.0
+            }
+          },
+          "children": [
+            2
+          ],
+          "primary_child": 2
+        },
+        {
+          "id": 4,
+          "parent": 3,
+          "command": {
+            "AddNode": {
+              "node": {
+                "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "name": "Halo Glow",
+                "layer_id": "00000000-0000-0000-0000-000000000000",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 0.6901961
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.30980393,
+                            "b": 0.5803922,
+                            "a": 0.2509804
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        190.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "layer_id": null
+            }
+          },
+          "children": [
+            5
+          ],
+          "primary_child": 5
+        },
+        {
+          "id": 10,
+          "parent": 9,
+          "command": {
+            "UpdateNode": {
+              "old": {
+                "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "name": "Halo Glow",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 0.6901961
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.30980393,
+                            "b": 0.5803922,
+                            "a": 0.2509804
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        190.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "new": {
+                "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "name": "Halo Glow",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 0.6901961
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.30980393,
+                            "b": 0.5803922,
+                            "a": 0.2509804
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        190.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                },
+                "visible": false
+              }
+            }
+          },
+          "children": [
+            11
+          ],
+          "primary_child": 11
+        },
+        {
+          "id": 12,
+          "parent": 11,
+          "command": {
+            "Batch": [
+              {
+                "RemoveNodeFull": {
+                  "node": {
+                    "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                    "name": "Halo Glow",
+                    "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                    "kind": {
+                      "type": "path",
+                      "path_data": {
+                        "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                      },
+                      "fill": {
+                        "kind": {
+                          "type": "gradient",
+                          "kind": "radial",
+                          "stops": [
+                            {
+                              "offset": 0.0,
+                              "color": {
+                                "r": 0.24313726,
+                                "g": 0.5254902,
+                                "b": 0.8392157,
+                                "a": 0.6901961
+                              },
+                              "midpoint": 0.5
+                            },
+                            {
+                              "offset": 0.5,
+                              "color": {
+                                "r": 0.11764706,
+                                "g": 0.30980393,
+                                "b": 0.5803922,
+                                "a": 0.2509804
+                              },
+                              "midpoint": 0.5
+                            },
+                            {
+                              "offset": 1.0,
+                              "color": {
+                                "r": 0.039215688,
+                                "g": 0.09411765,
+                                "b": 0.1882353,
+                                "a": 0.0
+                              },
+                              "midpoint": 0.5
+                            }
+                          ],
+                          "coords": [
+                            256.0,
+                            256.0,
+                            256.0,
+                            256.0,
+                            190.0
+                          ],
+                          "interpolation": "srgb",
+                          "units": "user_space_on_use"
+                        },
+                        "opacity": 1.0,
+                        "enabled": true
+                      },
+                      "stroke": {
+                        "color": {
+                          "r": 0.0,
+                          "g": 0.0,
+                          "b": 0.0,
+                          "a": 1.0
+                        },
+                        "width": 1.0,
+                        "opacity": 1.0,
+                        "line_cap": "butt",
+                        "line_join": "miter",
+                        "miter_limit": 4.0,
+                        "dash_array": [],
+                        "dash_offset": 0.0,
+                        "enabled": false,
+                        "align": "center",
+                        "dash_corner_alignment": false,
+                        "arrowhead_start": "none",
+                        "arrowhead_end": "none",
+                        "width_profile_id": null,
+                        "paint": null
+                      },
+                      "is_compound": false
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "children": [],
+          "primary_child": null
+        },
+        {
+          "id": 0,
+          "parent": null,
+          "command": null,
+          "children": [
+            1
+          ],
+          "primary_child": 1
+        },
+        {
+          "id": 5,
+          "parent": 4,
+          "command": {
+            "AddNode": {
+              "node": {
+                "id": "cfef551c-3fb1-4615-99c0-f7d965e0190d",
+                "name": "Twinkle Star",
+                "layer_id": "00000000-0000-0000-0000-000000000000",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M 151 151 L 256 248 L 361 151 L 264 256 L 361 361 L 256 264 L 151 361 L 248 256 Z"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 1.0,
+                            "g": 1.0,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.33333334,
+                          "color": {
+                            "r": 0.72156864,
+                            "g": 0.8627451,
+                            "b": 1.0,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.6666667,
+                          "color": {
+                            "r": 0.22745098,
+                            "g": 0.5411765,
+                            "b": 0.83137256,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.05490196,
+                            "g": 0.16470589,
+                            "b": 0.3137255,
+                            "a": 1.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        150.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              },
+              "layer_id": null
+            }
+          },
+          "children": [
+            6
+          ],
+          "primary_child": 6
+        },
+        {
+          "id": 3,
+          "parent": 2,
+          "command": {
+            "Batch": [
+              {
+                "RemoveNodeFull": {
+                  "node": {
+                    "id": "216f592d-b348-4e80-b1ad-d0bc6532a10c",
+                    "name": "alphatest",
+                    "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                    "kind": {
+                      "type": "path",
+                      "path_data": {
+                        "svg": "M180,140 C180,162.09138999323173 162.09138999323173,180 140,180 C117.90861000676827,180 100,162.09138999323173 100,140 C100,117.90861000676827 117.90861000676826,100 140,100 C162.09138999323173,100 180,117.90861000676826 180,140"
+                      },
+                      "fill": {
+                        "kind": {
+                          "type": "gradient",
+                          "kind": "radial",
+                          "stops": [
+                            {
+                              "offset": 0.0,
+                              "color": {
+                                "r": 0.24313726,
+                                "g": 0.5254902,
+                                "b": 0.8392157,
+                                "a": 1.0
+                              },
+                              "midpoint": 0.5
+                            },
+                            {
+                              "offset": 1.0,
+                              "color": {
+                                "r": 0.039215688,
+                                "g": 0.09411765,
+                                "b": 0.1882353,
+                                "a": 0.0
+                              },
+                              "midpoint": 0.5
+                            }
+                          ],
+                          "coords": [
+                            140.0,
+                            140.0,
+                            140.0,
+                            140.0,
+                            40.0
+                          ],
+                          "interpolation": "srgb",
+                          "units": "user_space_on_use"
+                        },
+                        "opacity": 1.0,
+                        "enabled": true
+                      },
+                      "stroke": {
+                        "color": {
+                          "r": 0.0,
+                          "g": 0.0,
+                          "b": 0.0,
+                          "a": 1.0
+                        },
+                        "width": 1.0,
+                        "opacity": 1.0,
+                        "line_cap": "butt",
+                        "line_join": "miter",
+                        "miter_limit": 4.0,
+                        "dash_array": [],
+                        "dash_offset": 0.0,
+                        "enabled": false,
+                        "align": "center",
+                        "dash_corner_alignment": false,
+                        "arrowhead_start": "none",
+                        "arrowhead_end": "none",
+                        "width_profile_id": null,
+                        "paint": null
+                      },
+                      "is_compound": false
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "children": [
+            4
+          ],
+          "primary_child": 4
+        },
+        {
+          "id": 11,
+          "parent": 10,
+          "command": {
+            "UpdateNode": {
+              "old": {
+                "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "name": "Halo Glow",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 0.6901961
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.30980393,
+                            "b": 0.5803922,
+                            "a": 0.2509804
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        190.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                },
+                "visible": false
+              },
+              "new": {
+                "id": "e3d1920e-698b-4df3-9e4d-d6ebe356abc7",
+                "name": "Halo Glow",
+                "layer_id": "3e101e9d-bce4-44a5-bc63-8b1655d0963f",
+                "kind": {
+                  "type": "path",
+                  "path_data": {
+                    "svg": "M446,256 C446,360.9341024678507 360.9341024678507,446 256,446 C151.06589753214928,446 66.00000000000003,360.9341024678508 66,256 C65.99999999999997,151.06589753214928 151.06589753214922,66.00000000000003 255.99999999999997,66 C360.9341024678507,65.99999999999997 446,151.06589753214922 446,255.99999999999994"
+                  },
+                  "fill": {
+                    "kind": {
+                      "type": "gradient",
+                      "kind": "radial",
+                      "stops": [
+                        {
+                          "offset": 0.0,
+                          "color": {
+                            "r": 0.24313726,
+                            "g": 0.5254902,
+                            "b": 0.8392157,
+                            "a": 0.6901961
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 0.5,
+                          "color": {
+                            "r": 0.11764706,
+                            "g": 0.30980393,
+                            "b": 0.5803922,
+                            "a": 0.2509804
+                          },
+                          "midpoint": 0.5
+                        },
+                        {
+                          "offset": 1.0,
+                          "color": {
+                            "r": 0.039215688,
+                            "g": 0.09411765,
+                            "b": 0.1882353,
+                            "a": 0.0
+                          },
+                          "midpoint": 0.5
+                        }
+                      ],
+                      "coords": [
+                        256.0,
+                        256.0,
+                        256.0,
+                        256.0,
+                        190.0
+                      ],
+                      "interpolation": "srgb",
+                      "units": "user_space_on_use"
+                    },
+                    "opacity": 1.0,
+                    "enabled": true
+                  },
+                  "stroke": {
+                    "color": {
+                      "r": 0.0,
+                      "g": 0.0,
+                      "b": 0.0,
+                      "a": 1.0
+                    },
+                    "width": 1.0,
+                    "opacity": 1.0,
+                    "line_cap": "butt",
+                    "line_join": "miter",
+                    "miter_limit": 4.0,
+                    "dash_array": [],
+                    "dash_offset": 0.0,
+                    "enabled": false,
+                    "align": "center",
+                    "dash_corner_alignment": false,
+                    "arrowhead_start": "none",
+                    "arrowhead_end": "none",
+                    "width_profile_id": null,
+                    "paint": null
+                  },
+                  "is_compound": false
+                }
+              }
+            }
+          },
+          "children": [
+            12
+          ],
+          "primary_child": 12
+        }
+      ],
+      "root": 0,
+      "current": 12,
+      "next_id": 13
+    }
+  }
+}
