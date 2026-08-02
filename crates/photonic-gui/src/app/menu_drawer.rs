@@ -329,6 +329,9 @@ impl PhotonicApp {
                                         ui.label(RichText::new("Behavior").strong());
                                         ui.add_space(4.0);
                                         ui.checkbox(&mut self.prefs.console_open_on_start, "Open Console on Start");
+                                        #[cfg(target_os = "linux")]
+                                        ui.checkbox(&mut self.prefs.force_x11_backend, "Use X11/XWayland backend")
+                                            .on_hover_text("Restart required. Enables file drag-and-drop on Wayland sessions via XWayland (#198).");
                                         ui.add_space(4.0);
                                         ui.checkbox(&mut self.prefs.auto_check_updates, "Check for updates on launch")
                                             .on_hover_text("Once per launch, ask GitHub for a newer release and show a banner if one exists. No automatic download.");
