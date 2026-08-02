@@ -74,7 +74,7 @@ fn document_changed(before: &Document, after: &Document) -> bool {
     serde_json::to_value(before).ok() != serde_json::to_value(after).ok()
 }
 
-pub(crate) async fn dispatch_tool(
+pub async fn dispatch_tool(
     state: &AppState,
     name: &str,
     args: Value,
