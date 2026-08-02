@@ -2243,6 +2243,27 @@ mod blend_tests {
         text_node.transform = Transform::new(1.0, 0.0, 0.0, 1.0, 20.0, 15.0);
         doc.add_node(text_node, None);
 
+        let mut debug_font_system = glyphon::FontSystem::new();
+        let debug_outlined = crate::outline_document_text(&doc, &mut debug_font_system);
+        let debug_path = debug_outlined
+            .nodes
+            .values()
+            .find(|node| node.name == "label")
+            .and_then(|node| match &node.kind {
+                SceneNodeKind::Path(path) => Some(path),
+                _ => None,
+            })
+            .expect("text fixture must outline to a path");
+        let even_odd_mesh = crate::tessellator::tessellate_fill(&debug_path.path_data, true, 0.1);
+        let non_zero_mesh = crate::tessellator::tessellate_fill(&debug_path.path_data, false, 0.1);
+        eprintln!(
+            "text fixture family={} path={} even_odd={} non_zero={}",
+            debug_path.path_data.to_bez_path().elements().len(),
+            debug_path.path_data.to_bez_path().to_svg().len(),
+            even_odd_mesh.vertices.len(),
+            non_zero_mesh.vertices.len()
+        );
+
         let png = r.render_png_at_size(&doc, w, h);
         let img = image::load_from_memory(&png)
             .expect("decode png")
