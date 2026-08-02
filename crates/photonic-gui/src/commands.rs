@@ -411,7 +411,9 @@ pub struct CommandEntry {
 }
 
 /// All commands the palette can list and run: editor commands, tool
-/// activations, then the canonical MCP operation schema.
+/// activations, then MCP operations whose schema can be invoked without
+/// required arguments. Argumented MCP tools stay available through the MCP
+/// client, where their schemas can be filled correctly.
 pub fn all_commands() -> Vec<CommandEntry> {
     let mut v: Vec<CommandEntry> = REGISTRY
         .iter()
@@ -441,6 +443,7 @@ fn mcp_command_entries() -> &'static Vec<CommandEntry> {
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|tool| !mcp_tool_has_required_args(tool))
             .filter_map(|tool| tool.get("name").and_then(|v| v.as_str()))
             .map(|name| CommandEntry {
                 id: format!("mcp.{name}"),
@@ -449,6 +452,13 @@ fn mcp_command_entries() -> &'static Vec<CommandEntry> {
             })
             .collect()
     })
+}
+
+fn mcp_tool_has_required_args(tool: &serde_json::Value) -> bool {
+    tool.get("inputSchema")
+        .and_then(|schema| schema.get("required"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|required| !required.is_empty())
 }
 
 #[cfg(test)]
@@ -501,17 +511,25 @@ mod tests {
     }
 
     #[test]
-    fn palette_includes_every_mcp_operation() {
-        let mcp_count = photonic_mcp::server::tool_list()
-            .as_array()
-            .expect("MCP tool list is an array")
-            .len();
+    fn palette_includes_only_argumentless_mcp_operations() {
+        let tool_list = photonic_mcp::server::tool_list();
+        let mcp_tools = tool_list.as_array().expect("MCP tool list is an array");
+        let argumentless_count = mcp_tools
+            .iter()
+            .filter(|tool| !mcp_tool_has_required_args(tool))
+            .count();
         let palette_mcp_count = all_commands()
             .iter()
             .filter(|entry| entry.id.starts_with("mcp."))
             .count();
-        assert_eq!(palette_mcp_count, mcp_count);
-        assert!(palette_mcp_count >= 260);
+        assert_eq!(palette_mcp_count, argumentless_count);
+        assert!(palette_mcp_count > 0);
+        assert!(
+            !all_commands()
+                .iter()
+                .any(|entry| entry.id == "mcp.create_shape"),
+            "tools requiring arguments must not be invokable with an empty payload"
+        );
     }
 
     #[test]

@@ -10,8 +10,8 @@ use clap::Parser;
 use egui_wgpu::ScreenDescriptor;
 use photonic_core::{document::Document, history::CommandHistory, AuditLog};
 use photonic_gui::PhotonicApp;
-use photonic_mcp::{McpServer, McpServerConfig};
 use photonic_mcp::server::AppState;
+use photonic_mcp::{McpServer, McpServerConfig};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
@@ -409,6 +409,71 @@ impl PhotonicWinitApp {
             );
         }
     }
+
+    /// Publish the result of the last palette-triggered MCP operation without
+    /// blocking the render loop. The receiver is kept on the app until the
+    /// worker actually completes; polling a freshly-created receiver would
+    /// otherwise drop every result before it can be observed.
+    fn poll_mcp_operation_result(
+        result_rx: &mut Option<std::sync::mpsc::Receiver<(String, Result<(), String>)>>,
+        gui: &mut PhotonicApp,
+    ) {
+        let completion = result_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(Ok(result)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("MCP worker disconnected".to_string()))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        });
+
+        let Some(completion) = completion else { return };
+        *result_rx = None;
+
+        match completion {
+            Ok((tool, Ok(()))) => {
+                gui.set_mcp_operation_status(format!("MCP operation completed: {tool}"));
+            }
+            Ok((tool, Err(error))) => {
+                gui.set_mcp_operation_status(format!("MCP operation failed ({tool}): {error}"));
+            }
+            Err(error) => gui.set_mcp_operation_status(format!("MCP operation failed: {error}")),
+        }
+    }
+
+    /// Start one argumentless MCP operation selected from the command palette.
+    /// The palette only exposes tools whose schema has no required fields, so
+    /// dispatching `{}` is intentional and cannot silently omit required data.
+    fn start_mcp_operation(
+        result_rx: &mut Option<std::sync::mpsc::Receiver<(String, Result<(), String>)>>,
+        mcp_state: &AppState,
+        gui: &mut PhotonicApp,
+        tool: String,
+    ) {
+        if result_rx.is_some() {
+            gui.set_mcp_operation_status("An MCP operation is already running".to_string());
+            return;
+        }
+
+        let mcp_state = mcp_state.clone();
+        let result_tool = tool.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *result_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())
+                .and_then(|rt| {
+                    rt.block_on(photonic_mcp::dispatch::dispatch_tool(
+                        &mcp_state,
+                        &tool,
+                        serde_json::json!({}),
+                    ))
+                    .map(|_| ())
+                });
+            let _ = tx.send((result_tool, result));
+        });
+    }
 }
 
 impl ApplicationHandler for PhotonicWinitApp {
@@ -680,25 +745,14 @@ impl PhotonicWinitApp {
         });
         // doc lock released here ↑
 
+        Self::poll_mcp_operation_result(&mut self.mcp_result_rx, &mut state.gui);
         if let Some(tool) = state.gui.take_mcp_operation_request() {
-            let mcp_state = self.mcp_state.clone();
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| e.to_string())
-                    .and_then(|rt| rt.block_on(photonic_mcp::dispatch::dispatch_tool(&mcp_state, &tool, serde_json::json!({}))).map_err(|e| e));
-                let _ = tx.send(result);
-            });
-            // Results are non-blocking; the next redraw publishes an immediate
-            // completion if the direct dispatch has already finished.
-            if let Ok(result) = rx.try_recv() {
-                state.gui.set_mcp_operation_status(match result {
-                    Ok(_) => "MCP operation completed".to_string(),
-                    Err(e) => format!("MCP operation failed: {e}"),
-                });
-            }
+            Self::start_mcp_operation(
+                &mut self.mcp_result_rx,
+                &self.mcp_state,
+                &mut state.gui,
+                tool,
+            );
         }
 
         if state.gui.current_file != gui_path_before {
