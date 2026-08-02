@@ -2221,14 +2221,24 @@ mod blend_tests {
 
         // Large white text near the top-left. The glyph outline sits between the
         // transform origin and ~font_size below it (baseline-anchored), so this
-        // lands well inside the artboard.
-        // Use an ascender and descender so the assertion exercises real glyph
-        // outlines while remaining independent of platform-specific metrics.
+        // lands well inside the artboard. Use an ascender and descender so the
+        // assertion exercises real glyph outlines.
         let mut t = TextNode::new("Ag");
-        // Use a generic family so the test uses each platform's available fallback.
-        t.font_family = "sans-serif".to_string();
         t.font_size = 48.0;
         t.fill = Fill::solid(Color::new(1.0, 1.0, 1.0, 1.0));
+
+        // Resolve the generic request once, then pin this raster fixture to a
+        // concrete face that is actually installed on the runner. This keeps the
+        // test about raster export rather than a particular OS font inventory;
+        // generic-family resolution is exercised separately by text-outline tests.
+        let mut font_system = glyphon::FontSystem::new();
+        let Some(resolved) = crate::resolve_document_font(&mut font_system, &t) else {
+            eprintln!("no system font available — skipping raster text export test");
+            return;
+        };
+        t.font_family = resolved.family;
+        t.font_weight = resolved.weight;
+
         let mut text_node = SceneNode::new("label", layer, SceneNodeKind::Text(t));
         text_node.transform = Transform::new(1.0, 0.0, 0.0, 1.0, 20.0, 15.0);
         doc.add_node(text_node, None);
