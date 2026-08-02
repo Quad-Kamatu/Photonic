@@ -2183,7 +2183,7 @@ mod blend_tests {
     /// entirely (`build_geometry` only emits Path geometry and the CPU compositor
     /// skips glyphs), so exported artboards had no text. A doc with a solid black
     /// background rect and a large white text node must export a PNG that
-    /// actually contains white text pixels inside the text's bounding box.
+    /// actually contains white text pixels.
     #[test]
     fn raster_export_includes_text() {
         use photonic_core::node::TextNode;
@@ -2214,7 +2214,9 @@ mod blend_tests {
         // Large white text near the top-left. The glyph outline sits between the
         // transform origin and ~font_size below it (baseline-anchored), so this
         // lands well inside the artboard.
-        let mut t = TextNode::new("ABCDEF");
+        // Use an ascender and descender so the assertion exercises real glyph
+        // outlines while remaining independent of platform-specific metrics.
+        let mut t = TextNode::new("Ag");
         // Use a generic family so the test uses each platform's available fallback.
         t.font_family = "sans-serif".to_string();
         t.font_size = 48.0;
@@ -2228,11 +2230,14 @@ mod blend_tests {
             .expect("decode png")
             .to_rgba8();
 
-        // Count near-white pixels inside the text's rough bounding box. With the
-        // bug present the whole image is black and this count is zero.
+        // Count near-white pixels anywhere in the exported artboard. Font
+        // backends can legitimately place a glyph at slightly different y
+        // coordinates, so a fixed pixel bounding box would make this regression
+        // test unnecessarily platform-specific. With the bug present the whole
+        // image is black and this count is zero.
         let mut white = 0u32;
-        for y in 10..70 {
-            for x in 15..250 {
+        for y in 0..h {
+            for x in 0..w {
                 let p = img.get_pixel(x, y).0;
                 if p[0] > 200 && p[1] > 200 && p[2] > 200 {
                     white += 1;
@@ -2241,7 +2246,7 @@ mod blend_tests {
         }
         assert!(
             white > 0,
-            "raster export must contain text pixels — found {white} white pixels in the text bbox"
+            "raster export must contain text pixels — found {white} white pixels"
         );
     }
 }
