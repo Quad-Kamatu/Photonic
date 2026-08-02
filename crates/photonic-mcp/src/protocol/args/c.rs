@@ -1,8 +1,8 @@
+use super::*;
 use photonic_core::color::Color;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use super::*;
 
 /// Arguments for the `set_paint` tool — apply one paint to many nodes at once,
 /// each re-fit to its own bounding box (issue #202). The paint uses the same

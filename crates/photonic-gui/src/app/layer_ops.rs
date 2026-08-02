@@ -244,7 +244,8 @@ impl PhotonicApp {
     /// The layer new content should target: the active layer, else the topmost
     /// layer in the stack.
     fn target_layer_id(doc: &Document) -> Option<LayerId> {
-        doc.active_layer_id.or_else(|| doc.layer_order.last().copied())
+        doc.active_layer_id
+            .or_else(|| doc.layer_order.last().copied())
     }
 
     /// Delete a layer and everything it contains. Refuses to remove the last
@@ -263,11 +264,7 @@ impl PhotonicApp {
         let mut cmds = vec![Command::RemoveLayer { layer_id }];
         // Re-home the active pointer to a survivor before the layer is gone.
         if doc.active_layer_id == Some(layer_id) {
-            let survivor = doc
-                .layer_order
-                .iter()
-                .copied()
-                .find(|id| *id != layer_id);
+            let survivor = doc.layer_order.iter().copied().find(|id| *id != layer_id);
             cmds.push(Command::SetActiveLayer {
                 old_id: doc.active_layer_id,
                 new_id: survivor,
@@ -275,7 +272,10 @@ impl PhotonicApp {
         }
         history.execute(Command::Batch(cmds), doc);
         // Drop any dangling node selection that pointed into the removed layer.
-        if self.selected_id.is_some_and(|id| !doc.nodes.contains_key(&id)) {
+        if self
+            .selected_id
+            .is_some_and(|id| !doc.nodes.contains_key(&id))
+        {
             self.selected_id = None;
             doc.selection.clear();
         }

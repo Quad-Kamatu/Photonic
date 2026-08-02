@@ -76,11 +76,13 @@ impl PhotonicApp {
                 names.len()
             ));
             ui.add_space(4.0);
-            egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                for n in &names {
-                    ui.label(RichText::new(format!("  • {n}")).weak());
-                }
-            });
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for n in &names {
+                        ui.label(RichText::new(format!("  • {n}")).weak());
+                    }
+                });
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if ui.button("Restore all").clicked() {
@@ -105,14 +107,7 @@ impl PhotonicApp {
                             if self.tabs.is_empty() {
                                 self.replace_live_document(doc, history, loaded, new_history, None);
                             } else {
-                                self.open_in_new_tab(
-                                    doc,
-                                    history,
-                                    view,
-                                    loaded,
-                                    new_history,
-                                    None,
-                                );
+                                self.open_in_new_tab(doc, history, view, loaded, new_history, None);
                             }
                             // Keep it untitled + dirty and remember its recovery
                             // file so continued autosave reuses the same slot.

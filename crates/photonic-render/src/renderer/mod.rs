@@ -8,7 +8,9 @@ use crate::{
         draw_segments, separable_blend_state, BlurBlend, BlurParams, CameraUniform,
         CompositeParams, DrawSegment, Vertex, SEPARABLE_BLEND_MODES,
     },
-    tessellator::{adaptive_tolerance, tessellate_fill, tessellate_stroke, tessellate_stroke_variable},
+    tessellator::{
+        adaptive_tolerance, tessellate_fill, tessellate_stroke, tessellate_stroke_variable,
+    },
 };
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,

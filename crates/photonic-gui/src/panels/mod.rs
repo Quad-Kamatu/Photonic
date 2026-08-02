@@ -19,8 +19,8 @@ mod document;
 mod editors;
 mod history;
 mod inspector;
-mod modify;
 mod layers_panel;
+mod modify;
 mod navigator;
 mod toolbar;
 mod tools_panel;
@@ -133,7 +133,10 @@ pub enum PanelAction {
     UpdateNodesFill { node_ids: Vec<NodeId>, fill: Fill },
     /// Apply the same stroke to every listed node at once (multi-selection edit).
     /// Recorded as a single undoable batch.
-    UpdateNodesStroke { node_ids: Vec<NodeId>, stroke: Stroke },
+    UpdateNodesStroke {
+        node_ids: Vec<NodeId>,
+        stroke: Stroke,
+    },
     /// Convert each listed path's stroke into a filled outline shape (Illustrator
     /// "Outline Stroke"). Paths without an enabled, positive-width stroke are
     /// skipped. Recorded as a single undoable batch.
@@ -918,9 +921,7 @@ impl PanelAction {
             WheelAction::AddAnchorPoints(id) => Self::AddAnchorPoints { node_id: id },
             WheelAction::SimplifyPath(id) => Self::OpenSimplifyDialog { node_id: id },
             WheelAction::MergeVertices(id) => Self::OpenMergeVerticesDialog { node_id: id },
-            WheelAction::OutlineStroke(id) => Self::OutlineStroke {
-                node_ids: vec![id],
-            },
+            WheelAction::OutlineStroke(id) => Self::OutlineStroke { node_ids: vec![id] },
             WheelAction::ReversePathDirection(id) => Self::ReversePathDirection { node_id: id },
             WheelAction::AverageAnchorPoints(id) => Self::AverageAnchorPoints { node_id: id },
             WheelAction::ClosePath(id) => Self::JoinPaths { node_ids: vec![id] },
@@ -962,9 +963,6 @@ pub enum ZOrderOp {
     SendBackward,
     BringForward,
 }
-
-
-
 
 /// Draw the right properties panel.
 /// Returns an optional action if the user clicked a boolean operation button.
@@ -1326,25 +1324,6 @@ pub(crate) fn draw_drawer(
 
     ctx.action.take()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ─── Fill editor ─────────────────────────────────────────────────────────────
 

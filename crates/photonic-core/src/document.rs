@@ -1529,9 +1529,8 @@ impl Document {
         use crate::node::SceneNode;
         use std::collections::BTreeSet;
         let ours = self;
-        let node_eq = |a: &SceneNode, b: &SceneNode| {
-            serde_json::to_vec(a).ok() == serde_json::to_vec(b).ok()
-        };
+        let node_eq =
+            |a: &SceneNode, b: &SceneNode| serde_json::to_vec(a).ok() == serde_json::to_vec(b).ok();
         let mut merged = ours.clone();
         let mut conflicts = Vec::new();
 
@@ -1549,7 +1548,11 @@ impl Document {
         let mut to_remove: Vec<NodeId> = Vec::new();
 
         for id in ids {
-            match (base.nodes.get(&id), ours.nodes.get(&id), theirs.nodes.get(&id)) {
+            match (
+                base.nodes.get(&id),
+                ours.nodes.get(&id),
+                theirs.nodes.get(&id),
+            ) {
                 (Some(b), Some(o), Some(t)) => {
                     let o_changed = !node_eq(b, o);
                     let t_changed = !node_eq(b, t);
@@ -1853,7 +1856,11 @@ mod tests {
             set_fill(&mut theirs, aid, "#0000ff");
             let out = ours.merge_3way(&base, &theirs);
             assert!(out.conflicts.is_empty());
-            assert_eq!(json(&out.merged, &aid), json(&theirs, &aid), "theirs edit taken");
+            assert_eq!(
+                json(&out.merged, &aid),
+                json(&theirs, &aid),
+                "theirs edit taken"
+            );
         }
 
         // 3. both edit A differently → conflict, keep ours.
@@ -1864,7 +1871,11 @@ mod tests {
             set_fill(&mut theirs, aid, "#0000ff");
             let out = ours.merge_3way(&base, &theirs);
             assert_eq!(out.conflicts, vec![MergeConflict::BothEdited(aid)]);
-            assert_eq!(json(&out.merged, &aid), json(&ours, &aid), "ours kept on conflict");
+            assert_eq!(
+                json(&out.merged, &aid),
+                json(&ours, &aid),
+                "ours kept on conflict"
+            );
         }
 
         // 4. theirs deletes A; ours untouched → removed.
@@ -2005,7 +2016,10 @@ mod tests {
         assert_eq!(back.history_max_mb, Some(120.0));
         // Old files without the field deserialize to None.
         let no_field = serde_json::to_string(&Document::new("t", 100.0, 100.0)).unwrap();
-        assert!(!no_field.contains("history_max_mb"), "None should skip the key");
+        assert!(
+            !no_field.contains("history_max_mb"),
+            "None should skip the key"
+        );
     }
 
     /// Build a minimal document with one layer and the supplied path nodes

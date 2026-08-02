@@ -119,7 +119,8 @@ mod tests {
 
     #[test]
     fn parses_css_custom_properties() {
-        let css = ":root {\n  --brand-primary: #2f56cf;\n  --brand-secondary: #7c3aed;\n  --pad: 8px;\n}";
+        let css =
+            ":root {\n  --brand-primary: #2f56cf;\n  --brand-secondary: #7c3aed;\n  --pad: 8px;\n}";
         let toks = parse_token_colors(css, None);
         assert_eq!(toks.len(), 2);
         assert!(toks.contains(&("brand-primary".to_string(), "#2f56cf".to_string())));
@@ -134,13 +135,19 @@ mod tests {
 
         let sd = r##"{ "color": { "primary": { "value": "#2f56cf" } } }"##;
         let toks = parse_token_colors(sd, None);
-        assert_eq!(toks, vec![("color/primary".to_string(), "#2f56cf".to_string())]);
+        assert_eq!(
+            toks,
+            vec![("color/primary".to_string(), "#2f56cf".to_string())]
+        );
     }
 
     #[test]
     fn ignores_export_scaffolding_keys() {
         let json = r##"{ "colors": { "color-1": "#ffffff" }, "font_sizes": [12, 16] }"##;
         let toks = parse_token_colors(json, None);
-        assert_eq!(toks, vec![("colors/color-1".to_string(), "#ffffff".to_string())]);
+        assert_eq!(
+            toks,
+            vec![("colors/color-1".to_string(), "#ffffff".to_string())]
+        );
     }
 }

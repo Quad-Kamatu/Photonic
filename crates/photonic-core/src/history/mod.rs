@@ -95,7 +95,11 @@ mod tests {
         );
         let group_id = group.id;
         doc.nodes.insert(group_id, group);
-        doc.layers.get_mut(&layer_id).unwrap().node_ids.push(group_id);
+        doc.layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .node_ids
+            .push(group_id);
 
         let before = doc.nodes_in_draw_order().len(); // two leaves
 
@@ -626,7 +630,10 @@ mod tests {
         // Budget with headroom → pressure well under 1.0.
         history.set_limits(100_000, Some(full * 4));
         let p = history.size_pressure().unwrap();
-        assert!(p > 0.0 && p < 0.5, "expected low pressure with a roomy budget, got {p}");
+        assert!(
+            p > 0.0 && p < 0.5,
+            "expected low pressure with a roomy budget, got {p}"
+        );
 
         // A tight budget trims the payload back to (at most just over) budget.
         history.set_limits(100_000, Some(full / 2));
@@ -1622,10 +1629,22 @@ mod tests {
 
         let a = make_node(&doc);
         let a_id = a.id;
-        h.execute(Command::AddNode { node: a, layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: a,
+                layer_id: None,
+            },
+            &mut doc,
+        );
         let b = make_node(&doc);
         let b_id = b.id;
-        h.execute(Command::AddNode { node: b, layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: b,
+                layer_id: None,
+            },
+            &mut doc,
+        );
 
         // Undo B, then make a different edit C — this must FORK (keep B), not
         // discard it the way a flat redo stack would.
@@ -1633,7 +1652,13 @@ mod tests {
         assert!(!doc.nodes.contains_key(&b_id));
         let c = make_node(&doc);
         let c_id = c.id;
-        h.execute(Command::AddNode { node: c, layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: c,
+                layer_id: None,
+            },
+            &mut doc,
+        );
 
         // Tree now: root → A → { B (undone), C (current) }.
         let graph = h.history_graph();
@@ -1644,12 +1669,26 @@ mod tests {
         let cur = graph.iter().find(|n| n.is_current).unwrap();
         let parent_id = cur.parent.unwrap();
         let parent = graph.iter().find(|n| n.id == parent_id).unwrap();
-        let b_node = parent.children.iter().copied().find(|&x| x != cur.id).unwrap();
+        let b_node = parent
+            .children
+            .iter()
+            .copied()
+            .find(|&x| x != cur.id)
+            .unwrap();
 
         assert!(h.jump_to_node(b_node, &mut doc), "jump to B branch");
-        assert!(doc.nodes.contains_key(&b_id), "B restored after cross-branch jump");
-        assert!(!doc.nodes.contains_key(&c_id), "C removed after jump to B branch");
-        assert!(doc.nodes.contains_key(&a_id), "shared ancestor A still present");
+        assert!(
+            doc.nodes.contains_key(&b_id),
+            "B restored after cross-branch jump"
+        );
+        assert!(
+            !doc.nodes.contains_key(&c_id),
+            "C removed after jump to B branch"
+        );
+        assert!(
+            doc.nodes.contains_key(&a_id),
+            "shared ancestor A still present"
+        );
 
         // Jump back to C and confirm the other branch swaps back in.
         assert!(h.jump_to_node(cur.id, &mut doc), "jump back to C branch");
@@ -1661,10 +1700,28 @@ mod tests {
     fn branching_survives_snapshot_round_trip() {
         let mut doc = make_doc();
         let mut h = CommandHistory::new(200);
-        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
-        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: make_node(&doc),
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        h.execute(
+            Command::AddNode {
+                node: make_node(&doc),
+                layer_id: None,
+            },
+            &mut doc,
+        );
         h.undo(&mut doc);
-        h.execute(Command::AddNode { node: make_node(&doc), layer_id: None }, &mut doc);
+        h.execute(
+            Command::AddNode {
+                node: make_node(&doc),
+                layer_id: None,
+            },
+            &mut doc,
+        );
         // 3 edits made across two branches → 4 tree nodes (root + 3).
         assert_eq!(h.history_graph().len(), 4);
 
@@ -1673,7 +1730,11 @@ mod tests {
         let mut fresh = CommandHistory::new(200);
         fresh.restore_state(restored);
         // The whole tree (both branches) survives, not just the linear path.
-        assert_eq!(fresh.history_graph().len(), 4, "branch lost across save/load");
+        assert_eq!(
+            fresh.history_graph().len(),
+            4,
+            "branch lost across save/load"
+        );
     }
 
     #[test]
@@ -1822,7 +1883,15 @@ mod tests {
 
         // It was stored as a tight region delta, not two full bitmap clones.
         match h.current_command() {
-            Some(Command::UpdateRasterRegion { x, y, w, h: rh, old, new, .. }) => {
+            Some(Command::UpdateRasterRegion {
+                x,
+                y,
+                w,
+                h: rh,
+                old,
+                new,
+                ..
+            }) => {
                 assert_eq!((*x, *y, *w, *rh), (20, 30, 10, 10));
                 assert_eq!(old.len(), 10 * 10 * 4);
                 assert_eq!(new.len(), 10 * 10 * 4);
@@ -1946,12 +2015,20 @@ mod tests {
         for step in (EDITS - 3..EDITS).rev() {
             assert!(h.undo(&mut doc));
             let (i, _) = samples[step];
-            assert_eq!(pix(&doc, i), 0, "undo did not restore pre-edit pixels at step {step}");
+            assert_eq!(
+                pix(&doc, i),
+                0,
+                "undo did not restore pre-edit pixels at step {step}"
+            );
         }
         for step in EDITS - 3..EDITS {
             assert!(h.redo(&mut doc));
             let (i, v) = samples[step];
-            assert_eq!(pix(&doc, i), v, "redo did not reproduce edit pixels at step {step}");
+            assert_eq!(
+                pix(&doc, i),
+                v,
+                "redo did not reproduce edit pixels at step {step}"
+            );
         }
     }
 
@@ -1993,7 +2070,10 @@ mod tests {
         h.execute(Command::UpdateNode { old, new }, &mut doc);
 
         assert!(
-            matches!(h.current_command(), Some(Command::UpdateRasterRegion { .. })),
+            matches!(
+                h.current_command(),
+                Some(Command::UpdateRasterRegion { .. })
+            ),
             "masked raster edit not stored as a region delta: {:?}",
             h.current_command()
         );
@@ -2319,7 +2399,10 @@ fn describe_node_update(old: &SceneNode, new: &SceneNode) -> String {
 
     // Geometry (move / resize / rotate).
     if old.transform != new.transform {
-        return format!("{} {name}", classify_transform(&old.transform, &new.transform));
+        return format!(
+            "{} {name}",
+            classify_transform(&old.transform, &new.transform)
+        );
     }
 
     // Kind-specific appearance / content changes.
@@ -2437,8 +2520,16 @@ impl Command {
                 BASE + old.mem_estimate() + new.mem_estimate()
             }
             Command::ReplaceDocument { old, new, .. } => {
-                BASE + old.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
-                    + new.nodes.values().map(|node| node.mem_estimate()).sum::<u64>()
+                BASE + old
+                    .nodes
+                    .values()
+                    .map(|node| node.mem_estimate())
+                    .sum::<u64>()
+                    + new
+                        .nodes
+                        .values()
+                        .map(|node| node.mem_estimate())
+                        .sum::<u64>()
             }
             Command::Batch(cmds) => BASE + cmds.iter().map(|c| c.mem_estimate()).sum::<u64>(),
             _ => BASE,
@@ -2474,10 +2565,18 @@ impl Command {
             Command::AddNode { node, .. } => format!("Add {}", node.name),
             Command::RemoveNode { .. } => "Remove node".to_string(),
             Command::AddSubtree { roots, .. } => {
-                format!("Paste {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
+                format!(
+                    "Paste {} object{}",
+                    roots.len(),
+                    if roots.len() == 1 { "" } else { "s" }
+                )
             }
             Command::RemoveSubtree { roots, .. } => {
-                format!("Remove {} object{}", roots.len(), if roots.len() == 1 { "" } else { "s" })
+                format!(
+                    "Remove {} object{}",
+                    roots.len(),
+                    if roots.len() == 1 { "" } else { "s" }
+                )
             }
             Command::UpdateNode { old, new } => describe_node_update(old, new),
             Command::UpdateRasterMeta { old, new } => describe_node_update(old, new),
@@ -3129,7 +3228,11 @@ impl Command {
                 new: old.clone(),
             }),
 
-            Command::ReplaceDocument { old, new, description } => Some(Command::ReplaceDocument {
+            Command::ReplaceDocument {
+                old,
+                new,
+                description,
+            } => Some(Command::ReplaceDocument {
                 old: new.clone(),
                 new: old.clone(),
                 description: description.clone(),
@@ -3357,7 +3460,6 @@ impl Default for CommandHistory {
     }
 }
 
-
 /// Recursively collect the `old` side of any `UpdateNode` command in `cmd`
 /// that touches `node_id`, appending to `out`.
 /// True when two nodes are identical except (possibly) for raster pixel data —
@@ -3403,10 +3505,7 @@ fn raster_update_delta(old: SceneNode, new: SceneNode) -> Command {
     let (SceneNodeKind::Raster(ro), SceneNodeKind::Raster(rn)) = (&old.kind, &new.kind) else {
         return Command::UpdateNode { old, new };
     };
-    if old.id != new.id
-        || ro.image.width != rn.image.width
-        || ro.image.height != rn.image.height
-    {
+    if old.id != new.id || ro.image.width != rn.image.width || ro.image.height != rn.image.height {
         return Command::UpdateNode { old, new };
     }
 

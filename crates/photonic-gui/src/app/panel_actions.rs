@@ -380,7 +380,10 @@ impl PhotonicApp {
                     }
                 }
 
-                PanelAction::SetNodeBlendMode { node_id, blend_mode } => {
+                PanelAction::SetNodeBlendMode {
+                    node_id,
+                    blend_mode,
+                } => {
                     if let Some(node) = doc.nodes.get(&node_id) {
                         if node.blend_mode != blend_mode {
                             let mut new_node = node.clone();
@@ -2734,19 +2737,58 @@ impl PhotonicApp {
                 }
 
                 PanelAction::SetLayerVisible { layer_id, visible } => {
-                    self.do_set_layer_flag(layer_id, Some(visible), None, None, None, doc, history, &mut doc_modified);
+                    self.do_set_layer_flag(
+                        layer_id,
+                        Some(visible),
+                        None,
+                        None,
+                        None,
+                        doc,
+                        history,
+                        &mut doc_modified,
+                    );
                 }
 
                 PanelAction::SetLayerLocked { layer_id, locked } => {
-                    self.do_set_layer_flag(layer_id, None, Some(locked), None, None, doc, history, &mut doc_modified);
+                    self.do_set_layer_flag(
+                        layer_id,
+                        None,
+                        Some(locked),
+                        None,
+                        None,
+                        doc,
+                        history,
+                        &mut doc_modified,
+                    );
                 }
 
                 PanelAction::SetLayerOpacity { layer_id, opacity } => {
-                    self.do_set_layer_flag(layer_id, None, None, Some(opacity), None, doc, history, &mut doc_modified);
+                    self.do_set_layer_flag(
+                        layer_id,
+                        None,
+                        None,
+                        Some(opacity),
+                        None,
+                        doc,
+                        history,
+                        &mut doc_modified,
+                    );
                 }
 
-                PanelAction::SetLayerBlendMode { layer_id, blend_mode } => {
-                    self.do_set_layer_flag(layer_id, None, None, None, Some(blend_mode), doc, history, &mut doc_modified);
+                PanelAction::SetLayerBlendMode {
+                    layer_id,
+                    blend_mode,
+                } => {
+                    self.do_set_layer_flag(
+                        layer_id,
+                        None,
+                        None,
+                        None,
+                        Some(blend_mode),
+                        doc,
+                        history,
+                        &mut doc_modified,
+                    );
                 }
 
                 PanelAction::OpenLayerOptions { layer_id } => {
@@ -2782,9 +2824,7 @@ impl PhotonicApp {
                 PanelAction::OpenColorPopup { node_id, stroke } => {
                     // Anchor the picker at the current pointer (the radial-menu
                     // click site); fall back to a sensible default off-screen.
-                    let pos = ctx
-                        .pointer_latest_pos()
-                        .unwrap_or(egui::pos2(240.0, 240.0));
+                    let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(240.0, 240.0));
                     self.color_popup = Some(ColorPopupState {
                         node_id,
                         stroke,

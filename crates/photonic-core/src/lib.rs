@@ -1,7 +1,7 @@
 pub mod annotation;
-pub mod color_cmyk;
 pub mod audit;
 pub mod color;
+pub mod color_cmyk;
 pub mod diagnostics;
 pub mod document;
 pub mod effects;
@@ -45,8 +45,8 @@ pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
     interpolate_stops, interpolate_stops_with, ArrowheadStyle, Fill, FillKind, FluidGradient,
-    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop,
-    GradientUnits, MeshGradient, Stroke,
+    FluidGradientPoint, Gradient, GradientInterpolation, GradientKind, GradientStop, GradientUnits,
+    MeshGradient, Stroke,
 };
 pub use transform::Transform;
 pub use units::{from_px, to_px, DocumentUnit};

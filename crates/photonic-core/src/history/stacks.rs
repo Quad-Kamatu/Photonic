@@ -390,7 +390,9 @@ impl CommandHistory {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.nodes.get(&self.current).is_some_and(|n| n.parent.is_some())
+        self.nodes
+            .get(&self.current)
+            .is_some_and(|n| n.parent.is_some())
     }
 
     pub fn can_redo(&self) -> bool {

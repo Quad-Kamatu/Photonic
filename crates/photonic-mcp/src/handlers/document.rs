@@ -1,32 +1,45 @@
-use crate::protocol::{
-    PlayActionArgs,
-    SaveDocumentArgs,
-    ToolResult,
-};
+use crate::protocol::{PlayActionArgs, SaveDocumentArgs, ToolResult};
 use crate::server::AppState;
 use serde_json::json;
 use std::path::PathBuf;
 
-pub use crate::handlers::doc_state::{
-    get_document_state, get_document_info, undo, redo, list_checkpoints, restore_checkpoint, diff_checkpoints, list_history, jump_to_history, get_canvas_overview, resize_canvas, get_document_template, apply_document_template, set_document_bleed, get_document_bleed, set_document_color_mode, get_document_color_mode, set_document_dpi, get_document_dpi, set_artboard_margins, get_artboard_margins, add_construction_line, add_dimension, list_dimensions, remove_dimension, fit_to_margins,
-};
-pub use crate::handlers::doc_export::{
-    export_svg, export_pdf, export_raster, export_artboards, preview_selection, export_selection_as_svg, export_icon_set, export_design_tokens, add_export_profile, list_export_profiles, remove_export_profile, run_export_profile, import_design_tokens, set_active_layer, delete_layer, reorder_layers, duplicate_layer,
-};
-pub use crate::handlers::doc_swatches::{
-    add_color_swatch, list_color_swatches, apply_color_swatch, update_color_swatch, delete_color_swatch, load_swatch_library, save_gradient_swatch, list_gradient_swatches, apply_gradient_swatch, delete_gradient_swatch, define_spot_color, list_spot_colors, apply_spot_color, delete_spot_color, define_pattern, list_patterns, apply_pattern_fill, delete_pattern,
-};
-pub use crate::handlers::doc_analysis::{
-    analyze_composition, detect_rhythms, measure_distances,
-};
+pub use crate::handlers::doc_analysis::{analyze_composition, detect_rhythms, measure_distances};
 pub use crate::handlers::doc_automation::{
-    define_grammar_rule, list_grammar_rules, delete_grammar_rule, check_grammar, define_action, list_actions, delete_action, branch_create, branch_list, branch_switch, branch_delete, register_event_trigger, list_event_triggers, remove_event_trigger, save_workspace, load_workspace, list_workspaces, delete_workspace,
+    branch_create, branch_delete, branch_list, branch_switch, check_grammar, define_action,
+    define_grammar_rule, delete_action, delete_grammar_rule, delete_workspace, list_actions,
+    list_event_triggers, list_grammar_rules, list_workspaces, load_workspace,
+    register_event_trigger, remove_event_trigger, save_workspace,
 };
 pub use crate::handlers::doc_data::{
-    set_constraint, list_constraints, remove_constraint, define_variable, list_variables, set_variable_value, delete_variable, apply_variables,
+    apply_variables, define_variable, delete_variable, list_constraints, list_variables,
+    remove_constraint, set_constraint, set_variable_value,
+};
+pub use crate::handlers::doc_export::{
+    add_export_profile, delete_layer, duplicate_layer, export_artboards, export_design_tokens,
+    export_icon_set, export_pdf, export_raster, export_selection_as_svg, export_svg,
+    import_design_tokens, list_export_profiles, preview_selection, remove_export_profile,
+    reorder_layers, run_export_profile, set_active_layer,
+};
+pub use crate::handlers::doc_state::{
+    add_construction_line, add_dimension, apply_document_template, diff_checkpoints,
+    fit_to_margins, get_artboard_margins, get_canvas_overview, get_document_bleed,
+    get_document_color_mode, get_document_dpi, get_document_info, get_document_state,
+    get_document_template, jump_to_history, list_checkpoints, list_dimensions, list_history, redo,
+    remove_dimension, resize_canvas, restore_checkpoint, set_artboard_margins, set_document_bleed,
+    set_document_color_mode, set_document_dpi, undo,
 };
 pub use crate::handlers::doc_styles_symbols::{
-    define_graphic_style, list_graphic_styles, apply_graphic_style, delete_graphic_style, define_width_profile, list_width_profiles, apply_width_profile, delete_width_profile, define_symbol, list_symbols, place_symbol, break_link_to_symbol, delete_symbol, spray_symbol_instances, load_symbol_library,
+    apply_graphic_style, apply_width_profile, break_link_to_symbol, define_graphic_style,
+    define_symbol, define_width_profile, delete_graphic_style, delete_symbol, delete_width_profile,
+    list_graphic_styles, list_symbols, list_width_profiles, load_symbol_library, place_symbol,
+    spray_symbol_instances,
+};
+pub use crate::handlers::doc_swatches::{
+    add_color_swatch, apply_color_swatch, apply_gradient_swatch, apply_pattern_fill,
+    apply_spot_color, define_pattern, define_spot_color, delete_color_swatch,
+    delete_gradient_swatch, delete_pattern, delete_spot_color, list_color_swatches,
+    list_gradient_swatches, list_patterns, list_spot_colors, load_swatch_library,
+    save_gradient_swatch, update_color_swatch,
 };
 
 /// Save the current document and persistent history in the same native
@@ -39,9 +52,11 @@ pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResu
         None => match state.document_path.lock() {
             Ok(path) => match path.clone() {
                 Some(path) => path,
-                None => return ToolResult::error(
-                    "This document has no current path; call save_document with a path.",
-                ),
+                None => {
+                    return ToolResult::error(
+                        "This document has no current path; call save_document with a path.",
+                    )
+                }
             },
             Err(_) => return ToolResult::error("Could not read the current document path"),
         },
@@ -51,7 +66,9 @@ pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResu
     } else {
         match std::env::current_dir() {
             Ok(dir) => dir.join(requested_path),
-            Err(error) => return ToolResult::error(format!("Could not resolve save path: {error}")),
+            Err(error) => {
+                return ToolResult::error(format!("Could not resolve save path: {error}"))
+            }
         }
     };
     if let Some(parent) = path.parent() {
@@ -68,7 +85,9 @@ pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResu
                 let bytes = json.len();
                 (json, bytes)
             }
-            Err(error) => return ToolResult::error(format!("Could not serialize document: {error}")),
+            Err(error) => {
+                return ToolResult::error(format!("Could not serialize document: {error}"))
+            }
         }
     };
     if let Err(error) = std::fs::write(&path, json) {
@@ -81,44 +100,15 @@ pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResu
         .with_data(json!({ "path": path, "bytes": bytes }))
 }
 
-
-
-
-
 // ─── Variable Width Profiles ─────────────────────────────────────────────────
-
-
-
-
 
 // ─── Patterns ──────────────────────────────────────────────────────────────────
 
-
-
-
 // ─── Document Variables ───────────────────────────────────────────────────────
-
-
-
-
-
 
 // ─── Symbols ──────────────────────────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
-
 // ─── Actions ─────────────────────────────────────────────────────────────────
-
-
-
 
 /// Play a named action set, with optional node ID substitutions.
 pub fn play_action(
@@ -214,19 +204,5 @@ async fn play_action_inner(state: &AppState, args: PlayActionArgs) -> ToolResult
         )
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ─── Fit to Margins ───────────────────────────────────────────────────────────

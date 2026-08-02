@@ -1,6 +1,4 @@
-use crate::handlers::shared::{
-    ordering::*, paths::*,
-};
+use crate::handlers::shared::{ordering::*, paths::*};
 use crate::protocol::*;
 use crate::server::AppState;
 use kurbo;

@@ -388,8 +388,14 @@ pub fn resolve_equal_spacing(
     // ── X distribution: L … moving … R (Y-bands overlap the dragged object) ──
     let y_overlap = |o: &(f64, f64, f64, f64)| o.1 < my1 && o.3 > my0;
     let mut best_x: Option<(f64, f64, SpacingHint)> = None; // (|shift|, shift, hint)
-    for l in others.iter().filter(|o| y_overlap(o) && o.2 <= mx0 + tolerance) {
-        for r in others.iter().filter(|o| y_overlap(o) && o.0 >= mx1 - tolerance) {
+    for l in others
+        .iter()
+        .filter(|o| y_overlap(o) && o.2 <= mx0 + tolerance)
+    {
+        for r in others
+            .iter()
+            .filter(|o| y_overlap(o) && o.0 >= mx1 - tolerance)
+        {
             let total = r.0 - l.2; // room between L's right and R's left
             if total <= mw {
                 continue; // no room for the dragged object + two gaps
@@ -420,8 +426,14 @@ pub fn resolve_equal_spacing(
     // ── Y distribution: T … moving … B (X-bands overlap the dragged object) ──
     let x_overlap = |o: &(f64, f64, f64, f64)| o.0 < mx1 && o.2 > mx0;
     let mut best_y: Option<(f64, f64, SpacingHint)> = None;
-    for t in others.iter().filter(|o| x_overlap(o) && o.3 <= my0 + tolerance) {
-        for b in others.iter().filter(|o| x_overlap(o) && o.1 >= my1 - tolerance) {
+    for t in others
+        .iter()
+        .filter(|o| x_overlap(o) && o.3 <= my0 + tolerance)
+    {
+        for b in others
+            .iter()
+            .filter(|o| x_overlap(o) && o.1 >= my1 - tolerance)
+        {
             let total = b.1 - t.3;
             if total <= mh {
                 continue;
@@ -488,7 +500,10 @@ mod tests {
         }
         // And a drag near the right edge snaps to it.
         let res = resolve_snap((196.0, 40.0, 216.0, 60.0), &cands, 6.0);
-        assert!((res.corrected.0 - 4.0).abs() < 1e-9, "should snap right edge to x=200");
+        assert!(
+            (res.corrected.0 - 4.0).abs() < 1e-9,
+            "should snap right edge to x=200"
+        );
     }
 
     #[test]
@@ -590,7 +605,10 @@ mod tests {
         let r = (90.0, 0.0, 100.0, 10.0);
         let moving = (43.0, 0.0, 53.0, 10.0);
         let res = resolve_equal_spacing(moving, &[l, r], 6.0);
-        assert!((res.dx.unwrap() - 2.0).abs() < 1e-9, "should shift +2 to centre");
+        assert!(
+            (res.dx.unwrap() - 2.0).abs() < 1e-9,
+            "should shift +2 to centre"
+        );
         let h = res.hint_x.unwrap();
         assert!((h.gap - 35.0).abs() < 1e-9);
         assert_eq!(h.seg1, (10.0, 45.0));

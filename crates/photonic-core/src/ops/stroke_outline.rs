@@ -113,7 +113,11 @@ mod tests {
         let stroke = Stroke::solid(Color::BLACK, 10.0);
         let out = outline_stroke_with_scale(&line, &stroke, 2.0).expect("outline");
         let bb = out.bounding_box().expect("bbox");
-        assert!((bb.height() - 5.0).abs() < 0.5, "local height={}", bb.height());
+        assert!(
+            (bb.height() - 5.0).abs() < 0.5,
+            "local height={}",
+            bb.height()
+        );
     }
 
     #[test]

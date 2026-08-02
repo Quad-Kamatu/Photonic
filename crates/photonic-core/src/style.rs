@@ -112,16 +112,12 @@ impl FillKind {
             FillKind::Gradient(g) if g.units.is_object_box() => {
                 std::borrow::Cow::Owned(FillKind::Gradient(g.resolved_for_bbox(min_x, min_y, w, h)))
             }
-            FillKind::FluidGradient(fg) if fg.units.is_object_box() => {
-                std::borrow::Cow::Owned(FillKind::FluidGradient(
-                    fg.resolved_for_bbox(min_x, min_y, w, h),
-                ))
-            }
-            FillKind::MeshGradient(mg) if mg.units.is_object_box() => {
-                std::borrow::Cow::Owned(FillKind::MeshGradient(
-                    mg.resolved_for_bbox(min_x, min_y, w, h),
-                ))
-            }
+            FillKind::FluidGradient(fg) if fg.units.is_object_box() => std::borrow::Cow::Owned(
+                FillKind::FluidGradient(fg.resolved_for_bbox(min_x, min_y, w, h)),
+            ),
+            FillKind::MeshGradient(mg) if mg.units.is_object_box() => std::borrow::Cow::Owned(
+                FillKind::MeshGradient(mg.resolved_for_bbox(min_x, min_y, w, h)),
+            ),
             _ => std::borrow::Cow::Borrowed(self),
         }
     }
@@ -477,7 +473,10 @@ pub enum GradientUnits {
 impl GradientUnits {
     /// Whether coords are `0..1` fractions of the object's bbox (either mode).
     pub fn is_object_box(self) -> bool {
-        matches!(self, Self::ObjectBoundingBox | Self::ObjectBoundingBoxRotated)
+        matches!(
+            self,
+            Self::ObjectBoundingBox | Self::ObjectBoundingBoxRotated
+        )
     }
     /// Whether the gradient rotates/shears with the object (local-space).
     pub fn follows_rotation(self) -> bool {
@@ -1095,7 +1094,10 @@ mod gradient_interp_tests {
         let mut s = stops();
         s[0].midpoint = 0.25;
         let c = interpolate_stops(&s, 0.25);
-        assert!((c[0] - 0.5).abs() < 1e-3, "expected half-red at t=0.25, got {c:?}");
+        assert!(
+            (c[0] - 0.5).abs() < 1e-3,
+            "expected half-red at t=0.25, got {c:?}"
+        );
     }
 
     #[test]
@@ -1106,7 +1108,10 @@ mod gradient_interp_tests {
         let srgb = interpolate_stops_with(&s, 0.5, GradientInterpolation::Srgb);
         let oklab = interpolate_stops_with(&s, 0.5, GradientInterpolation::Oklab);
         let diff: f32 = (0..3).map(|i| (srgb[i] - oklab[i]).abs()).sum();
-        assert!(diff > 0.05, "oklab should differ from srgb midpoint: {srgb:?} vs {oklab:?}");
+        assert!(
+            diff > 0.05,
+            "oklab should differ from srgb midpoint: {srgb:?} vs {oklab:?}"
+        );
     }
 
     #[test]
@@ -1173,10 +1178,14 @@ mod gradient_interp_tests {
     #[test]
     fn mesh_grid_hard_and_smooth_blend() {
         // 2×1 grid: left cell red, right cell blue, boundary at x=0.5.
-        let mut m = MeshGradient::grid(1, 2, vec![
-            Color::new(1.0, 0.0, 0.0, 1.0),
-            Color::new(0.0, 0.0, 1.0, 1.0),
-        ]);
+        let mut m = MeshGradient::grid(
+            1,
+            2,
+            vec![
+                Color::new(1.0, 0.0, 0.0, 1.0),
+                Color::new(0.0, 0.0, 1.0, 1.0),
+            ],
+        );
         // Hard: sharp switch at the line — just left is pure red, just right pure blue.
         m.blend = 0.0;
         let l = m.sample_at(0.4, 0.5);
@@ -1186,7 +1195,10 @@ mod gradient_interp_tests {
         // Smooth: at the boundary it's the 50/50 mix.
         m.blend = 1.0;
         let mid = m.sample_at(0.5, 0.5);
-        assert!((mid[0] - 0.5).abs() < 0.05 && (mid[2] - 0.5).abs() < 0.05, "smooth mid {mid:?}");
+        assert!(
+            (mid[0] - 0.5).abs() < 0.05 && (mid[2] - 0.5).abs() < 0.05,
+            "smooth mid {mid:?}"
+        );
     }
 
     #[test]
@@ -1208,8 +1220,8 @@ mod gradient_interp_tests {
     #[test]
     fn default_object_box_radial_renders_a_gradient() {
         // Exactly what the picker builds for a new radial fill.
-        let g = Gradient::radial(0.5, 0.5, 0.5, stops())
-            .with_units(GradientUnits::ObjectBoundingBox);
+        let g =
+            Gradient::radial(0.5, 0.5, 0.5, stops()).with_units(GradientUnits::ObjectBoundingBox);
         // Object bbox at (100,200) size 60×40.
         let r = g.resolved_for_bbox(100.0, 200.0, 60.0, 40.0);
         assert_eq!(r.units, GradientUnits::UserSpaceOnUse);
@@ -1219,7 +1231,10 @@ mod gradient_interp_tests {
         assert_eq!(r.coords[4], 30.0);
         let center = r.sample_at(130.0, 220.0); // dist 0 → first stop (red)
         let edge = r.sample_at(160.0, 220.0); // dist 30 == r → last stop (blue)
-        assert!((center[0] - 1.0).abs() < 1e-3 && center[2] < 1e-3, "center {center:?}");
+        assert!(
+            (center[0] - 1.0).abs() < 1e-3 && center[2] < 1e-3,
+            "center {center:?}"
+        );
         assert!(edge[2] > 0.99 && edge[0] < 1e-3, "edge {edge:?}");
     }
 }

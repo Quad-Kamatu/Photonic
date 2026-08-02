@@ -120,5 +120,4 @@ impl CommandHistory {
             .find(|c| c.id == id)
             .map(|c| c.snapshot.clone())
     }
-
 }

@@ -1,19 +1,8 @@
 use crate::protocol::{
-    AddColorSwatchArgs,
-    ApplyColorSwatchArgs,
-    ApplyGradientSwatchArgs,
-    ApplyPatternFillArgs,
-    ApplySpotColorArgs,
-    DefinePatternArgs,
-    DefineSpotColorArgs,
-    DeleteColorSwatchArgs,
-    DeleteGradientSwatchArgs,
-    DeletePatternArgs,
-    DeleteSpotColorArgs,
-    LoadSwatchLibraryArgs,
-    SaveGradientSwatchArgs,
-    ToolResult,
-    UpdateColorSwatchArgs,
+    AddColorSwatchArgs, ApplyColorSwatchArgs, ApplyGradientSwatchArgs, ApplyPatternFillArgs,
+    ApplySpotColorArgs, DefinePatternArgs, DefineSpotColorArgs, DeleteColorSwatchArgs,
+    DeleteGradientSwatchArgs, DeletePatternArgs, DeleteSpotColorArgs, LoadSwatchLibraryArgs,
+    SaveGradientSwatchArgs, ToolResult, UpdateColorSwatchArgs,
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
@@ -53,7 +42,6 @@ pub async fn add_color_swatch(state: &AppState, args: AddColorSwatchArgs) -> Too
         .with_data(serde_json::json!({ "name": name, "color_hex": hex_full }))
 }
 
-
 /// List all color swatches in the document.
 pub async fn list_color_swatches(state: &AppState) -> ToolResult {
     tracing::debug!("tool: list_color_swatches");
@@ -75,7 +63,6 @@ pub async fn list_color_swatches(state: &AppState) -> ToolResult {
     ToolResult::text(format!("{} swatch(es).", swatches.len()))
         .with_data(serde_json::json!({ "color_swatches": swatches }))
 }
-
 
 /// Apply a swatch color to the fill and/or stroke of the specified nodes.
 pub async fn apply_color_swatch(state: &AppState, args: ApplyColorSwatchArgs) -> ToolResult {
@@ -183,7 +170,6 @@ pub async fn apply_color_swatch(state: &AppState, args: ApplyColorSwatchArgs) ->
         "target": target,
     }))
 }
-
 
 /// Rename and/or recolor a swatch. When `propagate` is true (default), all
 /// nodes whose fill color matches the old color are updated to the new color.
@@ -307,7 +293,6 @@ pub async fn update_color_swatch(state: &AppState, args: UpdateColorSwatchArgs) 
     }))
 }
 
-
 /// Delete a named color swatch.
 pub async fn delete_color_swatch(state: &AppState, args: DeleteColorSwatchArgs) -> ToolResult {
     tracing::debug!("tool: delete_color_swatch");
@@ -320,7 +305,6 @@ pub async fn delete_color_swatch(state: &AppState, args: DeleteColorSwatchArgs) 
         ToolResult::error(format!("No swatch named '{}' found.", args.name))
     }
 }
-
 
 /// Load a predefined color swatch library into the document.
 pub async fn load_swatch_library(state: &AppState, args: LoadSwatchLibraryArgs) -> ToolResult {
@@ -391,7 +375,6 @@ pub async fn load_swatch_library(state: &AppState, args: LoadSwatchLibraryArgs) 
         palette.len() - added
     ))
 }
-
 
 /// Define (or overwrite) a named tiled pattern in the document registry.
 pub async fn define_pattern(state: &AppState, args: DefinePatternArgs) -> ToolResult {
@@ -471,7 +454,6 @@ pub async fn define_pattern(state: &AppState, args: DefinePatternArgs) -> ToolRe
     }))
 }
 
-
 /// List all named patterns in the document registry.
 pub async fn list_patterns(state: &AppState) -> ToolResult {
     tracing::debug!("tool: list_patterns");
@@ -496,7 +478,6 @@ pub async fn list_patterns(state: &AppState) -> ToolResult {
     ToolResult::text(format!("{} pattern(s).", patterns.len()))
         .with_data(serde_json::json!({ "patterns": patterns }))
 }
-
 
 /// Apply a registry pattern as the fill of path nodes (undo-safe batch).
 pub async fn apply_pattern_fill(state: &AppState, args: ApplyPatternFillArgs) -> ToolResult {
@@ -581,7 +562,6 @@ pub async fn apply_pattern_fill(state: &AppState, args: ApplyPatternFillArgs) ->
     ))
 }
 
-
 /// Delete a named pattern from the registry. Does not affect nodes already filled.
 pub async fn delete_pattern(state: &AppState, args: DeletePatternArgs) -> ToolResult {
     tracing::debug!("tool: delete_pattern");
@@ -596,7 +576,6 @@ pub async fn delete_pattern(state: &AppState, args: DeletePatternArgs) -> ToolRe
 }
 
 // ─── Property Constraints ──────────────────────────────────────────────────────
-
 
 /// Save the gradient fill of a node as a named gradient swatch.
 pub async fn save_gradient_swatch(state: &AppState, args: SaveGradientSwatchArgs) -> ToolResult {
@@ -656,7 +635,6 @@ pub async fn save_gradient_swatch(state: &AppState, args: SaveGradientSwatchArgs
     }
 }
 
-
 /// List all named gradient swatches.
 pub async fn list_gradient_swatches(state: &AppState) -> ToolResult {
     tracing::debug!("tool: list_gradient_swatches");
@@ -674,7 +652,6 @@ pub async fn list_gradient_swatches(state: &AppState) -> ToolResult {
     ToolResult::text(format!("{} gradient swatch(es).", swatches.len()))
         .with_data(json!({ "gradient_swatches": swatches }))
 }
-
 
 /// Apply a named gradient swatch to one or more path nodes.
 pub async fn apply_gradient_swatch(state: &AppState, args: ApplyGradientSwatchArgs) -> ToolResult {
@@ -736,7 +713,6 @@ pub async fn apply_gradient_swatch(state: &AppState, args: ApplyGradientSwatchAr
     .with_data(json!({ "name": args.name, "applied_count": applied }))
 }
 
-
 /// Delete a named gradient swatch.
 pub async fn delete_gradient_swatch(
     state: &AppState,
@@ -752,7 +728,6 @@ pub async fn delete_gradient_swatch(
         ToolResult::error(format!("No gradient swatch named '{}' found.", args.name))
     }
 }
-
 
 /// Define (or update) a named spot color.
 pub async fn define_spot_color(state: &AppState, args: DefineSpotColorArgs) -> ToolResult {
@@ -781,7 +756,6 @@ pub async fn define_spot_color(state: &AppState, args: DefineSpotColorArgs) -> T
     }
 }
 
-
 /// List all named spot colors.
 pub async fn list_spot_colors(state: &AppState) -> ToolResult {
     tracing::debug!("tool: list_spot_colors");
@@ -798,7 +772,6 @@ pub async fn list_spot_colors(state: &AppState) -> ToolResult {
     ToolResult::text(format!("{} spot color(s).", swatches.len()))
         .with_data(json!({ "spot_colors": swatches }))
 }
-
 
 /// Apply a spot color as a solid fill to one or more nodes.
 pub async fn apply_spot_color(state: &AppState, args: ApplySpotColorArgs) -> ToolResult {
@@ -881,7 +854,6 @@ pub async fn apply_spot_color(state: &AppState, args: ApplySpotColorArgs) -> Too
     ))
     .with_data(json!({ "name": args.name, "applied_count": applied }))
 }
-
 
 /// Delete a named spot color.
 pub async fn delete_spot_color(state: &AppState, args: DeleteSpotColorArgs) -> ToolResult {

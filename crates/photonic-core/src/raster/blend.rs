@@ -363,6 +363,9 @@ mod tests {
         let darker = blend_rgb(DarkerColor, [0.8, 0.8, 0.8], [0.2, 0.2, 0.2]);
         assert!(darker[0] < 0.5, "DarkerColor keeps the darker whole colour");
         let lighter = blend_rgb(LighterColor, [0.8, 0.8, 0.8], [0.2, 0.2, 0.2]);
-        assert!(lighter[0] > 0.5, "LighterColor keeps the lighter whole colour");
+        assert!(
+            lighter[0] > 0.5,
+            "LighterColor keeps the lighter whole colour"
+        );
     }
 }

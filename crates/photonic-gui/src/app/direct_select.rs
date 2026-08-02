@@ -250,8 +250,7 @@ impl PhotonicApp {
             && response.dragged_by(egui::PointerButton::Primary)
             && matches!(self.point_drag_mode, Some(DirectDrag::Anchors))
         {
-            let (raw, shift_held) =
-                ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift));
+            let (raw, shift_held) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift));
             // Holding Shift remaps the vertical wheel onto the horizontal axis
             // (egui/OS behaviour), so the delta arrives in `.x` — pick whichever
             // axis actually moved rather than assuming `.y`.
@@ -263,16 +262,12 @@ impl PhotonicApp {
             if scroll != 0.0 {
                 if shift_held {
                     let factor = (scroll as f64 * 0.004).exp();
-                    self.prop_falloff_k = (self.prop_falloff_k * factor).clamp(
-                        proportional_move::MIN_CURVE,
-                        proportional_move::MAX_CURVE,
-                    );
+                    self.prop_falloff_k = (self.prop_falloff_k * factor)
+                        .clamp(proportional_move::MIN_CURVE, proportional_move::MAX_CURVE);
                 } else {
                     let factor = (scroll as f64 * 0.0015).exp();
-                    self.prop_spread = (self.prop_spread * factor).clamp(
-                        proportional_move::MIN_SPREAD,
-                        proportional_move::MAX_SPREAD,
-                    );
+                    self.prop_spread = (self.prop_spread * factor)
+                        .clamp(proportional_move::MIN_SPREAD, proportional_move::MAX_SPREAD);
                 }
                 ui.ctx().request_repaint();
             }
@@ -941,8 +936,7 @@ impl PhotonicApp {
                     // falloff curve with live spread/curve readouts. Centred on the
                     // dragged selection (following the move) or the hovered anchor.
                     if proportional {
-                        let dragging_anchors = response
-                            .dragged_by(egui::PointerButton::Primary)
+                        let dragging_anchors = response.dragged_by(egui::PointerButton::Primary)
                             && matches!(self.point_drag_mode, Some(DirectDrag::Anchors));
                         let center_local = if dragging_anchors && !self.point_selected.is_empty() {
                             let sel: Vec<Point> = anchors
@@ -1017,7 +1011,8 @@ impl PhotonicApp {
                                     egui::pos2(bl + t as f32 * bw, bt + bh - 3.0 - w * (bh - 16.0))
                                 })
                                 .collect();
-                            painter.add(egui::Shape::line(curve_pts, egui::Stroke::new(1.5, accent)));
+                            painter
+                                .add(egui::Shape::line(curve_pts, egui::Stroke::new(1.5, accent)));
                             painter.text(
                                 egui::pos2(bl + 4.0, bt + 2.0),
                                 egui::Align2::LEFT_TOP,

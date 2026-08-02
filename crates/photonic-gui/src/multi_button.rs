@@ -179,8 +179,11 @@ pub fn multi_button(ui: &mut Ui, id_salt: &str, items: &[MultiButtonItem]) -> Op
         );
 
         // Label — fades in only for the active item.
-        let label_alpha =
-            ctx.animate_value_with_time(id.with(("lbl", i)), (hovered == Some(i)) as u8 as f32, DUR);
+        let label_alpha = ctx.animate_value_with_time(
+            id.with(("lbl", i)),
+            (hovered == Some(i)) as u8 as f32,
+            DUR,
+        );
         if label_alpha > 0.01 {
             seg_painter.text(
                 egui::pos2(seg.left() + CELL, seg.center().y),

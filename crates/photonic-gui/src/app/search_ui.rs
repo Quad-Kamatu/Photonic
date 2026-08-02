@@ -412,12 +412,8 @@ impl PhotonicApp {
                             let mut old_node = node.clone();
                             let mut new_node = node.clone();
                             match &mut old_node.kind {
-                                SceneNodeKind::Path(p) => {
-                                    p.fill.kind = FillKind::Solid(from_color)
-                                }
-                                SceneNodeKind::Text(t) => {
-                                    t.fill.kind = FillKind::Solid(from_color)
-                                }
+                                SceneNodeKind::Path(p) => p.fill.kind = FillKind::Solid(from_color),
+                                SceneNodeKind::Text(t) => t.fill.kind = FillKind::Solid(from_color),
                                 _ => {}
                             }
                             match &mut new_node.kind {
@@ -579,5 +575,4 @@ impl PhotonicApp {
             v
         }
     }
-
 }

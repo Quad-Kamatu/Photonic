@@ -785,7 +785,11 @@ impl NewDocumentForm {
             ui.add_space(14.0);
 
             // Per-document edit-history size cap (#195).
-            field_label_centered(ui, "History budget", "Edit-history size cap for this file (MB).");
+            field_label_centered(
+                ui,
+                "History budget",
+                "Edit-history size cap for this file (MB).",
+            );
             centered_row(ui, "history_mb", |ui| {
                 ui.add(
                     egui::DragValue::new(&mut self.history_mb)
@@ -795,7 +799,11 @@ impl NewDocumentForm {
                         .suffix(" MB"),
                 );
                 for m in [25.0_f64, 50.0, 100.0, 250.0] {
-                    if mini_toggle(ui, &format!("{}", m as i64), (self.history_mb - m).abs() < 0.5) {
+                    if mini_toggle(
+                        ui,
+                        &format!("{}", m as i64),
+                        (self.history_mb - m).abs() < 0.5,
+                    ) {
                         self.history_mb = m;
                     }
                 }

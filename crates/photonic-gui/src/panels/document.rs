@@ -113,9 +113,7 @@ pub(crate) fn draw_import_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
             if ctx.doc.artboards.len() > 1 {
                 if ui
                     .button(format!("{}  Export Artboards…", ph::EXPORT))
-                    .on_hover_text(
-                        "Export each artboard (all, or a range) to its own image file",
-                    )
+                    .on_hover_text("Export each artboard (all, or a range) to its own image file")
                     .clicked()
                 {
                     action = Some(PanelAction::OpenArtboardExportDialog);
@@ -934,4 +932,3 @@ pub(crate) fn draw_workspaces(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ctx.action = action;
     }
 }
-

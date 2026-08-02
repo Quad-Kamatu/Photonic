@@ -33,7 +33,11 @@ fn draw_layer_node_row(
             let row = ui.horizontal(|ui| {
                 // Caret — OUTSIDE the drag hitbox so clicking it toggles the
                 // folder open/closed instead of starting a drag.
-                let tri = if open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
+                let tri = if open {
+                    ph::CARET_DOWN
+                } else {
+                    ph::CARET_RIGHT
+                };
                 if ui
                     .add(egui::Label::new(RichText::new(tri).weak()).sense(egui::Sense::click()))
                     .clicked()
@@ -298,8 +302,6 @@ fn node_options_button(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAc
     });
 }
 
-
-
 pub fn draw_layers_panel(
     ui: &mut Ui,
     doc: &Document,
@@ -426,7 +428,11 @@ fn draw_layers_tree(
 
             // Disclosure caret — also OUTSIDE the drag hitbox so clicking it
             // expands/collapses the layer's contents instead of dragging.
-            let tri = if open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
+            let tri = if open {
+                ph::CARET_DOWN
+            } else {
+                ph::CARET_RIGHT
+            };
             if ui
                 .add(egui::Label::new(RichText::new(tri).weak()).sense(egui::Sense::click()))
                 .clicked()
@@ -468,7 +474,9 @@ fn draw_layers_tree(
                         None
                     } else {
                         let layer_label = if layer.is_template {
-                            RichText::new(format!("{} [T]", layer.name)).italics().weak()
+                            RichText::new(format!("{} [T]", layer.name))
+                                .italics()
+                                .weak()
                         } else if layer.visible {
                             RichText::new(layer.name.to_string())
                         } else {
@@ -478,8 +486,7 @@ fn draw_layers_tree(
                         if r.clicked() {
                             if ui.input(|i| i.modifiers.shift) {
                                 // Shift-click: toggle this layer in the selection.
-                                if let Some(pos) =
-                                    selected_layer_ids.iter().position(|x| x == &lid)
+                                if let Some(pos) = selected_layer_ids.iter().position(|x| x == &lid)
                                 {
                                     selected_layer_ids.remove(pos);
                                 } else {
@@ -891,8 +898,7 @@ fn adjustment_tile(ui: &mut Ui, kind: &str, label: &str) -> bool {
             egui::vec2(58.0, sq + 18.0),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(sq, sq), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(sq, sq), egui::Sense::click());
                 paint_adjustment_preview(ui.painter(), rect, kind);
                 let border = if resp.hovered() {
                     egui::Stroke::new(2.0, Color32::from_rgb(110, 86, 207))
@@ -956,4 +962,3 @@ fn preview_color(kind: &str, f: f32) -> Color32 {
         _ => gray(f),
     }
 }
-

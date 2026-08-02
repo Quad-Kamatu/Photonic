@@ -384,17 +384,20 @@ pub fn render(ui: &mut egui::Ui, items: &[HotbarItem], active_tool: Tool) -> Opt
         }
 
         if !tail.is_empty() {
-            ui.menu_button(egui::RichText::new(ph::DOTS_THREE).size(HOTBAR_ICON_SIZE), |ui| {
-                for item in tail {
-                    if ui
-                        .button(format!("{}  {}", item.icon, item.tooltip))
-                        .clicked()
-                    {
-                        invoked = Some(*item);
-                        ui.close_menu();
+            ui.menu_button(
+                egui::RichText::new(ph::DOTS_THREE).size(HOTBAR_ICON_SIZE),
+                |ui| {
+                    for item in tail {
+                        if ui
+                            .button(format!("{}  {}", item.icon, item.tooltip))
+                            .clicked()
+                        {
+                            invoked = Some(*item);
+                            ui.close_menu();
+                        }
                     }
-                }
-            })
+                },
+            )
             .response
             .on_hover_text("More…");
         }
@@ -405,6 +408,9 @@ pub fn render(ui: &mut egui::Ui, items: &[HotbarItem], active_tool: Tool) -> Opt
 /// One hotbar button: icon-only, highlighted when it represents the active tool.
 fn hotbar_button(ui: &mut egui::Ui, item: &HotbarItem, active_tool: Tool) -> egui::Response {
     let is_active = matches!(item.effect, HotbarEffect::Tool(t) if t == active_tool);
-    ui.selectable_label(is_active, egui::RichText::new(item.icon).size(HOTBAR_ICON_SIZE))
-        .on_hover_text(item.tooltip)
+    ui.selectable_label(
+        is_active,
+        egui::RichText::new(item.icon).size(HOTBAR_ICON_SIZE),
+    )
+    .on_hover_text(item.tooltip)
 }

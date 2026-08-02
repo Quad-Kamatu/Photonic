@@ -94,7 +94,9 @@ pub(crate) fn draw_color_swatches(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 // #207: import brand swatches from a design-tokens file.
                 if ui
                     .small_button("Import tokens…")
-                    .on_hover_text("Register named swatches from a CSS/JSON/Style-Dictionary tokens file")
+                    .on_hover_text(
+                        "Register named swatches from a CSS/JSON/Style-Dictionary tokens file",
+                    )
                     .clicked()
                 {
                     action = Some(PanelAction::ImportDesignTokens);
@@ -652,4 +654,3 @@ pub(crate) fn draw_libraries_export(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         ui.add_space(2.0);
     }
 }
-

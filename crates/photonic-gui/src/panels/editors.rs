@@ -19,12 +19,13 @@ pub(crate) fn default_checker_tile() -> photonic_core::RasterImage {
     img
 }
 
-
-
-
 /// Draw a compact stroke editor. Returns `Some(new_stroke)` if the user changed anything.
 /// Sets `*dropper` to `true` when the eyedropper button is clicked.
-pub(crate) fn draw_stroke_editor(ui: &mut Ui, stroke: &Stroke, dropper: &mut bool) -> Option<Stroke> {
+pub(crate) fn draw_stroke_editor(
+    ui: &mut Ui,
+    stroke: &Stroke,
+    dropper: &mut bool,
+) -> Option<Stroke> {
     use photonic_core::style::{LineCap, LineJoin, StrokeAlign};
 
     let mut new_stroke = stroke.clone();
@@ -292,11 +293,13 @@ pub(crate) fn draw_stroke_editor(ui: &mut Ui, stroke: &Stroke, dropper: &mut boo
     }
 }
 
-
-
 /// Renders a compact editor for a `GlowEffect`. Returns `Some(updated)` on any change.
 /// Sets `*dropper` to `true` when the eyedropper button is clicked.
-pub(crate) fn draw_glow_editor(ui: &mut Ui, glow: &GlowEffect, dropper: &mut bool) -> Option<GlowEffect> {
+pub(crate) fn draw_glow_editor(
+    ui: &mut Ui,
+    glow: &GlowEffect,
+    dropper: &mut bool,
+) -> Option<GlowEffect> {
     let mut new_glow = glow.clone();
     let mut changed = false;
 
@@ -361,8 +364,6 @@ pub(crate) fn draw_glow_editor(ui: &mut Ui, glow: &GlowEffect, dropper: &mut boo
     }
 }
 
-
-
 /// Renders a compact editor for a `GaussianGlow`. Returns `Some(updated)` on any change.
 /// Sets `*dropper` to `true` when the eyedropper button is clicked.
 pub(crate) fn draw_gaussian_glow_editor(
@@ -416,4 +417,3 @@ pub(crate) fn draw_gaussian_glow_editor(
         None
     }
 }
-

@@ -67,4 +67,3 @@ pub fn draw_toolbar(
         });
     });
 }
-
